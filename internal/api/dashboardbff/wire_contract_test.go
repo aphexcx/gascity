@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -159,6 +160,28 @@ func TestWireContractRunDiff(t *testing.T) {
 	mustArray(t, m, "changedFiles")
 	mustString(t, m, "patch")
 	mustBool(t, m, "truncated")
+}
+
+// TestWireContractRunDetailProgressTerminal guards the Go-derived
+// progress.terminal flag on the run-detail wire: the SPA reads it (in place of
+// the retired isTerminalProgress client fold) to drive ambient-event
+// suppression, so the field must always be present and a bool.
+func TestWireContractRunDetailProgressTerminal(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"),
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	m := wireGet(t, p, "/api/city/alpha/runs/run1/detail")
+	progress, ok := m["progress"].(map[string]any)
+	if !ok {
+		t.Fatalf("progress must be an object, got %T", m["progress"])
+	}
+	mustBool(t, progress, "terminal")
 }
 
 // TestSanitizeTerminalOutputStripsCSIAndControls is the regression guard for the
