@@ -263,7 +263,10 @@ describe('FormulaRunDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(reviewPipelineName)).toBe('false');
     expect(nodePressed(applyFixesName)).toBe('true');
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // Server-picked visible instance is the current iteration 2 (not-started),
+    // so the default panel shows the not-started copy, not the historical
+    // iteration 1 transcript.
+    await screen.findByText('This node has not started a session yet.');
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     expect(nodePressed(applyFixesName)).toBe('false');
@@ -343,6 +346,25 @@ describe('FormulaRunDetailPage', () => {
 
     expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(1);
     expect(diffUrls()).toHaveLength(1);
+  });
+
+  it('drives ambient suppression from the server progress.terminal flag, not a client taxonomy', async () => {
+    // An all-`done` census that the OLD client fold would classify terminal, but
+    // the server reports progress.terminal=false. The retired isTerminalProgress
+    // derivation would suppress here; the server flag must win and the ambient
+    // event must still refresh — proving the flag, not a re-derived taxonomy,
+    // gates suppression.
+    currentDetail = {
+      ...terminalDetail(),
+      progress: { ...terminalDetail().progress, terminal: false },
+    };
+    renderPage();
+    await screen.findByRole('heading', { name: /adopt pr #42/i });
+    const cityStream = requireCityEventSource();
+    await waitFor(() => expect(diffUrls()).toHaveLength(1));
+
+    cityStream.dispatch('event', { type: `${GC_EVENT_PREFIX.session}updated` });
+    await waitFor(() => expect(loadSupervisorFormulaRunDetail).toHaveBeenCalledTimes(2));
   });
 
   it('does not refresh from city events before the initial run detail identifies the run', async () => {
@@ -603,7 +625,10 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
+    // apply-fixes defaults to the server-picked current iteration 2 (not-started),
+    // so switching nodes shows the not-started copy — and must close the prior
+    // review-pipeline stream.
+    await screen.findByText('This node has not started a session yet.');
     await waitFor(() => expect(firstStream?.closed).toBe(true));
 
     fireEvent.click(screen.getByRole('button', { name: reviewPipelineName }));
@@ -623,11 +648,14 @@ describe('FormulaRunDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: applyFixesName }));
     openSessionTab();
-    await screen.findByText(/apply the iteration 1 review fixes/i);
-
-    fireEvent.click(screen.getByRole('radio', { name: /iteration 2/i }));
-
+    // The server's visibleExecutionInstanceId points at the current iteration 2
+    // instance (not the historical attached iteration 1 the old heuristic
+    // surfaced), so the not-started current instance shows by default.
     await screen.findByText('This node has not started a session yet.');
+
+    fireEvent.click(screen.getByRole('radio', { name: /iteration 1/i }));
+
+    await screen.findByText(/apply the iteration 1 review fixes/i);
   });
 
   it('keeps the Session tab available so a selected node can explain unresolved sessions', async () => {
@@ -943,6 +971,7 @@ function terminalDetail(): FormulaRunDetail {
       visibleNodeCount: 8,
       statusCounts: { done: 8 },
       allStatusCounts: { done: 8 },
+      terminal: true,
     },
     nodes: detail.nodes.map((node) => ({
       ...node,
