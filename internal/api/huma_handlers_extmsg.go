@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -88,6 +89,11 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 			default:
 				return nil, apierr.Internal.Msg(handleErr.Error())
 			}
+		}
+		if result != nil && result.TargetSessionID == "" && result.TargetAgentName == "" {
+			msg := input.Body.Message
+			log.Printf("extmsg: inbound %s/%s from %q dropped: no binding, no group route, no default route (explicit_target=%q)",
+				msg.Conversation.Provider, msg.Conversation.ConversationID, msg.Actor.DisplayName, msg.ExplicitTarget)
 		}
 		message := *input.Body.Message
 		s.runBackground(func(ctx context.Context) {
