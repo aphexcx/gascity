@@ -380,11 +380,9 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 	fmt.Fprintf(&b,
 		"To reply in %s, write your response to a file and run:\n"+
 			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
-			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
 			"</system-reminder>",
 		providerDisplay,
 		providerCLI, r.ConversationID,
-		r.Handle,
 	)
 	return b.String()
 }
