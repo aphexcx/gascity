@@ -1718,6 +1718,9 @@ type ExtMsgAdapterRegisterInputBody struct {
 
 	// Provider Provider name.
 	Provider string `json:"provider"`
+
+	// ReplyInstructions Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle}).
+	ReplyInstructions *string `json:"reply_instructions,omitempty"`
 }
 
 // ExtMsgAdapterRegisterOutputBody defines model for ExtMsgAdapterRegisterOutputBody.
