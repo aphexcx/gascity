@@ -176,9 +176,17 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			notifyConversation = result.Receipt.Conversation
 		}
 		sourceDisplay := s.extmsgSessionHandleForSelector(input.Body.SessionID)
-		text, sessionID := input.Body.Text, input.Body.SessionID
+		bc := extmsgNotifyBroadcast{
+			Conversation:      notifyConversation,
+			ActorDisplay:      sourceDisplay,
+			ActorKind:         "agent",
+			Text:              input.Body.Text,
+			ExcludeSelector:   input.Body.SessionID,
+			ProviderMessageID: result.Receipt.MessageID,
+			ReplyToMessageID:  input.Body.ReplyToMessageID,
+		}
 		s.runBackground(func(ctx context.Context) {
-			s.extmsgNotifyMembers(ctx, notifyConversation, sourceDisplay, "agent", text, sessionID, "")
+			s.extmsgNotifyMembers(ctx, bc)
 		})
 	}
 	out := &ExtMsgOutboundOutput{}
@@ -559,7 +567,8 @@ func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMs
 				resolved = input.Body.Provider + "/" + input.Body.AccountID
 			}
 
-			adapter := extmsg.NewHTTPAdapter(resolved, input.Body.CallbackURL, input.Body.Capabilities)
+			adapter := extmsg.NewHTTPAdapter(resolved, input.Body.CallbackURL, input.Body.Capabilities).
+				WithReplyInstructions(input.Body.ReplyInstructions)
 			key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
 			reg.Register(key, adapter)
 
