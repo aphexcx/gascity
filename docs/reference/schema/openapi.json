@@ -2511,6 +2511,10 @@
             "description": "Provider name.",
             "minLength": 1,
             "type": "string"
+          },
+          "reply_instructions": {
+            "description": "Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle}).",
+            "type": "string"
           }
         },
         "required": [
