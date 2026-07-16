@@ -160,6 +160,15 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
 		return
 	}
+	if len(members) == 0 {
+		// Membership is the routing truth for this fan-out: zero members means
+		// the message notifies nobody. That is legitimate for a conversation
+		// with no bound/participating sessions, but when it happens on a bound
+		// conversation it is the hq-ar4 black hole — make it observable either
+		// way instead of returning in silence.
+		log.Printf("extmsg: no transcript members for %s/%s — nobody notified (actor=%q)", conv.Provider, conv.ConversationID, b.ActorDisplay)
+		return
+	}
 
 	excludedResolvedID := ""
 	excludedSelector := apiNormalizeSessionTarget(b.ExcludeSelector)
