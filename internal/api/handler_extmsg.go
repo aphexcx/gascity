@@ -370,6 +370,12 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 		)
 	}
 	if instructions := renderExtmsgReplyInstructions(r); instructions != "" {
+		// Defense-in-depth: the adapter-registered template text is trusted
+		// control-plane content, but strip any literal <system-reminder>
+		// breakout sequences before embedding it so a compromised or
+		// mistaken registration cannot break out of the reminder block. No
+		// legitimate template contains these tags, so this is safe.
+		instructions = extmsg.SanitizeForSystemReminder(instructions)
 		b.WriteString(instructions)
 		if !strings.HasSuffix(instructions, "\n") {
 			b.WriteString("\n")
