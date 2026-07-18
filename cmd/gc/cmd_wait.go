@@ -43,6 +43,14 @@ type waitSetStateResult struct {
 	RetriedFrom string
 }
 
+type sessionWaitDeps struct {
+	sessions         *sessionpkg.Store
+	dependencies     waitDependencyReader
+	now              func() time.Time
+	createdBySession string
+	pokeController   func() error
+}
+
 type waitDependencyReader interface {
 	Get(string) (beads.Bead, error)
 }
@@ -264,8 +272,27 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, store, depID)
+	})
+	return doSessionWait(sessionID, depIDs, matchAny, note, sleep, stdout, stderr, sessionWaitDeps{
+		sessions:         sessFront,
+		dependencies:     dependencies,
+		now:              time.Now,
+		createdBySession: os.Getenv("GC_SESSION_ID"),
+		pokeController: func() error {
+			resolvedCityPath, err := resolveCity()
+			if err != nil {
+				return nil
+			}
+			return pokeController(resolvedCityPath)
+		},
+	})
+}
+
+func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer, deps sessionWaitDeps) int {
 	for _, depID := range depIDs {
-		if _, err := loadWaitDependencyBead(cityPath, store, depID); err != nil {
+		if _, err := deps.dependencies.Get(depID); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: dependency %s: %v\n", depID, err) //nolint:errcheck
 			return 1
 		}
@@ -274,30 +301,30 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	if matchAny {
 		depMode = "any"
 	}
-	now := time.Now().UTC()
-	wait, err := sessFront.CreateWait(sessionpkg.WaitSpec{
+	now := deps.now().UTC()
+	wait, err := deps.sessions.CreateWait(sessionpkg.WaitSpec{
 		SessionID:        sessionID,
 		Kind:             "deps",
 		DepIDs:           depIDs,
 		DepMode:          depMode,
 		Note:             note,
-		CreatedBySession: os.Getenv("GC_SESSION_ID"),
+		CreatedBySession: deps.createdBySession,
 		Now:              now,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	ready, depErr := depsWaitReadyDetailedForCity(cityPath, store, wait)
+	ready, depErr := depsWaitReadyDetailedFrom(deps.dependencies, wait)
 	if depErr != nil {
-		if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
+		if err := deps.sessions.FailWait(wait.ID, now, depErr.Error()); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
 		}
 		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
 		return 1
 	}
 	if ready {
-		if err := sessFront.MarkWaitReady(wait.ID, now); err != nil {
+		if err := deps.sessions.MarkWaitReady(wait.ID, now); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting ready state: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -305,18 +332,16 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 		return 0
 	}
 	if sleep {
-		if err := sessFront.ApplyPatch(sessionID, map[string]string{
+		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
 			"wait_hold":    "true",
 			"sleep_intent": "wait-hold",
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		if cityPath, err := resolveCity(); err == nil {
-			if err := pokeController(cityPath); err != nil {
-				fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
-				return 1
-			}
+		if err := deps.pokeController(); err != nil {
+			fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+			return 1
 		}
 		fmt.Fprintf(stdout, "Registered wait %s for session %s.\nSession %s draining to sleep.\n", wait.ID, sessionID, sessionID) //nolint:errcheck
 		return 0
@@ -326,16 +351,9 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if isRemote {
-		return routeWaitList("", remoteC, "", stateFilter, sessionFilter, jsonOutput, stdout, stderr)
-	}
-	c, reason := waitListAPIClient(cityPath)
-	return routeWaitList(cityPath, c, reason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	return routeReadCmd("wait list", stderr, waitListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitList(cityPath, c, nilReason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	})
 }
 
 // waitListAPIClient is indirected so tests inject a client pointed at
@@ -489,16 +507,9 @@ func writeWaitListTable(items []sessionpkg.WaitInfo, stdout io.Writer) {
 }
 
 func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	remoteC, isRemote, cityPath, err := resolveReadTarget()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if isRemote {
-		return routeWaitInspect("", remoteC, "", waitID, jsonOutput, stdout, stderr)
-	}
-	c, reason := waitInspectAPIClient(cityPath)
-	return routeWaitInspect(cityPath, c, reason, waitID, jsonOutput, stdout, stderr)
+	return routeReadCmd("wait inspect", stderr, waitInspectAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitInspect(cityPath, c, nilReason, waitID, jsonOutput, stdout, stderr)
+	})
 }
 
 var waitInspectAPIClient = func(cityPath string) (*api.Client, string) {
@@ -881,12 +892,6 @@ func depsWaitReady(store beads.Store, wait sessionpkg.WaitInfo) bool {
 
 func depsWaitReadyDetailed(store beads.Store, wait sessionpkg.WaitInfo) (bool, error) {
 	return depsWaitReadyDetailedFrom(store, wait)
-}
-
-func depsWaitReadyDetailedForCity(cityPath string, store beads.Store, wait sessionpkg.WaitInfo) (bool, error) {
-	return depsWaitReadyDetailedFrom(waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
-		return loadWaitDependencyBead(cityPath, store, depID)
-	}), wait)
 }
 
 func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpkg.WaitInfo) (bool, error) {
