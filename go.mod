@@ -253,4 +253,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/steveyegge/beads => github.com/aphexcx/beads v1.1.2-0.20260727061740-5f149e74b982
+replace github.com/steveyegge/beads => github.com/aphexcx/beads v1.1.2
