@@ -132,6 +132,25 @@ func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *Inbound
 		result.Binding = binding
 		result.TargetSessionID = binding.SessionID
 		result.TargetAgentName = binding.AgentName
+		// An active binding must always have its transcript membership: the
+		// notify layer fans out over memberships, so a conversation whose
+		// membership record was lost (e.g. closed by a cleanup race) would
+		// otherwise accept, transcribe, and event every inbound while
+		// delivering it to nobody, forever (hq-ar4 recurrence). Re-ensuring
+		// here is a no-op when the record is intact and repairs it when it is
+		// not. Failures propagate: transient store faults surface as
+		// retryable to the adapter, and corrupt membership state is already a
+		// permanent rejection on the bind path.
+		if _, err := deps.Services.Transcript.EnsureMembership(ctx, EnsureMembershipInput{
+			Caller:         Caller{Kind: CallerController, ID: "extmsg-inbound-repair"},
+			Conversation:   binding.Conversation,
+			SessionID:      bindingMembershipKey(*binding),
+			BackfillPolicy: MembershipBackfillSinceJoin,
+			Owner:          MembershipOwnerBinding,
+			Now:            now,
+		}); err != nil {
+			return wrapTranscriptSyncError("ensure transcript membership for bound inbound", err)
+		}
 	}
 
 	// No binding — try group routing.
