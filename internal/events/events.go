@@ -252,6 +252,16 @@ const (
 	// messages 200-accepted by extmsg/inbound vanished without a trace).
 	ExtMsgInboundDropped = "extmsg.inbound_dropped"
 
+	// ExtMsgInboundDuplicate fires when an accepted inbound message is a
+	// redelivery of one already in the conversation transcript (same
+	// conversation + provider message id). The message is acknowledged to the
+	// adapter but member notification is suppressed — the original delivery
+	// already notified — so an adapter redelivery loop cannot re-inject the
+	// same message as extra turns into a wedged session (RCA hq-703om: the
+	// same Slack message injected 2-4x while the mayor session sat behind an
+	// auth wall).
+	ExtMsgInboundDuplicate = "extmsg.inbound_duplicate"
+
 	// EventsRotated is the forensic anchor written as the first event in
 	// a freshly-rotated active log. Its payload carries the prior
 	// archive's filename and seq range so log readers can stitch back
@@ -360,6 +370,7 @@ var KnownEventTypes = []string{
 	ExtMsgOutboundChannelMismatch,
 	WebhookReceived, WebhookRejected,
 	ExtMsgInboundDropped,
+	ExtMsgInboundDuplicate,
 	EventsRotated,
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
