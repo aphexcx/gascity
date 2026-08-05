@@ -86,9 +86,11 @@ city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat <issue-id>" subcommand, which rewrites to
-"update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard, and
+gc-only "heartbeat <issue-id>" subcommand, which runs bd's native
+"heartbeat <issue-id>" (renewing the claim lease so the bead never goes
+stale-lease while its worker is alive) and then stamps
+"gc.last_heartbeat_at=<RFC3339 UTC now>" metadata so long-running workers
+can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
@@ -100,7 +102,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -167,19 +169,22 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 }
 
 // rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
-// subcommand into the bd command that performs the write:
+// subcommand into the metadata half of the heartbeat write pair:
 //
 //	update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>
 //
-// Long-running workers call `gc bd heartbeat {{issue}}` periodically so the
-// dashboard can distinguish a live worker from a dead one
-// (gastownhall/gascity#1855). It reuses bd's existing metadata-write path
-// rather than adding a new store method, and leaves the issue id in place so
-// the generic scope resolver still routes the write to the correct rig store.
-// Args that do not begin with "heartbeat" pass through unchanged.
-func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
+// and returns the issue id so doBd can run bd's native `heartbeat <issue-id>`
+// first. A worker heartbeat has two effects, in that order: renew the bd
+// claim lease (native heartbeat pushes lease_expires_at forward — without it
+// every in_progress bead goes stale-lease while its worker is alive, and
+// `bd reclaim` would rob live workers), then stamp gc.last_heartbeat_at so
+// the dashboard can distinguish a live worker from a dead one
+// (gastownhall/gascity#1855). The issue id stays in place so the generic
+// scope resolver still routes both writes to the correct rig store. Args that
+// do not begin with "heartbeat" pass through unchanged with an empty id.
+func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, string, error) {
 	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
-		return bdArgs, nil
+		return bdArgs, "", nil
 	}
 	rest := bdArgs[1:]
 	// A bead id never contains whitespace; reject any (leading, trailing, or
@@ -187,16 +192,16 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	// prefix-based rig auto-detection. Also reject empty and flag-shaped args.
 	if len(rest) != 1 || rest[0] == "" || strings.HasPrefix(rest[0], "-") ||
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
-		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
+		return nil, "", fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
 	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
-	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, rest[0], nil
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
-	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
+	bdArgs, heartbeatID, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -301,8 +306,35 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	env = workQueryEnvForDir(env, target.ScopeRoot)
+
+	// A heartbeat is a write pair: bd's native `heartbeat` first — the lease
+	// renewal that keeps a live worker's claim from going stale (and, for a
+	// legitimately held claim with no lease row, re-arms one) — then the
+	// gc.last_heartbeat_at metadata stamp the dashboard reads. The lease write
+	// leads so a worker whose claim is gone (reclaimed, closed, or taken by
+	// another assignee) fails loudly here and never stamps liveness metadata
+	// on a bead it no longer owns.
+	if heartbeatID != "" {
+		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, target.ScopeRoot, env, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+	return runBdSubprocess(bdPath, bdArgs, target.ScopeRoot, env, stdout, stderr)
+}
+
+// runBdSubprocess executes one bd invocation for doBd's passthrough handoff:
+// it wires the operator's stdio, traces the call, and maps the outcome onto
+// doBd's exit-code contract (bd's own exit code, or bdSilentFallbackExitCode
+// when bd exited 0 but silently fell back to the on-disk store).
+func runBdSubprocess(bdPath string, bdArgs []string, dir string, env []string, stdout, stderr io.Writer) int {
 	cmd := exec.Command(bdPath, bdArgs...)
-	cmd.Dir = target.ScopeRoot
+	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	// Tee stderr through a bounded head buffer alongside the operator's
@@ -312,12 +344,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	cmd.Env = env
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
@@ -330,7 +357,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			traceExit = -1
 		}
 	}
-	beads.TraceBDCall("go:gc-bd-passthrough", target.ScopeRoot, bdArgs, traceStart, traceExit, runErr)
+	beads.TraceBDCall("go:gc-bd-passthrough", dir, bdArgs, traceStart, traceExit, runErr)
 
 	if runErr != nil {
 		if traceExit > 0 {
