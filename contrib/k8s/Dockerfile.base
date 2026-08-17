@@ -19,7 +19,7 @@ ARG GH_SOURCE_DATE_EPOCH=1783026608
 ARG DOLT_VERSION=2.1.7
 ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
 ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.0
 ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
 ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
 ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce
@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# The latest published gh and Dolt binaries predate grpc-go 1.82.1. Rebuild the
+# The latest published gh and Dolt binaries predate grpc-go 1.83.0. Rebuild the
 # same released versions from checksum-pinned source with the patched module.
 RUN mkdir -p /src/gh /src/dolt /out \
     && curl -fsSL --retry 3 \
