@@ -374,6 +374,11 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("walk_up_fallback", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveContext's " +
+			"ambient cwd walk-up (step 10), which is now unconditionally refused " +
+			"inside test binaries; an explicit override would make it a no-op " +
+			"test rather than a fix")
+
 		resetFlags(t)
 		t.Setenv("GC_HOME", t.TempDir())
 
@@ -393,6 +398,11 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("walk_up_fallback_with_rig_match", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveContext's " +
+			"ambient cwd walk-up (step 10) followed by a rig match, which is now " +
+			"unconditionally refused inside test binaries; an explicit override " +
+			"would make it a no-op test rather than a fix")
+
 		resetFlags(t)
 		t.Setenv("GC_HOME", t.TempDir())
 
@@ -475,6 +485,12 @@ func TestRigAnywhere_ResolveContext(t *testing.T) {
 	})
 
 	t.Run("registered_rig_cwd_ambiguous_falls_through", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising the fallthrough " +
+			"from an ambiguous registered-rig match (step 9) to resolveContext's " +
+			"ambient cwd walk-up (step 10), which is now unconditionally refused " +
+			"inside test binaries; an explicit override would make it a no-op " +
+			"test rather than a fix")
+
 		resetFlags(t)
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)
@@ -857,6 +873,43 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 			if r.Name == "rm-rig" {
 				t.Error("rig should be removed from city.toml")
 			}
+		}
+	})
+
+	t.Run("sweeps_rig_keyed_agent_patch", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "sweep-city")
+		rigDir := filepath.Join(t.TempDir(), "sweep-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// The rig is targeted by a [[patches.agent]] via the new rig= key (not
+		// the legacy dir= key). Removing the rig must sweep the patch too; left
+		// behind, a rig-keyed patch dangles and hard-fails the next config
+		// compose. The pre-fix sweep only matched p.Dir == rigName, so a
+		// rig=-keyed patch survived.
+		toml := "[workspace]\nname = \"sweep-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"sweep-rig\"\npath = \"" + rigDir + "\"\n\n[[patches.agent]]\nrig = \"sweep-rig\"\nname = \"worker\"\nsuspended = true\n"
+		writeRigAnywhereCityToml(t, cityPath, toml)
+
+		registerCityForRigResolution(t, gcHome, cityPath, "sweep-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("sweep-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Patches.Agents) != 0 {
+			t.Errorf("patches.agent = %#v, want swept (rig=-keyed patch must be removed with the rig)", cfg.Patches.Agents)
 		}
 	})
 
@@ -1884,6 +1937,64 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "loading registered city rig bindings") {
 			t.Fatalf("error = %q, want registered binding load error", err)
+		}
+	})
+
+	// Regression (#4364): an explicit path argument that is itself a valid
+	// city must resolve successfully even when an unrelated registered
+	// sibling city has a broken .gc/site.toml. Before the fix,
+	// resolveContextFromPath always scanned every registered rig binding
+	// first (fail-closed), so one broken sibling aborted resolution of a
+	// perfectly healthy explicit target before validateCityPath ever got a
+	// chance to try it directly -- surfacing as a misleading "run gc init
+	// <path> first" hint on a city that already exists and needs no init.
+	t.Run("path_argument_valid_city_succeeds_despite_broken_sibling_binding", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		targetCity := setupCity(t, "valid-target")
+
+		badCity := setupCity(t, "broken-sibling")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-sibling")
+
+		ctx, err := resolveContextFromPath(targetCity)
+		if err != nil {
+			t.Fatalf("resolveContextFromPath error: %v (want success on the valid explicit target despite an unrelated broken sibling)", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, targetCity)
+	})
+
+	// Regression: a rig directory that carries a leftover ".gc/" runtime
+	// artifact but no city.toml of its own (the exact shape
+	// resolveContextFromDir's step-7 comment already warns about for a
+	// different code path) must still resolve through its registered rig
+	// binding, not get misread as a city in its own right by the #4364
+	// city-first check. The city-first branch only accepts a target that
+	// has a real city.toml (citylayout.HasCityConfig) -- it deliberately
+	// does not fall back to HasRuntimeRoot the way validateCityPath's other
+	// callers do, so a bare ".gc/" rig dir falls through to rig resolution
+	// exactly as it did before #4364.
+	t.Run("path_argument_rig_dir_with_leftover_gc_runtime_root_resolves_via_rig_binding", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		goodCity := setupCity(t, "leftover-gc-good")
+		rigDir := filepath.Join(t.TempDir(), "leftover-gc-rig")
+		if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		registerRigBindingForResolution(t, gcHome, goodCity, "leftover-gc-good", "leftover-gc-rig", rigDir)
+
+		ctx, err := resolveContextFromPath(rigDir)
+		if err != nil {
+			t.Fatalf("resolveContextFromPath error: %v (want success via the registered rig binding)", err)
+		}
+		assertSameTestPath(t, ctx.CityPath, goodCity)
+		if ctx.RigName != "leftover-gc-rig" {
+			t.Errorf("RigName = %q, want %q (rig dir must not be misread as its own city)", ctx.RigName, "leftover-gc-rig")
 		}
 	})
 

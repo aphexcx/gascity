@@ -53,7 +53,7 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 	if cfg == nil || len(cfg.ExtMsg.DefaultRoutes) == 0 {
 		return nil
 	}
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	return func(ref extmsg.ConversationRef) string {
 		agent := cfg.ExtMsgDefaultRouteAgent(ref.Provider, ref.AccountID)
 		if agent == "" {
@@ -74,7 +74,7 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 // without materializing one. HandleOutbound uses it to authorize publishes on
 // agent-bound conversations.
 func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return nil
 	}
@@ -95,7 +95,7 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -147,7 +147,10 @@ type extmsgNotifyBroadcast struct {
 // lets session resolution materialize or wake named sessions on first receive.
 func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcast) {
 	svc := s.state.ExtMsgServices()
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the member fan-out below materializes a
+	// configured named session that has no live bead yet, so through the work
+	// store on a relocated city every cold-wake mints a stranded session bead.
+	store := s.state.SessionsBeadStore().Store
 	if svc == nil || store == nil {
 		return
 	}

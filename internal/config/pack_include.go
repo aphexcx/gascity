@@ -298,14 +298,18 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bo
 		return "", true, fmt.Errorf("resolving global repo cache root: %w", err)
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
-	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit) == nil {
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return "", true, fmt.Errorf("resolving bundled repository for %q", source)
+	}
+	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit) == nil {
 		return cacheDir, true, nil
 	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
-		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
-		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit)
 	}); err != nil {
 		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
 	}
@@ -368,13 +372,19 @@ var remoteCacheValidationCache sync.Map // cacheDir+"\x00"+commit -> remoteCache
 type remoteCacheValidationEntry struct{ fingerprint string }
 
 // remoteCacheFingerprint is a cheap change signal for a remote cache checkout:
-// the size+mtime of the checkout root, its .git dir, and the git index. Git
-// checkout/status touch .git and the index; `gc import install` rewrites the
-// tree. A nested manual worktree edit touching none of these escapes detection
-// until the process restarts — acceptable for a pinned, gc-managed cache.
+// the size+mtime of the checkout root and the git index. `gc import install`
+// rewrites the tree (changing root mtime); git checkout/reset update the
+// index. The .git directory itself is intentionally excluded: git status
+// --porcelain creates and removes a lock file inside .git/ as a side effect,
+// updating .git dir mtime on every run and defeating the memo. .git/index
+// mtime is stable across git status (the flags we pass, including
+// -c core.untrackedCache=false, prevent any index refresh writes).
+// A nested manual worktree edit touching neither root nor the index escapes
+// detection until the process restarts — acceptable for a pinned,
+// gc-managed cache.
 func remoteCacheFingerprint(cacheDir string) string {
 	var b strings.Builder
-	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git"), filepath.Join(cacheDir, ".git", "index")} {
+	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git", "index")} {
 		if fi, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%d:%d;", fi.Size(), fi.ModTime().UnixNano())
 		} else {
@@ -413,7 +423,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		}
 		return err
 	}
-	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
+	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
 	return nil
 }
 
@@ -433,16 +443,20 @@ func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string)
 		// Present (possibly drifted/tampered) or unstattable: do not auto-heal.
 		return false
 	}
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		return false
+	}
 	if _, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
 		// Re-check under the lock: another writer may have materialized it.
-		if builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil {
+		if builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil {
 			return cacheDir, nil
 		}
-		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, commit)
+		return cacheDir, builtinpacks.MaterializeSyntheticRepo(cacheDir, repository, commit)
 	}); err != nil {
 		return false
 	}
-	return builtinpacks.ValidateSyntheticRepo(cacheDir, commit) == nil
+	return builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil
 }
 
 // ResetRemoteCacheValidationCache clears memoized remote-cache validations
@@ -457,8 +471,8 @@ func ResetRemoteCacheValidationCache() {
 func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
-	if IsBundledSourceAtCanonicalPin(source, commit) {
-		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, commit)
+	if repository, ok := builtinpacks.RepositoryForSource(source); ok && IsBundledSourceAtCanonicalPin(source, commit) {
+		err := builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit)
 		if err == nil {
 			return nil
 		}

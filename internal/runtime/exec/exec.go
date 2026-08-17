@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -79,18 +79,15 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	// Run the adapter in its own process group so cooperative cancellation
-	// reaches a foreground child (e.g. a readiness sleep in the adapter), not
-	// just the shell leader. Without this the shell defers its rollback trap
-	// until the child returns, and WaitDelay force-kills it first — leaking any
-	// resource the adapter already created (e.g. a Docker container).
-	setProcessGroup(cmd)
-	var cancellationAccepted atomic.Bool
-	cmd.Cancel = interruptThenKill(cmd, &cancellationAccepted)
-	// WaitDelay ensures Go forcibly closes I/O pipes after the context
-	// expires, even if grandchild processes (e.g. sleep in a shell script)
-	// still hold them open.
-	cmd.WaitDelay = 2 * time.Second
+	// Run the adapter in its own process group with interrupt-then-kill
+	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
+	// foreground child (e.g. a readiness sleep in the adapter), not just the
+	// shell leader — without this the shell defers its rollback trap until
+	// the child returns, and the forced kill wins first, leaking any resource
+	// the adapter already created (e.g. a Docker container). The grace also
+	// ensures Go forcibly closes I/O pipes after the context expires, even if
+	// grandchild processes (e.g. sleep in a shell script) still hold them open.
+	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -118,30 +115,6 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	return "", p.runError(err, stderr.String(), args)
 }
 
-// interruptThenKill builds a [exec.Cmd.Cancel] that first interrupts the
-// adapter's process group so a cooperative adapter — and any foreground child
-// blocking its rollback trap — can roll back before cancellation becomes a
-// forced kill, recording in accepted whether cancellation was delivered so the
-// caller can let it win over the adapter's own exit status. Platforms without
-// process groups or os.Interrupt (such as Windows) fall back to Kill.
-func interruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
-	return func() error {
-		err := interruptProcessGroup(cmd)
-		if err == nil {
-			accepted.Store(true)
-			return nil
-		}
-		if errors.Is(err, os.ErrProcessDone) {
-			return err
-		}
-		err = cmd.Process.Kill()
-		if err == nil {
-			accepted.Store(true)
-		}
-		return err
-	}
-}
-
 // cancellationError formats the error returned when a delivered cancellation
 // wins over the adapter's own exit status, preferring the context's cause and
 // attaching any adapter stderr for context.
@@ -156,10 +129,22 @@ func (p *Provider) cancellationError(ctxErr error, stderr string, args []string)
 	return fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
 }
 
+// startCollisionPhrases are the adapter stderr idioms that mean "a live session
+// already owns this name". exec is the only provider that INFERS
+// [runtime.ErrSessionExists] from the adapter's message instead of returning it
+// structurally, so this list is the whole detector — and packs word the refusal
+// differently ("already exists" and "already running" are both in use).
+//
+// Under-matching is the dangerous direction: the sentinel is what stops
+// cleanupAfterStartFailure from tearing down the box a healthy session is
+// already running in, so an unrecognized phrasing costs a live session. A false
+// match only forgoes cleanup of one box.
+var startCollisionPhrases = []string{"already exists", "already running"}
+
 // runError maps an ordinary (non-cancellation) cmd.Run failure onto the
 // provider's contract: exit code 2 is an unknown operation treated as success
-// (forward compatible, nil error), a "start ... already exists" collision maps
-// to [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
+// (forward compatible, nil error), a start-op name collision maps to
+// [runtime.ErrSessionExists], and everything else wraps the adapter's stderr.
 func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
@@ -169,10 +154,22 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 	if errMsg == "" {
 		errMsg = runErr.Error()
 	}
-	if len(args) > 0 && args[0] == "start" && strings.Contains(strings.ToLower(errMsg), "already exists") {
+	if len(args) > 0 && args[0] == "start" && isStartCollision(errMsg) {
 		return fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
 	}
 	return fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+}
+
+// isStartCollision reports whether a failed start op's message says the name is
+// already taken by a live session.
+func isStartCollision(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	for _, phrase := range startCollisionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // runWithTTY executes the script with the terminal inherited (for Attach).
@@ -197,20 +194,38 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-		return err
+		return p.cleanupAfterStartFailure(name, err)
 	}
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		if stopErr := p.Stop(name); stopErr != nil {
-			return errors.Join(
-				fmt.Errorf("exec provider: dismissing startup dialogs: %w", err),
-				fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr),
-			)
-		}
-		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err))
 	}
 
 	return nil
+}
+
+// cleanupAfterStartFailure tears down the box the adapter may already have
+// created before startErr, and returns the error Start should report. By the
+// time the `start` op fails the box usually exists — the adapter provisions it
+// and then blocks polling for readiness, so the common failure is gc hitting
+// its own startTimeout with the box already up. Without this teardown that box
+// is orphaned, and because a fresh session name is minted per attempt the retry
+// leaks another one.
+//
+// The [runtime.ErrSessionExists] case is the exception: a name collision means
+// a LIVE session already owns that box, and stopping it would destroy a healthy
+// session rather than clean up after this attempt.
+//
+// Stop deliberately runs on its own background context (see run), so cleanup
+// still happens when the caller's context is the thing that died.
+func (p *Provider) cleanupAfterStartFailure(name string, startErr error) error {
+	if errors.Is(startErr, runtime.ErrSessionExists) {
+		return startErr
+	}
+	if stopErr := p.Stop(name); stopErr != nil {
+		return errors.Join(startErr, fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr))
+	}
+	return startErr
 }
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
@@ -285,10 +300,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
-	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
-		return nil
-	}
-	if cfg.AcceptStartupDialogs == nil && !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
 		return nil
 	}
 

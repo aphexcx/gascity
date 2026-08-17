@@ -41,6 +41,14 @@ const bdSilentFallbackExitCode = 4
 
 const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)"
 
+// bdDoltStartConflictUserMessage is appended (bd's own output is left
+// intact) when bd's error output suggests running `bd dolt start` to
+// recover from an unreachable managed Dolt server. That command starts a
+// second, unmanaged Dolt server that conflicts with gc's own managed server
+// on the same data directory, so gc bd points at the gc-managed remedy
+// instead. See gastownhall/gascity#1374.
+const bdDoltStartConflictUserMessage = "gc bd: bd suggested \"bd dolt start\" to recover, but that starts a second, unmanaged Dolt server that will conflict with gc's managed server on the same data directory. Run \"gc start\" (or \"gc dolt restart\") to restart the managed Dolt server instead, then retry. (See gastownhall/gascity#1374.)"
+
 // bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
 // silent-fallback marker. bd emits the marker pair while opening the store —
 // before it runs the subcommand — so the marker, when present, always lands
@@ -85,6 +93,25 @@ city (HQ) store. An explicit --city is a true scope override: it forces the
 city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
+On a city that serves a coordination class from its own [storage] binding,
+a by-id read or write of a bead that binding owns is answered in process
+from the binding, not by bd against a work store that does not hold it.
+--rig is refused for those beads rather than ignored or honored: it names a
+work scope, and a relocated class is not partitioned by rig, so there is
+nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
+scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
+binding answers.
+
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
+
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which runs bd's native
 "heartbeat <issue-id>" (renewing the claim lease so the bead never goes
@@ -118,8 +145,12 @@ auto-export behavior, invoke bd directly.`,
 	return cmd
 }
 
-var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) bool {
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+// bdBeadExists reports whether a bead ID resolves in a candidate store. It is
+// called only to decide which store a bd invocation is scoped to, so it takes
+// the city config the caller already loaded: without it, every candidate probe
+// re-loaded the whole city config inside the store open.
+var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarget, beadID string) bool {
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		return false
 	}
@@ -207,6 +238,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Refuse a dropped --set-metadata pair before any store work, so nothing is
+	// written and the exit code is honest. bd applies the subset and exits 0.
+	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -224,17 +262,53 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "")
+	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// `gc bd sql`, `gc bd query` and the selector verbs (`list`, `search`) are
+	// passthroughs to bd, and bd answers about the bd ledger only. On a split
+	// city a read that names a relocated class's beads comes back empty and exit
+	// 0 — a confident wrong answer, and the one that reported live molecule roots
+	// as missing. A frontier read (`gc bd ready`, or `gc bd list --ready`, which
+	// runs the same query) is refused on the same seam for a different reason:
+	// its whole result set is short by the relocated class whatever the argv.
+	// Refuse both here, where the class routing is known; bd cannot know a class
+	// was relocated.
+	if msg, blind := bdSQLRelocatedClassRefusal(cfg, bdArgs); blind {
+		if !bdRelocatedClassOverrideEnabled() {
+			fmt.Fprintf(stderr, "gc bd: %s.%s\n", msg, bdRelocatedClassEscapeHint(bdRelocatedClassInvocationComputesFrontier(bdArgs))) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// Overridden, but never silently: the operator asked for a read this
+		// ledger cannot answer by class, so the reason it would have been
+		// refused travels with the result they are about to trust.
+		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// A by-ID operation whose subject a relocated class owns is answered in
+	// process, from the binding that class is served from, and never handed to
+	// the subprocess — which opens the work workspace and cannot see the bead.
+	// It runs BEFORE the release-if-current arm below because that arm resolves
+	// only the work scope: on a split city it would release against the ledger
+	// the bead was moved off. See cmd_bd_by_id.go.
+	//
+	// rigName is the explicit --rig, and it travels because the WORK scope this
+	// function just resolved and the class binding are two different ledgers: a
+	// class-owned subject under an explicit --rig is refused rather than served
+	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
+	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
+	// travel — see refuseRigScopedClassOwnedTarget.
+	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
+		return code
 	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doBdReleaseIfCurrent(cityPath, target, id, expectedAssignee, stdout, stderr)
+		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
@@ -264,23 +338,36 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	//
 	// Note: gc bd show (read passthrough) does NOT have this guard and still
 	// substring-resolves. That is intentional — reads are non-destructive.
+	//
+	// guardStore/guardBeads capture the store this guard opens and the beads
+	// it reads so the work-record close gate below can reuse them instead of
+	// opening the store and re-fetching the same bead a second time.
+	var (
+		guardStore beads.Store
+		guardBeads map[string]beads.Bead
+	)
 	if writeIDs, writeOK, ambiguous := bdMutationWriteIDs(bdArgs); writeOK {
 		if ambiguous {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCity(target.ScopeRoot, cityPath)
+			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 			// Store-unavailable: we cannot verify, but we must not block
 			// legitimate writes. Fall through; bd will error on actual problems.
 			if storeErr == nil {
+				guardStore = store
+				guardBeads = make(map[string]beads.Bead, len(writeIDs))
 				for _, id := range writeIDs {
-					_, getErr := store.Get(id)
+					bead, getErr := store.Get(id)
 					if errors.Is(getErr, beads.ErrIDCollision) {
 						// bd resolved a different bead — block the write to prevent
 						// mutating the wrong bead via substring resolution.
 						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
 						return 1
+					}
+					if getErr == nil {
+						guardBeads[id] = bead
 					}
 					// ErrNotFound or any other error: bead may be absent, ephemeral,
 					// or the read seam differs from the write seam — fall through.
@@ -292,17 +379,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
-	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
+	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
+	// store/beads the write-ID guard above already opened and read, and the
+	// config the caller already loaded.
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
 		return 1
 	}
 
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
-	bdPath, err := exec.LookPath("bd")
+	// Resolve the same binary every other bd path in the tree resolves for
+	// this scope: a scope bound to a complete storage binding pins the bd
+	// build that speaks that backend, and the passthrough must honor the pin
+	// or it hands the command to an ambient bd that rejects the bound
+	// backend. Keying on the target scope rather than the city keeps a rig
+	// that owns its binding on its pin, and keeps a rig that overrides the
+	// city backend on the ambient bd its runtime env already implies.
+	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
-		fmt.Fprintln(stderr, "gc bd: bd not found in PATH") //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -321,18 +417,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// another assignee) fails loudly here and never stamps liveness metadata
 	// on a bead it no longer owns.
 	if heartbeatID != "" {
-		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, target.ScopeRoot, env, stdout, stderr); code != 0 {
+		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, cityPath, target, env, stdout, stderr); code != 0 {
 			return code
 		}
 	}
-	return runBdSubprocess(bdPath, bdArgs, target.ScopeRoot, env, stdout, stderr)
+	return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
 }
 
 // runBdSubprocess executes one bd invocation for doBd's passthrough handoff:
 // it wires the operator's stdio, traces the call, and maps the outcome onto
 // doBd's exit-code contract (bd's own exit code, or bdSilentFallbackExitCode
 // when bd exited 0 but silently fell back to the on-disk store).
-func runBdSubprocess(bdPath string, bdArgs []string, dir string, env []string, stdout, stderr io.Writer) int {
+func runBdSubprocess(bdPath string, bdArgs []string, cityPath string, target execStoreTarget, env []string, stdout, stderr io.Writer) int {
+	dir := target.ScopeRoot
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
@@ -361,6 +458,10 @@ func runBdSubprocess(bdPath string, bdArgs []string, dir string, env []string, s
 
 	if runErr != nil {
 		if traceExit > 0 {
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) &&
+				bdScopeDoltIsGcManaged(cityPath, target.ScopeRoot) {
+				fmt.Fprintln(stderr, bdDoltStartConflictUserMessage) //nolint:errcheck // best-effort stderr
+			}
 			return traceExit
 		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
@@ -514,8 +615,8 @@ func bdMutationWriteID(args []string) (string, bool) {
 	return ids[0], true
 }
 
-func doBdReleaseIfCurrent(cityPath string, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
-	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTarget, id, expectedAssignee string, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -609,7 +710,11 @@ func extractBdDirectoryFlag(args []string) string {
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
 // Priority: explicit rig name > explicit city > bead prefix auto-detection > -C dir rig match > GC_RIG env > enclosing rig > city root.
-func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool) (execStoreTarget, error) {
+//
+// stderr receives a best-effort warning when a set-but-unresolvable GC_RIG is
+// discarded (see the GC_RIG block below); pass io.Discard when the caller does
+// not care.
+func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool, stderr io.Writer) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
 		rig, ok := rigByName(cfg, rigName)
@@ -639,7 +744,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
-			if bdBeadExists(cityPath, cityTarget, arg) {
+			if bdBeadExists(cityPath, cfg, cityTarget, arg) {
 				return cityTarget, nil
 			}
 		}
@@ -658,7 +763,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 				continue
 			}
 			target := bdRigScopeTarget(cityPath, rig)
-			if bdBeadExists(cityPath, target, arg) {
+			if bdBeadExists(cityPath, cfg, target, arg) {
 				return target, nil
 			}
 		}
@@ -684,23 +789,44 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
 	// live under .gc/worktrees/, not the configured rig path).
 	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
+	gcRigDiscarded := ""
 	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
 		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
 			return bdRigScopeTarget(cityPath, rig), nil
 		}
-		// GC_RIG names an unknown or unbound rig — fall through to cwd/city
-		// rather than erroring, so cross-city queries still work from rig agents.
+		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
+		// (which exits 1 on the identical value), we do not error: falling
+		// through to cwd/city keeps cross-city queries working from rig agents
+		// whose GC_RIG names a rig this city does not bind. But the discard
+		// must not be silent — a stale or typo'd GC_RIG would otherwise
+		// redirect a query to a different store than the operator intended with
+		// no diagnostic, while the same value via --rig fails loudly. Record it
+		// and warn below, naming the store actually answered.
+		gcRigDiscarded = gcRig
 	}
 
+	target := cityTarget
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
 		return execStoreTarget{}, err
 	} else if ok {
 		// resolveRigForDir already skips unbound rigs, so rig.Path is
 		// guaranteed non-empty here.
-		return bdRigScopeTarget(cityPath, rig), nil
+		target = bdRigScopeTarget(cityPath, rig)
 	}
 
-	return cityTarget, nil
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+	return target, nil
+}
+
+// scopeLabel renders a store target for operator-facing diagnostics, e.g.
+// `city` or `rig "packs"`.
+func scopeLabel(t execStoreTarget) string {
+	if t.ScopeKind == "rig" && strings.TrimSpace(t.RigName) != "" {
+		return fmt.Sprintf("rig %q", t.RigName)
+	}
+	return t.ScopeKind
 }
 
 func bdRigForArg(cfg *config.City, arg string) (config.Rig, bool) {

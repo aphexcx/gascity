@@ -34,6 +34,7 @@ named-always-min-conflict
 instructions-file
 service-secrets-perms
 skill-collision
+skill-dangling-sink
 order-firing-current
 codex-hooks-drift
 rig-pack-coverage
@@ -60,6 +61,7 @@ beads-store
 v2-routed-to-namespace
 census-owner-liveness
 run-target-routed-to-backfill
+route-recovery-quarantine
 hold-label-routed-to
 work-option-metadata-migration
 backlog-depth
