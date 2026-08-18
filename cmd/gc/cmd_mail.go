@@ -1500,7 +1500,16 @@ Suppression exits 0. Once the recipient archives the message the stream may
 alert again; senders that want a longer re-alert cadence keep their own
 last-sent state. Dedup needs a provider that can query its own message
 history. The built-in provider can; one that cannot sends normally and says
-so on stderr, because a duplicate notification beats a dropped one.`,
+so on stderr, because a duplicate notification beats a dropped one.
+
+With --context/--city-url the message is sent to a REMOTE city over the
+control plane (a hardened city requires the context's grant_command). The
+sender then defaults to "<local city>/<identity>" (e.g. citadel/mayor) so the
+far side knows which city to answer with 'gc --context <city> mail send';
+--from overrides it. The remote city stores an unknown sender literally, but
+if it has a session whose alias equals that string (a rig named after the
+sending city) the message binds to that session — do not name a rig after a
+city that mails you. --all and --notify are refused for a remote city.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
@@ -1541,7 +1550,11 @@ func newMailInboxCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.`,
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
+
+With --context/--city-url the inbox is read from a REMOTE city; with no
+argument it lists mail addressed to this client's remote identity
+("<local city>/<identity>") — where a far-side 'gc mail reply' lands.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailInboxWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -1610,7 +1623,11 @@ Inherits the thread ID from the original message for conversation tracking.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
-Use -s/--subject for the reply subject and -m/--message for the reply body.`,
+Use -s/--subject for the reply subject and -m/--message for the reply body.
+
+With --context/--city-url the reply is sent inside a REMOTE city (the reply
+is addressed by that city to the original sender); the sender is
+"<local city>/<identity>" and --notify is refused.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
@@ -1757,6 +1774,17 @@ func cmdMailSend(args []string, notify bool, all bool, from string, to string, s
 // [mail.DedupSender] capability so a repeating notifier keeps at most one live
 // copy; an empty dedupKey sends unconditionally.
 func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
+	// Remote city: forward the mutation over the control plane before any local
+	// provider/store work (mirrors gc sling). A "no city discoverable" error is
+	// deferred to the local path so it reports exactly as before; a genuine
+	// resolution error (bad --context, remote client build failure) fails now,
+	// non-fallbackably (gate G1).
+	if remoteC, isRemote, remoteTgt, rerr := resolveWriteTarget(); rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		fmt.Fprintf(stderr, "gc mail send: %v\n", rerr) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if isRemote {
+		return cmdMailSendRemote(remoteC, remoteTgt, args, notify, all, from, to, subject, message, jsonOut, stdout, stderr)
+	}
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -2033,6 +2061,14 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
+	// Remote city: read the far-side mailbox over the control plane (see
+	// mail_remote.go). Same deferral of "no city discoverable" as mail send.
+	if remoteC, isRemote, remoteTgt, rerr := resolveReadTargetEcho(); rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		fmt.Fprintf(stderr, "gc mail inbox: %v\n", rerr) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if isRemote {
+		return cmdMailInboxRemote(remoteC, remoteTgt, args, jsonOut, stdout, stderr)
+	}
 	mp, code := openCityMailProvider(stderr, "gc mail inbox")
 	if mp == nil {
 		return code
@@ -2256,6 +2292,13 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail reply: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Remote city: forward the reply over the control plane (see mail_remote.go).
+	if remoteC, isRemote, remoteTgt, rerr := resolveWriteTarget(); rerr != nil && !isCityDiscoveryNotFound(rerr) {
+		fmt.Fprintf(stderr, "gc mail reply: %v\n", rerr) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if isRemote {
+		return cmdMailReplyRemote(remoteC, remoteTgt, args, subject, message, notify, jsonOut, stdout, stderr)
 	}
 
 	mp, code := openCityMailProvider(stderr, "gc mail reply")
