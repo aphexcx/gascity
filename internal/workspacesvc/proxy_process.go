@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,6 +27,19 @@ const (
 	proxyProcessReadyTimeout   = 5 * time.Second
 	proxyProcessRestartBackoff = 1 * time.Second
 	proxyProcessShutdownWait   = 2 * time.Second
+)
+
+// Advisory service-health contract: a 2xx health_path response may carry
+// X-GC-Health: degraded (plus X-GC-Health-Reason) to report a partial
+// failure — e.g. a Slack adapter whose inbound event stream is dead while
+// outbound still works (gp-rol). The supervisor then shows State=degraded
+// with the reason but keeps LocalState=ready, so traffic keeps flowing;
+// only a non-2xx (or unreachable) health check gates routing. Services
+// that never set the header behave exactly as before.
+const (
+	serviceHealthHeader       = "X-GC-Health"
+	serviceHealthReasonHeader = "X-GC-Health-Reason"
+	serviceHealthDegraded     = "degraded"
 )
 
 var errProxyProcessExitedEarly = errors.New("process exited before listener became ready")
@@ -269,7 +283,9 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	}
 
 	p.mu.Lock()
-	if p.cmd == cmd && !p.closed {
+	// checkHealth (via waitReady) may already have recorded an advisory
+	// degraded state; only promote when nothing observed a health verdict.
+	if p.cmd == cmd && !p.closed && p.status.State == "starting" {
 		p.status.State = "ready"
 		p.status.LocalState = "ready"
 		p.status.Reason = ""
@@ -337,11 +353,22 @@ func (p *proxyProcessInstance) checkHealth(now time.Time) error {
 		return fmt.Errorf("health check returned %d", resp.StatusCode)
 	}
 
+	state, reason := "ready", ""
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get(serviceHealthHeader)), serviceHealthDegraded) {
+		state = serviceHealthDegraded
+		reason = strings.TrimSpace(resp.Header.Get(serviceHealthReasonHeader))
+		if reason == "" {
+			reason = "service reported degraded"
+		}
+	}
+
 	p.mu.Lock()
 	if p.cmd != nil && !p.closed {
-		p.status.State = "ready"
+		p.status.State = state
+		// A 2xx means the service is serving: advisory degradation must
+		// not gate the proxy (HandleHTTP routes on LocalState).
 		p.status.LocalState = "ready"
-		p.status.Reason = ""
+		p.status.Reason = reason
 		p.status.UpdatedAt = now
 	}
 	p.mu.Unlock()

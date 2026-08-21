@@ -1337,7 +1337,7 @@
         },
         "health_path": {
           "type": "string",
-          "description": "HealthPath, when set, is probed on the local listener before the\nservice is marked ready."
+          "description": "HealthPath, when set, is probed on the local listener before the\nservice is marked ready, and again on every supervisor tick. A\nnon-2xx (or unreachable) probe marks the service degraded and stops\nrouting. A 2xx response may additionally carry an advisory\n\"X-GC-Health: degraded\" header (with \"X-GC-Health-Reason\") to\nsurface a partial failure — e.g. a dead inbound stream while\noutbound still works — as State=degraded WITHOUT stopping routing."
         }
       },
       "additionalProperties": false,

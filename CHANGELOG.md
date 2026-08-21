@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **proxy_process services can report advisory degradation without losing
+  traffic.** A 2xx `health_path` response may now carry
+  `X-GC-Health: degraded` (+ `X-GC-Health-Reason`); the supervisor then
+  shows `State=degraded` on `gc service list` (the reason rides on
+  `gc service show <name>`, `--json`, and the API) while `LocalState`
+  stays `ready`, so the reverse proxy keeps routing.
+  Built for partial failures where cutting traffic makes the outage worse
+  — the canonical case is a Slack adapter whose inbound event stream is
+  dead while outbound `/publish` still works (gp-rol): health previously
+  had only "ready" or "degraded-and-unroutable", so such a service showed
+  `ready` for the entire outage. Non-2xx health checks behave exactly as
+  before; services that never set the header are unaffected.
+
 ### Fixed
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
