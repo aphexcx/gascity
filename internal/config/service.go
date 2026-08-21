@@ -151,7 +151,12 @@ type ServiceProcessConfig struct {
 	// Command is the argv used to start the local service process.
 	Command []string `toml:"command,omitempty"`
 	// HealthPath, when set, is probed on the local listener before the
-	// service is marked ready.
+	// service is marked ready, and again on every supervisor tick. A
+	// non-2xx (or unreachable) probe marks the service degraded and stops
+	// routing. A 2xx response may additionally carry an advisory
+	// "X-GC-Health: degraded" header (with "X-GC-Health-Reason") to
+	// surface a partial failure — e.g. a dead inbound stream while
+	// outbound still works — as State=degraded WITHOUT stopping routing.
 	HealthPath string `toml:"health_path,omitempty"`
 }
 

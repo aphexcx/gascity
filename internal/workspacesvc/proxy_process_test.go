@@ -162,6 +162,83 @@ func TestManagerReloadProxyProcessStartsAndProxies(t *testing.T) {
 	}
 }
 
+// Advisory degraded health (gp-rol): a 2xx health response carrying
+// X-GC-Health: degraded must flip State to degraded with the reason while
+// LocalState stays ready — traffic keeps flowing, because the service is
+// still serving (a Slack adapter with a dead inbound stream must keep its
+// outbound /publish route). Clearing the header recovers to ready on the
+// next tick.
+func TestProxyProcessAdvisoryDegradedKeepsRouting(t *testing.T) {
+	t.Setenv("GC_SERVICE_HELPER", "1")
+	setHelperPassthrough(t)
+	degradeFile := filepath.Join(t.TempDir(), "degrade")
+	if err := os.WriteFile(degradeFile, []byte("1"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	extraHelperEnv = append(extraHelperEnv, "PROXY_TEST_DEGRADE_FILE="+degradeFile)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+
+	rt := &testRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg: &config.City{
+			Services: []config.Service{{
+				Name: "bridge",
+				Kind: "proxy_process",
+				Process: config.ServiceProcessConfig{
+					Command:    []string{exe, "-test.run=^TestProxyProcessHelper$", "--"},
+					HealthPath: "/healthz",
+				},
+			}},
+		},
+		sp:    runtime.NewFake(),
+		store: beads.NewMemStore(),
+	}
+	mgr := NewManager(rt)
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	defer mgr.Close() //nolint:errcheck // best-effort cleanup
+
+	status, ok := mgr.Get("bridge")
+	if !ok {
+		t.Fatal("service status missing")
+	}
+	if status.State != "degraded" {
+		t.Fatalf("State = %q, want degraded (reason=%q)", status.State, status.Reason)
+	}
+	if status.LocalState != "ready" {
+		t.Fatalf("LocalState = %q, want ready — advisory degradation must not gate routing", status.LocalState)
+	}
+	if status.Reason != "inbound stalled (test)" {
+		t.Fatalf("Reason = %q, want %q", status.Reason, "inbound stalled (test)")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/svc/bridge/hooks/example", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	if ok := mgr.ServeHTTP(rec, req); !ok {
+		t.Fatal("ServeHTTP returned false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxied status while degraded = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	if err := os.Remove(degradeFile); err != nil {
+		t.Fatalf("Remove degrade file: %v", err)
+	}
+	mgr.Tick(context.Background(), time.Now().UTC())
+	status, _ = mgr.Get("bridge")
+	if status.State != "ready" || status.LocalState != "ready" {
+		t.Fatalf("post-recovery state = %q/%q (reason=%q), want ready/ready", status.State, status.LocalState, status.Reason)
+	}
+	if status.Reason != "" {
+		t.Fatalf("post-recovery Reason = %q, want empty", status.Reason)
+	}
+}
+
 func TestProxyProcessHelper(t *testing.T) {
 	if os.Getenv("GC_SERVICE_HELPER") != "1" {
 		t.Skip("helper process")
@@ -180,6 +257,15 @@ func TestProxyProcessHelper(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		// Advisory degraded-health contract: while the file named by
+		// PROXY_TEST_DEGRADE_FILE exists, report 2xx + X-GC-Health so
+		// tests can flip degradation on and off per request.
+		if f := os.Getenv("PROXY_TEST_DEGRADE_FILE"); f != "" {
+			if _, err := os.Stat(f); err == nil {
+				w.Header().Set("X-GC-Health", "degraded")
+				w.Header().Set("X-GC-Health-Reason", "inbound stalled (test)")
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
