@@ -7,11 +7,14 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -145,14 +148,38 @@ type extmsgNotifyBroadcast struct {
 // extmsgNotifyMembers sends a peer-publication reminder to transcript members
 // via the session message API. This treats membership as the routing truth and
 // lets session resolution materialize or wake named sessions on first receive.
-func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcast) {
+//
+// It returns one [extmsg.InboundDeliveryMember] per member it attempted, which
+// the inbound path folds into the caller-visible delivery receipt. Callers
+// that only fan out and do not report (the outbound broadcast) discard it.
+//
+// A non-nil error means the fan-out could not be DETERMINED — the membership
+// lookup failed, or the services backing it are unavailable — which is not the
+// same as a conversation with no members. Both produce zero outcomes, but zero
+// outcomes summarize as no_route, and no_route tells a consumer to commit its
+// dedup claim because a retry could not reach anyone either. Collapsing a
+// transient store fault into that verdict would silently discard the message.
+// Callers must report an error as a delivery failure, never as no_route.
+//
+// A member that is skipped as the excluded sender contributes no entry: it was
+// never a delivery target, so counting it would understate the success rate
+// for no reason. A member that could not even be resolved DOES contribute a
+// failed entry — from the sender's point of view that is an undelivered
+// recipient, and silently dropping it is how a fan-out reports success while
+// reaching nobody.
+//
+// The fan-out is synchronous: it returns only once every member goroutine has
+// finished or ctx is done. Bounding the wall-clock cost is the caller's job
+// via ctx, because only the caller knows its own response budget.
+func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcast) ([]extmsg.InboundDeliveryMember, error) {
 	svc := s.state.ExtMsgServices()
 	// Sessions class, and a WRITE path: the member fan-out below materializes a
 	// configured named session that has no live bead yet, so through the work
 	// store on a relocated city every cold-wake mints a stranded session bead.
 	store := s.state.SessionsBeadStore().Store
 	if svc == nil || store == nil {
-		return
+		// Cannot determine membership, so cannot claim there was nobody.
+		return nil, fmt.Errorf("extmsg services unavailable")
 	}
 	conv := b.Conversation
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
@@ -161,7 +188,7 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
-		return
+		return nil, fmt.Errorf("list memberships for %s/%s: %w", conv.Provider, conv.ConversationID, err)
 	}
 	if len(members) == 0 {
 		// Membership is the routing truth for this fan-out: zero members means
@@ -170,7 +197,9 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		// conversation it is the hq-ar4 black hole — make it observable either
 		// way instead of returning in silence.
 		log.Printf("extmsg: no transcript members for %s/%s — nobody notified (actor=%q)", conv.Provider, conv.ConversationID, b.ActorDisplay)
-		return
+		// A SUCCESSFUL lookup that found nobody. This is the only path allowed
+		// to produce no_route.
+		return nil, nil
 	}
 
 	excludedResolvedID := ""
@@ -182,6 +211,17 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		} else {
 			excludedResolvedID = resolvedID
 		}
+	}
+
+	// outcomes is appended to from every member goroutine, so it is mutex-held
+	// rather than pre-sized by index: members can drop out (excluded sender)
+	// without leaving a zero-valued hole that would read as a failed delivery.
+	var outcomesMu sync.Mutex
+	outcomes := make([]extmsg.InboundDeliveryMember, 0, len(members))
+	record := func(m extmsg.InboundDeliveryMember) {
+		outcomesMu.Lock()
+		defer outcomesMu.Unlock()
+		outcomes = append(outcomes, m)
 	}
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
@@ -201,9 +241,54 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 			ReplyToMessageID:        b.ReplyToMessageID,
 			ReplyInstructions:       replyInstructions,
 		})
-		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
-			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
+		// Expected size and digest are properties of the string gc built, so
+		// they are known here regardless of how the send goes — which is what
+		// lets a failed member still report what it was supposed to receive.
+		outcome := extmsg.InboundDeliveryMember{
+			SessionID:     resolvedID,
+			Selector:      sessionSelector,
+			ExpectedBytes: len(nudge),
+			Digest:        runtime.NudgePayloadDigest(nudge),
 		}
+		result, err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge)
+		switch {
+		case err != nil:
+			outcome.Status = extmsg.InboundDeliveryFailed
+			outcome.Error = err.Error()
+			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
+		case result.Delivered:
+			// The runtime reports it delivered the payload, so the delivered
+			// size is the reminder's own length — not a count read back out of
+			// the terminal, which no runtime offers.
+			//
+			// That is exact rather than optimistic on the tmux runtime this
+			// city uses: its send path stages the payload with one WriteString
+			// (short writes surface as an error) and pastes it with a single
+			// atomic tmux paste-buffer, so "some of it arrived" is not a state
+			// the transport can reach — it either delivers whole or errors into
+			// the arm above. Runtimes without that property inherit the
+			// honesty of their own Delivered flag, which is the same trust
+			// boundary every other caller of Nudge already relies on.
+			outcome.Status = extmsg.InboundDeliveryDelivered
+			outcome.DeliveredBytes = len(nudge)
+		default:
+			// No error, but the runtime reports it did not put the payload in a
+			// terminal. The default nudge semantics used above cold-wake the
+			// session and surface any failure as an error, so this arm is not
+			// reachable through today's call — it is here because the wait-idle
+			// and live-only nudge modes DO return (false, nil) when they
+			// downgrade to the queue, and a future switch to either must not
+			// silently start reporting queued nudges as delivered. That
+			// overclaim is the exact failure this receipt exists to eliminate.
+			outcome.Status = extmsg.InboundDeliveryFailed
+			if reason := string(result.Undelivered); reason != "" {
+				outcome.Error = "not delivered live: " + reason
+			} else {
+				outcome.Error = "not delivered live"
+			}
+			log.Printf("extmsg: notify %s not delivered live: %s", sessionSelector, outcome.Error)
+		}
+		record(outcome)
 	}
 
 	var wg sync.WaitGroup
@@ -225,6 +310,15 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 			resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionSelector)
 			if err != nil {
 				log.Printf("extmsg: resolve session %s failed: %v", sessionSelector, err)
+				// An unresolvable member is an undelivered recipient, not a
+				// non-member: report it so the aggregate cannot read
+				// "delivered" while a transcript member got nothing.
+				record(extmsg.InboundDeliveryMember{
+					SessionID: sessionSelector,
+					Selector:  sessionSelector,
+					Status:    extmsg.InboundDeliveryFailed,
+					Error:     "resolve session: " + err.Error(),
+				})
 				return
 			}
 			if preErr != nil {
@@ -237,6 +331,16 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		}(m.SessionID)
 	}
 	wg.Wait()
+
+	// Stable order so a response body and a log line are diffable across
+	// retries; goroutine completion order is not.
+	sort.Slice(outcomes, func(i, j int) bool {
+		if outcomes[i].Selector != outcomes[j].Selector {
+			return outcomes[i].Selector < outcomes[j].Selector
+		}
+		return outcomes[i].SessionID < outcomes[j].SessionID
+	})
+	return outcomes, nil
 }
 
 // extmsgReplyInstructionsForConversation returns the reply-instruction
@@ -277,12 +381,92 @@ func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Servic
 	return strings.TrimSpace(route.TargetSessionID)
 }
 
-func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
+// extmsgInboundReceiptBudget bounds how long the inbound response waits for
+// the terminal fan-out before answering "pending".
+//
+// It is set under the 20s HTTP client deadline the Slack adapter uses
+// (gcForwardClient), so a slow session degrades to an honest pending receipt
+// that the adapter can act on, rather than to a client-side timeout that tells
+// it nothing. It is NOT a cancellation: the fan-out keeps running past this
+// point (see extmsgNotifyInboundWithReceipt).
+const extmsgInboundReceiptBudget = 15 * time.Second
+
+// extmsgNotifyInboundWithReceipt runs the inbound terminal fan-out and returns
+// a delivery receipt describing what actually reached agent terminals.
+//
+// The fan-out runs on the background task group — as it always has, so server
+// shutdown still waits for it — but the response now WAITS for it, up to
+// extmsgInboundReceiptBudget. That wait is the entire point: the previous
+// fire-and-forget shape meant the 200 was written before a single keystroke
+// reached a terminal, so it could not report delivery even in principle, and a
+// caller gating on it was gating on nothing (pc_2e2378b9918e).
+//
+// On budget expiry the fan-out is deliberately NOT cancelled and the receipt
+// says "pending". A paste already handed to a terminal cannot be un-sent, so
+// cancelling would not undo a partial delivery — it would only destroy the
+// remaining ones. The honest report is that gc does not yet know, which leaves
+// the retry decision with the caller that owns the dedup claim.
+//
+// Note that the fan-out's own lifetime is bounded only in principle: the
+// background context caps it at extmsgNotifyTimeout, but the runtime nudge
+// below the session manager does not take a context and will not observe that
+// cancellation. A wedged provider therefore holds its fan-out goroutine (and
+// the shutdown WaitGroup) until it returns on its own. That predates this
+// receipt and is not made worse by it — the wait here is bounded regardless —
+// but do not read the background context as a hard kill.
+func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.ExternalInboundMessage) extmsg.InboundDelivery {
+	receiptID := extmsg.NextInboundReceiptID()
+	type fanoutResult struct {
+		members []extmsg.InboundDeliveryMember
+		err     error
+	}
+	// Buffered so the fan-out goroutine never blocks publishing its result
+	// after the budget has expired and nobody is receiving any more.
+	done := make(chan fanoutResult, 1)
+	s.runBackground(func(bgCtx context.Context) {
+		members, err := s.extmsgNotifyInboundMembers(bgCtx, msg)
+		done <- fanoutResult{members: members, err: err}
+	})
+
+	timer := time.NewTimer(extmsgInboundReceiptBudget)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		if result.err != nil {
+			// The fan-out could not be determined. Reporting this as no_route
+			// (which zero members would summarize to) would tell the caller to
+			// commit its dedup claim and drop the message for good.
+			log.Printf("extmsg: inbound fan-out failed (receipt=%s conversation=%s/%s): %v",
+				receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID, result.err)
+			return extmsg.FailedInboundDelivery(receiptID, result.err.Error())
+		}
+		delivery := extmsg.SummarizeInboundDelivery(receiptID, result.members)
+		if delivery.Status != extmsg.InboundDeliveryDelivered {
+			// The case this whole bead exists for. Log it at the seam so it is
+			// visible in gc's own logs even when the caller drops the receipt.
+			log.Printf("extmsg: %s conversation=%s/%s", delivery, msg.Conversation.Provider, msg.Conversation.ConversationID)
+		}
+		return delivery
+	case <-ctx.Done():
+		// The caller hung up or the server is shutting down. Waiting out the
+		// rest of the budget would pin a handler goroutine per inbound request
+		// for a response nobody will read. The sends continue regardless.
+		log.Printf("extmsg: inbound request ended before the fan-out concluded, reporting pending (receipt=%s conversation=%s/%s): %v",
+			receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID, ctx.Err())
+		return extmsg.PendingInboundDelivery(receiptID)
+	case <-timer.C:
+		log.Printf("extmsg: inbound fan-out exceeded %s receipt budget, reporting pending (receipt=%s conversation=%s/%s) — sends continue in background",
+			extmsgInboundReceiptBudget, receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID)
+		return extmsg.PendingInboundDelivery(receiptID)
+	}
+}
+
+func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) ([]extmsg.InboundDeliveryMember, error) {
 	actorKind := "agent"
 	if !msg.Actor.IsBot {
 		actorKind = "human"
 	}
-	s.extmsgNotifyMembers(ctx, extmsgNotifyBroadcast{
+	return s.extmsgNotifyMembers(ctx, extmsgNotifyBroadcast{
 		Conversation:      msg.Conversation,
 		ActorDisplay:      msg.Actor.DisplayName,
 		ActorKind:         actorKind,

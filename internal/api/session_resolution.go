@@ -657,13 +657,18 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it.
-func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
+//
+// It returns the runtime's [worker.NudgeResult] rather than discarding it. A
+// nil error alone does NOT mean the payload reached a terminal — a nudge that
+// downgrades to the queue also returns nil — so a caller that has to report
+// delivery honestly (the inbound receipt, [extmsg.InboundDelivery]) must read
+// Delivered, not just err.
+func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) (worker.NudgeResult, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		return err
+		return worker.NudgeResult{}, err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
-	return err
+	return handle.Nudge(ctx, worker.NudgeRequest{Text: message})
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for

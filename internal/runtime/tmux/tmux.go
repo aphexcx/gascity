@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,6 +143,12 @@ type Config struct {
 	// literal. Empty disables the durable capture, so ad-hoc invocations
 	// and tests run unchanged.
 	RuntimeDir string
+	// NudgeReceiptSink receives a [runtime.NudgeReceipt] for every nudge this
+	// Tmux frames into a session. Nil (the default) logs the receipt; an
+	// installed sink replaces the log line, so a host that wants both should
+	// log from its own sink. Runs inline on the delivery path — a sink must
+	// not block or panic.
+	NudgeReceiptSink runtime.NudgeReceiptSink
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -258,7 +265,6 @@ const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
-	maxSendKeysLiteralLen    = 4096
 	// Copilot CLI converts any single paste larger than 20 KiB into a
 	// workspace attachment. Keep each paste below that provider boundary and
 	// separate consecutive paste events so its TUI does not coalesce them.
@@ -1958,6 +1964,25 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	return true, nil
 }
 
+// bracketedPasteStart/bracketedPasteEnd are the DEC 2004 paste markers. The
+// hidden-attach path writes bytes straight into an attached client's stdin
+// rather than going through tmux's paste-buffer, so it has to frame the
+// payload itself.
+//
+// Measured through `script` + `tmux attach-session` against a TUI in raw mode
+// with bracketed paste enabled, the markers are forwarded to the pane intact
+// (payload arrives as ESC[200~ ... ESC[201~), and an unframed write of the
+// same payload arrives as bare newlines — i.e. as individual Enter presses
+// that make the TUI submit the first line and drop the rest. That is the same
+// truncation sendLiteralText used to cause; framing here closes it on the
+// second transport. tmux strips the markers for a pane whose application has
+// not requested bracketed paste, so framing is safe for panes that do not
+// support it.
+const (
+	bracketedPasteStart = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
 func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -1973,16 +1998,25 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	// echo instead of counting this nudge as the agent responding (see
 	// discountPokeActivity). A failed write records nothing.
 	commitPoke := t.beginPoke(target)
-	if err := client.write([]byte(text)); err != nil {
+	// One write, so the markers and the payload cannot be interleaved with
+	// another writer's bytes (client.write serializes on its own mutex, but a
+	// three-write framing would still let a concurrent Enter land inside the
+	// paste).
+	if err := client.write([]byte(bracketedPasteStart + text + bracketedPasteEnd)); err != nil {
 		return true, err
 	}
 	if t.cfg.DebounceMs > 0 {
 		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
 	}
+	// The submit Enter goes OUTSIDE the paste: inside it would be pasted text,
+	// not a keypress.
 	if err := client.write([]byte{'\r'}); err != nil {
 		return true, err
 	}
 	commitPoke()
+	// Submit is unconfirmed on this transport — it has no busy probe — so the
+	// receipt reports the honest best-effort outcome.
+	t.emitNudgeReceipt(target, text, len(text), false)
 	return true, nil
 }
 
@@ -1997,49 +2031,93 @@ func isTransientSendKeysError(err error) bool {
 	return strings.Contains(msg, "not in a mode")
 }
 
-func isCommandTooLongError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "command too long")
-}
-
 func nextPasteBufferName() string {
 	seq := atomic.AddUint64(&pasteBufferSeq, 1)
 	return fmt.Sprintf("gc-nudge-%d-%d", os.Getpid(), seq)
 }
 
-func (t *Tmux) sendLiteralText(target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
-		return t.pasteLiteralText(target, text)
-	}
-	_, err := t.run("send-keys", "-t", target, "-l", text)
-	if isCommandTooLongError(err) {
-		return t.pasteLiteralText(target, text)
-	}
-	return err
+var nudgeReceiptSeq uint64
+
+// nextNudgeReceiptID mints a per-delivery receipt id. The pid keeps ids from
+// colliding across the several gc processes that can nudge one city.
+func nextNudgeReceiptID() string {
+	seq := atomic.AddUint64(&nudgeReceiptSeq, 1)
+	return fmt.Sprintf("nr-%d-%d", os.Getpid(), seq)
 }
 
-func (t *Tmux) pasteLiteralText(target, text string) error {
+// emitNudgeReceipt issues the delivery receipt for one nudge: the evidence
+// that payload was framed whole into target's terminal. Called only after the
+// payload has actually been handed over, so a receipt is never issued for a
+// delivery that failed at the tmux layer.
+//
+// submitted carries whether the agent was observed to take the submit; a
+// provider with no reliable busy indicator delivers best-effort and reports
+// false, which is not a truncation signal. See [runtime.NudgeReceipt].
+func (t *Tmux) emitNudgeReceipt(target, payload string, payloadBytes int, submitted bool) {
+	receipt := runtime.NudgeReceipt{
+		ID:        nextNudgeReceiptID(),
+		Target:    target,
+		Bytes:     payloadBytes,
+		Digest:    runtime.NudgePayloadDigest(payload),
+		Framing:   runtime.NudgeFramingBracketedPaste,
+		Submitted: submitted,
+		At:        time.Now(),
+	}
+	if sink := t.cfg.NudgeReceiptSink; sink != nil {
+		sink(receipt)
+		return
+	}
+	log.Printf("tmux nudge: %s", receipt)
+}
+
+// sendLiteralText delivers text to target as ONE bracketed paste, whatever its
+// size.
+//
+// It used to type payloads of 4096 bytes or less as a raw `send-keys -l`
+// burst and reserve the paste buffer for anything larger. That split is the
+// bug: outside a bracketed paste, every newline in the payload is an ordinary
+// Enter, so a TUI reading the burst submits at the first one and treats the
+// rest as a fresh line — and a busy TUI that is not servicing input drops the
+// leading keys outright. The observable result is the head of the message
+// vanishing and the tail being submitted alone, which is how four founder
+// messages arrived as fragments on 2026-08-27/28 (pc_2e2378b9918e). Payload
+// size never had anything to do with it; the 4096 threshold only decided
+// which messages got the framing that made them safe.
+//
+// Every nudge now takes the pasteLiteralText path so the framing is a
+// property of the transport rather than of the message that happened to be
+// long enough. The cost is a temp file and two extra tmux invocations on
+// short nudges — microseconds against a delivery budget already measured in
+// hundreds of milliseconds, and the only way the receipt can honestly claim
+// the payload could not have been split.
+func (t *Tmux) sendLiteralText(target, text string) (int, error) {
+	return t.pasteLiteralText(target, text)
+}
+
+// pasteLiteralText loads text into a private tmux paste buffer and pastes it
+// into target inside bracketed-paste markers. It returns the number of payload
+// bytes handed to tmux, which the caller records on the delivery receipt.
+func (t *Tmux) pasteLiteralText(target, text string) (int, error) {
 	tmp, err := os.CreateTemp("", "gc-tmux-paste-*")
 	if err != nil {
-		return fmt.Errorf("creating tmux paste buffer file: %w", err)
+		return 0, fmt.Errorf("creating tmux paste buffer file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if _, err := tmp.WriteString(text); err != nil {
+	written, err := tmp.WriteString(text)
+	if err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("writing tmux paste buffer file: %w", err)
+		return 0, fmt.Errorf("writing tmux paste buffer file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing tmux paste buffer file: %w", err)
+		return 0, fmt.Errorf("closing tmux paste buffer file: %w", err)
 	}
 
 	bufferName := nextPasteBufferName()
 	loaded := false
 	if _, err := t.run("load-buffer", "-b", bufferName, tmpName); err != nil {
-		return fmt.Errorf("loading tmux paste buffer: %w", err)
+		return 0, fmt.Errorf("loading tmux paste buffer: %w", err)
 	}
 	loaded = true
 	defer func() {
@@ -2048,13 +2126,17 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 		}
 	}()
 
-	// Force bracketed paste so multiline nudges arrive as one paste operation
-	// instead of being interpreted as individual keypresses by provider TUIs.
+	// -p brackets the paste for an application that has requested bracketed
+	// paste mode, so the TUI sees one paste instead of a keystroke stream;
+	// -d drops the buffer once it has been consumed. Measured against a
+	// raw-mode TUI with the mode enabled, the payload arrives as
+	// ESC[200~ ... ESC[201~; against a pane that never requested the mode
+	// tmux omits the markers, so this is safe for non-TUI panes too.
 	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
-		return fmt.Errorf("pasting tmux buffer: %w", err)
+		return 0, fmt.Errorf("pasting tmux buffer: %w", err)
 	}
 	loaded = false
-	return nil
+	return written, nil
 }
 
 func splitPasteText(text string, maxBytes int) []string {
@@ -2114,11 +2196,13 @@ func sendPasteChunks(chunks []string, send func(string) error, pause func()) err
 //
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
-func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
+// Returns the number of payload bytes handed to tmux, for the caller's
+// delivery receipt.
+func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) (int, error) {
 	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
 }
 
-func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
+func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) (int, error) {
 	if len(text) > copilotMaxPasteBytes && sessionlog.ProviderFamily(provider) == "copilot" {
 		chunks := splitPasteText(text, copilotMaxPasteBytes)
 		// Budget the inter-chunk pauses on top of the retry window rather than
@@ -2129,12 +2213,15 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 		// retry-heavy first chunk can starve the later ones and turn what would
 		// have been a plain timeout into errPartialPasteDelivery.
 		deadline := time.Now().Add(timeout + time.Duration(len(chunks)-1)*copilotPasteChunkDelay)
-		return sendPasteChunks(chunks, func(chunk string) error {
+		written := 0
+		err := sendPasteChunks(chunks, func(chunk string) error {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				return fmt.Errorf("agent not ready for input after %s", timeout)
 			}
-			return t.sendTextWithRetry(target, chunk, remaining, t.pasteLiteralText)
+			n, err := t.sendTextWithRetry(target, chunk, remaining, t.pasteLiteralText)
+			written += n
+			return err
 		}, func() {
 			remaining := time.Until(deadline)
 			if remaining > copilotPasteChunkDelay {
@@ -2144,22 +2231,25 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 				time.Sleep(remaining)
 			}
 		})
+		return written, err
 	}
 	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
 }
 
-func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) error) error {
+// sendTextWithRetry runs send with retry on transient errors until timeout and
+// returns the payload bytes send reported, for the delivery receipt.
+func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) (int, error)) (int, error) {
 	deadline := time.Now().Add(timeout)
 	interval := t.cfg.NudgeRetryInterval
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		err := send(target, text)
+		written, err := send(target, text)
 		if err == nil {
-			return nil
+			return written, nil
 		}
 		if !isTransientSendKeysError(err) {
-			return err // non-transient (session gone, no server) — fail fast
+			return 0, err // non-transient (session gone, no server) — fail fast
 		}
 		lastErr = err
 		// Clamp sleep to remaining time so we don't overshoot the deadline.
@@ -2179,7 +2269,7 @@ func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, sen
 			interval = 2 * time.Second
 		}
 	}
-	return fmt.Errorf("agent not ready for input after %s: %w", timeout, lastErr)
+	return 0, fmt.Errorf("agent not ready for input after %s: %w", timeout, lastErr)
 }
 
 // Verified-submit tuning. After the message is pasted, the submit Enter can be
@@ -2518,7 +2608,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 	return t.nudgeSession(
 		session,
 		message,
-		func(target, text string, timeout time.Duration) error {
+		func(target, text string, timeout time.Duration) (int, error) {
 			return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
 		},
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
@@ -2528,7 +2618,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 
 func (t *Tmux) nudgeSession(
 	session, message string,
-	sendText func(string, string, time.Duration) error,
+	sendText func(string, string, time.Duration) (int, error),
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
 ) error {
@@ -2557,10 +2647,17 @@ func (t *Tmux) nudgeSession(
 	// so chained nudges inside pokeGrace don't record gc's own echo as prior.
 	commitPoke := t.beginPoke(session)
 	delivered := false
+	// payloadBytes/submitted are filled in as delivery progresses and read by
+	// the deferred receipt below, so one emission point covers both the
+	// submit-verified and the best-effort arm.
+	payloadBytes := 0
+	submitted := false
 	defer func() {
-		if delivered {
-			commitPoke()
+		if !delivered {
+			return
 		}
+		commitPoke()
+		t.emitNudgeReceipt(target, message, payloadBytes, submitted)
 	}()
 
 	// Wake a detached pane BEFORE the first send. A fully-detached pool TUI
@@ -2601,10 +2698,13 @@ func (t *Tmux) nudgeSession(
 	// is in Provider.Nudge -- it must run unconditionally, here.
 	t.DismissFeedbackSurveyModalIfPresent(session)
 
-	// 2. Send text in literal mode with retry on transient errors
-	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+	// 2. Send the text as one bracketed paste, with retry on transient errors;
+	// the byte count feeds the delivery receipt (gp-2rq).
+	written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
+	if err != nil {
 		return err
 	}
+	payloadBytes = written
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
@@ -2655,6 +2755,7 @@ func (t *Tmux) nudgeSession(
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
 		delivered = true
+		submitted = confirmed
 		if !confirmed {
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
@@ -2763,16 +2864,24 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// baseline forward) and the poke stamped only on confirmed delivery.
 	commitPoke := t.beginPoke(pane)
 	delivered := false
+	payloadBytes := 0
 	defer func() {
-		if delivered {
-			commitPoke()
+		if !delivered {
+			return
 		}
+		commitPoke()
+		// This path has no submit confirmation (see step 5 below), so the
+		// receipt reports submitted=false: the payload was framed and
+		// delivered whole, the submit was best-effort.
+		t.emitNudgeReceipt(pane, message, payloadBytes, false)
 	}()
 
-	// 1. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout); err != nil {
+	// 1. Send the text as one bracketed paste, with retry on transient errors
+	written, err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout)
+	if err != nil {
 		return err
 	}
+	payloadBytes = written
 
 	// 2. Wait 500ms for paste to complete (tested, required)
 	time.Sleep(500 * time.Millisecond)

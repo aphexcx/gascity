@@ -21,6 +21,19 @@ type InboundResult struct {
 	TranscriptEntry *ConversationTranscriptRecord
 	TargetSessionID string
 	TargetAgentName string
+	// Delivery is gc's synchronous receipt for the terminal fan-out, or nil
+	// when this build/path cannot vouch for delivery — absence is the
+	// "fail open, this gc predates receipts" signal a consumer gates on, so
+	// it must stay nil rather than become a zero-valued object. See
+	// [InboundDelivery].
+	//
+	// This is the one field on InboundResult carrying an explicit json tag.
+	// The rest predate any tagging and serialize as Go names (Message,
+	// Binding, ...), which is already the live wire shape; renaming them to
+	// match would break every current consumer, so the new field takes the
+	// conventional lowercase name on its own rather than dragging the struct
+	// through a breaking change for consistency's sake.
+	Delivery *InboundDelivery `json:"delivery,omitempty"`
 }
 
 // targetSubject is the event subject for the routed target: the concrete
