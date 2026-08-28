@@ -96,13 +96,17 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 				msg.Conversation.Provider, msg.Conversation.ConversationID, msg.Actor.DisplayName, msg.ExplicitTarget)
 		}
 		message := *input.Body.Message
-		s.runBackground(func(ctx context.Context) {
-			s.extmsgNotifyInboundMembers(ctx, message)
-		})
+		// Synchronous: the response carries a delivery receipt describing what
+		// actually reached agent terminals, so a caller holding a dedup claim
+		// can gate on it. See extmsgNotifyInboundWithReceipt for the budget and
+		// for why an over-budget fan-out reports pending instead of being
+		// cancelled.
+		delivery := s.extmsgNotifyInboundWithReceipt(ctx, message)
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
 			out.Body = *result
 		}
+		out.Body.Delivery = &delivery
 		return out, nil
 	}
 

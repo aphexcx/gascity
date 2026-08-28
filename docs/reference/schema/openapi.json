@@ -3757,6 +3757,77 @@
         ],
         "type": "object"
       },
+      "InboundDelivery": {
+        "additionalProperties": false,
+        "properties": {
+          "delivered_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/InboundDeliveryMember"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "status",
+          "delivered_bytes",
+          "expected_bytes"
+        ],
+        "type": "object"
+      },
+      "InboundDeliveryMember": {
+        "additionalProperties": false,
+        "properties": {
+          "delivered_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "expected_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "delivered_bytes",
+          "expected_bytes",
+          "digest"
+        ],
+        "type": "object"
+      },
       "InboundDroppedEventPayload": {
         "additionalProperties": false,
         "properties": {
@@ -3827,6 +3898,9 @@
           },
           "TranscriptEntry": {
             "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/InboundDelivery"
           }
         },
         "required": [
@@ -14470,6 +14544,12 @@
           "actor": {
             "type": "string"
           },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "message": {
             "type": "string"
           },
@@ -20254,6 +20334,12 @@
           },
           "city": {
             "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "message": {
             "type": "string"

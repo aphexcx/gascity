@@ -104,7 +104,11 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-				return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+				// The submit path reports Queued, not live delivery, so the
+				// delivered bool has no field to land in here; POST /messages
+				// keeps its existing semantics.
+				_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+				return err
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
@@ -129,7 +133,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			return err
 		}
 	})
 	return outcome, err
@@ -145,7 +150,8 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
-		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+		_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+		return err
 	}
 	if requiresHardRestartInterrupt(b) {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
@@ -192,7 +198,8 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			return err
 		}
 	}
-	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	return err
 }
 
 func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
@@ -210,7 +217,8 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	// This is a fresh replacement turn after a hard restart. The previous run's
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
-	return m.nudgeSession(ctx, sessName, message, true)
+	_, err := m.nudgeSession(ctx, sessName, message, true)
+	return err
 }
 
 func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {
