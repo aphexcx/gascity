@@ -203,6 +203,11 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredSessionNotLive means the send path completed without
+	// error but the runtime reported that nothing reached a terminal — the
+	// canonical case being a session (or tmux server) that no longer exists,
+	// which runtimes surface as a successful no-op rather than an error.
+	NudgeUndeliveredSessionNotLive NudgeUndeliveredReason = "session_not_live"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.

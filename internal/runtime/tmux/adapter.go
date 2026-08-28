@@ -527,28 +527,37 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	// Wait for the agent to be idle before sending, unless disabled.
-	// This prevents interrupting active tool calls — the prompt is visible
-	// in scrollback during inter-tool-call gaps, so immediate send-keys
-	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
-	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
-		// Best-effort wait — if it fails (session gone, timeout), proceed
-		// with the nudge anyway. The message may arrive during active work,
-		// but Claude's cooperative queue will handle it at the next turn.
-		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
-			// Not idle within the window. A mid-session Codex/GPT model-switch
-			// modal ("approaching rate limits — switch model?") blocks input and
-			// would otherwise hang the session; dismiss it (keep current model,
-			// no downgrade) so the nudge can land. No-op if the modal is absent,
-			// so this never disturbs a genuinely busy pane.
-			p.tm.DismissModelSwitchModalIfPresent(name)
-		}
-	}
+	p.waitForIdleBeforeNudge(name)
 	return p.NudgeNow(name, content)
 }
 
-// NudgeNow sends a message immediately without performing a wait-idle check.
-func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+// waitForIdleBeforeNudge blocks until the agent reaches an idle boundary, up
+// to NudgeIdleTimeout. Shared by Nudge and NudgeDelivered so both place the
+// payload at the same safe boundary.
+func (p *Provider) waitForIdleBeforeNudge(name string) {
+	// This prevents interrupting active tool calls — the prompt is visible
+	// in scrollback during inter-tool-call gaps, so immediate send-keys
+	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
+	idleTimeout := p.tm.cfg.NudgeIdleTimeout
+	if idleTimeout <= 0 {
+		return
+	}
+	// Best-effort wait — if it fails (session gone, timeout), proceed
+	// with the nudge anyway. The message may arrive during active work,
+	// but Claude's cooperative queue will handle it at the next turn.
+	if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
+		// Not idle within the window. A mid-session Codex/GPT model-switch
+		// modal ("approaching rate limits — switch model?") blocks input and
+		// would otherwise hang the session; dismiss it (keep current model,
+		// no downgrade) so the nudge can land. No-op if the modal is absent,
+		// so this never disturbs a genuinely busy pane.
+		p.tm.DismissModelSwitchModalIfPresent(name)
+	}
+}
+
+// flattenNudgeContent renders content blocks into the single string that goes
+// into the terminal, staging any file attachments as a side effect.
+func (p *Provider) flattenNudgeContent(name string, content []runtime.ContentBlock) string {
 	var parts []string
 	for _, b := range content {
 		switch b.Type {
@@ -569,23 +578,63 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 			}
 		}
 	}
-	message := strings.Join(parts, "\n")
+	return strings.Join(parts, "\n")
+}
+
+// NudgeNow sends a message immediately without performing a wait-idle check.
+func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	message := p.flattenNudgeContent(name, content)
 	if message == "" {
 		return nil
 	}
 
+	_, err := p.nudgeNowDelivered(name, message)
+	return err
+}
+
+// nudgeNowDelivered is NudgeNow's body plus the one fact NudgeNow's error
+// return cannot express: whether the payload actually reached the session.
+//
+// A missing session or a dead tmux server is reported to Nudge/NudgeNow
+// callers as success (nil), because a routine wake-up should not treat a
+// session that is simply gone as an operational failure. That deliberate
+// leniency is exactly what makes a nil error worthless as delivery evidence,
+// so this returns delivered=false for those cases while keeping the nil error
+// its callers rely on. See [runtime.NudgeVouchingProvider].
+func (p *Provider) nudgeNowDelivered(name, message string) (bool, error) {
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
 		if err != nil {
-			return err
+			return false, err
 		}
-		return nil
+		return true, nil
 	}
 
 	err := p.tm.NudgeSession(name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil
+		// Nothing was delivered: there was no session to deliver into.
+		return false, nil
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// NudgeDelivered implements [runtime.NudgeVouchingProvider].
+//
+// It performs the same wait-idle-then-send as Nudge — a caller asking for
+// delivery evidence still wants the payload placed at a safe boundary, not
+// injected into the middle of a tool call — and additionally reports whether
+// the payload reached the session.
+func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (bool, error) {
+	p.waitForIdleBeforeNudge(name)
+	message := p.flattenNudgeContent(name, content)
+	if message == "" {
+		// Nothing to deliver. Not a failure, but nothing reached the session
+		// either, so it cannot be vouched for as delivered.
+		return false, nil
+	}
+	return p.nudgeNowDelivered(name, message)
 }
 
 // SetMeta stores a key-value pair in the named session's tmux environment.

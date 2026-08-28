@@ -308,6 +308,28 @@ type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
 }
 
+// NudgeVouchingProvider is an optional extension for runtimes that can report
+// whether a nudge REACHED the session, as opposed to merely not failing.
+//
+// [Provider.Nudge] cannot answer that. It is best-effort by contract: a runtime
+// whose session has vanished is expected to return nil rather than an error, so
+// callers doing routine wake-ups are not forced to handle a dead session as a
+// failure. That makes "err == nil" unusable as evidence of delivery — it
+// conflates "the payload is in the terminal" with "there was no terminal to put
+// it in".
+//
+// A runtime that implements this reports the two apart. Callers that must not
+// overclaim (the inbound delivery receipt, extmsg.InboundDelivery, which a
+// Slack adapter gates an irreversible dedup claim on) prefer it and fall back
+// to Nudge only for runtimes that cannot vouch.
+//
+// delivered==false with a nil error is a normal, non-exceptional answer: it
+// means the runtime knows the payload did not land. Implementations must never
+// return true unless the payload was actually handed to the session.
+type NudgeVouchingProvider interface {
+	NudgeDelivered(name string, content []ContentBlock) (delivered bool, err error)
+}
+
 // InterruptedTurnResetProvider is an optional extension for runtimes that can
 // discard the just-interrupted user turn from the provider's active
 // conversation state without restarting the session.

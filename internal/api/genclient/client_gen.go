@@ -2146,6 +2146,26 @@ type HeartbeatEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// InboundDelivery defines model for InboundDelivery.
+type InboundDelivery struct {
+	DeliveredBytes int64                    `json:"delivered_bytes"`
+	ExpectedBytes  int64                    `json:"expected_bytes"`
+	Members        *[]InboundDeliveryMember `json:"members,omitempty"`
+	ReceiptId      string                   `json:"receipt_id"`
+	Status         string                   `json:"status"`
+}
+
+// InboundDeliveryMember defines model for InboundDeliveryMember.
+type InboundDeliveryMember struct {
+	DeliveredBytes int64   `json:"delivered_bytes"`
+	Digest         string  `json:"digest"`
+	Error          *string `json:"error,omitempty"`
+	ExpectedBytes  int64   `json:"expected_bytes"`
+	Selector       *string `json:"selector,omitempty"`
+	SessionId      string  `json:"session_id"`
+	Status         string  `json:"status"`
+}
+
 // InboundDroppedEventPayload defines model for InboundDroppedEventPayload.
 type InboundDroppedEventPayload struct {
 	Actor          string  `json:"actor"`
@@ -2171,6 +2191,7 @@ type InboundResult struct {
 	TargetAgentName string                       `json:"TargetAgentName"`
 	TargetSessionID string                       `json:"TargetSessionID"`
 	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	Delivery        *InboundDelivery             `json:"delivery,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -5815,17 +5836,18 @@ type TypedEventStreamEnvelopeExtmsgInbound struct {
 
 // TypedEventStreamEnvelopeExtmsgInboundDropped defines model for TypedEventStreamEnvelopeExtmsgInboundDropped.
 type TypedEventStreamEnvelopeExtmsgInboundDropped struct {
-	Actor     string                     `json:"actor"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   InboundDroppedEventPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          InboundDroppedEventPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
@@ -7309,18 +7331,19 @@ type TypedTaggedEventStreamEnvelopeExtmsgInbound struct {
 
 // TypedTaggedEventStreamEnvelopeExtmsgInboundDropped defines model for TypedTaggedEventStreamEnvelopeExtmsgInboundDropped.
 type TypedTaggedEventStreamEnvelopeExtmsgInboundDropped struct {
-	Actor     string                     `json:"actor"`
-	City      string                     `json:"city"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   InboundDroppedEventPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          InboundDroppedEventPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
