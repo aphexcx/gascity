@@ -3,31 +3,9 @@ package runtime
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 )
-
-// ErrNudgeSubmitUnconfirmed reports that the COMPLETE payload was framed and
-// handed to the terminal, and the submit key was sent, but the agent's busy
-// indicator was never observed within budget — so the runtime cannot say
-// whether the turn started. The message may be sitting drafted-but-unsubmitted
-// in the pane, or the turn may have run too fast for the probe to catch (the
-// 2026-08-28 08:24Z incident: the session answered two seconds before gc's
-// receipt reported the send as failed).
-//
-// It lives here, transport-neutral, so a layer that reports delivery (the
-// inbound receipt, extmsg.InboundDelivery) can tell this apart from every
-// other send error without importing a transport: this one means "delivered,
-// submit unverified", not "nothing reached the terminal". Treating it as a
-// clean-retry failure is how the Slack adapter came to re-post a message the
-// agent had already acted on six times and then dead-letter it (gp-3yg).
-//
-// Callers that own a retry budget for the SUBMIT (the nudge queue dispatcher,
-// the idle-claim backstop) still treat it as not acked, so the item requeues
-// and spends one bounded attempt — ga-bwm proved an unconfirmed submit read as
-// clean success lets a stalled nudge go undetected for many minutes.
-var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
 
 // NudgeFramingBracketedPaste names the only framing gc uses to put a nudge or
 // an injected reminder into an agent TUI: the whole payload is handed to the

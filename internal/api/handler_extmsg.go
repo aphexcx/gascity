@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -253,21 +252,6 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		}
 		result, err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge)
 		switch {
-		case errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed):
-			// The runtime framed and pasted the COMPLETE payload and sent the
-			// submit key; only the agent's busy transition went unobserved.
-			// That is a delivery with a caveat, not a failure: "failed" tells
-			// the consumer a retry is clean, and it is not — the payload is
-			// in the terminal, and a fast turn can outrun the probe entirely
-			// (2026-08-28 08:24Z: the session answered two seconds before
-			// this receipt said failed 0/1215, and the adapter re-posted six
-			// times, then dead-lettered a message already acted on). The
-			// caveat rides in Error, which consumers read for context only,
-			// exactly as they already do for transports with no busy probe.
-			outcome.Status = extmsg.InboundDeliveryDelivered
-			outcome.DeliveredBytes = len(nudge)
-			outcome.Error = err.Error()
-			log.Printf("extmsg: notify %s delivered, submit unconfirmed: %v", sessionSelector, err)
 		case err != nil:
 			outcome.Status = extmsg.InboundDeliveryFailed
 			outcome.Error = err.Error()

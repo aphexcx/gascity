@@ -217,11 +217,7 @@ var (
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
-	//
-	// It IS the transport-neutral [runtime.ErrNudgeSubmitUnconfirmed], so a
-	// delivery-reporting layer can recognize it without importing tmux; see
-	// that sentinel for why it must not read as "nothing was delivered".
-	ErrNudgeSubmitUnconfirmed = runtime.ErrNudgeSubmitUnconfirmed
+	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time

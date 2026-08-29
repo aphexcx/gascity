@@ -62,12 +62,8 @@ type InboundDeliveryMember struct {
 	// log entry to the exact delivery inside gc during an incident. Nothing
 	// gates on it.
 	Digest string `json:"digest"`
-	// Error is context, never a second copy of Status. Set for a
-	// non-delivered member, and ALSO for a delivered one whose submit could
-	// not be confirmed (runtime.ErrNudgeSubmitUnconfirmed: the complete
-	// payload was pasted, the busy transition was not observed). A consumer
-	// must therefore never read a non-empty Error as "not delivered" —
-	// Status and the byte counts carry the verdict; this carries the why.
+	// Error is context for a non-delivered member, never a second copy of
+	// Status. Empty on success.
 	Error string `json:"error,omitempty"`
 }
 
