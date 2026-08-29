@@ -848,6 +848,12 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		Delivery: delivery,
 		Source:   "session",
 	})
+	if err == nil {
+		// An unconfirmed submit is the retry signal it has always been for
+		// this caller; the evidence path reports it as a result now (gp-2io),
+		// so apply the one translation before reading Delivered.
+		err = result.UnconfirmedSubmitError(target.agentKey())
+	}
 	if err != nil {
 		if errors.Is(err, runtime.ErrSessionNotFound) && target.sessionTransport() == "acp" {
 			if mode == nudgeDeliveryWaitIdle {
@@ -858,11 +864,32 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 				return 1
 			}
 		}
+		if mode == nudgeDeliveryWaitIdle && errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
+			// The payload is in the pane but the agent was not seen taking
+			// it. Before gp-2io the manager swallowed this on the wait-idle
+			// route and the nudge queued for a bounded retry; keep that
+			// outcome (the ga-bwm trade-off) rather than surfacing an error
+			// for a nudge that may be sitting drafted in the composer.
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "submit_unconfirmed", stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+	if mode == nudgeDeliveryWaitIdle && !result.Landed() {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
+	if !result.Landed() {
+		// The runtime said nothing landed — a session that vanished between
+		// observation and delivery reports a successful no-op, and only the
+		// evidence tells the two apart. Printing "Nudged" here would let
+		// automation acknowledge a lost message: the receipt's exact
+		// overclaim, reproduced at the CLI (gp-2io, gate round 4).
+		reason := string(result.Undelivered)
+		if reason == "" {
+			reason = "the runtime reported that nothing reached the session"
+		}
+		fmt.Fprintf(stderr, "gc session nudge: not delivered live: %s\n", reason) //nolint:errcheck
+		return 1
 	}
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
@@ -1215,7 +1242,12 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				Source:   "mail",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
-			if nudgeErr == nil && result.Delivered {
+			if nudgeErr == nil {
+				// Unconfirmed submit = not live-delivered for this caller
+				// (gp-2io): fall through to the queue like any other error.
+				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+			}
+			if nudgeErr == nil && result.Landed() {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 				var sessFront *session.Store
 				if store != nil {
@@ -1477,6 +1509,14 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
+	if err == nil {
+		// The queue must not ack an unconfirmed submit: the payload may be
+		// sitting drafted-but-unsubmitted in the pane (ga-bwm). Before gp-2io
+		// this arrived as ErrNudgeSubmitUnconfirmed from the runtime; the
+		// evidence path now reports it as a result, so the same translation
+		// is applied here and the item records a failure and requeues.
+		err = result.UnconfirmedSubmitError(target.agentKey())
+	}
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
 		if errors.Is(err, runtime.ErrSessionNotFound) {
@@ -1490,7 +1530,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 		return false, bookkeepErr
 	}
-	if !result.Delivered {
+	if !result.Landed() {
 		// The runtime declined without an error (e.g. the session stopped
 		// between observation and delivery). Release the claims so the next
 		// pass retries promptly instead of waiting out the in-flight lease.

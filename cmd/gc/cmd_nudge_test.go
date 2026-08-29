@@ -5162,3 +5162,218 @@ func TestResolveNudgePollInterval(t *testing.T) {
 		}
 	})
 }
+
+// unconfirmedSubmitVouchingFake reproduces the 2026-08-28 08:24Z evidence at
+// the runtime boundary: every payload lands whole, but the agent is never
+// seen taking the turn, so the submit stays unconfirmed. flagDown reports
+// the landing through the byte count alone (Delivered=false, Bytes=N), the
+// combination a consumer reading only the flag would mistake for "nothing
+// landed".
+type unconfirmedSubmitVouchingFake struct {
+	*runtime.Fake
+	flagDown bool
+}
+
+func (p *unconfirmedSubmitVouchingFake) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{
+		Delivered: !p.flagDown,
+		Bytes:     len(runtime.FlattenText(content)),
+		Submit:    runtime.NudgeSubmitUnconfirmed,
+	}, nil
+}
+
+// TestTryDeliverQueuedNudgesByPollerRequeuesUnconfirmedSubmit pins the queue
+// dispatcher's half of the gp-2io contract. The evidence path now reports an
+// unconfirmed submit as a RESULT (landed, submit unconfirmed) instead of an
+// error, and a dispatcher that acks on Delivered alone would delete a queued
+// nudge whose draft may be sitting unsubmitted in the pane (ga-bwm) — while
+// one that RELEASES the claim on a flag-down landing would re-paste a whole
+// live payload every poll without ever spending an attempt. The item must
+// record a failure and requeue, exactly as it did when the runtime surfaced
+// ErrNudgeSubmitUnconfirmed directly, whichever operand carried the landing.
+func TestTryDeliverQueuedNudgesByPollerRequeuesUnconfirmedSubmit(t *testing.T) {
+	for name, flagDown := range map[string]bool{
+		"landed on the Delivered flag":   false,
+		"landed on the byte count alone": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			testPollerRequeuesUnconfirmedSubmit(t, flagDown)
+		})
+	}
+}
+
+func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := &unconfirmedSubmitVouchingFake{Fake: runtime.NewFake(), flagDown: flagDown}
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true: the dispatcher acked a nudge whose submit was never confirmed — " +
+			"the draft may be sitting unsubmitted in the pane and would be silently lost")
+	}
+
+	nudges := 0
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("nudge calls = %d, want exactly 1 (no same-tick redelivery)", nudges)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1 (the item must requeue, not ack): inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+	if len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("inFlight = %d, dead = %d, want 0/0 after one unconfirmed attempt", len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1: the unconfirmed submit must spend one bounded attempt", pending[0].Attempts)
+	}
+}
+
+// unconfirmedImmediateVouchingFake reports the 2026-08-28 evidence on the
+// immediate route (the wait-idle delivery mode injects through it once the
+// pane is idle): the payload lands whole, the agent is never seen taking it.
+type unconfirmedImmediateVouchingFake struct {
+	*runtime.Fake
+}
+
+func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.NudgeNow(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitUnconfirmed}, nil
+}
+
+// TestDeliverSessionNudgeWaitIdleQueuesUnconfirmedSubmit pins the wait-idle
+// CLI route's pre-gp-2io outcome for a landed-but-unconfirmed submit: the
+// manager used to swallow that error and the nudge queued for a bounded
+// retry. Now that the evidence reaches this caller, the retry-signal
+// translation produces ErrNudgeSubmitUnconfirmed here, and it must still
+// queue — not print an error for a nudge that may be sitting drafted in the
+// composer.
+func TestDeliverSessionNudgeWaitIdleQueuesUnconfirmedSubmit(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := &unconfirmedImmediateVouchingFake{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil // the pane reaches an idle boundary; the live attempt proceeds
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0 (queued, as before gp-2io); stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
+		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+	}
+	nudged := 0
+	for _, call := range fake.Calls {
+		if call.Method == "NudgeNow" {
+			nudged++
+		}
+	}
+	if nudged != 1 {
+		t.Fatalf("NudgeNow calls = %d, want exactly 1 (the live attempt that landed unconfirmed)", nudged)
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0: an unconfirmed submit on the wait-idle route queues for a bounded retry", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// vanishedSessionImmediateFake reports the race the immediate route can hit:
+// the session was observed running, then vanished before the injection, and
+// the runtime's best-effort contract answers with zero evidence and a nil
+// error.
+type vanishedSessionImmediateFake struct {
+	*runtime.Fake
+}
+
+func (p *vanishedSessionImmediateFake) NudgeNowDelivered(string, []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	return runtime.NudgeDelivery{}, nil
+}
+
+// TestDeliverSessionNudgeImmediateReportsVanishedSession pins the CLI's half
+// of the Landed() invariant on the immediate route: when the evidence says
+// nothing landed, the command must not print "Nudged" (or emit outcome
+// "delivered"), because automation acknowledges on that output — the
+// receipt's exact overclaim, reproduced at the CLI.
+func TestDeliverSessionNudgeImmediateReportsVanishedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := &vanishedSessionImmediateFake{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryImmediate, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("deliverSessionNudgeWithProvider = 0, want nonzero when the runtime says nothing landed; stdout: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Nudged") {
+		t.Fatalf("stdout = %q: a success line for a delivery the evidence denies", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not delivered live") {
+		t.Fatalf("stderr = %q, want the undelivered reason", stderr.String())
+	}
+}

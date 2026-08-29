@@ -108,7 +108,10 @@ func TestNudgeSessionComposesEscapeThenSubmitSequence(t *testing.T) {
 	}
 }
 
-// nudgeSessionSource returns the source text of NudgeSession's body.
+// nudgeSessionSource returns the source text of NudgeSession's body. Since
+// gp-2io that body is nudgeSessionDelivery — NudgeSession itself is the thin
+// wrapper that turns an unconfirmed submit into ErrNudgeSubmitUnconfirmed for
+// retrying callers — so the decisions this file models are read from there.
 func nudgeSessionSource(t *testing.T) string {
 	t.Helper()
 	src, err := os.ReadFile("tmux.go")
@@ -116,9 +119,9 @@ func nudgeSessionSource(t *testing.T) string {
 		t.Fatalf("reading tmux.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func (t *Tmux) NudgeSession(")
+	start := strings.Index(body, "func (t *Tmux) nudgeSessionDelivery(")
 	if start < 0 {
-		t.Fatal("NudgeSession not found in tmux.go")
+		t.Fatal("nudgeSessionDelivery (NudgeSession's body) not found in tmux.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

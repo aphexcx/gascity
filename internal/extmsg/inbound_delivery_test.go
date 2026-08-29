@@ -29,16 +29,17 @@ func TestSummarizeInboundDeliveryStatusPrecedence(t *testing.T) {
 			why:     "unanimity is the only thing that earns the delivered claim",
 		},
 		{
-			name:    "one delivered one failed",
+			name:    "one delivered one failed holds",
 			members: []InboundDeliveryMember{member(InboundDeliveryDelivered, 10, 10), member(InboundDeliveryFailed, 0, 20)},
-			want:    InboundDeliveryPartial,
-			why:     "the message is live somewhere, so a retry duplicates for that member",
+			want:    InboundDeliveryPending,
+			why: "a WHOLE copy is live in the delivered member's terminal; partial and failed both license " +
+				"a fan-out-wide re-post, which would duplicate it — hold is the only safe aggregate",
 		},
 		{
-			name:    "one delivered one pending",
+			name:    "one delivered one pending holds",
 			members: []InboundDeliveryMember{member(InboundDeliveryDelivered, 10, 10), member(InboundDeliveryPending, 0, 20)},
-			want:    InboundDeliveryPartial,
-			why:     "a pending sibling must not be rounded up into a delivered aggregate",
+			want:    InboundDeliveryPending,
+			why:     "neither rounded up to delivered nor down to partial: a whole copy is live and a sibling is unconcluded",
 		},
 		{
 			name:    "all failed",
@@ -58,6 +59,38 @@ func TestSummarizeInboundDeliveryStatusPrecedence(t *testing.T) {
 			want:    InboundDeliveryPending,
 			why: "failed promises a retry is clean; the pending member may still land, which would " +
 				"turn that retry into a duplicate. Unknown is the only supportable claim",
+		},
+		{
+			name:    "a lone partial member is partial, not failed",
+			members: []InboundDeliveryMember{member(InboundDeliveryPartial, 4, 10)},
+			want:    InboundDeliveryPartial,
+			why:     "part of the message is live in the terminal; failed would promise a clean retry",
+		},
+		{
+			name:    "pending outranks partial",
+			members: []InboundDeliveryMember{member(InboundDeliveryPartial, 4, 10), member(InboundDeliveryPending, 20, 20)},
+			want:    InboundDeliveryPending,
+			why: "the pending member's payload landed whole (its runtime vouched for the paste); a re-post " +
+				"that repairs the truncated sibling duplicates that whole copy, and duplicates are the worse failure",
+		},
+		{
+			name:    "delivered plus partial holds",
+			members: []InboundDeliveryMember{member(InboundDeliveryDelivered, 10, 10), member(InboundDeliveryPartial, 4, 20)},
+			want:    InboundDeliveryPending,
+			why:     "same shape: a whole copy is live in the delivered member, so the repairing re-post duplicates it",
+		},
+		{
+			name:    "partial outranks failed",
+			members: []InboundDeliveryMember{member(InboundDeliveryPartial, 4, 10), member(InboundDeliveryFailed, 0, 20)},
+			want:    InboundDeliveryPartial,
+			why: "only fragments are live — no member holds a whole copy — so a re-post duplicates at most " +
+				"a fragment and is the only thing that repairs the truncation",
+		},
+		{
+			name:    "all pending with full counts (the gp-2io shape: pasted whole, submit unconfirmed)",
+			members: []InboundDeliveryMember{member(InboundDeliveryPending, 10, 10), member(InboundDeliveryPending, 20, 20)},
+			want:    InboundDeliveryPending,
+			why:     "pending is a hold regardless of the counts; the counts say the paste is whole, the status says the agent has not been seen taking it",
 		},
 	}
 	for _, tc := range cases {

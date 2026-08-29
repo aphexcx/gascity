@@ -308,6 +308,19 @@ type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
 }
 
+// ImmediateNudgeVouchingProvider is the evidence-returning twin of
+// [ImmediateNudgeProvider], as [NudgeVouchingProvider] is of Provider.Nudge:
+// the same immediate injection, reporting what the runtime can vouch for
+// (whether the payload reached the session, how much, the submit verdict)
+// instead of folding it into the error. The same contract applies — a
+// non-nil error never erases a non-zero [NudgeDelivery] — so the immediate
+// and wait-idle routes carry the same evidence the default route does
+// (gp-2io, gate round 3: without this, a hidden-attach fragment or a whole
+// paste with an unconfirmed Enter reached those routes as zero evidence).
+type ImmediateNudgeVouchingProvider interface {
+	NudgeNowDelivered(name string, content []ContentBlock) (NudgeDelivery, error)
+}
+
 // NudgeVouchingProvider is an optional extension for runtimes that can report
 // whether a nudge REACHED the session, as opposed to merely not failing.
 //
@@ -323,11 +336,18 @@ type ImmediateNudgeProvider interface {
 // Slack adapter gates an irreversible dedup claim on) prefer it and fall back
 // to Nudge only for runtimes that cannot vouch.
 //
-// delivered==false with a nil error is a normal, non-exceptional answer: it
-// means the runtime knows the payload did not land. Implementations must never
-// return true unless the payload was actually handed to the session.
+// A zero [NudgeDelivery] with a nil error is a normal, non-exceptional answer:
+// it means the runtime knows the payload did not land. Implementations must
+// never report Delivered unless the payload was actually handed to the
+// session, and must report the submit verdict as a separate fact: a payload
+// that landed but whose submit could not be confirmed is NOT an error here —
+// that is the caller's cue to hold, and turning it into an error is exactly
+// what produced the 2026-08-28 duplicate storm (gp-2io). The error return is
+// for the send itself failing — and it never erases evidence: an
+// implementation that learns the paste landed before the send failed returns
+// the non-zero delivery together with the error (see [NudgeDelivery]).
 type NudgeVouchingProvider interface {
-	NudgeDelivered(name string, content []ContentBlock) (delivered bool, err error)
+	NudgeDelivered(name string, content []ContentBlock) (NudgeDelivery, error)
 }
 
 // InterruptedTurnResetProvider is an optional extension for runtimes that can

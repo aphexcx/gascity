@@ -309,3 +309,55 @@ func lastRecordedWorkerOperation(t *testing.T, recorder *recordingEventRecorder)
 	}
 	return recorder.events[len(recorder.events)-1]
 }
+
+// flagDownVouchingProvider reports a landing through the byte count alone:
+// Delivered=false, Bytes=N, submit confirmed — the combination the canonical
+// predicate (runtime.NudgeDelivery.Landed) counts as landed.
+type flagDownVouchingProvider struct {
+	*runtime.Fake
+}
+
+func (p *flagDownVouchingProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitConfirmed}, nil
+}
+
+// TestRuntimeHandleNudgeEventReportsLanded keeps observability on the same
+// predicate as the receipt and the ack sites: the worker.operation event's
+// delivered field is Landed(), so a flag-down landing does not read as
+// undelivered in the event stream while every consumer treated it as live.
+func TestRuntimeHandleNudgeEventReportsLanded(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	sp := &flagDownVouchingProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		Transport:    "tmux-cli",
+		Recorder:     recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{Text: "flag down, bytes up"})
+	if err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	if result.Delivered || !result.Landed() {
+		t.Fatalf("fixture: result = %+v, want Delivered=false with a landed byte count", result)
+	}
+
+	var payload operationEventPayload
+	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if payload.Delivered == nil || !*payload.Delivered {
+		t.Fatalf("payload.Delivered = %v, want true: the event must report Landed(), the predicate every consumer acts on", payload.Delivered)
+	}
+}

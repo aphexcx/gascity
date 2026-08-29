@@ -25,6 +25,7 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.NudgeVouchingProvider         = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -114,6 +115,49 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return np.NudgeNow(name, content)
 	}
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeNowDelivered implements [runtime.ImmediateNudgeVouchingProvider] by
+// forwarding to the routed backend, exactly as NudgeDelivered does for the
+// default route: a backend that vouches for its immediate injection has its
+// evidence (and any accompanying error) passed through unchanged; one that
+// only offers NudgeNow keeps the historical nil-error reading; one with
+// neither is asked through NudgeDelivered.
+func (p *Provider) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	backend := p.route(name)
+	if vp, ok := backend.(runtime.ImmediateNudgeVouchingProvider); ok {
+		return vp.NudgeNowDelivered(name, content)
+	}
+	if np, ok := backend.(runtime.ImmediateNudgeProvider); ok {
+		if err := np.NudgeNow(name, content); err != nil {
+			return runtime.NudgeDelivery{}, err
+		}
+		return runtime.NudgeDelivery{Delivered: true}, nil
+	}
+	return p.NudgeDelivered(name, content)
+}
+
+// NudgeDelivered delegates to the routed backend when it can vouch for a
+// delivery ([runtime.NudgeVouchingProvider]), passing its evidence through
+// unchanged. A backend that cannot vouch is asked through Nudge and its nil
+// error reported as delivery with no byte count and no submit verdict — the
+// same reading the session manager applies to a non-vouching provider — so
+// this router neither hides a backend's evidence nor fabricates any.
+//
+// The router must forward this: the session manager type-asserts the provider
+// it holds, and on a city with a remote-match pattern that provider is this composite.
+// Without the forward, tmux's evidence never reaches the inbound delivery
+// receipt and an unconfirmed submit surfaces as Nudge's error, which is what
+// classified a landed founder message as failed on 2026-08-28 (gp-2io).
+func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	backend := p.route(name)
+	if vp, ok := backend.(runtime.NudgeVouchingProvider); ok {
+		return vp.NudgeDelivered(name, content)
+	}
+	if err := backend.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Delivered: true}, nil
 }
 
 // ResetInterruptedTurn delegates to the routed backend when it supports

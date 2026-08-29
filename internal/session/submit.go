@@ -91,6 +91,20 @@ func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string,
 	return m.submit(ctx, id, message, resumeCommand, hints, intent)
 }
 
+// submitDelivered is the error-only boundary of the semantic submit paths:
+// they report success or failure, not evidence, so the one translation
+// ([runtime.NudgeDelivery.UnconfirmedSubmitError]) applies here — an
+// unconfirmed submit is the retry signal these callers received before the
+// evidence path existed, and reporting success for it would emit
+// session.submit.succeeded for a turn that may be sitting drafted in the
+// pane (gp-2io, gate round 5).
+func submitDelivered(sessName string, delivery runtime.NudgeDelivery, err error) error {
+	if err != nil {
+		return err
+	}
+	return delivery.UnconfirmedSubmitError(sessName)
+}
+
 func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
 	err := withSessionMutationLock(id, func() error {
@@ -107,8 +121,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				// The submit path reports Queued, not live delivery, so the
 				// delivered bool has no field to land in here; POST /messages
 				// keeps its existing semantics.
-				_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
-				return err
+				delivery, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+				return submitDelivered(sessName, delivery, err)
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
@@ -133,8 +147,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
-			return err
+			delivery, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			return submitDelivered(sessName, delivery, err)
 		}
 	})
 	return outcome, err
@@ -150,8 +164,8 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
-		_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
-		return err
+		delivery, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+		return submitDelivered(sessName, delivery, err)
 	}
 	if requiresHardRestartInterrupt(b) {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
@@ -198,8 +212,8 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			return err
 		}
 	}
-	_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
-	return err
+	delivery, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	return submitDelivered(sessName, delivery, err)
 }
 
 func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
@@ -217,8 +231,8 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	// This is a fresh replacement turn after a hard restart. The previous run's
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
-	_, err := m.nudgeSession(ctx, sessName, message, true)
-	return err
+	delivery, err := m.nudgeSession(ctx, sessName, message, true)
+	return submitDelivered(sessName, delivery, err)
 }
 
 func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {

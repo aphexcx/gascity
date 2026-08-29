@@ -188,6 +188,45 @@ type NudgeResult struct {
 	// not (yet) distinguish — a caller must treat it as a hint, never as a
 	// second copy of Delivered.
 	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
+	// Bytes and Submit carry the runtime's own evidence through unchanged
+	// when it vouched for the delivery ([runtime.NudgeDelivery]); both are
+	// zero when it did not. They exist for the one caller that has to
+	// classify a delivery truthfully rather than as a bool — the inbound
+	// delivery receipt — and are hints for everyone else.
+	Bytes  int                 `json:"bytes,omitempty"`
+	Submit runtime.NudgeSubmit `json:"submit,omitempty"`
+}
+
+// nudgeResultFromDelivery projects a runtime's delivery evidence onto the
+// handle's result without reinterpreting any of it.
+func nudgeResultFromDelivery(d runtime.NudgeDelivery) NudgeResult {
+	return NudgeResult{Delivered: d.Delivered, Bytes: d.Bytes, Submit: d.Submit}
+}
+
+// UnconfirmedSubmitError is the retry signal a caller without an evidence
+// channel must apply before acking, committing, or reporting success on
+// Delivered: non-nil ([runtime.ErrNudgeSubmitUnconfirmed]) when the runtime
+// handed the payload to the session but never saw the agent take it. Before
+// gp-2io that condition reached these callers as an error from Nudge; the
+// evidence path now returns it as a result instead, so a consumer that acks
+// on Delivered alone would ack a nudge that may be sitting drafted in the
+// pane (ga-bwm). The one consumer that wants the evidence without the error
+// — the inbound delivery receipt — classifies it as pending instead.
+func (r NudgeResult) UnconfirmedSubmitError(target string) error {
+	return r.delivery().UnconfirmedSubmitError(target)
+}
+
+// Landed reports whether the runtime's evidence says something reached the
+// session's terminal — [runtime.NudgeDelivery.Landed], the one definition
+// every ack site and the inbound receipt share. Callers deciding whether a
+// nudge was live-delivered read this, not Delivered alone: a vouching
+// runtime's positive byte count is proof whatever the flag says.
+func (r NudgeResult) Landed() bool {
+	return r.delivery().Landed()
+}
+
+func (r NudgeResult) delivery() runtime.NudgeDelivery {
+	return runtime.NudgeDelivery{Delivered: r.Delivered, Bytes: r.Bytes, Submit: r.Submit}
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not

@@ -582,57 +582,83 @@ func (p *Provider) flattenNudgeContent(name string, content []runtime.ContentBlo
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
+//
+// Like [Tmux.NudgeSession], it reports an unconfirmed submit as
+// ErrNudgeSubmitUnconfirmed: its callers have no evidence channel and the
+// nudge queue needs that error to keep an item unacked. Evidence goes through
+// NudgeDelivered instead.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
-	message := p.flattenNudgeContent(name, content)
-	if message == "" {
-		return nil
+	delivery, err := p.NudgeNowDelivered(name, content)
+	if err != nil {
+		return err
 	}
-
-	_, err := p.nudgeNowDelivered(name, message)
-	return err
+	return unconfirmedSubmitError(name, delivery)
 }
 
-// nudgeNowDelivered is NudgeNow's body plus the one fact NudgeNow's error
-// return cannot express: whether the payload actually reached the session.
+// NudgeNowDelivered implements [runtime.ImmediateNudgeVouchingProvider]:
+// NudgeNow's injection with its evidence returned instead of folded into the
+// error, so the immediate and wait-idle routes carry the same evidence
+// NudgeDelivered gives the default route. An empty payload is nothing to
+// deliver: not a failure, and not a delivery either.
+func (p *Provider) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	message := p.flattenNudgeContent(name, content)
+	if message == "" {
+		return runtime.NudgeDelivery{}, nil
+	}
+	return p.nudgeNowDelivered(name, message)
+}
+
+// nudgeNowDelivered is NudgeNow's body plus what NudgeNow's error return
+// cannot express: whether the payload actually reached the session, and what
+// the runtime observed about the submit.
 //
 // A missing session or a dead tmux server is reported to Nudge/NudgeNow
 // callers as success (nil), because a routine wake-up should not treat a
 // session that is simply gone as an operational failure. That deliberate
 // leniency is exactly what makes a nil error worthless as delivery evidence,
-// so this returns delivered=false for those cases while keeping the nil error
+// so this returns a zero delivery for those cases while keeping the nil error
 // its callers rely on. See [runtime.NudgeVouchingProvider].
-func (p *Provider) nudgeNowDelivered(name, message string) (bool, error) {
-	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+func (p *Provider) nudgeNowDelivered(name, message string) (runtime.NudgeDelivery, error) {
+	if used, delivery, err := p.tm.sendHiddenAttachedText(name, message); used {
+		// The hidden-attach transport reports its own evidence (see
+		// sendHiddenAttachedText): unverified when the Enter went out, since
+		// it has no busy probe; unconfirmed when the Enter could not be
+		// written after the paste landed; a short unconfirmed paste TOGETHER
+		// with the error when the client closed under the write. The
+		// evidence is never dropped on the error's account.
+		return delivery, err
 	}
 
-	err := p.tm.NudgeSession(name, message)
+	delivery, err := p.tm.nudgeSessionDelivery(name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		// Nothing was delivered: there was no session to deliver into.
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	if err != nil {
-		return false, err
+		// Whatever evidence the send produced before failing rides along.
+		return delivery, err
 	}
-	return true, nil
+	// An unconfirmed submit is returned AS EVIDENCE here, never folded into
+	// the error: the paste is in the pane (the receipt vouches for it) and the
+	// submit verdict travels beside it. NudgeNow applies unconfirmedSubmitError
+	// for the callers that need the retry signal instead.
+	return delivery, nil
 }
 
 // NudgeDelivered implements [runtime.NudgeVouchingProvider].
 //
 // It performs the same wait-idle-then-send as Nudge — a caller asking for
 // delivery evidence still wants the payload placed at a safe boundary, not
-// injected into the middle of a tool call — and additionally reports whether
-// the payload reached the session.
-func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (bool, error) {
+// injected into the middle of a tool call — and additionally reports what the
+// runtime can vouch for: whether the payload reached the session, how much of
+// it, and whether the agent was seen taking it.
+func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
 	p.waitForIdleBeforeNudge(name)
 	message := p.flattenNudgeContent(name, content)
 	if message == "" {
 		// Nothing to deliver. Not a failure, but nothing reached the session
 		// either, so it cannot be vouched for as delivered.
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	return p.nudgeNowDelivered(name, message)
 }
