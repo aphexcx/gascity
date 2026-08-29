@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -38,6 +39,20 @@ func (s *Server) waitForBackground() {
 	s.backgroundTasks.Wait()
 }
 
+// inboundReceiptStore returns the record of inbound fan-out outcomes this
+// server writes and answers from. It is the PROCESS-wide store unless a
+// test injected its own: the supervisor replaces a city's Server when the
+// city's State changes, and a store scoped to the Server would then report
+// a fan-out still running under the old Server as "unknown" — which a
+// consumer reads as "nobody is still trying" (codex r2 P2 #2). See
+// extmsg.DefaultInboundReceipts.
+func (s *Server) inboundReceiptStore() *extmsg.InboundReceiptStore {
+	if s.inboundReceipts != nil {
+		return s.inboundReceipts
+	}
+	return extmsg.DefaultInboundReceipts()
+}
+
 // Server is the per-city handler-host. It owns the per-city State and
 // holds every per-city HTTP handler method (humaHandle*, checkXxxStream,
 // streamXxx, handleServiceProxy, etc.). Per-city Huma operations are
@@ -63,6 +78,12 @@ type Server struct {
 	runCensusSource RunCensusSource
 
 	backgroundTasks sync.WaitGroup
+
+	// inboundReceipts overrides the process-wide inbound receipt store
+	// (gp-3yg); nil means extmsg.DefaultInboundReceipts. Set only by tests
+	// that need an isolated store — see inboundReceiptStore for why
+	// production shares one.
+	inboundReceipts *extmsg.InboundReceiptStore
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().

@@ -447,6 +447,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// ExtMsg.
 	cityPost(sm, "/extmsg/inbound", (*Server).humaHandleExtMsgInbound, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	// Registered at supervisor scope, not through cityGet: the receipt
+	// store is process-wide and must keep answering while a city's Server
+	// is being replaced (see humaHandleExtMsgInboundReceipt).
+	huma.Get(sm.humaAPI, cityScopePrefix+"/extmsg/inbound/receipts/{receipt_id}", sm.humaHandleExtMsgInboundReceipt)
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))

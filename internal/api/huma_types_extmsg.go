@@ -32,6 +32,21 @@ type ExtMsgInboundOutput struct {
 	Body extmsg.InboundResult
 }
 
+// ExtMsgInboundReceiptInput is the Huma input for
+// GET /v0/city/{cityName}/extmsg/inbound/receipts/{receipt_id}.
+type ExtMsgInboundReceiptInput struct {
+	CityScope
+	ReceiptID string `path:"receipt_id" doc:"Receipt id from an inbound response's delivery block (delivery.receipt_id)."`
+}
+
+// ExtMsgInboundReceiptOutput is the Huma output for
+// GET /v0/city/{cityName}/extmsg/inbound/receipts/{receipt_id}. Always 200:
+// an id gc does not know is reported as state "unknown" in the body, never
+// as a 404, so a caller can tell it apart from a gc that lacks this endpoint.
+type ExtMsgInboundReceiptOutput struct {
+	Body extmsg.InboundReceiptStatus
+}
+
 // ExtMsgOutboundInput is the Huma input for POST /v0/city/{cityName}/extmsg/outbound.
 type ExtMsgOutboundInput struct {
 	CityScope

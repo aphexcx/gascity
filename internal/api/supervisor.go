@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"log"
 	"net"
 	"net/http"
@@ -106,8 +107,12 @@ type cachedCityServer struct {
 // dashboard is attached — the embedded SPA at "/" and the host-side dashboard
 // plane at "/api/". Everything else is a typed Huma operation.
 type SupervisorMux struct {
-	resolver        CityResolver
-	initializer     cityInitializer
+	resolver    CityResolver
+	initializer cityInitializer
+	// inboundReceipts overrides the process-wide inbound receipt store
+	// for the receipt poll route (gp-3yg); nil means
+	// extmsg.DefaultInboundReceipts. Set only by tests.
+	inboundReceipts *extmsg.InboundReceiptStore
 	readOnly        bool
 	version         string
 	buildID         string

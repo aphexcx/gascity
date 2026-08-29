@@ -3878,6 +3878,38 @@
         ],
         "type": "object"
       },
+      "InboundReceiptStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "begun_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "concluded_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/InboundDelivery"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "concluded",
+              "unknown"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "state"
+        ],
+        "type": "object"
+      },
       "InboundResult": {
         "additionalProperties": false,
         "properties": {
@@ -32686,6 +32718,68 @@
           }
         },
         "summary": "Post v0 city by city name extmsg inbound"
+      }
+    },
+    "/v0/city/{cityName}/extmsg/inbound/receipts/{receipt_id}": {
+      "get": {
+        "operationId": "get-v0-city-by-city-name-extmsg-inbound-receipts-by-receipt-id",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Receipt id from an inbound response's delivery block (delivery.receipt_id).",
+            "in": "path",
+            "name": "receipt_id",
+            "required": true,
+            "schema": {
+              "description": "Receipt id from an inbound response's delivery block (delivery.receipt_id).",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundReceiptStatus"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name extmsg inbound receipts by receipt ID"
       }
     },
     "/v0/city/{cityName}/extmsg/outbound": {
