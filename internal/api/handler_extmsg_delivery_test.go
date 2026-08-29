@@ -217,11 +217,18 @@ type vouchingFakeProvider struct {
 	delivered bool
 }
 
-func (p *vouchingFakeProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (bool, error) {
-	if err := p.Fake.Nudge(name, content); err != nil {
-		return false, err
+func (p *vouchingFakeProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
 	}
-	return p.delivered, nil
+	if !p.delivered {
+		return runtime.NudgeDelivery{}, nil
+	}
+	return runtime.NudgeDelivery{
+		Delivered: true,
+		Bytes:     len(runtime.FlattenText(content)),
+		Submit:    runtime.NudgeSubmitConfirmed,
+	}, nil
 }
 
 // TestExtmsgNotifyMembersReceiptHonorsRuntimeThatDeclinesToVouch is the
@@ -258,5 +265,80 @@ func TestExtmsgNotifyMembersReceiptHonorsRuntimeThatDeclinesToVouch(t *testing.T
 	}
 	if got := extmsg.SummarizeInboundDelivery("ir-test", outcomes); got.Status != extmsg.InboundDeliveryFailed {
 		t.Fatalf("aggregate status = %q, want failed", got.Status)
+	}
+}
+
+// unconfirmedSubmitFakeProvider is a runtime that reproduces the 2026-08-28
+// 08:24Z incident at the vouching boundary: the payload was pasted whole into
+// a session that never showed a busy indicator, so the submit could not be
+// confirmed. It records the nudge like the Fake so the test can see what was
+// handed to the runtime.
+type unconfirmedSubmitFakeProvider struct {
+	*runtime.Fake
+}
+
+func (p *unconfirmedSubmitFakeProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{
+		Delivered: true,
+		Bytes:     len(runtime.FlattenText(content)),
+		Submit:    runtime.NudgeSubmitUnconfirmed,
+	}, nil
+}
+
+// TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes is
+// the gp-2io regression test. On 2026-08-28 08:24Z one founder message reached
+// the mayor six times in ~90s: gc reported the delivery as failed with
+// delivered_bytes=0 because the submit Enter could not be confirmed, and the
+// Slack adapter did exactly what "failed" licenses — a clean re-post. The
+// payload had landed every time.
+//
+// A paste that reached the terminal but whose submit was not observed is
+// "not yet", which is what pending means, and the byte count must say what
+// was actually pasted. "failed" is a promise that a retry is clean; here it
+// is not.
+func TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes(t *testing.T) {
+	fs, srv, ref := notifyDeliveryFixture(t)
+	fs.sessionProvider = &unconfirmedSubmitFakeProvider{Fake: fs.sp}
+
+	outcomes, notifyErr := srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
+		Conversation:      ref,
+		ActorDisplay:      "Taylor",
+		ActorKind:         "human",
+		Text:              "are we still on for 3?",
+		ProviderMessageID: "1787905440.672959",
+	})
+	if notifyErr != nil {
+		t.Fatalf("extmsgNotifyMembers: %v", notifyErr)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("got %d member outcomes, want 2: %+v", len(outcomes), outcomes)
+	}
+	for _, m := range outcomes {
+		if m.Status != extmsg.InboundDeliveryPending {
+			t.Fatalf("member %s status = %q, want pending: an unconfirmed submit on a pasted payload is "+
+				"'not yet', and 'failed' would license the consumer's clean re-post (the 6x duplicate storm): %+v",
+				m.SessionID, m.Status, m)
+		}
+		if m.ExpectedBytes == 0 {
+			t.Fatalf("member %s expected_bytes = 0: %+v", m.SessionID, m)
+		}
+		if m.DeliveredBytes != m.ExpectedBytes {
+			t.Fatalf("member %s delivered_bytes = %d/%d: the whole payload was pasted, so the count must say so",
+				m.SessionID, m.DeliveredBytes, m.ExpectedBytes)
+		}
+		if m.Error == "" {
+			t.Fatalf("member %s pending with no reason: %+v", m.SessionID, m)
+		}
+	}
+
+	got := extmsg.SummarizeInboundDelivery("ir-test", outcomes)
+	if got.Status != extmsg.InboundDeliveryPending {
+		t.Fatalf("aggregate status = %q, want pending", got.Status)
+	}
+	if got.DeliveredBytes != got.ExpectedBytes || got.ExpectedBytes == 0 {
+		t.Fatalf("aggregate bytes = %d/%d, want equal and non-zero", got.DeliveredBytes, got.ExpectedBytes)
 	}
 }

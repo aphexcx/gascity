@@ -5407,7 +5407,7 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 	// strip ("--session-id key-B-current") cannot match it; only the
 	// value-agnostic fallback produces a clean fresh start.
 	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
 	}

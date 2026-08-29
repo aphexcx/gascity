@@ -2222,6 +2222,34 @@ type HookClaimReclaimedStalePayload struct {
 	PreviousOwner string `json:"previous_owner"`
 }
 
+// InboundDelivery defines model for InboundDelivery.
+type InboundDelivery struct {
+	DeliveredBytes int64                    `json:"delivered_bytes"`
+	ExpectedBytes  int64                    `json:"expected_bytes"`
+	Members        *[]InboundDeliveryMember `json:"members,omitempty"`
+	ReceiptId      string                   `json:"receipt_id"`
+	Status         string                   `json:"status"`
+}
+
+// InboundDeliveryMember defines model for InboundDeliveryMember.
+type InboundDeliveryMember struct {
+	DeliveredBytes int64   `json:"delivered_bytes"`
+	Digest         string  `json:"digest"`
+	Error          *string `json:"error,omitempty"`
+	ExpectedBytes  int64   `json:"expected_bytes"`
+	Selector       *string `json:"selector,omitempty"`
+	SessionId      string  `json:"session_id"`
+	Status         string  `json:"status"`
+}
+
+// InboundDroppedEventPayload defines model for InboundDroppedEventPayload.
+type InboundDroppedEventPayload struct {
+	Actor          string  `json:"actor"`
+	ConversationId string  `json:"conversation_id"`
+	ExplicitTarget *string `json:"explicit_target,omitempty"`
+	Provider       string  `json:"provider"`
+}
+
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
 	Actor          string  `json:"actor"`
@@ -2251,6 +2279,7 @@ type InboundResult struct {
 	TargetAgentName string                       `json:"TargetAgentName"`
 	TargetSessionID string                       `json:"TargetSessionID"`
 	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	Delivery        *InboundDelivery             `json:"delivery,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -6022,6 +6051,22 @@ type TypedEventStreamEnvelopeExtmsgInbound struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExtmsgInboundDropped defines model for TypedEventStreamEnvelopeExtmsgInboundDropped.
+type TypedEventStreamEnvelopeExtmsgInboundDropped struct {
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          InboundDroppedEventPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
 type TypedEventStreamEnvelopeExtmsgOutbound struct {
 	Actor            string                   `json:"actor"`
@@ -7695,6 +7740,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgInbound struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgInboundDropped defines model for TypedTaggedEventStreamEnvelopeExtmsgInboundDropped.
+type TypedTaggedEventStreamEnvelopeExtmsgInboundDropped struct {
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          InboundDroppedEventPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
@@ -10876,6 +10938,32 @@ func (t *EventPayload) FromHookClaimReclaimedStalePayload(v HookClaimReclaimedSt
 
 // MergeHookClaimReclaimedStalePayload performs a merge with any union data inside the EventPayload, using the provided HookClaimReclaimedStalePayload
 func (t *EventPayload) MergeHookClaimReclaimedStalePayload(v HookClaimReclaimedStalePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInboundDroppedEventPayload returns the union data inside the EventPayload as a InboundDroppedEventPayload
+func (t EventPayload) AsInboundDroppedEventPayload() (InboundDroppedEventPayload, error) {
+	var body InboundDroppedEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInboundDroppedEventPayload overwrites any union data inside the EventPayload as the provided InboundDroppedEventPayload
+func (t *EventPayload) FromInboundDroppedEventPayload(v InboundDroppedEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInboundDroppedEventPayload performs a merge with any union data inside the EventPayload, using the provided InboundDroppedEventPayload
+func (t *EventPayload) MergeInboundDroppedEventPayload(v InboundDroppedEventPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14585,6 +14673,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgInbound(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExtmsgInboundDropped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgInboundDropped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgInboundDropped() (TypedEventStreamEnvelopeExtmsgInboundDropped, error) {
+	var body TypedEventStreamEnvelopeExtmsgInboundDropped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgInboundDropped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgInboundDropped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgInboundDropped(v TypedEventStreamEnvelopeExtmsgInboundDropped) error {
+	v.Type = "extmsg.inbound_dropped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgInboundDropped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgInboundDropped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgInboundDropped(v TypedEventStreamEnvelopeExtmsgInboundDropped) error {
+	v.Type = "extmsg.inbound_dropped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgOutbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgOutbound
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgOutbound() (TypedEventStreamEnvelopeExtmsgOutbound, error) {
 	var body TypedEventStreamEnvelopeExtmsgOutbound
@@ -16495,6 +16611,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgGroupCreated()
 	case "extmsg.inbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgInbound()
+	case "extmsg.inbound_dropped":
+		return t.AsTypedEventStreamEnvelopeExtmsgInboundDropped()
 	case "extmsg.outbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
@@ -17664,6 +17782,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgInbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgInbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgInbound(v TypedTaggedEventStreamEnvelopeExtmsgInbound) error {
 	v.Type = "extmsg.inbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgInboundDropped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgInboundDropped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgInboundDropped() (TypedTaggedEventStreamEnvelopeExtmsgInboundDropped, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgInboundDropped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgInboundDropped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgInboundDropped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgInboundDropped(v TypedTaggedEventStreamEnvelopeExtmsgInboundDropped) error {
+	v.Type = "extmsg.inbound_dropped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDropped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgInboundDropped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDropped(v TypedTaggedEventStreamEnvelopeExtmsgInboundDropped) error {
+	v.Type = "extmsg.inbound_dropped"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19584,6 +19730,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgGroupCreated()
 	case "extmsg.inbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInbound()
+	case "extmsg.inbound_dropped":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInboundDropped()
 	case "extmsg.outbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":

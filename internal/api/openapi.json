@@ -2648,6 +2648,9 @@
             "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
           },
           {
+            "$ref": "#/components/schemas/InboundDroppedEventPayload"
+          },
+          {
             "$ref": "#/components/schemas/InboundEventPayload"
           },
           {
@@ -3969,6 +3972,100 @@
         ],
         "type": "object"
       },
+      "InboundDelivery": {
+        "additionalProperties": false,
+        "properties": {
+          "delivered_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/InboundDeliveryMember"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "status",
+          "delivered_bytes",
+          "expected_bytes"
+        ],
+        "type": "object"
+      },
+      "InboundDeliveryMember": {
+        "additionalProperties": false,
+        "properties": {
+          "delivered_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "expected_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "delivered_bytes",
+          "expected_bytes",
+          "digest"
+        ],
+        "type": "object"
+      },
+      "InboundDroppedEventPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string"
+          },
+          "explicit_target": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "conversation_id",
+          "actor"
+        ],
+        "type": "object"
+      },
       "InboundEventPayload": {
         "additionalProperties": false,
         "properties": {
@@ -4048,6 +4145,9 @@
           },
           "TranscriptEntry": {
             "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/InboundDelivery"
           }
         },
         "required": [
@@ -12473,6 +12573,7 @@
             "extmsg.bound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgBound",
             "extmsg.group_created": "#/components/schemas/TypedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
+            "extmsg.inbound_dropped": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInboundDropped",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
@@ -12651,6 +12752,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInboundDropped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound"
@@ -14231,6 +14335,7 @@
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
                 "webhook.rejected",
+                "extmsg.inbound_dropped",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -15116,6 +15221,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.inbound",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExtmsgInboundDropped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/InboundDroppedEventPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.inbound_dropped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope extmsg.inbound_dropped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgOutbound": {
@@ -18807,6 +18969,7 @@
             "extmsg.bound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgBound",
             "extmsg.group_created": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
+            "extmsg.inbound_dropped": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInboundDropped",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
@@ -18985,6 +19148,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInboundDropped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound"
@@ -20656,6 +20822,7 @@
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
                 "webhook.rejected",
+                "extmsg.inbound_dropped",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
@@ -21602,6 +21769,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.inbound",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExtmsgInboundDropped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/InboundDroppedEventPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.inbound_dropped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope extmsg.inbound_dropped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgOutbound": {

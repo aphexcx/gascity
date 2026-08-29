@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ func TestSendHiddenAttachedTextFramesPayloadAsOneBracketedPaste(t *testing.T) {
 	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: sink}}
 	tm.hiddenAttachMu.Unlock()
 
-	used, err := tm.sendHiddenAttachedText(sess, message)
+	used, _, err := tm.sendHiddenAttachedText(sess, message)
 	if err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestSendHiddenAttachedTextEmitsReceipt(t *testing.T) {
 	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: &recordingWriteCloser{}}}
 	tm.hiddenAttachMu.Unlock()
 
-	if _, err := tm.sendHiddenAttachedText(sess, message); err != nil {
+	if _, _, err := tm.sendHiddenAttachedText(sess, message); err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
 
@@ -228,13 +229,16 @@ func TestNudgeDeliveredReportsFalseWhenSessionIsGone(t *testing.T) {
 			p.tm.exec = fe
 			p.tm.cfg.NudgeIdleTimeout = 0 // no wait-idle probing in a unit test
 
-			delivered, err := p.NudgeDelivered("gt-vanished", runtime.TextContent("ship it"))
+			delivery, err := p.NudgeDelivered("gt-vanished", runtime.TextContent("ship it"))
 			if err != nil {
 				t.Fatalf("NudgeDelivered() error = %v, want nil (best-effort semantics preserved)", err)
 			}
-			if delivered {
+			if delivery.Delivered {
 				t.Fatal("NudgeDelivered() vouched for a payload sent to a session that does not exist — " +
 					"a consumer would commit its dedup claim and the message would be lost for good")
+			}
+			if delivery != (runtime.NudgeDelivery{}) {
+				t.Fatalf("NudgeDelivered() = %+v, want the zero delivery: a vanished session has no bytes and no submit verdict", delivery)
 			}
 
 			// The lenient error contract the rest of the system depends on must
@@ -255,11 +259,440 @@ func TestNudgeDeliveredVouchesForARealDelivery(t *testing.T) {
 	p.tm.cfg.NudgeIdleTimeout = 0
 	p.tm.cfg.DebounceMs = 0
 
-	delivered, err := p.NudgeDelivered("gt-live", runtime.TextContent("ship it"))
+	delivery, err := p.NudgeDelivered("gt-live", runtime.TextContent("ship it"))
 	if err != nil {
 		t.Fatalf("NudgeDelivered() = %v, want nil", err)
 	}
-	if !delivered {
+	if !delivery.Delivered {
 		t.Fatal("NudgeDelivered() did not vouch for a delivery that succeeded")
 	}
+	if delivery.Bytes != len("ship it") {
+		t.Fatalf("NudgeDelivered() Bytes = %d, want %d (the paste's size, as on the receipt)", delivery.Bytes, len("ship it"))
+	}
+	// No GC_PROVIDER on this fake pane, so no busy probe ran: the submit is
+	// unverified, the historical best-effort outcome — not unconfirmed, which
+	// would tell a consumer to hold.
+	if delivery.Submit != runtime.NudgeSubmitUnverified {
+		t.Fatalf("NudgeDelivered() Submit = %q, want %q for a family without a busy probe", delivery.Submit, runtime.NudgeSubmitUnverified)
+	}
 }
+
+// claudeNeverBusyExecutor stands in for a claude-family pane that accepts the
+// bracketed paste and every submit Enter but never shows a busy indicator
+// within the confirm budget — the shape of the 2026-08-28 08:24Z incident, in
+// which a founder message was pasted whole into the mayor's session and gc
+// reported the delivery as failed with 0 bytes because the submit could not be
+// confirmed.
+//
+// Only the GC_PROVIDER lookup is answered; every other tmux call succeeds with
+// empty output, so capture-pane never contains a busy marker. (runCtx prefixes
+// every invocation with -u and an optional -L <socket>, so the subcommand is
+// not args[0].)
+func claudeNeverBusyExecutor() *fakeExecutor {
+	return &fakeExecutor{fn: func(args []string) (string, error) {
+		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+			return "GC_PROVIDER=claude", nil
+		}
+		return "", nil
+	}}
+}
+
+// TestNudgeDeliveredVouchesForAPasteWhoseSubmitWasNeverConfirmed is the
+// regression test for gp-2io. The runtime's own receipt is the delivery claim:
+// it is emitted only after the payload was framed and handed to the terminal,
+// and it carries the byte count that was pasted. NudgeDelivered must not
+// contradict that receipt. An unconfirmed submit means "the agent has not been
+// seen taking the turn yet" — it is NOT "nothing was delivered", and reporting
+// it as a failure is what drove a consumer's clean-retry path six times over
+// for one message that had landed every time.
+func TestNudgeDeliveredVouchesForAPasteWhoseSubmitWasNeverConfirmed(t *testing.T) {
+	const message = "<system-reminder>\nNew message in shared conversation slack/C0BEZ3CQK5X:\n\n- Taylor (human): are we still on for 3?\n</system-reminder>"
+
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = claudeNeverBusyExecutor()
+	p.tm.cfg.NudgeIdleTimeout = 0
+	p.tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(p.tm)
+
+	delivery, err := p.NudgeDelivered("gt-busy-mayor", runtime.TextContent(message))
+
+	// The fixture must reproduce the incident shape before the assertion means
+	// anything: a receipt exists (the paste landed), it carries the whole
+	// payload, and the submit was not confirmed.
+	got := receipts()
+	if len(got) != 1 {
+		t.Fatalf("fixture: emitted %d receipts, want exactly 1 (the paste must have landed): %+v", len(got), got)
+	}
+	if got[0].Bytes != len(message) {
+		t.Fatalf("fixture: receipt Bytes = %d, want %d", got[0].Bytes, len(message))
+	}
+	if got[0].Submitted {
+		t.Fatal("fixture: submit was confirmed, but this test is about the never-busy pane")
+	}
+
+	if err != nil {
+		t.Fatalf("NudgeDelivered() error = %v — the runtime's own receipt (%s) says the payload landed; "+
+			"an unconfirmed submit is 'not yet', not a delivery failure", err, got[0])
+	}
+	if !delivery.Delivered {
+		t.Fatalf("NudgeDelivered() = %+v, want Delivered for a payload its own receipt vouches for", delivery)
+	}
+	if delivery.Bytes != len(message) {
+		t.Fatalf("NudgeDelivered() Bytes = %d, want %d (what was actually pasted)", delivery.Bytes, len(message))
+	}
+	if delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("NudgeDelivered() Submit = %q, want %q: the pane never went busy, so the submit is unconfirmed, not confirmed",
+			delivery.Submit, runtime.NudgeSubmitUnconfirmed)
+	}
+}
+
+// TestNudgeKeepsUnconfirmedSubmitErrorForRetryingCallers pins the other half
+// of the contract. Nudge and NudgeNow return no evidence, only an error, and
+// the nudge queue relies on ErrNudgeSubmitUnconfirmed to leave an item unacked
+// so it requeues (ga-bwm). Giving the vouching caller an honest answer must not
+// take that signal away from the retrying ones.
+func TestNudgeKeepsUnconfirmedSubmitErrorForRetryingCallers(t *testing.T) {
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = claudeNeverBusyExecutor()
+	p.tm.cfg.NudgeIdleTimeout = 0
+	p.tm.cfg.DebounceMs = 0
+
+	for name, send := range map[string]func() error{
+		"Nudge":    func() error { return p.Nudge("gt-busy-mayor", runtime.TextContent("hello")) },
+		"NudgeNow": func() error { return p.NudgeNow("gt-busy-mayor", runtime.TextContent("hello")) },
+	} {
+		if err := send(); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("%s() error = %v, want ErrNudgeSubmitUnconfirmed so a queued nudge stays unacked", name, err)
+		}
+	}
+}
+
+// claudeEnterRefusedExecutor stands in for a claude-family pane whose
+// bracketed paste lands but where tmux refuses every submit Enter afterwards
+// (a client that detached between the paste and the submit does this). The
+// payload is in the pane; only the submit is unaccounted for.
+func claudeEnterRefusedExecutor() *fakeExecutor {
+	return &fakeExecutor{fn: func(args []string) (string, error) {
+		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+			return "GC_PROVIDER=claude", nil
+		}
+		if slices.Contains(args, "send-keys") && args[len(args)-1] == "Enter" {
+			return "", errors.New("no current client")
+		}
+		return "", nil
+	}}
+}
+
+// TestNudgeDeliveredVouchesForAPasteWhoseSubmitEnterWasRefused closes the
+// second gp-2io gap: not just an unobserved busy state, but a submit key that
+// tmux refused outright AFTER the paste landed. The old shape returned zero
+// evidence with an error, which classified as failed/0 bytes and licensed the
+// consumer's clean re-post of a payload already sitting in the composer.
+func TestNudgeDeliveredVouchesForAPasteWhoseSubmitEnterWasRefused(t *testing.T) {
+	const message = "post-paste enter refusal"
+
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = claudeEnterRefusedExecutor()
+	p.tm.cfg.NudgeIdleTimeout = 0
+	p.tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(p.tm)
+
+	delivery, err := p.NudgeDelivered("gt-enter-refused", runtime.TextContent(message))
+
+	got := receipts()
+	if len(got) != 1 || got[0].Bytes != len(message) {
+		t.Fatalf("fixture: receipts = %+v, want exactly 1 carrying %d bytes (the paste must have landed)", got, len(message))
+	}
+	if err != nil {
+		t.Fatalf("NudgeDelivered() error = %v — the paste landed (its receipt says so); a refused submit is evidence, not a delivery failure", err)
+	}
+	if !delivery.Delivered || delivery.Bytes != len(message) {
+		t.Fatalf("NudgeDelivered() = %+v, want Delivered with Bytes=%d", delivery, len(message))
+	}
+	if delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("NudgeDelivered() Submit = %q, want %q: the submit never reached tmux, so it is unconfirmed", delivery.Submit, runtime.NudgeSubmitUnconfirmed)
+	}
+
+	// The retrying callers keep their signal for the same shape.
+	if err := p.tm.NudgeSession("gt-enter-refused", message); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("NudgeSession() error = %v, want ErrNudgeSubmitUnconfirmed so a queued nudge stays unacked", err)
+	}
+}
+
+// TestNudgeDeliveredReportsUnconfirmedWhenBestEffortSubmitNeverReachesTmux
+// covers the same post-paste gap on the best-effort arm (a provider family
+// with no busy probe): the paste lands, every submit attempt is refused, and
+// the evidence must still say the payload is in the pane.
+func TestNudgeDeliveredReportsUnconfirmedWhenBestEffortSubmitNeverReachesTmux(t *testing.T) {
+	const message = "best-effort enter refusal"
+
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+		if slices.Contains(args, "send-keys") && args[len(args)-1] == "Enter" {
+			return "", errors.New("no current client")
+		}
+		return "", nil
+	}}
+	p.tm.cfg.NudgeIdleTimeout = 0
+	p.tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(p.tm)
+
+	delivery, err := p.NudgeDelivered("gt-best-effort-refused", runtime.TextContent(message))
+	if err != nil {
+		t.Fatalf("NudgeDelivered() error = %v, want evidence for a landed paste", err)
+	}
+	if got := receipts(); len(got) != 1 || got[0].Bytes != len(message) {
+		t.Fatalf("fixture: receipts = %+v, want exactly 1 carrying %d bytes", got, len(message))
+	}
+	if !delivery.Delivered || delivery.Bytes != len(message) || delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("NudgeDelivered() = %+v, want Delivered/Bytes=%d/unconfirmed", delivery, len(message))
+	}
+}
+
+// enterRefusedWriteCloser accepts the first write (the framed payload) and
+// refuses everything after it (the submit '\r').
+type enterRefusedWriteCloser struct {
+	writes int
+}
+
+func (w *enterRefusedWriteCloser) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, errors.New("hidden attach client stdin closed")
+	}
+	return len(p), nil
+}
+
+func (w *enterRefusedWriteCloser) Close() error { return nil }
+
+// TestSendHiddenAttachedTextReportsUnconfirmedWhenEnterFails is the
+// hidden-attach twin of the refused-Enter case: the framed payload was
+// written into the client's stdin, so it is in the composer whatever happens
+// to the trailing '\r'. Reporting an error here would let a consumer classify
+// the member as failed and re-post a payload that is already drafted.
+func TestSendHiddenAttachedTextReportsUnconfirmedWhenEnterFails(t *testing.T) {
+	const message = "hidden payload, enter refused"
+
+	fe := &fakeExecutor{out: strconv.FormatInt(time.Now().Unix(), 10)}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(tm)
+
+	const sess = "hidden-attach-enter-refused"
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: &enterRefusedWriteCloser{}}}
+	tm.hiddenAttachMu.Unlock()
+
+	used, delivery, err := tm.sendHiddenAttachedText(sess, message)
+	if !used {
+		t.Fatal("sendHiddenAttachedText: used = false, want the hidden-attach transport taken")
+	}
+	if err != nil {
+		t.Fatalf("sendHiddenAttachedText: err = %v — the payload write succeeded, so the failed Enter is evidence, not an error", err)
+	}
+	if !delivery.Delivered || delivery.Bytes != len(message) {
+		t.Fatalf("delivery = %+v, want Delivered with Bytes=%d", delivery, len(message))
+	}
+	if delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("delivery Submit = %q, want %q for an Enter that never reached the client", delivery.Submit, runtime.NudgeSubmitUnconfirmed)
+	}
+	if got := receipts(); len(got) != 1 || got[0].Bytes != len(message) {
+		t.Fatalf("receipts = %+v, want exactly 1 carrying the whole payload", got)
+	}
+}
+
+// shortWriteCloser accepts the first accept bytes of the first write and then
+// fails, the shape of a hidden-attach client that closed under a long paste.
+type shortWriteCloser struct {
+	accept int
+	writes int
+}
+
+func (w *shortWriteCloser) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, errors.New("hidden attach client stdin closed")
+	}
+	n := min(w.accept, len(p))
+	return n, errors.New("write: broken pipe")
+}
+
+func (w *shortWriteCloser) Close() error { return nil }
+
+// TestSendHiddenAttachedTextReportsAFragmentThatLandedBeforeTheWriteFailed
+// covers the hidden-attach write failing partway: the bytes the client
+// accepted before the error are in front of the pane, so the evidence must
+// say so (a short, unconfirmed paste) alongside the error — never a zero
+// delivery, which would classify as "nothing landed" and re-post the whole
+// message on top of the fragment.
+func TestSendHiddenAttachedTextReportsAFragmentThatLandedBeforeTheWriteFailed(t *testing.T) {
+	const message = "a payload long enough to be cut in half by a closing client"
+	const landed = 17
+
+	fe := &fakeExecutor{out: strconv.FormatInt(time.Now().Unix(), 10)}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(tm)
+
+	const sess = "hidden-attach-short-write"
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: &shortWriteCloser{accept: len(bracketedPasteStart) + landed}}}
+	tm.hiddenAttachMu.Unlock()
+
+	used, delivery, err := tm.sendHiddenAttachedText(sess, message)
+	if !used {
+		t.Fatal("sendHiddenAttachedText: used = false, want the hidden-attach transport taken")
+	}
+	if err == nil {
+		t.Fatal("sendHiddenAttachedText: err = nil, want the write error passed through for retrying callers")
+	}
+	if !delivery.Landed() || delivery.Bytes != landed || delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("delivery = %+v, want a landed fragment of %d bytes, submit unconfirmed", delivery, landed)
+	}
+	if got := receipts(); len(got) != 1 || got[0].Bytes != landed {
+		t.Fatalf("receipts = %+v, want exactly 1 carrying the %d-byte fragment", got, landed)
+	}
+
+	// A write that fails before any of the payload got past the start marker
+	// left nothing in the pane: zero evidence, the error alone.
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: &shortWriteCloser{accept: len(bracketedPasteStart)}}}
+	tm.hiddenAttachMu.Unlock()
+	_, delivery, err = tm.sendHiddenAttachedText(sess, message)
+	if err == nil || delivery.Landed() {
+		t.Fatalf("marker-only write: delivery = %+v err = %v, want zero evidence with the error", delivery, err)
+	}
+	if got := receipts(); len(got) != 1 {
+		t.Fatalf("receipts = %+v, want no receipt for a paste of which nothing landed", got)
+	}
+}
+
+// TestNudgeDeliveredKeepsHiddenAttachFragmentAlongsideError pins the
+// provider boundary above sendHiddenAttachedText: the fragment evidence must
+// reach NudgeDelivered's caller together with the error, and Nudge/NudgeNow
+// must still surface the error for retrying callers.
+func TestNudgeDeliveredKeepsHiddenAttachFragmentAlongsideError(t *testing.T) {
+	const message = "a payload long enough to be cut in half by a closing client"
+	const landed = 11
+
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = &fakeExecutor{out: strconv.FormatInt(time.Now().Unix(), 10)}
+	p.tm.cfg.DebounceMs = 0
+	const sess = "hidden-attach-fragment-boundary"
+	arm := func() {
+		p.tm.hiddenAttachMu.Lock()
+		p.tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: &shortWriteCloser{accept: len(bracketedPasteStart) + landed}}}
+		p.tm.hiddenAttachMu.Unlock()
+	}
+
+	arm()
+	delivery, err := p.NudgeDelivered(sess, runtime.TextContent(message))
+	if err == nil {
+		t.Fatal("NudgeDelivered() error = nil, want the write error passed through")
+	}
+	if !delivery.Landed() || delivery.Bytes != landed || delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("NudgeDelivered() = %+v, want the landed %d-byte fragment, unconfirmed, alongside the error", delivery, landed)
+	}
+
+	arm()
+	if err := p.NudgeNow(sess, runtime.TextContent(message)); err == nil {
+		t.Fatal("NudgeNow() error = nil, want the write error so a queued nudge stays unacked")
+	}
+}
+
+// blockingWriteCloser accepts the first accept bytes of a write and then
+// blocks until Close is called, the shape of a hidden-attach client whose
+// reader has stopped draining the pipe.
+type blockingWriteCloser struct {
+	accept  int
+	started chan struct{} // closed when the first write is in flight
+	closed  chan struct{}
+	start   sync.Once
+	once    sync.Once
+}
+
+func newBlockingWriteCloser(accept int) *blockingWriteCloser {
+	return &blockingWriteCloser{accept: accept, started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (w *blockingWriteCloser) Write(p []byte) (int, error) {
+	n := min(w.accept, len(p))
+	w.start.Do(func() { close(w.started) })
+	<-w.closed
+	return n, errors.New("write: file already closed")
+}
+
+func (w *blockingWriteCloser) Close() error {
+	w.once.Do(func() { close(w.closed) })
+	return nil
+}
+
+// TestCloseHiddenAttachClientReturnsWhileAWriteIsBlocked pins the
+// shutdown side of the fragment evidence: closing the client must not wait
+// on the write lock, because the close is the only thing that unblocks a
+// write stuck on a reader cancel() did not reach. The interrupted write then
+// reports what it got through, and that becomes evidence.
+func TestCloseHiddenAttachClientReturnsWhileAWriteIsBlocked(t *testing.T) {
+	const message = "a payload that blocks the client halfway through"
+	const landed = 9
+
+	fe := &fakeExecutor{out: strconv.FormatInt(time.Now().Unix(), 10)}
+	tm := NewTmux()
+	tm.exec = fe
+	tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(tm)
+
+	const sess = "hidden-attach-blocked-write"
+	stdin := newBlockingWriteCloser(len(bracketedPasteStart) + landed)
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{sess: {stdin: stdin, cancel: func() {}}}
+	tm.hiddenAttachMu.Unlock()
+
+	type outcome struct {
+		delivery runtime.NudgeDelivery
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		_, delivery, err := tm.sendHiddenAttachedText(sess, message)
+		done <- outcome{delivery, err}
+	}()
+	// Only close once the paste is actually in flight; closing before the
+	// send looked the client up would test nothing but the map.
+	select {
+	case <-stdin.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the paste never reached the client's stdin")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		tm.CloseHiddenAttachClient(sess)
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseHiddenAttachClient did not return while a write was blocked: it must never wait on the write lock")
+	}
+
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the blocked write did not return after the close")
+	}
+	if got.err == nil {
+		t.Fatal("sendHiddenAttachedText: err = nil, want the interrupted write's error")
+	}
+	if !got.delivery.Landed() || got.delivery.Bytes != landed || got.delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("delivery = %+v, want the %d-byte fragment the client accepted before the close, unconfirmed", got.delivery, landed)
+	}
+	if r := receipts(); len(r) != 1 || r[0].Bytes != landed {
+		t.Fatalf("receipts = %+v, want exactly 1 carrying the fragment", r)
+	}
+}
+
+var _ runtime.ImmediateNudgeVouchingProvider = (*Provider)(nil)

@@ -231,7 +231,11 @@ var (
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
-	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	//
+	// The sentinel lives in the runtime package since gp-2io so that every
+	// consumer of delivery evidence ([runtime.NudgeDelivery]) translates to
+	// the same error; this name is kept for existing errors.Is callers.
+	ErrNudgeSubmitUnconfirmed = runtime.ErrNudgeSubmitUnconfirmed
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -1889,6 +1893,14 @@ func (t *Tmux) CloseHiddenAttachClient(target string) {
 		_, _ = t.run("set-hook", "-u", "-t", target, "client-attached")
 	}
 	client.cancel()
+	// Close the pipe immediately after canceling — never wait on writeMu. A
+	// write blocked on a reader that cancel() did not reach (a descendant of
+	// the attached client holding the read end) would hold the lock
+	// indefinitely, and this close is the only thing that unblocks it. A
+	// write interrupted by the close reports the count it got through, and
+	// sendHiddenAttachedText turns that into evidence (see
+	// hiddenAttachClient.write), so the interleaving is accounted for rather
+	// than prevented.
 	_ = client.stdin.Close()
 	select {
 	case <-client.done:
@@ -1896,11 +1908,14 @@ func (t *Tmux) CloseHiddenAttachClient(target string) {
 	}
 }
 
-func (c *hiddenAttachClient) write(input []byte) error {
+// write hands input to the attached client's stdin and reports how much of it
+// was accepted before any error: a write that fails partway (the client
+// closed under it) has still put the first n bytes in front of the pane, and
+// the caller turns that into evidence rather than discarding it.
+func (c *hiddenAttachClient) write(input []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := c.stdin.Write(input)
-	return err
+	return c.stdin.Write(input)
 }
 
 func hiddenAttachedKeyBytes(key string) ([]byte, bool) {
@@ -1956,7 +1971,7 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	// after the last key lands. A failed write records nothing.
 	commitPoke := t.beginPoke(target)
 	for _, seq := range seqs {
-		if err := client.write(seq); err != nil {
+		if _, err := client.write(seq); err != nil {
 			return true, err
 		}
 	}
@@ -1983,13 +1998,19 @@ const (
 	bracketedPasteEnd   = "\x1b[201~"
 )
 
-func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
+// sendHiddenAttachedText delivers text through the hidden-attach client when
+// one is open for target. used reports whether that transport was taken at
+// all; when it was, delivery is the evidence for the paste: zero with a
+// non-nil error when none of the payload could be written, a short
+// unconfirmed paste together with the error when the client accepted part
+// of it before failing, and a whole paste otherwise.
+func (t *Tmux) sendHiddenAttachedText(target, text string) (used bool, delivery runtime.NudgeDelivery, err error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
-		return false, nil
+		return false, runtime.NudgeDelivery{}, nil
 	}
 	if text == "" {
-		return true, nil
+		return true, runtime.NudgeDelivery{}, nil
 	}
 	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
 	// so record a poke here too (the residual NudgeNow gap): capture the
@@ -2002,22 +2023,44 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	// another writer's bytes (client.write serializes on its own mutex, but a
 	// three-write framing would still let a concurrent Enter land inside the
 	// paste).
-	if err := client.write([]byte(bracketedPasteStart + text + bracketedPasteEnd)); err != nil {
-		return true, err
+	n, err := client.write([]byte(bracketedPasteStart + text + bracketedPasteEnd))
+	if err != nil {
+		// The frame is start-marker + payload + end-marker; whatever of the
+		// payload the client accepted before failing is in front of the pane
+		// now, and an error that zeroed it would let a consumer classify a
+		// live fragment as "nothing landed" and re-post the whole message on
+		// top of it. Report the fragment as evidence alongside the error: the
+		// classifier reads the short count as partial, retrying callers read
+		// the error.
+		landed := min(max(n-len(bracketedPasteStart), 0), len(text))
+		if landed <= 0 {
+			return true, runtime.NudgeDelivery{}, err
+		}
+		commitPoke()
+		t.emitNudgeReceipt(target, text, landed, false)
+		return true, runtime.NudgeDelivery{Delivered: true, Bytes: landed, Submit: runtime.NudgeSubmitUnconfirmed}, err
 	}
 	if t.cfg.DebounceMs > 0 {
 		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
 	}
+	// The paste is in the client's stdin from here on: the receipt is emitted
+	// and the evidence says Delivered whatever happens to the Enter. This
+	// transport has no busy probe, so a delivered Enter is unverified (the
+	// historical best-effort outcome) and an Enter that could not be written
+	// is unconfirmed — never a failed delivery, which would license a
+	// redelivery of a payload already in the composer.
+	submit := runtime.NudgeSubmitUnverified
 	// The submit Enter goes OUTSIDE the paste: inside it would be pasted text,
 	// not a keypress.
-	if err := client.write([]byte{'\r'}); err != nil {
-		return true, err
+	if _, err := client.write([]byte{'\r'}); err != nil {
+		log.Printf("tmux nudge: hidden-attach submit Enter to %q failed after the paste landed; reporting the submit as unconfirmed: %v", target, err)
+		submit = runtime.NudgeSubmitUnconfirmed
 	}
 	commitPoke()
-	// Submit is unconfirmed on this transport — it has no busy probe — so the
-	// receipt reports the honest best-effort outcome.
+	// The receipt's submitted flag is only ever true when a busy probe saw
+	// the agent take the turn; this transport has none.
 	t.emitNudgeReceipt(target, text, len(text), false)
-	return true, nil
+	return true, runtime.NudgeDelivery{Delivered: true, Bytes: len(text), Submit: submit}, nil
 }
 
 // isTransientSendKeysError returns true if the error from tmux send-keys is
@@ -2592,40 +2635,80 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // If multiple goroutines try to nudge the same session concurrently, they will
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
+//
+// An unconfirmed submit on a submit-verify-eligible pane is reported as
+// ErrNudgeSubmitUnconfirmed. NudgeSession's callers (the nudge queue
+// dispatcher, the startup nudge) have no evidence channel, only this error,
+// and the queue relies on it to leave the item unacked so it requeues
+// (ga-bwm). Callers that want evidence rather than a retry signal go through
+// nudgeSessionDelivery (via [Provider.NudgeDelivered]), where the same outcome
+// is a delivered payload whose submit is unconfirmed — not a failure. See
+// unconfirmedSubmitError for why the two must not be conflated.
 func (t *Tmux) NudgeSession(session, message string) error {
-	return t.nudgeSession(
-		session,
-		message,
-		t.sendKeysLiteralWithRetry,
-		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
-		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
-	)
+	delivery, err := t.nudgeSessionDelivery(session, message)
+	if err != nil {
+		return err
+	}
+	return unconfirmedSubmitError(session, delivery)
+}
+
+// unconfirmedSubmitError applies the one translation from delivery evidence
+// to the retry signal that NudgeSession and Provider.NudgeNow owe their
+// callers ([runtime.NudgeDelivery.UnconfirmedSubmitError]).
+//
+// Do NOT collapse an unconfirmed submit to nil on those paths: a caller that
+// treats nil as "clean delivery" would ack a queued nudge for a message that
+// may still be sitting drafted-but-unsubmitted in the pane. Surfacing it as an
+// error leaves the item unacked, so it requeues after the normal retry delay
+// and spends one of its bounded attempts instead of silently losing the nudge.
+//
+// And do NOT apply this translation on the evidence path: the payload IS in
+// the pane (the receipt vouches for it), so a consumer that reads the error as
+// "nothing landed" and redelivers produces a duplicate. That reading is what
+// delivered one founder message to the mayor six times on 2026-08-28 (gp-2io).
+func unconfirmedSubmitError(session string, d runtime.NudgeDelivery) error {
+	return d.UnconfirmedSubmitError(session)
+}
+
+// nudgeSessionDelivery is NudgeSession's body, returning what the runtime can
+// vouch for about the delivery instead of folding it into the error:
+//
+//   - Delivered is set once the payload has been pasted (a receipt was
+//     emitted for it), whatever then happens to the submit sequence.
+//   - Bytes is the paste's size, the same number the receipt carries.
+//   - Submit is confirmed when the pane went busy, unconfirmed when a busy
+//     probe ran and never saw it OR the submit sequence could not be
+//     delivered after the paste, and unverified when no probe exists for
+//     this pane's provider family and the submit went out.
+//
+// The error return is for the send failing BEFORE anything landed (lock
+// timeout, paste rejected, session gone). A zero delivery accompanies every
+// error; once the paste is in the pane there is no error to return, only
+// evidence.
+func (t *Tmux) nudgeSessionDelivery(session, message string) (runtime.NudgeDelivery, error) {
+	return t.nudgeSessionDeliveryWith(session, message, t.sendKeysLiteralWithRetry)
 }
 
 // nudgeStartupSession sends the initial startup prompt. Copilot startup
 // prompts use provider-safe paste chunks so its TUI keeps the text inline.
+// Like NudgeSession it owes its caller the retry signal, not evidence.
 func (t *Tmux) nudgeStartupSession(session, message string) error {
-	return t.nudgeSession(
-		session,
-		message,
-		func(target, text string, timeout time.Duration) (int, error) {
-			return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
-		},
-		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
-		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
-	)
+	delivery, err := t.nudgeSessionDeliveryWith(session, message, func(target, text string, timeout time.Duration) (int, error) {
+		return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
+	})
+	if err != nil {
+		return err
+	}
+	return unconfirmedSubmitError(session, delivery)
 }
 
-func (t *Tmux) nudgeSession(
-	session, message string,
-	sendText func(string, string, time.Duration) (int, error),
-	shouldSendEscape func(string) bool,
-	submitKeySequence func(string) []string,
-) error {
+// nudgeSessionDeliveryWith is nudgeSessionDelivery with the paste function
+// injected (plain nudges paste whole; startup prompts may chunk for copilot).
+func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (runtime.NudgeDelivery, error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return runtime.NudgeDelivery{}, fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
 	}
 	defer releaseNudgeLock(session)
 
@@ -2680,7 +2763,7 @@ func (t *Tmux) nudgeSession(
 	// concatenation this clear otherwise prevents (#5192).
 	if !t.IsSessionAttached(session) {
 		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
-			return err
+			return runtime.NudgeDelivery{}, err
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -2702,7 +2785,7 @@ func (t *Tmux) nudgeSession(
 	// the byte count feeds the delivery receipt (gp-2rq).
 	written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
 	if err != nil {
-		return err
+		return runtime.NudgeDelivery{}, err
 	}
 	payloadBytes = written
 
@@ -2714,7 +2797,7 @@ func (t *Tmux) nudgeSession(
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
-	if shouldSendEscape(target) {
+	if t.shouldSendEscapeBeforeEnter(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
 		time.Sleep(100 * time.Millisecond)
@@ -2735,7 +2818,7 @@ func (t *Tmux) nudgeSession(
 	// with a known staged-draft marker get a slower, bounded recovery
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
-	submitKeys := submitKeySequence(target)
+	submitKeys := t.nudgeSubmitKeySequence(target)
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an
@@ -2749,14 +2832,23 @@ func (t *Tmux) nudgeSession(
 	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
+	// From here on the paste is in the pane, whatever happens to the submit
+	// sequence: the receipt is emitted and the evidence says Delivered. A
+	// submit that could not be delivered or confirmed is reported as
+	// unconfirmed — never as a failed delivery, which would license a
+	// consumer's clean redelivery of a payload that is already sitting in the
+	// composer. NudgeSession turns unconfirmed into ErrNudgeSubmitUnconfirmed
+	// for the callers that need a retry signal (see unconfirmedSubmitError).
+	delivered = true
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
-		if err != nil {
-			return fmt.Errorf("failed to send submit sequence: %w", err)
-		}
-		delivered = true
 		submitted = confirmed
-		if !confirmed {
+		if err != nil {
+			// Every submit attempt was refused by tmux (or the last one was,
+			// after earlier sends went unconfirmed). The paste landed; the
+			// submit is unknown.
+			log.Printf("tmux nudge: submit sequence to %q failed after the paste landed; reporting the submit as unconfirmed: %v", target, err)
+		} else if !confirmed {
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
@@ -2768,32 +2860,37 @@ func (t *Tmux) nudgeSession(
 				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
 				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
 				case stagedDraftSubmittedBusy:
-					return nil
+					submitted = true
+					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed}, nil
 				case stagedDraftCleared:
-					return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+					// Delivery is proven (the draft left the composer); only
+					// the busy OBSERVATION missed it. The evidence says
+					// confirmed and the error is upstream's do-not-retry
+					// sentinel, returned together (an error never erases
+					// evidence, gp-2io).
+					submitted = true
+					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed},
+						fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 				}
 				// stagedDraftUnresolved falls through to the handling below.
 			}
-			// Do NOT collapse this to nil: a caller that treats nil as "clean
-			// delivery" would ack a queued nudge for a message that may still
-			// be sitting drafted-but-unsubmitted in the pane. Surfacing this
-			// as an error leaves the item unacked, so it requeues after the
-			// normal retry delay and spends one of its bounded attempts —
-			// the same handling as any other delivery failure — instead of
-			// silently losing the nudge.
-			//
-			// One extra capture here, on the already-failed path only: check
-			// whether the composer actually drained before concluding the
-			// submit itself is in doubt. A drained composer is positive
+			// One extra capture here, on the already-unconfirmed path only:
+			// check whether the composer actually drained before concluding
+			// the submit itself is in doubt. A drained composer is positive
 			// evidence the Enter reached the pane and the agent consumed it —
-			// only the busy-state OBSERVATION missed it — so that case must be
-			// reported as proven delivery, not requeued as a failure.
+			// only the busy-state OBSERVATION missed it — so that case is
+			// reported as proven delivery, not as unconfirmed.
 			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
-				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				submitted = true
+				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed},
+					fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
-			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
-		return nil
+		submit := runtime.NudgeSubmitUnconfirmed
+		if confirmed {
+			submit = runtime.NudgeSubmitConfirmed
+		}
+		return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: submit}, nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
 	// This family has no busy-state indicator AT ALL — confirmation is
@@ -2818,11 +2915,13 @@ func (t *Tmux) nudgeSession(
 		}
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
-		delivered = true
 		t.recordUnconfirmedSubmit(session, message)
-		return nil
+		// No busy probe for this family: the submit is unverified, which has
+		// always counted as delivery on this path.
+		return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnverified}, nil
 	}
-	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
+	log.Printf("tmux nudge: submit sequence to %q failed after %d attempts with the paste landed; reporting the submit as unconfirmed: %v", target, submitEnterMaxSends, lastErr)
+	return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, nil
 }
 
 // recordUnconfirmedSubmit persists a best-effort diagnostic artifact when a

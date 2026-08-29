@@ -25,20 +25,32 @@ const (
 	// resolve the same empty membership and also reach nobody, so a consumer
 	// should commit rather than retry.
 	InboundDeliveryNoRoute InboundDeliveryStatus = "no_route"
-	// InboundDeliveryPartial means some members took the payload and others did
-	// not. The message IS live in at least one terminal, so a consumer that
-	// retries must expect a duplicate for the members that succeeded.
+	// InboundDeliveryPartial means only FRAGMENTS of the message are live: at
+	// least one member's paste was truncated, and no member holds a whole
+	// copy (those combinations summarize as pending — see
+	// [SummarizeInboundDelivery]). A redelivery duplicates at most a fragment
+	// and is the only thing that repairs the truncation, so this is the one
+	// something-landed state in which a consumer may re-post.
 	InboundDeliveryPartial InboundDeliveryStatus = "partial"
 	// InboundDeliveryFailed means no member took the payload, though at least
 	// one was supposed to. Nothing was delivered, so a retry is clean.
 	InboundDeliveryFailed InboundDeliveryStatus = "failed"
-	// InboundDeliveryPending means gc could not conclude the delivery inside
-	// its response budget. It is NOT a failure claim and NOT a success claim:
-	// the sends are still running. A consumer must treat it as unverified.
+	// InboundDeliveryPending means the outcome is not concluded in a way a
+	// redelivery could safely repair. It is NOT a failure claim and NOT a
+	// success claim, and a consumer must HOLD on it — never re-post. It
+	// covers three shapes that share that one property:
+	//
+	//   - the fan-out outran the response budget and the sends are still
+	//     running (the whole-receipt PendingInboundDelivery);
+	//   - a member's payload landed whole but the agent was not seen taking
+	//     the turn (submit unconfirmed — the 2026-08-28 gp-2io incident,
+	//     which classified as failed and licensed a 6x duplicate storm);
+	//   - a mixed fan-out in which at least one member holds a whole live
+	//     copy, so a fan-out-wide re-post would duplicate it.
 	//
 	// The duplicate window is real and unavoidable here: gc cannot cancel a
-	// paste already handed to a terminal, so a pending send may land AFTER the
-	// consumer has given up and retried. Documented rather than hidden,
+	// paste already handed to a terminal, so a pending send may land AFTER
+	// the consumer has given up and retried. Documented rather than hidden,
 	// because the alternative is guessing.
 	InboundDeliveryPending InboundDeliveryStatus = "pending"
 )
@@ -129,13 +141,15 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 		out.Status = InboundDeliveryNoRoute
 		return out
 	}
-	delivered, pending := 0, 0
+	delivered, partial, pending := 0, 0, 0
 	for _, m := range members {
 		out.DeliveredBytes += m.DeliveredBytes
 		out.ExpectedBytes += m.ExpectedBytes
 		switch m.Status {
 		case InboundDeliveryDelivered:
 			delivered++
+		case InboundDeliveryPartial:
+			partial++
 		case InboundDeliveryPending:
 			pending++
 		}
@@ -143,20 +157,25 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 	switch {
 	case delivered == len(members):
 		out.Status = InboundDeliveryDelivered
-	case delivered > 0:
-		// Mixed. Partial regardless of whether the rest failed or are still
-		// running: either way the message is live somewhere, which is the fact
-		// that governs whether a retry duplicates.
-		out.Status = InboundDeliveryPartial
-	case pending > 0:
-		// Nothing delivered YET, and at least one member is unconcluded. This
-		// outranks failed even when a sibling has hard-failed: "failed" carries
-		// the promise that a retry is clean, and a pending member that later
-		// lands would turn that retry into a duplicate. "Still unknown" is the
-		// only claim the evidence supports.
+	case delivered > 0 || pending > 0:
+		// A WHOLE copy of the payload is live in a delivered member's
+		// terminal, or landed/unconcluded in a pending one. The only repair a
+		// consumer has is a fan-out-wide redelivery, and that would duplicate
+		// the whole copy — the worse failure (a truncated message looks wrong
+		// when caught; a duplicated one reads as the sender saying it twice).
+		// So any such mix must HOLD: partial and failed both license the
+		// re-post and are unreachable from here, no matter what the other
+		// members report.
 		out.Status = InboundDeliveryPending
+	case partial > 0:
+		// Only truncated fragments and failures — no member holds a whole
+		// copy. A redelivery duplicates at most a fragment and is the only
+		// thing that repairs the truncation, so this is the one mixed state
+		// that may invite it. A lone partial member lands here too; it must
+		// never fall through to failed, which promises a clean retry.
+		out.Status = InboundDeliveryPartial
 	default:
-		// Every member concluded and none delivered.
+		// Every member concluded and nothing landed anywhere.
 		out.Status = InboundDeliveryFailed
 	}
 	return out
