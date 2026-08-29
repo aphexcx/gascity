@@ -739,6 +739,18 @@ export const zInboundEventPayload = z.object({
     target_session: z.string()
 });
 
+export const zInboundReceiptStatus = z.object({
+    begun_at: z.iso.datetime().optional(),
+    concluded_at: z.iso.datetime().optional(),
+    delivery: zInboundDelivery.optional(),
+    receipt_id: z.string(),
+    state: z.enum([
+        'pending',
+        'concluded',
+        'unknown'
+    ])
+});
+
 export const zListBodyBead = z.object({
     items: z.array(zBead).nullable(),
     next_cursor: z.string().optional(),
@@ -7813,6 +7825,16 @@ export const zPostV0CityByCityNameExtmsgInboundPath = z.object({
  * OK
  */
 export const zPostV0CityByCityNameExtmsgInboundResponse = zInboundResult;
+
+export const zGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    receipt_id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse = zInboundReceiptStatus;
 
 export const zPostV0CityByCityNameExtmsgOutboundBody = zExtMsgOutboundInputBody;
 

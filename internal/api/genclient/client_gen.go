@@ -117,6 +117,27 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	}
 }
 
+// Defines values for InboundReceiptStatusState.
+const (
+	InboundReceiptStatusStateConcluded InboundReceiptStatusState = "concluded"
+	InboundReceiptStatusStatePending   InboundReceiptStatusState = "pending"
+	InboundReceiptStatusStateUnknown   InboundReceiptStatusState = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the InboundReceiptStatusState enum.
+func (e InboundReceiptStatusState) Valid() bool {
+	switch e {
+	case InboundReceiptStatusStateConcluded:
+		return true
+	case InboundReceiptStatusStatePending:
+		return true
+	case InboundReceiptStatusStateUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -557,19 +578,19 @@ func (e StatusConditionalWritesEffective) Valid() bool {
 
 // Defines values for StatusConditionalWritesMode.
 const (
-	StatusConditionalWritesModeAuto    StatusConditionalWritesMode = "auto"
-	StatusConditionalWritesModeOff     StatusConditionalWritesMode = "off"
-	StatusConditionalWritesModeRequire StatusConditionalWritesMode = "require"
+	Auto    StatusConditionalWritesMode = "auto"
+	Off     StatusConditionalWritesMode = "off"
+	Require StatusConditionalWritesMode = "require"
 )
 
 // Valid indicates whether the value is a known member of the StatusConditionalWritesMode enum.
 func (e StatusConditionalWritesMode) Valid() bool {
 	switch e {
-	case StatusConditionalWritesModeAuto:
+	case Auto:
 		return true
-	case StatusConditionalWritesModeOff:
+	case Off:
 		return true
-	case StatusConditionalWritesModeRequire:
+	case Require:
 		return true
 	default:
 		return false
@@ -2182,6 +2203,18 @@ type InboundEventPayload struct {
 	TargetAgent    *string `json:"target_agent,omitempty"`
 	TargetSession  string  `json:"target_session"`
 }
+
+// InboundReceiptStatus defines model for InboundReceiptStatus.
+type InboundReceiptStatus struct {
+	BegunAt     *time.Time                `json:"begun_at,omitempty"`
+	ConcludedAt *time.Time                `json:"concluded_at,omitempty"`
+	Delivery    *InboundDelivery          `json:"delivery,omitempty"`
+	ReceiptId   string                    `json:"receipt_id"`
+	State       InboundReceiptStatusState `json:"state"`
+}
+
+// InboundReceiptStatusState defines model for InboundReceiptStatus.State.
+type InboundReceiptStatusState string
 
 // InboundResult defines model for InboundResult.
 type InboundResult struct {
@@ -18669,6 +18702,9 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameExtmsgInboundReceiptsByReceiptId request
+	GetV0CityByCityNameExtmsgInboundReceiptsByReceiptId(ctx context.Context, cityName string, receiptId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameExtmsgOutboundWithBody request with any body
 	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -19913,6 +19949,18 @@ func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, 
 
 func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameExtmsgInboundReceiptsByReceiptId(ctx context.Context, cityName string, receiptId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdRequest(c.Server, cityName, receiptId)
 	if err != nil {
 		return nil, err
 	}
@@ -25021,6 +25069,47 @@ func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+	}
+
+	return req, nil
+}
+
+// NewGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdRequest generates requests for GetV0CityByCityNameExtmsgInboundReceiptsByReceiptId
+func NewGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdRequest(server string, cityName string, receiptId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "receipt_id", receiptId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/extmsg/inbound/receipts/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -32203,6 +32292,9 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
 
+	// GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdWithResponse request
+	GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdWithResponse(ctx context.Context, cityName string, receiptId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse, error)
+
 	// PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with any body
 	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
 
@@ -34060,6 +34152,29 @@ func (r PostV0CityByCityNameExtmsgInboundResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostV0CityByCityNameExtmsgInboundResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *InboundReceiptStatus
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -37654,6 +37769,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx 
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgInboundResponse(rsp)
+}
+
+// GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdWithResponse request returning *GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse
+func (c *ClientWithResponses) GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdWithResponse(ctx context.Context, cityName string, receiptId string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameExtmsgInboundReceiptsByReceiptId(ctx, cityName, receiptId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse(rsp)
 }
 
 // PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgOutboundResponse
@@ -42186,6 +42310,39 @@ func ParsePostV0CityByCityNameExtmsgInboundResponse(rsp *http.Response) (*PostV0
 			return nil, err
 		}
 		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse parses an HTTP response from a GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdWithResponse call
+func ParseGetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse(rsp *http.Response) (*GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest InboundReceiptStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
 
 	}
 

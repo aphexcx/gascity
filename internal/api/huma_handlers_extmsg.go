@@ -38,6 +38,40 @@ func (s *Server) humaExtmsgAdapterRegistry() (*extmsg.AdapterRegistry, error) {
 
 // --- Inbound ---
 
+// humaHandleExtMsgInboundReceipt is the Huma-typed handler for
+// GET /v0/city/{cityName}/extmsg/inbound/receipts/{receipt_id}.
+//
+// It answers the question an adapter is left with after an inbound response
+// said "pending": did gc's background send ever land? The state set is closed
+// (pending | concluded | unknown) and every state is a 200 — "unknown" is a
+// definite statement ("nobody in this process is still trying") that the
+// caller acts on, and must not share a status code with "no such route",
+// which the caller has to fail open on. See extmsg.InboundReceiptStatus.
+//
+// It is a SupervisorMux method, registered without bindCity, on purpose:
+// the store is process-wide and the fan-out goroutine it describes belongs
+// to the process, while the city Server bindCity resolves is replaced (and
+// briefly absent) whenever the city's State changes. Answering 404 in that
+// window would read to the adapter as "no such endpoint" — the fail-open
+// arm — for a send that is still running here (codex r3 P2).
+//
+// The lookup is scoped to the city in the path without resolving it: a
+// receipt issued for another city answers unknown (codex r4 P2).
+func (sm *SupervisorMux) humaHandleExtMsgInboundReceipt(_ context.Context, input *ExtMsgInboundReceiptInput) (*ExtMsgInboundReceiptOutput, error) {
+	return &ExtMsgInboundReceiptOutput{
+		Body: sm.inboundReceiptStore().Lookup(strings.TrimSpace(input.GetCityName()), strings.TrimSpace(input.ReceiptID)),
+	}, nil
+}
+
+// inboundReceiptStore returns the process-wide inbound receipt store, or
+// the one a test injected.
+func (sm *SupervisorMux) inboundReceiptStore() *extmsg.InboundReceiptStore {
+	if sm.inboundReceipts != nil {
+		return sm.inboundReceipts
+	}
+	return extmsg.DefaultInboundReceipts()
+}
+
 // humaHandleExtMsgInbound is the Huma-typed handler for POST /v0/extmsg/inbound.
 func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInboundInput) (*ExtMsgInboundOutput, error) {
 	svc, err := s.humaExtmsgServices()

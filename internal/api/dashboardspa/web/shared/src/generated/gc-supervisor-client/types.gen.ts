@@ -1433,6 +1433,14 @@ export type InboundEventPayload = {
     target_session: string;
 };
 
+export type InboundReceiptStatus = {
+    begun_at?: string;
+    concluded_at?: string;
+    delivery?: InboundDelivery;
+    receipt_id: string;
+    state: 'pending' | 'concluded' | 'unknown';
+};
+
 export type InboundResult = {
     Binding: SessionBindingRecord;
     GroupRoute: GroupRouteDecision;
@@ -12521,6 +12529,40 @@ export type PostV0CityByCityNameExtmsgInboundResponses = {
 };
 
 export type PostV0CityByCityNameExtmsgInboundResponse = PostV0CityByCityNameExtmsgInboundResponses[keyof PostV0CityByCityNameExtmsgInboundResponses];
+
+export type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Receipt id from an inbound response's delivery block (delivery.receipt_id).
+         */
+        receipt_id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/extmsg/inbound/receipts/{receipt_id}';
+};
+
+export type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdError = GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdErrors[keyof GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdErrors];
+
+export type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponses = {
+    /**
+     * OK
+     */
+    200: InboundReceiptStatus;
+};
+
+export type GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponse = GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponses[keyof GetV0CityByCityNameExtmsgInboundReceiptsByReceiptIdResponses];
 
 export type PostV0CityByCityNameExtmsgOutboundData = {
     body: ExtMsgOutboundInputBody;

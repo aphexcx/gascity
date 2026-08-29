@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -252,6 +253,21 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		}
 		result, err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge)
 		switch {
+		case errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed):
+			// The runtime framed and pasted the COMPLETE payload and sent the
+			// submit key; only the agent's busy transition went unobserved.
+			// That is a delivery with a caveat, not a failure: "failed" tells
+			// the consumer a retry is clean, and it is not — the payload is
+			// in the terminal, and a fast turn can outrun the probe entirely
+			// (2026-08-28 08:24Z: the session answered two seconds before
+			// this receipt said failed 0/1215, and the adapter re-posted six
+			// times, then dead-lettered a message already acted on). The
+			// caveat rides in Error, which consumers read for context only,
+			// exactly as they already do for transports with no busy probe.
+			outcome.Status = extmsg.InboundDeliveryDelivered
+			outcome.DeliveredBytes = len(nudge)
+			outcome.Error = err.Error()
+			log.Printf("extmsg: notify %s delivered, submit unconfirmed: %v", sessionSelector, err)
 		case err != nil:
 			outcome.Status = extmsg.InboundDeliveryFailed
 			outcome.Error = err.Error()
@@ -415,48 +431,80 @@ const extmsgInboundReceiptBudget = 15 * time.Second
 // receipt and is not made worse by it — the wait here is bounded regardless —
 // but do not read the background context as a hard kill.
 func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.ExternalInboundMessage) extmsg.InboundDelivery {
+	conversation := msg.Conversation.Provider + "/" + msg.Conversation.ConversationID
+	return awaitInboundFanout(ctx, s.inboundReceiptStore(), s.state.CityName(), extmsgInboundReceiptBudget, s.runBackground,
+		func(bgCtx context.Context) ([]extmsg.InboundDeliveryMember, error) {
+			return s.extmsgNotifyInboundMembers(bgCtx, msg)
+		}, conversation)
+}
+
+// awaitInboundFanout runs one inbound fan-out under budget and returns the
+// receipt to answer with. It is the mechanism behind gp-3yg: whether or not
+// the response waited long enough to see it, the fan-out's conclusion is
+// RECORDED in store against the receipt id, so a caller that was answered
+// "pending" can poll GET /extmsg/inbound/receipts/{id} afterwards and learn
+// definitively whether the send landed. Before this the late result was
+// published into a channel nobody read any more, and a message lost after a
+// pending receipt left no trace beyond the caller's own "held" log line.
+//
+// Split from the Server method so the budget race is testable with a fan-out
+// the test controls; city scopes the record (a lookup through another
+// city's path answers unknown); conversation is log context only.
+func awaitInboundFanout(
+	ctx context.Context,
+	store *extmsg.InboundReceiptStore,
+	city string,
+	budget time.Duration,
+	runBackground func(func(context.Context)),
+	fanout func(context.Context) ([]extmsg.InboundDeliveryMember, error),
+	conversation string,
+) extmsg.InboundDelivery {
 	receiptID := extmsg.NextInboundReceiptID()
-	type fanoutResult struct {
-		members []extmsg.InboundDeliveryMember
-		err     error
-	}
+	store.Begin(city, receiptID)
 	// Buffered so the fan-out goroutine never blocks publishing its result
 	// after the budget has expired and nobody is receiving any more.
-	done := make(chan fanoutResult, 1)
-	s.runBackground(func(bgCtx context.Context) {
-		members, err := s.extmsgNotifyInboundMembers(bgCtx, msg)
-		done <- fanoutResult{members: members, err: err}
-	})
-
-	timer := time.NewTimer(extmsgInboundReceiptBudget)
-	defer timer.Stop()
-	select {
-	case result := <-done:
-		if result.err != nil {
+	done := make(chan extmsg.InboundDelivery, 1)
+	runBackground(func(bgCtx context.Context) {
+		members, err := fanout(bgCtx)
+		var delivery extmsg.InboundDelivery
+		if err != nil {
 			// The fan-out could not be determined. Reporting this as no_route
 			// (which zero members would summarize to) would tell the caller to
 			// commit its dedup claim and drop the message for good.
-			log.Printf("extmsg: inbound fan-out failed (receipt=%s conversation=%s/%s): %v",
-				receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID, result.err)
-			return extmsg.FailedInboundDelivery(receiptID, result.err.Error())
+			log.Printf("extmsg: inbound fan-out failed (receipt=%s conversation=%s): %v", receiptID, conversation, err)
+			delivery = extmsg.FailedInboundDelivery(receiptID, err.Error())
+		} else {
+			delivery = extmsg.SummarizeInboundDelivery(receiptID, members)
+			if delivery.Status != extmsg.InboundDeliveryDelivered {
+				// The case gp-32q exists for. Logged at the seam so it is
+				// visible in gc's own logs even when the caller drops the
+				// receipt — and logged HERE, on the fan-out side, so a late
+				// conclusion the response never saw is still on record.
+				log.Printf("extmsg: %s conversation=%s", delivery, conversation)
+			}
 		}
-		delivery := extmsg.SummarizeInboundDelivery(receiptID, result.members)
-		if delivery.Status != extmsg.InboundDeliveryDelivered {
-			// The case this whole bead exists for. Log it at the seam so it is
-			// visible in gc's own logs even when the caller drops the receipt.
-			log.Printf("extmsg: %s conversation=%s/%s", delivery, msg.Conversation.Provider, msg.Conversation.ConversationID)
-		}
+		// Record before publishing: a caller that reads the channel and
+		// immediately polls must not see "pending" for a fan-out that has
+		// concluded.
+		store.Conclude(city, receiptID, delivery)
+		done <- delivery
+	})
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case delivery := <-done:
 		return delivery
 	case <-ctx.Done():
 		// The caller hung up or the server is shutting down. Waiting out the
 		// rest of the budget would pin a handler goroutine per inbound request
 		// for a response nobody will read. The sends continue regardless.
-		log.Printf("extmsg: inbound request ended before the fan-out concluded, reporting pending (receipt=%s conversation=%s/%s): %v",
-			receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID, ctx.Err())
+		log.Printf("extmsg: inbound request ended before the fan-out concluded, reporting pending (receipt=%s conversation=%s): %v",
+			receiptID, conversation, ctx.Err())
 		return extmsg.PendingInboundDelivery(receiptID)
 	case <-timer.C:
-		log.Printf("extmsg: inbound fan-out exceeded %s receipt budget, reporting pending (receipt=%s conversation=%s/%s) — sends continue in background",
-			extmsgInboundReceiptBudget, receiptID, msg.Conversation.Provider, msg.Conversation.ConversationID)
+		log.Printf("extmsg: inbound fan-out exceeded %s receipt budget, reporting pending (receipt=%s conversation=%s) — sends continue in background; poll GET /extmsg/inbound/receipts/%s for the outcome",
+			budget, receiptID, conversation, receiptID)
 		return extmsg.PendingInboundDelivery(receiptID)
 	}
 }
