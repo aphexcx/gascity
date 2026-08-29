@@ -2288,3 +2288,69 @@ func writeGeminiHistoryFixture(t *testing.T, path, sessionID string, messages []
 		t.Fatalf("write gemini transcript %s: %v", path, err)
 	}
 }
+
+// landedThenErroredProvider is a vouching runtime whose send fails AFTER the
+// paste landed: it returns the evidence together with the error, as
+// runtime.NudgeVouchingProvider permits.
+type landedThenErroredProvider struct {
+	*runtime.Fake
+}
+
+func (p *landedThenErroredProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitConfirmed},
+		errors.New("client closed after the paste")
+}
+
+func (p *landedThenErroredProvider) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := p.NudgeNow(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitConfirmed},
+		errors.New("hidden-attach client closed after the paste")
+}
+
+// TestRuntimeHandleNudgeKeepsEvidenceAlongsideError pins the pass-through
+// contract at the runtime-handle boundary on every arm — default, immediate,
+// and wait-idle: an error from the runtime never erases the evidence that
+// the payload landed. A consumer that reads the error alone (the queue)
+// requeues; one that must not duplicate (the inbound receipt) reads the
+// evidence first and holds instead of re-posting.
+func TestRuntimeHandleNudgeKeepsEvidenceAlongsideError(t *testing.T) {
+	const message = "landed then failed"
+	for _, tc := range []struct {
+		name     string
+		delivery NudgeDelivery
+		wantSize int
+	}{
+		{"default", NudgeDeliveryDefault, len(message)},
+		{"immediate", NudgeDeliveryImmediate, len(message)},
+		{"wait-idle", NudgeDeliveryWaitIdle, len(formatRuntimeWaitIdleReminder("mail", message))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &landedThenErroredProvider{Fake: runtime.NewFake()}
+			if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.WaitForIdleErrors["legacy-worker"] = nil // arm the idle probe the wait-idle arm needs
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     sp,
+				SessionName:  "legacy-worker",
+				ProviderName: "claude", // wait-idle is claude-only on this handle
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			result, err := handle.Nudge(context.Background(), NudgeRequest{Text: message, Delivery: tc.delivery, Source: "mail"})
+			if err == nil {
+				t.Fatalf("Nudge(%s) error = nil, want the runtime's error passed through for retrying callers", tc.name)
+			}
+			if !result.Landed() || result.Bytes != tc.wantSize || result.Submit != runtime.NudgeSubmitConfirmed {
+				t.Fatalf("Nudge(%s) result = %+v, want the runtime's evidence intact alongside the error (Bytes=%d, confirmed)", tc.name, result, tc.wantSize)
+			}
+		})
+	}
+}

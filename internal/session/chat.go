@@ -609,49 +609,59 @@ func formatWaitIdleReminder(source, message string) string {
 	return sb.String()
 }
 
-// nudgeSession delivers message to sessName, returning whether it reached the
-// terminal. See [Manager.nudgeContent] for why that is a separate answer from
-// the error.
-func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) (bool, error) {
+// nudgeSession delivers message to sessName, returning the runtime's evidence
+// about whether it reached the terminal. See [Manager.nudgeContent] for why
+// that is a separate answer from the error.
+func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) (runtime.NudgeDelivery, error) {
 	content := runtime.TextContent(message)
-	delivered, err := m.nudgeContent(sessName, content, immediate)
+	delivery, err := m.nudgeContent(sessName, content, immediate)
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
 	if err != nil {
-		return false, fmt.Errorf("sending message to session: %w", err)
+		// The evidence rides along with the error: a runtime that learned
+		// the paste landed before the send failed said so in delivery, and
+		// zeroing it here would let a consumer classify a whole live copy as
+		// "nothing landed" (see runtime.NudgeDelivery).
+		return delivery, fmt.Errorf("sending message to session: %w", err)
 	}
-	return delivered, nil
+	return delivery, nil
 }
 
-// nudgeContent delivers content to the session and reports whether it actually
-// reached the terminal.
+// nudgeContent delivers content to the session and reports what the runtime
+// can vouch for about its arrival.
 //
-// The delivered bool is NOT derived from the error. A runtime whose session has
+// Delivered is NOT derived from the error. A runtime whose session has
 // vanished returns nil from Nudge by contract (best-effort wake-up semantics),
 // so treating a nil error as delivery would report a message as delivered to a
 // session that no longer exists. Runtimes that can tell the two apart implement
-// [runtime.NudgeVouchingProvider] and are asked directly; the rest fall back to
-// the historical "no error means it went out" reading, which is the most their
-// interface can support.
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) (bool, error) {
+// [runtime.NudgeVouchingProvider] and are asked directly, and their answer is
+// passed through untouched — including a submit verdict, which is a separate
+// fact from delivery. The rest fall back to the historical "no error means it
+// went out" reading, which is the most their interface can support; that
+// answer carries no submit verdict and no byte count, and says so by leaving
+// both zero.
+func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) (runtime.NudgeDelivery, error) {
 	if immediate {
+		if vp, ok := m.sp.(runtime.ImmediateNudgeVouchingProvider); ok {
+			return vp.NudgeNowDelivered(sessName, content)
+		}
 		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
 			if err := np.NudgeNow(sessName, content); err != nil {
-				return false, err
+				return runtime.NudgeDelivery{}, err
 			}
-			return true, nil
+			return runtime.NudgeDelivery{Delivered: true}, nil
 		}
 	}
 	if vp, ok := m.sp.(runtime.NudgeVouchingProvider); ok {
 		return vp.NudgeDelivered(sessName, content)
 	}
 	if err := m.sp.Nudge(sessName, content); err != nil {
-		return false, err
+		return runtime.NudgeDelivery{}, err
 	}
-	return true, nil
+	return runtime.NudgeDelivery{Delivered: true}, nil
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {
@@ -662,55 +672,57 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (runtime.NudgeDelivery, error) {
 	if transportFromMetadata(b) == "acp" {
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-			return false, err
+			return runtime.NudgeDelivery{}, err
 		}
 		return m.nudgeSession(ctx, sessName, message, false)
 	}
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-		return false, err
+		return runtime.NudgeDelivery{}, err
 	}
 	if providerKind(b) != "claude" {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
-	delivered, err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
-	if err != nil {
-		return false, nil
-	}
-	return delivered, nil
+	// A send that fails here downgrades to the queue: nil error, and whatever
+	// evidence the runtime produced before failing — zero when nothing
+	// landed, non-zero when it did, so the caller holds rather than queueing
+	// a duplicate (see runtime.NudgeDelivery).
+	delivery, _ := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
+	return delivery, nil
 }
 
-func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
+func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (runtime.NudgeDelivery, error) {
 	if !m.sp.IsRunning(sessName) {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	if transportFromMetadata(b) == "acp" {
 		return m.nudgeSession(ctx, sessName, message, false)
 	}
 	if providerKind(b) != "claude" {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
 	if !ok {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
-		return false, nil
+		return runtime.NudgeDelivery{}, nil
 	}
-	delivered, err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
-	if err != nil {
-		return false, nil
-	}
-	return delivered, nil
+	// A send that fails here downgrades to the queue: nil error, and whatever
+	// evidence the runtime produced before failing — zero when nothing
+	// landed, non-zero when it did, so the caller holds rather than queueing
+	// a duplicate (see runtime.NudgeDelivery).
+	delivery, _ := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true)
+	return delivery, nil
 }
 
 func (m *Manager) pendingInteractionLocked(sessName string) error {
@@ -745,59 +757,58 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 	b.Metadata[startupDialogVerifiedKey] = "true"
 }
 
-func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
+func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (runtime.NudgeDelivery, error) {
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-		return false, err
+		return runtime.NudgeDelivery{}, err
 	}
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
-		return false, err
+		return runtime.NudgeDelivery{}, err
 	}
-	delivered, err := m.nudgeSession(ctx, sessName, message, immediate)
+	delivery, err := m.nudgeSession(ctx, sessName, message, immediate)
 	if err != nil {
-		return false, err
+		// Evidence survives the error (see nudgeSession).
+		return delivery, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
 		m.markStartupDialogsVerifiedLocked(id, &b)
 	}
-	return delivered, nil
+	return delivery, nil
 }
 
-func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
-	var delivered bool
+func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) (runtime.NudgeDelivery, error) {
+	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+		delivery, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
 		return err
 	})
-	return delivered, err
+	return delivery, err
 }
 
-func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
-	var delivered bool
+func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (runtime.NudgeDelivery, error) {
+	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			delivered = false
+			delivery = runtime.NudgeDelivery{}
 			return nil
 		}
 		sent, err := m.nudgeSession(ctx, sessName, message, immediate)
-		if err != nil {
-			return err
-		}
-		delivered = sent
-		return nil
+		// Evidence survives the error (see nudgeSession).
+		delivery = sent
+		return err
 	})
-	return delivered, err
+	return delivery, err
 }
 
 // Start ensures the session runtime is live without sending a message.
@@ -829,9 +840,10 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string
 
 // Send resumes a suspended session if needed, then nudges the runtime with a
 // new user message.
-// Send returns whether the message actually reached the session terminal, not
-// merely whether the send path errored. See [Manager.nudgeContent].
-func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
+// Send returns the runtime's evidence about whether the message actually
+// reached the session terminal, not merely whether the send path errored. See
+// [Manager.nudgeContent].
+func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (runtime.NudgeDelivery, error) {
 	return m.send(ctx, id, message, resumeCommand, hints, false)
 }
 
@@ -839,56 +851,56 @@ func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, h
 // user message without waiting for an idle boundary when the runtime supports
 // immediate nudges. Falls back to Send semantics on runtimes without the
 // optional immediate nudge capability.
-// SendImmediate returns whether the message actually reached the session
-// terminal. See [Manager.nudgeContent].
-func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (bool, error) {
+// SendImmediate returns the runtime's evidence about whether the message
+// actually reached the session terminal. See [Manager.nudgeContent].
+func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) (runtime.NudgeDelivery, error) {
 	return m.send(ctx, id, message, resumeCommand, hints, true)
 }
 
 // SendLiveOnly nudges the runtime only when the current session is already
 // running. It never resumes or restarts the session.
-func (m *Manager) SendLiveOnly(ctx context.Context, id, message string) (bool, error) {
+func (m *Manager) SendLiveOnly(ctx context.Context, id, message string) (runtime.NudgeDelivery, error) {
 	return m.sendLiveOnly(ctx, id, message, false)
 }
 
 // SendImmediateLiveOnly is like SendLiveOnly but uses the immediate nudge path
 // when the runtime supports it. It never resumes or restarts the session.
-func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string) (bool, error) {
+func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string) (runtime.NudgeDelivery, error) {
 	return m.sendLiveOnly(ctx, id, message, true)
 }
 
 // TryWaitIdleNudge delivers a best-effort session nudge at a provider-defined
 // safe boundary. It resumes supported runtimes if needed, then reports whether
-// live delivery actually happened. Unsupported providers return (false, nil)
-// so higher layers can fall back to queue semantics without treating that as
-// an operational error.
-func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
-	var delivered bool
+// live delivery actually happened. Unsupported providers return a zero
+// delivery with a nil error so higher layers can fall back to queue semantics
+// without treating that as an operational error.
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (runtime.NudgeDelivery, error) {
+	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
+		delivery, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
 		return err
 	})
-	return delivered, err
+	return delivery, err
 }
 
 // TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
 // only when the runtime is already live. It never resumes or restarts the
 // session.
-func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (bool, error) {
-	var delivered bool
+func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string) (runtime.NudgeDelivery, error) {
+	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
+		delivery, err = m.tryWaitIdleNudgeLiveOnlyLocked(ctx, b, source, sessName, message)
 		return err
 	})
-	return delivered, err
+	return delivery, err
 }
 
 // StopTurn issues a provider-appropriate interrupt for the currently running

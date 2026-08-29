@@ -244,7 +244,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
-		event.payload.Delivered = boolPointer(result.Delivered)
+		event.payload.Delivered = boolPointer(result.Landed())
 		event.finish(err)
 	}()
 
@@ -263,16 +263,33 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+		// Mirror session.Manager's trust boundary (nudgeContent): a runtime
+		// that can vouch is asked for evidence, so an unconfirmed submit or a
+		// session that vanished mid-send reaches the caller as a result
+		// instead of being rounded up to Delivered by a nil error. Before
+		// gp-2io this arm reported Delivered on "no error", which acked
+		// queued nudges against runtimes whose Nudge treats a gone session as
+		// a successful no-op. Non-vouching providers keep the historical
+		// reading.
+		// reading. Evidence survives the error (see runtime.NudgeDelivery).
+		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.TextContent(req.Text))
+		result = nudgeResultFromDelivery(delivery)
+		if err != nil {
+			return result, err
 		}
-		result = NudgeResult{Delivered: true}
+		if !delivery.Landed() {
+			result.Undelivered = NudgeUndeliveredSessionNotLive
+		}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
-			return NudgeResult{}, err
+		delivery, err := h.nudgeNow(req.Text)
+		result = nudgeResultFromDelivery(delivery)
+		if err != nil {
+			return result, err
 		}
-		result = NudgeResult{Delivered: true}
+		if !delivery.Landed() {
+			result.Undelivered = NudgeUndeliveredSessionNotLive
+		}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		result, err = h.nudgeWaitIdle(ctx, req)
@@ -384,12 +401,42 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
 
-func (h *RuntimeHandle) nudgeNow(message string) error {
-	content := runtime.TextContent(message)
-	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
-		return immediate.NudgeNow(h.sessionName, content)
+// nudgeNow injects message immediately and returns the runtime's evidence
+// about it together with any error (see runtime.NudgeDelivery: an error never
+// erases evidence).
+func (h *RuntimeHandle) nudgeNow(message string) (runtime.NudgeDelivery, error) {
+	return providerNudgeNowDelivery(h.provider, h.sessionName, runtime.TextContent(message))
+}
+
+// providerNudgeDelivery asks p for delivery evidence when it can vouch and
+// falls back to the historical nil-error reading otherwise — the same trust
+// boundary session.Manager applies (nudgeContent), so a runtime-only handle
+// and a session handle carry the same evidence to the same callers.
+func providerNudgeDelivery(p runtime.Provider, name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if vp, ok := p.(runtime.NudgeVouchingProvider); ok {
+		return vp.NudgeDelivered(name, content)
 	}
-	return h.provider.Nudge(h.sessionName, content)
+	if err := p.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return runtime.NudgeDelivery{Delivered: true}, nil
+}
+
+// providerNudgeNowDelivery is providerNudgeDelivery for the immediate route:
+// evidence from a runtime that vouches for its immediate injection, the
+// historical reading from one that only offers NudgeNow, and the default
+// route's answer from one with neither.
+func providerNudgeNowDelivery(p runtime.Provider, name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if vp, ok := p.(runtime.ImmediateNudgeVouchingProvider); ok {
+		return vp.NudgeNowDelivered(name, content)
+	}
+	if np, ok := p.(runtime.ImmediateNudgeProvider); ok {
+		if err := np.NudgeNow(name, content); err != nil {
+			return runtime.NudgeDelivery{}, err
+		}
+		return runtime.NudgeDelivery{Delivered: true}, nil
+	}
+	return providerNudgeDelivery(p, name, content)
 }
 
 func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
@@ -397,10 +444,15 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		ctx = context.Background()
 	}
 	if h.transport == "acp" {
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.TextContent(req.Text))
+		result := nudgeResultFromDelivery(delivery)
+		if err != nil {
+			return result, err
 		}
-		return NudgeResult{Delivered: true}, nil
+		if !delivery.Landed() {
+			result.Undelivered = NudgeUndeliveredSessionNotLive
+		}
+		return result, nil
 	}
 	// Not a silent false: a caller that downgrades to the queue has to be able
 	// to say WHY, and "this provider cannot take live delivery" is a permanent
@@ -426,10 +478,16 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
-	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
-		return NudgeResult{}, err
+	delivery, err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text))
+	result := nudgeResultFromDelivery(delivery)
+	if err != nil {
+		// Evidence survives the error (see runtime.NudgeDelivery).
+		return result, err
 	}
-	return NudgeResult{Delivered: true}, nil
+	if !delivery.Landed() {
+		result.Undelivered = NudgeUndeliveredSessionNotLive
+	}
+	return result, nil
 }
 
 func formatRuntimeWaitIdleReminder(source, message string) string {

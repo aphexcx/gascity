@@ -251,42 +251,25 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 			Digest:        runtime.NudgePayloadDigest(nudge),
 		}
 		result, err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge)
-		switch {
-		case err != nil:
-			outcome.Status = extmsg.InboundDeliveryFailed
-			outcome.Error = err.Error()
-			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
-		case result.Delivered:
-			// The runtime reports it delivered the payload, so the delivered
-			// size is the reminder's own length — not a count read back out of
-			// the terminal, which no runtime offers.
-			//
-			// That is exact rather than optimistic on the tmux runtime this
-			// city uses: its send path stages the payload with one WriteString
-			// (short writes surface as an error) and pastes it with a single
-			// atomic tmux paste-buffer, so "some of it arrived" is not a state
-			// the transport can reach — it either delivers whole or errors into
-			// the arm above. Runtimes without that property inherit the
-			// honesty of their own Delivered flag, which is the same trust
-			// boundary every other caller of Nudge already relies on.
-			outcome.Status = extmsg.InboundDeliveryDelivered
-			outcome.DeliveredBytes = len(nudge)
-		default:
-			// No error, but the runtime reports it did not put the payload in a
-			// terminal. The default nudge semantics used above cold-wake the
-			// session and surface any failure as an error, so this arm is not
-			// reachable through today's call — it is here because the wait-idle
-			// and live-only nudge modes DO return (false, nil) when they
-			// downgrade to the queue, and a future switch to either must not
-			// silently start reporting queued nudges as delivered. That
-			// overclaim is the exact failure this receipt exists to eliminate.
-			outcome.Status = extmsg.InboundDeliveryFailed
-			if reason := string(result.Undelivered); reason != "" {
-				outcome.Error = "not delivered live: " + reason
-			} else {
-				outcome.Error = "not delivered live"
-			}
-			log.Printf("extmsg: notify %s not delivered live: %s", sessionSelector, outcome.Error)
+		// One decision point. Every fact the send path produced goes in —
+		// the error, the runtime's delivered flag, its byte count, its submit
+		// verdict, its downgrade reason — and the status comes out of
+		// extmsg.ClassifyInboundMember, whose table test is the spec. Nothing
+		// here re-reads the error or the flag on its own: on 2026-08-28 the
+		// runtime's "submit not confirmed" error was classified as failed with
+		// 0 bytes for a payload that had landed whole, and the consumer's
+		// clean re-post turned one founder message into six (gp-2io).
+		verdict := extmsg.ClassifyInboundMember(extmsg.InboundMemberEvidence{
+			NudgeDelivery: runtime.NudgeDelivery{Delivered: result.Delivered, Bytes: result.Bytes, Submit: result.Submit},
+			ExpectedBytes: len(nudge),
+			Err:           err,
+			Undelivered:   string(result.Undelivered),
+		})
+		outcome.Status = verdict.Status
+		outcome.DeliveredBytes = verdict.DeliveredBytes
+		outcome.Error = verdict.Reason
+		if verdict.Status != extmsg.InboundDeliveryDelivered {
+			log.Printf("extmsg: notify %s %s (%d/%d bytes): %s", sessionSelector, verdict.Status, verdict.DeliveredBytes, len(nudge), verdict.Reason)
 		}
 		record(outcome)
 	}

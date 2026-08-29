@@ -1657,7 +1657,12 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 				Source:   "sling",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
-			if nudgeErr == nil && result.Delivered {
+			if nudgeErr == nil {
+				// Unconfirmed submit = not live-delivered for this caller
+				// (gp-2io): fall through to the queue like any other error.
+				nudgeErr = result.UnconfirmedSubmitError(target.agent.QualifiedName())
+			}
+			if nudgeErr == nil && result.Landed() {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 				var sessFront *session.Store
 				if store != nil {

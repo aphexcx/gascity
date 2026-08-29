@@ -285,3 +285,139 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
 	}
 }
+
+// vouchingBackend implements [runtime.NudgeVouchingProvider] with fixed
+// evidence, so a test can see whether the router passed it through untouched.
+type vouchingBackend struct {
+	*runtime.Fake
+	delivery runtime.NudgeDelivery
+}
+
+func (b *vouchingBackend) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := b.Nudge(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return b.delivery, nil
+}
+
+func nudgeCalls(f *runtime.Fake) int {
+	n := 0
+	for _, c := range f.Calls {
+		if c.Method == "Nudge" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestNudgeDeliveredForwardsBackendEvidence: a backend's delivery evidence
+// must survive the hybrid hop unchanged — in particular an unconfirmed submit,
+// which is the difference between "hold" and the 2026-08-28 re-post storm
+// (gp-2io).
+func TestNudgeDeliveredForwardsBackendEvidence(t *testing.T) {
+	want := runtime.NudgeDelivery{Delivered: true, Bytes: 1215, Submit: runtime.NudgeSubmitUnconfirmed}
+	local := &vouchingBackend{Fake: runtime.NewFake(), delivery: want}
+	remote := runtime.NewFake()
+	p := New(local, remote, func(name string) bool { return name == "remote-worker" })
+
+	got, err := p.NudgeDelivered("mayor", runtime.TextContent("hello"))
+	if err != nil {
+		t.Fatalf("NudgeDelivered: %v", err)
+	}
+	if got != want {
+		t.Fatalf("NudgeDelivered = %+v, want the backend's evidence %+v passed through unchanged", got, want)
+	}
+	if n := nudgeCalls(remote); n != 0 {
+		t.Fatalf("remote backend received %d nudges, want 0 for a local session", n)
+	}
+}
+
+// TestNudgeDeliveredFallsBackToNudgeForNonVouchingBackend: a backend without
+// evidence is asked the old way and its nil error reported as a delivery with
+// no byte count and no submit verdict — nothing is fabricated, and its error
+// is still its error.
+func TestNudgeDeliveredFallsBackToNudgeForNonVouchingBackend(t *testing.T) {
+	local := runtime.NewFake()
+	remote := runtime.NewFake()
+	p := New(local, remote, func(name string) bool { return name == "remote-worker" })
+
+	got, err := p.NudgeDelivered("remote-worker", runtime.TextContent("hello"))
+	if err != nil {
+		t.Fatalf("NudgeDelivered: %v", err)
+	}
+	if want := (runtime.NudgeDelivery{Delivered: true}); got != want {
+		t.Fatalf("NudgeDelivered = %+v, want %+v (no bytes, no submit verdict from a backend that cannot vouch)", got, want)
+	}
+	if n := nudgeCalls(remote); n != 1 {
+		t.Fatalf("remote backend received %d nudges, want 1", n)
+	}
+	if n := nudgeCalls(local); n != 0 {
+		t.Fatalf("local backend received %d nudges, want 0 for a remote session", n)
+	}
+
+	p = New(runtime.NewFailFake(), remote, func(string) bool { return false })
+	if _, err := p.NudgeDelivered("worker", runtime.TextContent("hello")); err == nil {
+		t.Fatal("NudgeDelivered returned nil error from a failing backend, want its error")
+	}
+}
+
+var _ runtime.ImmediateNudgeVouchingProvider = (*Provider)(nil)
+
+// immediateVouchingBackend implements
+// [runtime.ImmediateNudgeVouchingProvider] with fixed evidence AND a fixed
+// error, so a test can see whether the router passes both through untouched.
+type immediateVouchingBackend struct {
+	*runtime.Fake
+	delivery runtime.NudgeDelivery
+	err      error
+}
+
+func (b *immediateVouchingBackend) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if err := b.NudgeNow(name, content); err != nil {
+		return runtime.NudgeDelivery{}, err
+	}
+	return b.delivery, b.err
+}
+
+// TestNudgeNowDeliveredForwardsBackendEvidenceAlongsideError: the immediate
+// route's evidence — including evidence that rides with an error, like a
+// hidden-attach fragment — must survive the hybrid hop, or the manager's
+// immediate/wait-idle paths would classify a landed payload as failed.
+func TestNudgeNowDeliveredForwardsBackendEvidenceAlongsideError(t *testing.T) {
+	want := runtime.NudgeDelivery{Delivered: true, Bytes: 41, Submit: runtime.NudgeSubmitUnconfirmed}
+	wantErr := errors.New("client closed after the paste")
+	local := &immediateVouchingBackend{Fake: runtime.NewFake(), delivery: want, err: wantErr}
+	p := New(local, runtime.NewFake(), func(string) bool { return false })
+
+	got, err := p.NudgeNowDelivered("mayor", runtime.TextContent("hello"))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("NudgeNowDelivered error = %v, want the backend's error passed through", err)
+	}
+	if got != want {
+		t.Fatalf("NudgeNowDelivered = %+v, want the backend's evidence %+v passed through unchanged alongside the error", got, want)
+	}
+}
+
+// TestNudgeNowDeliveredFallsBackForNonVouchingBackend: a backend with only
+// error-returning NudgeNow keeps the historical nil-error reading, and its
+// error stays its error with zero evidence — nothing fabricated either way.
+func TestNudgeNowDeliveredFallsBackForNonVouchingBackend(t *testing.T) {
+	p := New(runtime.NewFake(), runtime.NewFake(), func(string) bool { return false })
+
+	got, err := p.NudgeNowDelivered("mayor", runtime.TextContent("hello"))
+	if err != nil {
+		t.Fatalf("NudgeNowDelivered: %v", err)
+	}
+	if want := (runtime.NudgeDelivery{Delivered: true}); got != want {
+		t.Fatalf("NudgeNowDelivered = %+v, want %+v (no bytes, no submit verdict from a backend that cannot vouch)", got, want)
+	}
+
+	p = New(runtime.NewFailFake(), runtime.NewFake(), func(string) bool { return false })
+	got, err = p.NudgeNowDelivered("mayor", runtime.TextContent("hello"))
+	if err == nil {
+		t.Fatal("NudgeNowDelivered returned nil error from a failing backend, want its error")
+	}
+	if got.Landed() {
+		t.Fatalf("NudgeNowDelivered = %+v, want zero evidence from a backend that delivered nothing", got)
+	}
+}

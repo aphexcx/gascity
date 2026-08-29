@@ -299,7 +299,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
-		event.payload.Delivered = boolPointer(result.Delivered)
+		event.payload.Delivered = boolPointer(result.Landed())
 		event.finish(err)
 		if err == nil {
 			h.recordInvocationTelemetry(ctx)
@@ -321,59 +321,71 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
+			delivery, err := h.manager.SendLiveOnly(ctx, id, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				// Evidence survives the error (see runtime.NudgeDelivery).
+				result = nudgeResultFromDelivery(delivery)
+				return result, err
 			}
-			result = NudgeResult{Delivered: delivered}
+			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivered, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
-			return NudgeResult{}, err
+			// Evidence survives the error (see runtime.NudgeDelivery).
+			result = nudgeResultFromDelivery(delivery)
+			return result, err
 		}
 		// Delivered comes from the runtime, not from "err was nil". A runtime
 		// reports a vanished session as a successful no-op (best-effort wake
 		// semantics), so deriving Delivered from the error would vouch for a
 		// payload that reached nothing — which callers gating a dedup claim on
 		// this flag would then commit against. See runtime.NudgeVouchingProvider.
-		result = NudgeResult{Delivered: delivered}
-		if !delivered {
+		result = nudgeResultFromDelivery(delivery)
+		if !delivery.Landed() {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
+			delivery, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				// Evidence survives the error (see runtime.NudgeDelivery).
+				result = nudgeResultFromDelivery(delivery)
+				return result, err
 			}
-			result = NudgeResult{Delivered: delivered}
+			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivered, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
-			return NudgeResult{}, err
+			// Evidence survives the error (see runtime.NudgeDelivery).
+			result = nudgeResultFromDelivery(delivery)
+			return result, err
 		}
-		result = NudgeResult{Delivered: delivered}
-		if !delivered {
+		result = nudgeResultFromDelivery(delivery)
+		if !delivery.Landed() {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
+			delivery, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
 			if err != nil {
-				return NudgeResult{}, err
+				// Evidence survives the error (see runtime.NudgeDelivery).
+				result = nudgeResultFromDelivery(delivery)
+				return result, err
 			}
-			result = NudgeResult{Delivered: delivered}
+			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
-			return NudgeResult{}, err
+			// Evidence survives the error (see runtime.NudgeDelivery).
+			result = nudgeResultFromDelivery(delivery)
+			return result, err
 		}
-		result = NudgeResult{Delivered: delivered}
+		result = nudgeResultFromDelivery(delivery)
 		return result, nil
 	default:
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
