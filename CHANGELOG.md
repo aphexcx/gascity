@@ -7,7 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Added
 
 - **proxy_process services can report advisory degradation without losing
@@ -22,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had only "ready" or "degraded-and-unroutable", so such a service showed
   `ready` for the entire outage. Non-2xx health checks behave exactly as
   before; services that never set the header are unaffected.
-=======
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
@@ -44,7 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stands in for a missing `[pack].name`, and it can no longer rename a pack at
   publish time: the registry byte-compares it with `[pack].name`, so it can
   only restate the name `pack.toml` already declares.
->>>>>>> upstream/main
 
 ### Fixed
 

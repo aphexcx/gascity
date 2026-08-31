@@ -100,23 +100,15 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-<<<<<<< HEAD
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which runs bd's native
-"heartbeat <issue-id>" (renewing the claim lease so the bead never goes
-stale-lease while its worker is alive) and then stamps
+"heartbeat <issue-id>" (refreshing the claim lease — failing loudly when
+the caller no longer owns it — so the bead never goes stale-lease while
+its worker is alive) and then stamps
 "gc.last_heartbeat_at=<RFC3339 UTC now>" metadata so long-running workers
 can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
-=======
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
-<issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
-subcommand of its own: "release-if-current <issue-id> <assignee>", which
-conditionally resets an in-progress assignment only when the bead still has
-that assignee.
->>>>>>> upstream/main
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -126,11 +118,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-<<<<<<< HEAD
   gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
-=======
-  gc bd heartbeat my-project-abc     # refresh the claim lease you hold
->>>>>>> upstream/main
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -200,7 +188,6 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
-<<<<<<< HEAD
 // rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
 // subcommand into the metadata half of the heartbeat write pair:
 //
@@ -216,19 +203,6 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 // scope resolver still routes both writes to the correct rig store. Args that
 // do not begin with "heartbeat" pass through unchanged with an empty id.
 func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, string, error) {
-=======
-// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id>` subcommand and
-// forwards it to bd's NATIVE heartbeat, which pushes the claim's
-// lease_expires_at forward and fails loudly when the caller no longer owns
-// the claim (reclaimed lease, closed issue). gc used to rewrite this into
-// `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` — a write
-// nothing reads — which reported success while leaving the lease untouched,
-// so a worker's claim could go stale mid-task under a green heartbeat
-// (dip-wdt5aq). The id is validated here so a malformed id never reaches
-// bd's prefix-based rig auto-detection. Args that do not begin with
-// "heartbeat" pass through unchanged.
-func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
->>>>>>> upstream/main
 	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
 		return bdArgs, "", nil
 	}
@@ -240,105 +214,8 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
 		return nil, "", fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
-<<<<<<< HEAD
 	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
 	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, rest[0], nil
-=======
-	return []string{"heartbeat", rest[0]}, nil
-}
-
-// bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
-// whose rig segment is absent from the loaded city configuration. These values
-// are opaque to bd, so gc bd is the common admission boundary for stale and
-// external writers.
-//
-// Actor names without a slash remain compatible: historic dotted identities
-// are provenance, not rig-qualified routes. Both bd metadata spellings are
-// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
-// preflight cannot interpret exactly are refused before bd can mutate state.
-func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
-	verb, args := bdflags.SplitGlobalFlags(bdArgs)
-	if verb != "create" && verb != "update" {
-		return "", false
-	}
-	valueFlags := bdflags.ValueFlags(verb)
-	configuredRigs := make(map[string]struct{}, len(cfg.Rigs))
-	for _, rig := range cfg.Rigs {
-		configuredRigs[rig.Name] = struct{}{}
-	}
-
-	validate := func(key, value string) (string, bool) {
-		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
-			return "", false
-		}
-		rig, _, qualified := strings.Cut(value, "/")
-		if !qualified || rig == "" {
-			return "", false
-		}
-		if _, ok := configuredRigs[rig]; ok {
-			return "", false
-		}
-		return fmt.Sprintf("gc bd: refusing %s=%q: rig %q is not configured in this city\n", key, value, rig), true
-	}
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		value := ""
-		switch {
-		case arg == "--set-metadata" || arg == "--metadata":
-			if i+1 >= len(args) {
-				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
-			}
-			i++
-			value = args[i]
-		case strings.HasPrefix(arg, "--set-metadata="):
-			value = strings.TrimPrefix(arg, "--set-metadata=")
-		case strings.HasPrefix(arg, "--metadata="):
-			value = strings.TrimPrefix(arg, "--metadata=")
-		default:
-			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
-				i++
-			}
-			continue
-		}
-
-		if strings.HasPrefix(arg, "--set-metadata") {
-			key, metadataValue, ok := strings.Cut(value, "=")
-			if !ok || strings.TrimSpace(key) == "" {
-				return fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
-			}
-			if msg, refused := validate(key, metadataValue); refused {
-				return msg, true
-			}
-			continue
-		}
-
-		metadataJSON := strings.TrimSpace(value)
-		if strings.HasPrefix(metadataJSON, "@") {
-			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
-		}
-		var metadata map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
-			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
-		}
-		for key, rawValue := range metadata {
-			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
-				continue
-			}
-			var metadataValue string
-			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
-				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
-			}
-			if msg, refused := validate(key, metadataValue); refused {
-				return msg, true
-			}
-		}
-	}
-	return "", false
->>>>>>> upstream/main
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {

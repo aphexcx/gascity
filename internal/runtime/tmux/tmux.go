@@ -2418,27 +2418,27 @@ func (t *Tmux) nudgeSessionDelivery(session, message string) (runtime.NudgeDeliv
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
-<<<<<<< HEAD
-	// 1. Send the text as one bracketed paste, with retry on transient errors
-	written, err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout)
-	if err != nil {
-		return runtime.NudgeDelivery{}, err
-=======
 	// 1. Clear any pending input already sitting on the line before pasting,
 	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
 	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
 	// the input box, and this paste concatenates on top of it instead of
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
+	// Fork note: this REPLACES any stranded composed draft rather than
+	// stacking onto it — a deliberate semantic alongside the fork's
+	// pending-not-failed submit classification (gp-2io): the classifier stops
+	// wrongful redeliveries, and when a nudge does arrive, replacement beats
+	// stacking.
 	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
-		return err
+		return runtime.NudgeDelivery{}, err
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	// 2. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
-		return err
->>>>>>> upstream/main
+	// 2. Send the text as one bracketed paste, with retry on transient errors
+	// (typed delivery evidence: written bytes feed the receipt — gp-2io).
+	written, err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout)
+	if err != nil {
+		return runtime.NudgeDelivery{}, err
 	}
 	payloadBytes = written
 

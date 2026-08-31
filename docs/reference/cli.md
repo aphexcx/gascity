@@ -292,7 +292,6 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-<<<<<<< HEAD
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which runs bd's native
 "heartbeat &lt;issue-id&gt;" (renewing the claim lease so the bead never goes
@@ -301,14 +300,12 @@ stale-lease while its worker is alive) and then stamps
 can signal liveness to the dashboard, and
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
-=======
 All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
->>>>>>> upstream/main
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -326,11 +323,8 @@ gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
 gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-<<<<<<< HEAD
 gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
-=======
 gc bd heartbeat my-project-abc     # refresh the claim lease you hold
->>>>>>> upstream/main
 gc bd release-if-current my-project-abc worker-1
 ```
 

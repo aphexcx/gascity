@@ -2327,7 +2327,6 @@ func TestHeadLimitedWriter(t *testing.T) {
 	})
 }
 
-<<<<<<< HEAD
 // TestGcBdHeartbeatRenewsLeaseThenStampsMetadata pins the heartbeat write
 // pair: `gc bd heartbeat <id>` must first forward bd's native
 // `heartbeat <id>` (the lease renewal — without it every in_progress bead
@@ -2346,16 +2345,6 @@ func TestGcBdHeartbeatRenewsLeaseThenStampsMetadata(t *testing.T) {
 
 	// The fake bd appends each invocation's args so the assertion can check
 	// both writes and their order.
-=======
-// TestGcBdHeartbeatForwardsNativeLeaseRefresh pins the dip-wdt5aq fix:
-// `gc bd heartbeat <id>` must forward to bd's NATIVE heartbeat subcommand,
-// which refreshes lease_expires_at and fails loudly when the caller no longer
-// owns the claim. The old rewrite to `update --set-metadata` reported success
-// while leaving the lease untouched, so a reviewer's claim could be reclaimed
-// mid-review by a command that had just printed success.
-func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
-	// The fake bd captures its forwarded args so the assertion can inspect them.
->>>>>>> upstream/main
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\n")
 	t.Setenv("CAPTURE_PATH", capture)
@@ -2372,7 +2361,6 @@ func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	if calls[0] != "heartbeat demo-abc" {
 		t.Fatalf("first write = %q, want native lease renewal %q", calls[0], "heartbeat demo-abc")
 	}
-<<<<<<< HEAD
 	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
 	stamp, ok := strings.CutPrefix(calls[1], prefix)
 	if !ok {
@@ -2387,10 +2375,6 @@ func TestGcBdHeartbeatForwardsNativeLeaseRefresh(t *testing.T) {
 	}
 	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
 		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
-=======
-	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
-		t.Fatalf("forwarded args = %q, want native %q", gotArgs, "heartbeat demo-abc")
->>>>>>> upstream/main
 	}
 }
 
@@ -2456,13 +2440,8 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			}
 		}
 	})
-<<<<<<< HEAD
 	t.Run("rewrites a clean id to a set-metadata update and returns the id", func(t *testing.T) {
 		out, id, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
-=======
-	t.Run("forwards a clean id to bd's native heartbeat", func(t *testing.T) {
-		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
->>>>>>> upstream/main
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
