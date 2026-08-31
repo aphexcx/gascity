@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"time"
 )
 
 func TestExtractRigFlag(t *testing.T) {
