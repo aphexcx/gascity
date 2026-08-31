@@ -3306,7 +3306,7 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		call := name + " " + strings.Join(args, " ")
 		switch call {
-		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 0":
+		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 50":
 			return []byte(`[
 				{
 					"id":"ga-child",
@@ -6777,6 +6777,10 @@ case "$1" in
     printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
     ;;
   show)
+    # gc writes diagnostics to stderr on a read (scope disclosure, doctor
+    # warnings). The prune loop must not fold them into the JSON it parses,
+    # or every bead reads as "unknown" and nothing is ever pruned.
+    printf 'gc bd: answering from the city store\n' >&2
     case "$2" in
       ga-closed)
         printf '[{"id":"ga-closed","status":"closed","title":"Closed bead"}]\n'
