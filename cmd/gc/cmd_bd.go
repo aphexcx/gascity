@@ -128,9 +128,11 @@ shares with other cities names the city that owns it; each federated
 city's claim path refuses beads owned by another city. An owner: label
 you pass yourself via -l/--labels/--label is kept as given, and the
 gc-only --no-owner-label flag (stripped before dispatch) skips the stamp
-for one create. A create argv gc cannot scan is forwarded exactly as
-typed with a one-line notice on stderr, never refused. With the identity
-unset, create is untouched.
+for one create. A create argv gc cannot scan, and a batch create
+(--graph, --file, --stdin: its fields live in the file or stream, where bd
+never reads --labels, so label each item yourself), is forwarded exactly
+as typed with a one-line notice on stderr, never refused. With the
+identity unset, create is untouched.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -277,16 +279,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// On a federated city every bead this city creates names its owner
 	// (internal/federation): stamp `create` with --labels owner:<identity>
 	// unless the operator named an owner or opted out, and strip the gc-owned
-	// opt-out either way. An argv the scanner cannot parse is forwarded as
-	// typed with one notice — never refused — so no create that worked before
-	// the stamp existed breaks because of it.
-	owner, federated := cfg.Federation.OwnerLabel()
-	if rewritten, ambiguous := rewriteBdCreateOwnerLabel(bdArgs, owner); ambiguous {
-		if federated {
-			fmt.Fprintln(stderr, bdOwnerLabelNotInjectedNotice) //nolint:errcheck // best-effort stderr
-		}
-	} else {
-		bdArgs = rewritten
+	// opt-out on every path. The rewrite returns the argv bd receives, always,
+	// and a notice when a create was left unstamped (an argv the scanner cannot
+	// parse, or a batch create whose fields live in a file) — never a refusal,
+	// so no create that worked before the stamp existed breaks because of it.
+	owner, _ := cfg.Federation.OwnerLabel()
+	var ownerNotice string
+	bdArgs, ownerNotice = rewriteBdCreateOwnerLabel(bdArgs, owner)
+	if ownerNotice != "" {
+		fmt.Fprintln(stderr, ownerNotice) //nolint:errcheck // best-effort stderr
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)

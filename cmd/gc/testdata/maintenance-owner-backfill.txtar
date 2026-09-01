@@ -64,7 +64,7 @@ scope-local-v1
  {"id":"ci-4","title":"closed","status":"closed","issue_type":"task","assignee":"ci-abc12"},
  {"id":"ci-5","title":"ours in progress","status":"in_progress","issue_type":"task","assignee":"ci-wisp-77"},
  {"id":"ci-6","title":"unassigned legacy","status":"open","issue_type":"task"}
-]}
+],"revisions":{"ci-1":1,"ci-2":1,"ci-3":1,"ci-4":1,"ci-5":1,"ci-6":1},"revisions_sealed":true}
 -- plain/city.toml --
 [workspace]
 name = "plain"

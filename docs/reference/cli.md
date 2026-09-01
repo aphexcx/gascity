@@ -307,9 +307,11 @@ shares with other cities names the city that owns it; each federated
 city's claim path refuses beads owned by another city. An owner: label
 you pass yourself via -l/--labels/--label is kept as given, and the
 gc-only --no-owner-label flag (stripped before dispatch) skips the stamp
-for one create. A create argv gc cannot scan is forwarded exactly as
-typed with a one-line notice on stderr, never refused. With the identity
-unset, create is untouched.
+for one create. A create argv gc cannot scan, and a batch create
+(--graph, --file, --stdin: its fields live in the file or stream, where bd
+never reads --labels, so label each item yourself), is forwarded exactly
+as typed with a one-line notice on stderr, never refused. With the
+identity unset, create is untouched.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -2631,11 +2633,16 @@ listed in one of two buckets with the rule that decided it:
 
 The default is a dry run: nothing is written. --apply adds owner:&lt;identity&gt;
 to the OURS bucket only, one line per bead changed, and is idempotent: a
-labeled bead is no longer a candidate. THEIRS-OR-UNKNOWN is never touched —
-unlabeled legacy work stays claimable by anyone, per the federation
-convention — and closed beads are never read. The city (HQ) store is the
-default scope; --rig backfills one rig's store instead. The command refuses
-(exit 2) when [federation] identity is unset.
+labeled bead is no longer a candidate. Each write is made after a live
+re-read and fenced on the revision that re-read returned, so a bead that
+closed, gained an owner, or lost its signal since the list is skipped with
+the reason, and a store that cannot fence the write (no conditional writes,
+or no revision proven for the bead) gets no write at all and the command
+exits 1 naming the bead. THEIRS-OR-UNKNOWN is never touched — unlabeled
+legacy work stays claimable by anyone, per the federation convention — and
+closed beads are never read. The city (HQ) store is the default scope; --rig
+backfills one rig's store instead. The command refuses (exit 2) when
+[federation] identity is unset.
 
 It runs against the store directly, unlike 'status' and 'dolt-gc', which
 route through the supervisor.

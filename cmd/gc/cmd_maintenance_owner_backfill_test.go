@@ -81,7 +81,9 @@ func TestMaintenanceOwnerBackfillScript(t *testing.T) {
 }
 
 // staleReadStore serves Get from a substitute bead, standing in for a bead
-// that changed between the backfill's list and its write.
+// that changed between the backfill's list and its write. It exposes the
+// inner store's conditional writer the way the policy wrapper does, so the
+// write path under test is the fenced one.
 type staleReadStore struct {
 	beads.Store
 	fresh map[string]beads.Bead
@@ -93,6 +95,8 @@ func (s *staleReadStore) Get(id string) (beads.Bead, error) {
 	}
 	return s.Store.Get(id)
 }
+
+func (s *staleReadStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 // TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting: --apply must not
 // trust the dry-run snapshot. A bead that was closed, given an owner, or lost
@@ -124,9 +128,9 @@ func TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting(t *testing.T) {
 	store := &staleReadStore{Store: mem, fresh: map[string]beads.Bead{closed.ID: closedNow, owned.ID: ownedNow, moved.ID: movedNow}}
 
 	var stdout, stderr bytes.Buffer
-	labeled, skipped, failed := applyOwnerBackfill(store, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
-	if labeled != 1 || skipped != 3 || failed != 0 {
-		t.Fatalf("labeled/skipped/failed = %d/%d/%d, want 1/3/0; stdout=%q stderr=%q", labeled, skipped, failed, stdout.String(), stderr.String())
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(store, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 1 || skipped != 3 || unfenced != 0 || failed != 0 {
+		t.Fatalf("labeled/skipped/unfenced/failed = %d/%d/%d/%d, want 1/3/0/0; stdout=%q stderr=%q", labeled, skipped, unfenced, failed, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "labeled "+still.ID+" owner:citadel") {
 		t.Fatalf("stdout = %q, want the one labeled line", stdout.String())
@@ -149,5 +153,95 @@ func TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting(t *testing.T) {
 	}
 	if !beadLabelsContain(got.Labels, "owner:citadel") {
 		t.Fatalf("%s labels = %v, want owner:citadel", still.ID, got.Labels)
+	}
+}
+
+// TestApplyOwnerBackfillWritesThroughThePolicyWrapperFence: every store gc
+// opens is policy-wrapped, and the wrapper embeds the Store interface, so the
+// conditional writer is not promoted through it. The backfill must resolve
+// the fence through the wrapper's resolve target, or production never fences.
+func TestApplyOwnerBackfillWritesThroughThePolicyWrapperFence(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Title: "ours", Assignee: "ci-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := wrapStoreWithBeadPolicies(mem, federatedTestConfig("citadel"))
+	rows := ownerBackfillRows([]beads.Bead{b}, "ci", nil)
+	var stdout, stderr bytes.Buffer
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(store, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 1 || skipped != 0 || unfenced != 0 || failed != 0 {
+		t.Fatalf("labeled/skipped/unfenced/failed = %d/%d/%d/%d, want 1/0/0/0; stdout=%q stderr=%q", labeled, skipped, unfenced, failed, stdout.String(), stderr.String())
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beadLabelsContain(got.Labels, "owner:citadel") {
+		t.Fatalf("labels = %v, want owner:citadel", got.Labels)
+	}
+}
+
+// TestApplyOwnerBackfillSkipsABeadThatMovedBetweenReadAndWrite: the fence is
+// the revision the re-read returned; a bead that moved after it is skipped.
+func TestApplyOwnerBackfillSkipsABeadThatMovedBetweenReadAndWrite(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Title: "ours", Assignee: "ci-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store moves on after the re-read: a title edit bumps the revision,
+	// while the stale reader keeps serving the version the backfill saw.
+	retitled := "ours, edited meanwhile"
+	if err := mem.Update(b.ID, beads.UpdateOpts{Title: &retitled}); err != nil {
+		t.Fatal(err)
+	}
+	if b.Revision <= 0 {
+		t.Fatalf("MemStore.Create returned revision %d, want a positive one for this fixture", b.Revision)
+	}
+	store := &staleReadStore{Store: mem, fresh: map[string]beads.Bead{b.ID: b}}
+	rows := ownerBackfillRows([]beads.Bead{b}, "ci", nil)
+	var stdout, stderr bytes.Buffer
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(store, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 0 || skipped != 1 || unfenced != 0 || failed != 0 {
+		t.Fatalf("labeled/skipped/unfenced/failed = %d/%d/%d/%d, want 0/1/0/0; stdout=%q stderr=%q", labeled, skipped, unfenced, failed, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "skipped "+b.ID+": changed while labeling") {
+		t.Fatalf("stdout = %q, want the changed-while-labeling skip", stdout.String())
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beadLabelsContain(got.Labels, "owner:citadel") {
+		t.Fatalf("labels = %v, want no write on a moved revision", got.Labels)
+	}
+}
+
+// TestApplyOwnerBackfillRefusesAnUnfencedWrite: a store that cannot prove a
+// revision or fence the write gets no write at all — the backfill is
+// fail-closed, never a blind add.
+func TestApplyOwnerBackfillRefusesAnUnfencedWrite(t *testing.T) {
+	mem := beads.NewMemStore()
+	mem.DisableConditionalWrites = true
+	b, err := mem.Create(beads.Bead{Title: "ours", Assignee: "ci-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := ownerBackfillRows([]beads.Bead{b}, "ci", nil)
+	var stdout, stderr bytes.Buffer
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(mem, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 0 || skipped != 0 || unfenced != 1 || failed != 0 {
+		t.Fatalf("labeled/skipped/unfenced/failed = %d/%d/%d/%d, want 0/0/1/0; stdout=%q stderr=%q", labeled, skipped, unfenced, failed, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unfenced") || !strings.Contains(stderr.String(), b.ID) {
+		t.Fatalf("stderr = %q, want the bead named as unfenced", stderr.String())
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beadLabelsContain(got.Labels, "owner:citadel") {
+		t.Fatalf("labels = %v, want no write without a fence", got.Labels)
 	}
 }

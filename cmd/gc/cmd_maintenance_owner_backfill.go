@@ -105,11 +105,16 @@ listed in one of two buckets with the rule that decided it:
 
 The default is a dry run: nothing is written. --apply adds owner:<identity>
 to the OURS bucket only, one line per bead changed, and is idempotent: a
-labeled bead is no longer a candidate. THEIRS-OR-UNKNOWN is never touched —
-unlabeled legacy work stays claimable by anyone, per the federation
-convention — and closed beads are never read. The city (HQ) store is the
-default scope; --rig backfills one rig's store instead. The command refuses
-(exit 2) when [federation] identity is unset.
+labeled bead is no longer a candidate. Each write is made after a live
+re-read and fenced on the revision that re-read returned, so a bead that
+closed, gained an owner, or lost its signal since the list is skipped with
+the reason, and a store that cannot fence the write (no conditional writes,
+or no revision proven for the bead) gets no write at all and the command
+exits 1 naming the bead. THEIRS-OR-UNKNOWN is never touched — unlabeled
+legacy work stays claimable by anyone, per the federation convention — and
+closed beads are never read. The city (HQ) store is the default scope; --rig
+backfills one rig's store instead. The command refuses (exit 2) when
+[federation] identity is unset.
 
 It runs against the store directly, unlike 'status' and 'dolt-gc', which
 route through the supervisor.`,
@@ -185,32 +190,36 @@ func cmdMaintenanceOwnerBackfill(rigName string, apply bool, stdout, stderr io.W
 		return 0
 	}
 
-	labeled, skipped, failed := applyOwnerBackfill(store, rows, owner, hqPrefix, func(target string) bool { return config.FindAgent(cfg, target) != nil }, stdout, stderr)
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(store, rows, owner, hqPrefix, func(target string) bool { return config.FindAgent(cfg, target) != nil }, stdout, stderr)
 	summary := fmt.Sprintf("%d labeled %s, %d left unlabeled (%s)", labeled, owner, unknown, ownerBackfillUnknown)
 	if skipped > 0 {
 		summary += fmt.Sprintf(", %d skipped (changed since the list)", skipped)
 	}
+	if unfenced > 0 {
+		summary += fmt.Sprintf(", %d unfenced (not written)", unfenced)
+	}
 	fmt.Fprintln(stdout, summary) //nolint:errcheck // best-effort stdout
-	if failed > 0 {
-		fmt.Fprintf(stderr, "%s: %d bead(s) could not be labeled\n", cmdName, failed) //nolint:errcheck // best-effort stderr
+	if failed > 0 || unfenced > 0 {
+		fmt.Fprintf(stderr, "%s: %d bead(s) not labeled (%d unfenced, %d failed)\n", cmdName, failed+unfenced, unfenced, failed) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
 }
 
-// applyOwnerBackfill labels the OURS rows, re-reading each bead live first.
-// The rows are a snapshot: between the list and the write a bead can close,
-// gain an owner from the other city's sync, or lose the signal that made it
-// OURS, and a blind add would then label a closed bead or put two owners on
-// one. A bead that no longer classifies OURS on the live read is skipped with
-// the reason. When the store proves a revision for the re-read (a positive
-// one — a zero revision is "unknown", not "zero") and can write conditionally,
-// the write is fenced on it, so a change between the re-read and the write is
-// a skip too; otherwise the re-read is the check and the add-if-absent label
-// path is the write.
-func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPrefix string, poolResolves func(target string) bool, stdout, stderr io.Writer) (labeled, skipped, failed int) {
+// applyOwnerBackfill labels the OURS rows through ONE write path: re-read the
+// bead live, re-classify it with the dry run's rule, and write fenced on the
+// revision that re-read returned. The rows are a snapshot: between the list
+// and the write a bead can close, gain an owner from the other city's sync,
+// or lose the signal that made it OURS, and a blind add would then label a
+// closed bead or put two owners on one. A bead that no longer classifies OURS
+// on the re-read is skipped with the reason; one that moved between the
+// re-read and the write is skipped by the fence. A store that cannot fence —
+// no conditional writer, or no positive revision on the re-read (zero is
+// "unknown", not "zero") — gets NO write: the bead is reported unfenced and the
+// command exits non-zero. Fail-closed, never a blind add.
+func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPrefix string, poolResolves func(target string) bool, stdout, stderr io.Writer) (labeled, skipped, unfenced, failed int) {
 	const cmdName = "gc maintenance owner-backfill"
-	conditional, _ := beads.ConditionalWriterFor(store)
+	writer, fenceable := ownerBackfillConditionalWriter(store)
 	for _, row := range rows {
 		if row.Bucket != ownerBackfillOurs {
 			continue
@@ -227,30 +236,56 @@ func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPre
 			fmt.Fprintf(stdout, "skipped %s: %s\n", id, reason) //nolint:errcheck // best-effort stdout
 			continue
 		}
-		opts := beads.UpdateOpts{Labels: []string{owner}}
-		if conditional != nil && fresh.Revision > 0 {
-			err = conditional.UpdateIfMatch(id, fresh.Revision, opts)
-			var precondition *beads.PreconditionFailedError
-			switch {
-			case errors.As(err, &precondition):
-				skipped++
-				fmt.Fprintf(stdout, "skipped %s: changed while labeling (revision %d is now %d)\n", id, precondition.Expected, precondition.Current) //nolint:errcheck // best-effort stdout
-				continue
-			case errors.Is(err, beads.ErrConditionalWriteUnsupported):
-				err = store.Update(id, opts)
-			}
-		} else {
-			err = store.Update(id, opts)
-		}
-		if err != nil {
-			failed++
-			fmt.Fprintf(stderr, "%s: labeling %s: %v\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
+		switch {
+		case !fenceable:
+			unfenced++
+			fmt.Fprintf(stderr, "%s: %s unfenced: the store cannot write conditionally; not written\n", cmdName, id) //nolint:errcheck // best-effort stderr
+			continue
+		case fresh.Revision <= 0:
+			unfenced++
+			fmt.Fprintf(stderr, "%s: %s unfenced: the store proves no revision for it; not written\n", cmdName, id) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		labeled++
-		fmt.Fprintf(stdout, "labeled %s %s\n", id, owner) //nolint:errcheck // best-effort stdout
+		err = writer.UpdateIfMatch(id, fresh.Revision, beads.UpdateOpts{Labels: []string{owner}})
+		var precondition *beads.PreconditionFailedError
+		switch {
+		case err == nil:
+			labeled++
+			fmt.Fprintf(stdout, "labeled %s %s\n", id, owner) //nolint:errcheck // best-effort stdout
+		case errors.As(err, &precondition):
+			skipped++
+			fmt.Fprintf(stdout, "skipped %s: changed while labeling (revision %d is now %d)\n", id, precondition.Expected, precondition.Current) //nolint:errcheck // best-effort stdout
+		case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+			unfenced++
+			fmt.Fprintf(stderr, "%s: %s unfenced: %v; not written\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
+		default:
+			failed++
+			fmt.Fprintf(stderr, "%s: labeling %s: %v\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
+		}
 	}
-	return labeled, skipped, failed
+	return labeled, skipped, unfenced, failed
+}
+
+// ownerBackfillConditionalWriter resolves the store's conditional writer
+// through the wrappers gc puts around it. The policy wrapper every opened
+// store passes through embeds the Store interface, which does not promote the
+// optional capability, so it declares a resolve target instead; follow it.
+func ownerBackfillConditionalWriter(store beads.Store) (beads.ConditionalWriter, bool) {
+	for store != nil {
+		if writer, ok := beads.ConditionalWriterFor(store); ok {
+			return writer, true
+		}
+		target, ok := store.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			return nil, false
+		}
+		next := target.ConditionalWritesResolveTarget()
+		if next == nil || next == store {
+			return nil, false
+		}
+		store = next
+	}
+	return nil, false
 }
 
 // ownerBackfillStillOurs re-classifies one live bead with the rule the dry run

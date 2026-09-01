@@ -428,3 +428,15 @@ func TestGlobalFlagsTrackBd122(t *testing.T) {
 		t.Fatalf("SplitGlobalFlags = (%q, %v), want (create, [t])", sub, rest)
 	}
 }
+
+// bd 1.2.2's create surface: a flag the manifest lacks makes a valid create
+// argv look ambiguous to the owner-label injector, which then forwards it
+// unstamped — a federation fail-open, not a mere lint gap.
+func TestCreateFlagsTrackBd122(t *testing.T) {
+	if !ValueFlags("create")["--storage-class"] {
+		t.Error(`ValueFlags(create)["--storage-class"] = false, want true`)
+	}
+	if !BoolFlags("create")["--allow-empty-description"] {
+		t.Error(`BoolFlags(create)["--allow-empty-description"] = false, want true`)
+	}
+}

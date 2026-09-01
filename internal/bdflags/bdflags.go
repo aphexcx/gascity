@@ -38,8 +38,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--id": true, "-l": true, "--label": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
-		"--waits-for-gate": true, "--wisp-type": true,
+		"-s": true, "--status": true, "--storage-class": true, "--title": true, "-t": true, "--type": true,
+		"--waits-for": true, "--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {
 		"--acceptance": true, "--add-label": true, "--append-notes": true,
@@ -115,8 +115,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 // global set. Same keying convention as valueFlagsBySub.
 var boolFlagsBySub = map[string]map[string]bool{
 	"create": {
-		"--dry-run": true, "--ephemeral": true, "--force": true, "--no-history": true,
-		"--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
+		"--allow-empty-description": true, "--dry-run": true, "--ephemeral": true, "--force": true,
+		"--no-history": true, "--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
