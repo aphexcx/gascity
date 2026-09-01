@@ -100,31 +100,56 @@ func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error
 		return s.Store.Tx(commitMsg, fn)
 	}
 	return s.Store.Tx(commitMsg, func(tx beads.Tx) error {
-		return fn(ownerStampingTx{Tx: tx, store: s})
+		return fn(&ownerStampingTx{Tx: tx, store: s, created: make(map[string][]string)})
 	})
 }
 
 // ownerStampingTx is the transaction the policy wrapper hands out on a
-// federated city: every other verb is the inner transaction's.
+// federated city: every other verb is the inner transaction's. It remembers
+// what it created, because a parent created earlier in the same transaction
+// is not yet visible through the outer store and its children must still
+// inherit its lane.
 type ownerStampingTx struct {
 	beads.Tx
-	store *beadPolicyStore
+	store   *beadPolicyStore
+	created map[string][]string
 }
 
-func (tx ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
-	b.Labels = tx.store.ownerLabelsForCreate(b)
-	return tx.Tx.Create(b)
+func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
+	parentLabels, seen := tx.created[strings.TrimSpace(b.ParentID)]
+	if !seen {
+		parentLabels = tx.store.ownerParentLabels(b.ParentID)
+	}
+	b.Labels = tx.store.ownerLabelsForCreateUnder(b, parentLabels)
+	created, err := tx.Tx.Create(b)
+	if err == nil && created.ID != "" {
+		labels := created.Labels
+		if len(labels) == 0 {
+			labels = b.Labels
+		}
+		tx.created[created.ID] = labels
+	}
+	return created, err
 }
 
 // ownerLabelsForCreate applies the owner rule to one create: an owner on the
 // bead wins, else its parent's (read through the wrapped store), else this
 // city's. Reads the parent only on a federated city.
 func (s *beadPolicyStore) ownerLabelsForCreate(b beads.Bead) []string {
+	if s.ownerLabel() == "" {
+		return b.Labels
+	}
+	return s.ownerLabelsForCreateUnder(b, s.ownerParentLabels(b.ParentID))
+}
+
+// ownerLabelsForCreateUnder is ownerLabelsForCreate with the parent's labels
+// already in hand.
+func (s *beadPolicyStore) ownerLabelsForCreateUnder(b beads.Bead, parentLabels []string) []string {
 	owner := s.ownerLabel()
 	if owner == "" {
 		return b.Labels
 	}
-	return federation.OwnerLabelForChild(b.Labels, s.ownerParentLabels(b.ParentID), owner)
+	return federation.OwnerLabelForChild(b.Labels, parentLabels, owner)
 }
 
 // ownerParentLabels returns the labels of the bead a create names as parent,

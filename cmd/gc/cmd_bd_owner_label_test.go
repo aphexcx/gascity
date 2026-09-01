@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,8 @@ func TestStripBdNoOwnerLabel(t *testing.T) {
 		{"inline false is not an opt-out", []string{"create", "t", "--no-owner-label=false"}, []string{"create", "t"}, false},
 		{"after -- it is bd's positional", []string{"create", "--", "--no-owner-label"}, []string{"create", "--", "--no-owner-label"}, false},
 		{"ambiguous rest is left alone", []string{"create", "t", "--no-owner-label", "-p1"}, []string{"create", "t", "-p1"}, true},
+		{"a value flag's value is not a flag", []string{"create", "t", "--description", "--no-owner-label"}, []string{"create", "t", "--description", "--no-owner-label"}, false},
+		{"a malformed value is left for bd to reject", []string{"create", "t", "--no-owner-label=tru"}, []string{"create", "t", "--no-owner-label=tru"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,20 +47,30 @@ func TestStripBdNoOwnerLabel(t *testing.T) {
 // costs a scan of output that names no created bead, while a miss leaves a
 // bead unlabeled.
 func TestBdLooksLikeCreate(t *testing.T) {
-	yes := [][]string{{"create", "t"}, {"new", "t"}, {"--actor", "bob", "create", "t"}, {"--future-flag", "x", "create", "t"}, {"create", "--graph", "p.json"}}
-	// A verb-shaped token in a flag value ("--add-label create") is a
-	// tolerated false positive: it costs one scan of output that names no
-	// created bead and can write nothing.
-	no := [][]string{{"list"}, {"show", "--", "create"}, {"update", "x", "--add-label", "created"}, {}}
-	for _, args := range yes {
-		if !bdLooksLikeCreate(args) {
-			t.Errorf("bdLooksLikeCreate(%v) = false, want true", args)
+	create := [][]string{{"create", "t"}, {"new", "t"}, {"--actor", "bob", "create", "t"}, {"--database", "shared", "new", "t"}, {"create", "--graph", "p.json"}}
+	// A global flag's VALUE is never the verb: `--actor create show x` is a
+	// show, and stamping what it prints would mutate a read.
+	other := [][]string{{"list"}, {"show", "--", "create"}, {"--actor", "create", "show", "ci-1", "--json"}, {"update", "x", "--add-label", "create"}, {}}
+	// A leading flag neither global manifest knows hides the verb: gc cannot
+	// tell a create from a show, so it must not stamp — only say so.
+	hidden := [][]string{{"--future-flag", "x", "create", "t"}, {"--future-flag", "x", "list"}}
+	for _, args := range create {
+		if got := bdCreateVerdict(args); got != bdVerbCreate {
+			t.Errorf("bdCreateVerdict(%v) = %v, want create", args, got)
 		}
 	}
-	for _, args := range no {
-		if bdLooksLikeCreate(args) {
-			t.Errorf("bdLooksLikeCreate(%v) = true, want false", args)
+	for _, args := range other {
+		if got := bdCreateVerdict(args); got != bdVerbOther {
+			t.Errorf("bdCreateVerdict(%v) = %v, want other", args, got)
 		}
+	}
+	for _, args := range hidden {
+		if got := bdCreateVerdict(args); got != bdVerbHidden {
+			t.Errorf("bdCreateVerdict(%v) = %v, want hidden", args, got)
+		}
+	}
+	if !bdHasBoolFlag([]string{"create", "t", "--dry-run"}, "--dry-run") || bdHasBoolFlag([]string{"create", "t", "--description", "--dry-run"}, "--dry-run") {
+		t.Error("bdHasBoolFlag must skip a value flag's value")
 	}
 }
 
@@ -72,6 +85,7 @@ func TestBdCreatedIDs(t *testing.T) {
 	}{
 		{"single create", "\n✓ Created issue: hw-a1b — Fix the thing\n  Type:     task\n", []string{"hw-a1b"}},
 		{"single create without a title", "✓ Created issue: hw-a1b\n", []string{"hw-a1b"}},
+		{"hierarchical child id", "✓ Created issue: ci-root.1 — sub\n", []string{"ci-root.1"}},
 		{"json object", "{\n  \"id\": \"hw-a1b\",\n  \"title\": \"t\"\n}\n", []string{"hw-a1b"}},
 		{"json dry run has no id", "{\n  \"id\": \"\",\n  \"title\": \"t\"\n}\n", nil},
 		{"silent bare id", "hw-a1b\n", []string{"hw-a1b"}},
@@ -103,11 +117,16 @@ const createFakeBd = `#!/bin/sh
 printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 case "$1" in
   create|new)
-    if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi ;;
+    if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi
+    exit "${CREATE_EXIT:-0}" ;;
   show)
     labels=""
-    if [ "${LABELS:-}" != "" ]; then labels=$(printf '%s' "${LABELS}" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}'); fi
-    printf '[{"id":"%s","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z","labels":[%s]}]\n' "$3" "$labels" ;;
+    src="${LABELS:-}"
+    if [ "$3" = "demo-0" ]; then src="hold:mayor,owner:jadegate"; fi
+    if [ "$src" != "" ]; then labels=$(printf '%s' "$src" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}'); fi
+    parent=""
+    if [ "$3" != "demo-0" ] && [ "${PARENT:-}" != "" ]; then parent=",\"parent\":\"${PARENT}\""; fi
+    printf '[{"id":"%s","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z","labels":[%s]%s}]\n' "$3" "$labels" "$parent" ;;
 esac
 `
 
@@ -155,6 +174,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"dry run creates nothing", federatedDemoCityTOML, []string{"create", "t", "--dry-run"}, "", "⚠ [DRY RUN] Would create issue:\n  ID: demo-1\n  Title: t", "create t --dry-run", false, ""},
 		{"identity unset is byte-identical and silent", "[workspace]\nname = \"demo\"\n", []string{"create", "t", "-l", "foo"}, "", "", "create t -l foo", false, ""},
 		{"no id in the output is said out loud", federatedDemoCityTOML, []string{"create", "t", "--silent"}, "", "created something, format unknown", "create t --silent", false, bdOwnerLabelNotAppliedNotice},
+		{"a hidden verb is never stamped, only said", federatedDemoCityTOML, []string{"--future-flag", "x", "create", "t"}, "", "", "--future-flag x create t", false, bdOwnerLabelHiddenVerbNotice},
+		{"a value that spells the opt-out is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--no-owner-label"}, "", "", "create t --description --no-owner-label", true, ""},
+		{"an explicit owner beats an inherited one", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "-l", "owner:boomtown"}, "owner:boomtown,owner:jadegate", "", "create child --parent demo-0 -l owner:boomtown", false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,6 +185,12 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			t.Setenv("CAPTURE_PATH", capture)
 			t.Setenv("LABELS", tt.labels)
 			t.Setenv("CREATE_OUT", tt.createOut)
+			t.Setenv("CREATE_EXIT", "")
+			parent := ""
+			if slices.Contains(tt.args, "--parent") {
+				parent = "demo-0"
+			}
+			t.Setenv("PARENT", parent)
 
 			var stdout, stderr bytes.Buffer
 			if got := doBd(tt.args, &stdout, &stderr); got != 0 {
@@ -181,14 +209,20 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			if stamped != tt.wantStamp {
 				t.Fatalf("stamp write present = %v, want %v; calls=%q", stamped, tt.wantStamp, calls)
 			}
+			if strings.Contains(tt.labels, "owner:boomtown") {
+				if joined := strings.Join(calls, "\n"); !strings.Contains(joined, "update --json demo-1 --remove-label owner:jadegate") {
+					t.Fatalf("calls = %q, want the inherited owner removed", calls)
+				}
+			}
 			if tt.wantNote == "" && strings.Contains(stderr.String(), "owner label") {
 				t.Fatalf("unexpected owner-label notice: %q", stderr.String())
 			}
 			if tt.wantNote != "" && !strings.Contains(stderr.String(), tt.wantNote) {
 				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantNote)
 			}
-			// bd's own output still reaches the operator untouched.
-			if tt.createOut == "" && !strings.Contains(stdout.String(), "Created issue: demo-1") {
+			// bd's own output still reaches the operator untouched (the fake
+			// only prints when it actually runs its create branch).
+			if tt.createOut == "" && (tt.args[0] == "create" || tt.args[0] == "new") && !strings.Contains(stdout.String(), "Created issue: demo-1") {
 				t.Fatalf("stdout = %q, want bd's create line passed through", stdout.String())
 			}
 		})
@@ -213,5 +247,25 @@ func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("calls = %q, want %q", calls, want)
 		}
+	}
+}
+
+// TestGcBdCreateStampsWhatBdReportedEvenOnFailure: a batch that persisted
+// some beads and then failed still names them; they are labeled and the
+// exit code stays bd's.
+func TestGcBdCreateStampsWhatBdReportedEvenOnFailure(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("LABELS", "")
+	t.Setenv("CREATE_OUT", "✓ Created issue: demo-1 — first")
+	t.Setenv("CREATE_EXIT", "3")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
+		t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+	}
+	if calls := strings.Join(fakeBdCalls(t, capture), "\n"); !strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") {
+		t.Fatalf("calls = %q, want the reported bead labeled despite the failure", calls)
 	}
 }

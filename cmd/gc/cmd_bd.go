@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -286,7 +288,17 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	owner, federated := cfg.Federation.OwnerLabel()
 	var ownerOptOut bool
 	bdArgs, ownerOptOut = stripBdNoOwnerLabel(bdArgs)
-	stampOwner := federated && !ownerOptOut && bdLooksLikeCreate(bdArgs) && !bdHasBoolFlag(bdArgs, "--dry-run")
+	stampOwner := false
+	if federated && !ownerOptOut {
+		switch bdCreateVerdict(bdArgs) {
+		case bdVerbCreate:
+			stampOwner = !bdHasBoolFlag(bdArgs, "--dry-run")
+		case bdVerbHidden:
+			if slices.Contains(bdArgs, "create") || slices.Contains(bdArgs, "new") {
+				fmt.Fprintln(stderr, bdOwnerLabelHiddenVerbNotice) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
 	if err != nil {
@@ -451,16 +463,17 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
 	}
 	// Tee bd's stdout so the created ids can be read out of it; the operator
-	// still sees every byte. The create's exit code is the exit code: the
-	// stamp is a follow-up write that reports its own outcome on stderr.
-	created := &headLimitedWriter{limit: bdCreatedOutputScanLimit}
-	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, created)
-	if code != 0 {
-		return code
-	}
+	// still sees every byte. Whatever bd reported it created is labeled even
+	// when bd then exited non-zero (a batch that persisted some beads and
+	// failed on a later one), and the create's exit code stays the exit code:
+	// the stamp is a follow-up write that reports its own outcome on stderr.
+	var created bytes.Buffer
+	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, &created)
 	ids := bdCreatedIDs(created.String())
 	if len(ids) == 0 {
-		fmt.Fprintln(stderr, bdOwnerLabelNotAppliedNotice) //nolint:errcheck // best-effort stderr
+		if code == 0 {
+			fmt.Fprintln(stderr, bdOwnerLabelNotAppliedNotice) //nolint:errcheck // best-effort stderr
+		}
 		return code
 	}
 	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
@@ -471,10 +484,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	stampCreatedBeads(store, ids, owner, stderr)
 	return code
 }
-
-// bdCreatedOutputScanLimit bounds the copy of bd's create output kept for id
-// extraction; a create's own output is a few lines, a batch's a few hundred.
-const bdCreatedOutputScanLimit = 1 << 20
 
 // runBdSubprocess executes one bd invocation for doBd's passthrough handoff:
 // it wires the operator's stdio, traces the call, and maps the outcome onto
@@ -495,7 +504,10 @@ func runBdSubprocessTee(bdPath string, bdArgs []string, cityPath string, target 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	if stdoutTee != nil {
-		cmd.Stdout = io.MultiWriter(stdout, stdoutTee)
+		// The tee comes FIRST: io.MultiWriter stops at the first failing
+		// writer, and the operator's sink can close early (`| head`), which
+		// must not cost the copy the stamp reads.
+		cmd.Stdout = io.MultiWriter(stdoutTee, stdout)
 	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk

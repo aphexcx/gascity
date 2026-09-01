@@ -21,6 +21,7 @@ package federation
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -186,4 +187,42 @@ func OwnerLabelsForPlan(nodes []PlanNode, owner string) [][]string {
 		resolve(i)
 	}
 	return out
+}
+
+// OwnerLabels returns every owner label the bead carries, in order. A bead
+// carries at most one by convention; more than one means an explicit owner
+// met an inherited one, and the doors resolve that in the explicit one's
+// favor.
+func OwnerLabels(labels []string) []string {
+	var owners []string
+	for _, l := range labels {
+		if strings.HasPrefix(l, OwnerLabelPrefix) {
+			owners = append(owners, l)
+		}
+	}
+	return owners
+}
+
+// ChildLabels resolves the labels a create that names a parent should carry
+// on a backend that COPIES the parent's labels onto the child (bd does, unless
+// told not to). It is OwnerLabelForChild plus the one case that rule cannot
+// express there: a child that names its own owner under a parent owned by
+// another city. Copying would give it two owners, so the child takes the
+// parent's other labels itself and reports inherit=false — the caller must
+// then turn the backend's copying off for this create.
+func ChildLabels(labels, parentLabels []string, owner string) (out []string, inherit bool) {
+	explicit := OwnerOf(labels)
+	parentOwner := OwnerOf(parentLabels)
+	if explicit == "" || parentOwner == "" || explicit == parentOwner {
+		return OwnerLabelForChild(labels, parentLabels, owner), true
+	}
+	out = make([]string, 0, len(labels)+len(parentLabels))
+	out = append(out, labels...)
+	for _, l := range parentLabels {
+		if strings.HasPrefix(l, OwnerLabelPrefix) || slices.Contains(out, l) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, false
 }

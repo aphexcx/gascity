@@ -204,3 +204,49 @@ func TestBeadPolicyStoreChildOfAnOwnedParentInheritsThatOwner(t *testing.T) {
 		t.Fatalf("graph node labels = %v, want %v", got, want)
 	}
 }
+
+// TestBeadPolicyStoreTxChildInheritsAnInTransactionParent: a parent created
+// earlier in the same transaction is not yet visible through the outer store;
+// the transaction remembers what it created so its children still inherit.
+func TestBeadPolicyStoreTxChildInheritsAnInTransactionParent(t *testing.T) {
+	mem := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(&invisibleUntilCommitStore{Store: mem}, federatedTestConfig("citadel"))
+	var child beads.Bead
+	if err := store.Tx("t", func(tx beads.Tx) error {
+		parent, err := tx.Create(beads.Bead{Title: "jadegate epic", Labels: []string{"owner:jadegate"}})
+		if err != nil {
+			return err
+		}
+		child, err = tx.Create(beads.Bead{Title: "child", ParentID: parent.ID})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mem.Get(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Labels, []string{"owner:jadegate"}) {
+		t.Fatalf("child labels = %v, want the in-transaction parent's owner", got.Labels)
+	}
+}
+
+// invisibleUntilCommitStore hides every bead from Get while a transaction is
+// open, the way a real transactional backend does.
+type invisibleUntilCommitStore struct {
+	beads.Store
+	inTx bool
+}
+
+func (s *invisibleUntilCommitStore) Tx(msg string, fn func(tx beads.Tx) error) error {
+	s.inTx = true
+	defer func() { s.inTx = false }()
+	return s.Store.Tx(msg, fn)
+}
+
+func (s *invisibleUntilCommitStore) Get(id string) (beads.Bead, error) {
+	if s.inTx {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.Store.Get(id)
+}
