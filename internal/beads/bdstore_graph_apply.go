@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/federation"
 )
@@ -105,9 +106,39 @@ func (s *BdStore) stampGraphPlanOwner(plan *GraphApplyPlan) *GraphApplyPlan {
 	}
 	stamped := *plan
 	stamped.Nodes = make([]GraphApplyNode, len(plan.Nodes))
+	labels := federation.OwnerLabelsForPlan(graphPlanOwnerNodes(plan, s.ownerParentLabels), s.ownerLabel)
 	for i, node := range plan.Nodes {
-		node.Labels = federation.EnsureOwnerLabel(node.Labels, s.ownerLabel)
+		node.Labels = labels[i]
 		stamped.Nodes[i] = node
 	}
 	return &stamped
+}
+
+// graphPlanOwnerNodes projects a plan onto the owner rule's inputs: each
+// node's authored labels, its in-plan parent by key, and the labels of an
+// existing parent bead read through parentLabels (memoized per id).
+func graphPlanOwnerNodes(plan *GraphApplyPlan, parentLabels func(id string) []string) []federation.PlanNode {
+	index := make(map[string]int, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		if node.Key != "" {
+			index[node.Key] = i
+		}
+	}
+	read := make(map[string][]string)
+	nodes := make([]federation.PlanNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		pn := federation.PlanNode{Labels: node.Labels, ParentIndex: -1}
+		if node.ParentKey != "" {
+			if p, ok := index[node.ParentKey]; ok {
+				pn.ParentIndex = p
+			}
+		} else if id := strings.TrimSpace(node.ParentID); id != "" && parentLabels != nil {
+			if _, seen := read[id]; !seen {
+				read[id] = parentLabels(id)
+			}
+			pn.ParentLabels = read[id]
+		}
+		nodes[i] = pn
+	}
+	return nodes
 }

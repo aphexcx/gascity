@@ -1,205 +1,230 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/bdflags"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/federation"
 )
 
-// bdNoOwnerLabelFlag is the gc-owned opt-out on `gc bd create`: skip the
-// owner:<identity> stamp for this one create. It never reaches bd.
+// bdNoOwnerLabelFlag is the gc-owned opt-out on `gc bd create`: leave this
+// one create unlabeled. It never reaches bd.
 const bdNoOwnerLabelFlag = "--no-owner-label"
 
-// The one stderr line an operator sees when a federated city's `gc bd create`
-// was not stamped. Either way the create runs exactly as typed (minus the
-// gc-owned opt-out).
-const (
-	// bdOwnerLabelNotInjectedNotice: the argv could not be scanned.
-	bdOwnerLabelNotInjectedNotice = "gc bd: owner label not injected (ambiguous argv)"
-	// bdOwnerLabelBatchNotice: --graph/--file/--stdin creates carry their
-	// fields in the file or stream, where bd never reads --labels.
-	bdOwnerLabelBatchNotice = "gc bd: owner label not injected (batch create: --graph/--file/--stdin supply their own fields; add owner:<identity> to each item)"
-)
+// bdOwnerLabelNotAppliedNotice is the one stderr line an operator sees when a
+// federated city's create ran but gc could not find the created bead in bd's
+// output to label it. The create itself is untouched.
+const bdOwnerLabelNotAppliedNotice = "gc bd: owner label not applied (could not read the created bead id from bd's output)"
 
-// rewriteBdCreateOwnerLabel is the argv door of the federation owner label
-// (internal/federation). It returns the argv bd must receive — ALWAYS that,
-// on every path, which is why the caller has no branch — and a notice for the
-// operator, empty when there is nothing to say. On a `create` it appends
-// `--labels <owner>` unless the operator already named an owner via
-// -l/--labels/--label or opted out with --no-owner-label, and it strips the
-// gc-owned opt-out before bd sees it. owner is the full "owner:<identity>"
-// label, or "" on a non-federated city, where only the strip happens, the
-// notice is always empty, and every other argv is returned as it came.
+// The argv door of the federation owner label (internal/federation) works
+// AFTER the create, on the bead bd says it created:
 //
-// It scans fail-closed, like bdMutationWriteIDs: a flag the create manifest
-// does not know may consume the next token, so the label could land as a
-// positional and become the title — and a global flag the manifest does not
-// know may hide the verb itself. Such an argv is forwarded as it came, minus
-// the gc-owned opt-out (which bd would reject), with the ambiguous-argv
-// notice — not refused, not stamped — because a create that worked yesterday
-// must keep working today, and bd is the one to reject a flag it does not
-// take. A batch create (--graph, --file, --stdin) is forwarded the same way
-// with its own notice: its fields live in the file or stream, where bd never
-// reads --labels, so a stamp there would be silently dropped. The stamp lands
-// before a `--` terminator so it is read as a flag, never as a positional.
-func rewriteBdCreateOwnerLabel(bdArgs []string, owner string) ([]string, string) {
-	notice := func(text string) string {
-		if owner == "" {
-			return ""
-		}
-		return text
-	}
-	if bdLeadingFlagsHideTheVerb(bdArgs) {
-		// The verb cannot be located, so neither can a create be stamped nor
-		// its absence trusted; say so only when a create may be in there.
-		if slices.Contains(bdArgs, "create") {
-			return stripBdNoOwnerLabel(bdArgs), notice(bdOwnerLabelNotInjectedNotice)
-		}
-		return stripBdNoOwnerLabel(bdArgs), ""
-	}
-	sub, rest := bdflags.SplitGlobalFlags(bdArgs)
-	if sub != "create" {
-		return bdArgs, ""
-	}
-	head := bdArgs[:len(bdArgs)-len(rest)] // the global flags and the verb
-	valueFlags := bdflags.ValueFlags("create")
-	boolFlags := bdflags.BoolFlags("create")
-	gcFlags := bdflags.GCOwnedBoolFlags("create")
+//  1. The argv reaches bd exactly as typed, minus the gc-owned opt-out. gc
+//     does not parse bd's create surface — every alias, inline boolean,
+//     batch mode, inherited label and flag bd adds tomorrow is bd's own
+//     business — so no create that worked yesterday can break, and nothing
+//     gc fails to understand can leave a bead silently unlabeled.
+//  2. bd's stdout is teed and the ids it reports as created are read out of
+//     it (its single-create line, its --json object, its --silent bare id,
+//     its --graph and --file listings).
+//  3. Each created bead is read back through the store and labeled
+//     owner:<identity> unless it already carries an owner — its own, or one
+//     bd copied from its parent. The bead's stored labels are the operand no
+//     argv variant can move.
+//
+// A create whose output names no bead (a format gc does not know) is said
+// out loud, once, on stderr; a --dry-run creates nothing and is left alone.
 
-	out := make([]string, 0, len(bdArgs)+2)
-	out = append(out, head...)
-	optOut, hasOwner, batch := false, false, false
-	terminator := -1 // index in out of the "--" token, when present
-	for i := 0; i < len(rest); i++ {
-		tok := rest[i]
-		switch {
-		case terminator >= 0:
-			out = append(out, tok)
-			continue
-		case tok == "--":
-			terminator = len(out)
-			out = append(out, tok)
-			continue
-		case !strings.HasPrefix(tok, "-") || tok == "-":
+// stripBdNoOwnerLabel removes the gc-owned opt-out in every spelling bd's flag
+// parser would accept for a boolean (bare, =true, =false, =1, =0 …) from the
+// tokens before a `--` terminator, and reports whether the operator opted out
+// — which `=false` does not.
+func stripBdNoOwnerLabel(bdArgs []string) ([]string, bool) {
+	out := make([]string, 0, len(bdArgs))
+	optOut := false
+	seenTerminator := false
+	for _, tok := range bdArgs {
+		if seenTerminator || tok == "--" {
+			seenTerminator = true
 			out = append(out, tok)
 			continue
 		}
 		name, value, inline := strings.Cut(tok, "=")
-		switch {
-		case gcFlags[name]:
-			if name == bdNoOwnerLabelFlag {
-				optOut = true
-			}
-			continue // gc-owned: consumed here, never forwarded
-		case boolFlags[name]:
+		if name != bdNoOwnerLabelFlag {
 			out = append(out, tok)
-			if bdCreateBatchFlag(name) {
-				batch = true
-			}
-		case valueFlags[name]:
-			if !inline {
-				if i+1 >= len(rest) {
-					return stripBdNoOwnerLabel(bdArgs), notice(bdOwnerLabelNotInjectedNotice) // a value flag with no value: bd's error to give
-				}
-				i++
-				value = rest[i]
-				out = append(out, tok, value)
-			} else {
-				out = append(out, tok)
-			}
-			if bdCreateLabelFlag(name) && bdLabelValueNamesOwner(value) {
-				hasOwner = true
-			}
-			if bdCreateBatchFlag(name) {
-				batch = true
-			}
-		default:
-			return stripBdNoOwnerLabel(bdArgs), notice(bdOwnerLabelNotInjectedNotice)
-		}
-	}
-	if batch {
-		return out, notice(bdOwnerLabelBatchNotice)
-	}
-	if optOut || hasOwner || owner == "" {
-		return out, ""
-	}
-	stamp := []string{"--labels", owner}
-	if terminator >= 0 {
-		return slices.Insert(out, terminator, stamp...), ""
-	}
-	return append(out, stamp...), ""
-}
-
-// bdCreateBatchFlag reports whether name selects one of bd create's batch
-// modes, whose per-item fields come from a file or stream: --graph <plan>,
-// --file/-f <markdown>, --stdin.
-func bdCreateBatchFlag(name string) bool {
-	switch name {
-	case "--graph", "--file", "-f", "--stdin":
-		return true
-	}
-	return false
-}
-
-// bdLeadingFlagsHideTheVerb reports whether a flag before the verb is one
-// neither global manifest knows. SplitGlobalFlags skips such a flag as if it
-// took no value, so `--future-flag x create t` would read x as the verb: the
-// verb is undecidable from this argv.
-func bdLeadingFlagsHideTheVerb(bdArgs []string) bool {
-	valueFlags := bdflags.GlobalValueFlags()
-	boolFlags := bdflags.GlobalBoolFlags()
-	for i := 0; i < len(bdArgs); i++ {
-		tok := bdArgs[i]
-		if !strings.HasPrefix(tok, "-") || tok == "-" || tok == "--" {
-			return false // the verb (or a positional) — the leading flags are done
-		}
-		name, _, inline := strings.Cut(tok, "=")
-		switch {
-		case boolFlags[name]:
-		case valueFlags[name]:
-			if !inline {
-				i++
-			}
-		default:
-			return true
-		}
-	}
-	return false
-}
-
-// stripBdNoOwnerLabel returns bdArgs without the gc-owned opt-out tokens that
-// precede a `--` terminator: whatever else happens to the argv, bd must never
-// see a flag only gc takes.
-func stripBdNoOwnerLabel(bdArgs []string) []string {
-	out := make([]string, 0, len(bdArgs))
-	seenTerminator := false
-	for _, tok := range bdArgs {
-		if tok == "--" {
-			seenTerminator = true
-		}
-		if !seenTerminator && tok == bdNoOwnerLabelFlag {
 			continue
 		}
-		out = append(out, tok)
+		if !inline {
+			optOut = true
+			continue
+		}
+		if v, err := strconv.ParseBool(value); err != nil || v {
+			optOut = true // an unparseable value: bd would have rejected it; treat as the bare flag
+		}
 	}
-	return out
+	return out, optOut
 }
 
-// bdCreateLabelFlag reports whether name is one of bd create's label flags:
-// -l, --labels, and the hidden --label alias bd also accepts.
-func bdCreateLabelFlag(name string) bool {
-	return name == "-l" || name == "--labels" || name == "--label"
-}
-
-// bdLabelValueNamesOwner reports whether a label flag's value (bd takes a
-// comma-separated list per occurrence) already names an owner.
-func bdLabelValueNamesOwner(value string) bool {
-	for _, label := range strings.Split(value, ",") {
-		if strings.HasPrefix(strings.TrimSpace(label), federation.OwnerLabelPrefix) {
+// bdLooksLikeCreate reports whether the argv may be a create: `create` or its
+// alias `new` anywhere before a `--` terminator. Generous on purpose — a
+// global flag gc does not know may sit before the verb and hide it — because
+// a false positive costs one scan of output that names no created bead, while
+// a miss leaves a bead unlabeled.
+func bdLooksLikeCreate(bdArgs []string) bool {
+	for _, tok := range bdArgs {
+		if tok == "--" {
+			return false
+		}
+		if tok == "create" || tok == "new" {
 			return true
 		}
 	}
 	return false
+}
+
+// bdHasBoolFlag reports whether a boolean flag is set in the tokens before a
+// `--` terminator, honoring an inline value.
+func bdHasBoolFlag(bdArgs []string, flag string) bool {
+	for _, tok := range bdArgs {
+		if tok == "--" {
+			return false
+		}
+		name, value, inline := strings.Cut(tok, "=")
+		if name != flag {
+			continue
+		}
+		if !inline {
+			return true
+		}
+		if v, err := strconv.ParseBool(value); err != nil || v {
+			return true
+		}
+	}
+	return false
+}
+
+// bdBeadIDRE is the shape of a bead id (<prefix>-<suffix>, with an optional
+// class or wisp segment); anything else in bd's output is not an id.
+var bdBeadIDRE = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$`)
+
+var (
+	// bdCreatedIssueRE matches bd's single-create success line:
+	//   ✓ Created issue: <id> — <title>
+	bdCreatedIssueRE = regexp.MustCompile(`Created issue: (\S+)`)
+	// bdGraphCreatedRE matches one line of `bd create --graph`'s text listing
+	// after its "Created N issues" header:   <key> -> <id>
+	bdGraphCreatedRE = regexp.MustCompile(`^\s+\S+ -> (\S+)\s*$`)
+	// bdMarkdownCreatedRE matches one line of `bd create --file`'s text
+	// listing after its "Created N issues from <file>:" header:
+	//   <id>: <title> [P<n>, <type>]
+	bdMarkdownCreatedRE = regexp.MustCompile(`^\s+(\S+): .*\[P\d+, [^\]]+\]\s*$`)
+)
+
+// bdCreatedIDs reads the ids bd reports as created out of its stdout, in
+// bd 1.2.2's own shapes: the single-create line, the --json object (or the
+// --file array of objects, or the --graph {"ids":{key:id}} object), the
+// --silent bare id, and the --graph / --file text listings. A dry run
+// previews with an empty id and creates nothing; it yields none.
+func bdCreatedIDs(out string) []string {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return nil
+	}
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && bdBeadIDRE.MatchString(id) && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var single struct {
+			ID  string            `json:"id"`
+			IDs map[string]string `json:"ids"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &single); err == nil {
+			add(single.ID)
+			keys := make([]string, 0, len(single.IDs))
+			for k := range single.IDs {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			for _, k := range keys {
+				add(single.IDs[k])
+			}
+		}
+		var many []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &many); err == nil {
+			for _, m := range many {
+				add(m.ID)
+			}
+		}
+		return ids
+	}
+	inGraphListing, inMarkdownListing := false, false
+	for _, line := range strings.Split(out, "\n") {
+		if m := bdCreatedIssueRE.FindStringSubmatch(line); m != nil {
+			add(m[1])
+			continue
+		}
+		switch {
+		case strings.Contains(line, "Created ") && strings.Contains(line, " issues from "):
+			inMarkdownListing, inGraphListing = true, false
+			continue
+		case strings.HasPrefix(strings.TrimSpace(line), "Created ") && strings.Contains(line, " issues"):
+			inGraphListing, inMarkdownListing = true, false
+			continue
+		}
+		if inGraphListing {
+			if m := bdGraphCreatedRE.FindStringSubmatch(line); m != nil {
+				add(m[1])
+				continue
+			}
+		}
+		if inMarkdownListing {
+			if m := bdMarkdownCreatedRE.FindStringSubmatch(line); m != nil {
+				add(m[1])
+				continue
+			}
+		}
+		// --silent prints the bare id and nothing else.
+		if bare := strings.TrimSpace(line); bare == line && bdBeadIDRE.MatchString(bare) {
+			add(bare)
+		}
+	}
+	return ids
+}
+
+// stampCreatedBeads labels each created bead owner unless it already carries
+// an owner (its own, or one bd copied from its parent), reading each one back
+// through the store first. Every failure is named on stderr; the create has
+// already happened, so nothing here changes the exit code.
+func stampCreatedBeads(store beads.Store, ids []string, owner string, stderr io.Writer) (stamped, kept, failed int) {
+	for _, id := range ids {
+		bead, err := store.Get(id)
+		if err != nil {
+			failed++
+			fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: reading it back: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if federation.HasOwnerLabel(bead.Labels) {
+			kept++
+			continue
+		}
+		if err := store.Update(id, beads.UpdateOpts{Labels: []string{owner}}); err != nil {
+			failed++
+			fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		stamped++
+	}
+	return stamped, kept, failed
 }

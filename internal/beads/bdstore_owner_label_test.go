@@ -3,6 +3,7 @@ package beads_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -104,5 +105,47 @@ func TestBdStoreApplyGraphPlanStampsTheOwnerLabel(t *testing.T) {
 	}
 	if plan.Nodes[0].Labels != nil || !reflect.DeepEqual(plan.Nodes[1].Labels, []string{"pool:x"}) {
 		t.Fatalf("caller's plan was mutated: %+v", plan.Nodes)
+	}
+}
+
+// TestBdStoreCreateUnderAnOwnedParentInheritsThatOwner: bd copies a parent's
+// labels onto the child, so a child of another city's bead must carry that
+// owner and not a second one; the store reads the parent first.
+func TestBdStoreCreateUnderAnOwnedParentInheritsThatOwner(t *testing.T) {
+	tests := []struct {
+		name         string
+		parentLabels string // JSON array body for show --json
+		parentErr    bool
+		want         string
+	}{
+		{"parent owned by another city", `"hold:mayor","owner:jadegate"`, false, "owner:jadegate"},
+		{"parent without an owner", `"hold:mayor"`, false, "owner:citadel"},
+		{"parent unreadable: the creator's owner", "", true, "owner:citadel"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var createArgs []string
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				switch args[0] {
+				case "show":
+					if tt.parentErr {
+						return nil, errors.New("bd show: boom")
+					}
+					return []byte(`[{"id":"P","title":"parent","status":"open","issue_type":"epic","created_at":"2026-09-01T00:00:00Z","labels":[` + tt.parentLabels + `]}]`), nil
+				case "create":
+					createArgs = args
+					return []byte(`{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z"}`), nil
+				}
+				return nil, errors.New("unexpected: " + strings.Join(args, " "))
+			}
+			s := beads.NewBdStore("/city", runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
+			if _, err := s.Create(beads.Bead{Title: "t", ParentID: "P"}); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := bdCreateLabelsArg(t, createArgs)
+			if !ok || got != tt.want {
+				t.Fatalf("--labels = %q (present=%v), want %q; args=%q", got, ok, tt.want, strings.Join(createArgs, " "))
+			}
+		})
 	}
 }

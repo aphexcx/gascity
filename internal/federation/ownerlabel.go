@@ -126,3 +126,64 @@ func HasHandoffTo(labels []string, identity string) bool {
 	}
 	return false
 }
+
+// OwnerLabelForChild is the one rule for a create that names a parent. An
+// owner already on the child wins. Otherwise the child stays in its parent's
+// lane: bd copies a parent's labels onto a child by default, so a child of
+// another city's bead would otherwise end up with two owners, and on a
+// backend that does not copy labels it would end up in the wrong lane —
+// either way the parent's owner is the child's. Only a child of an unowned
+// parent (or with no parent) is the creating city's. With an empty owner
+// (not federated) the inherited owner still applies and nothing else does.
+func OwnerLabelForChild(labels, parentLabels []string, owner string) []string {
+	if HasOwnerLabel(labels) {
+		return labels
+	}
+	if inherited := OwnerOf(parentLabels); inherited != "" {
+		return EnsureOwnerLabel(labels, OwnerLabelPrefix+inherited)
+	}
+	return EnsureOwnerLabel(labels, owner)
+}
+
+// PlanNode is one node of a bulk create for OwnerLabelsForPlan: its authored
+// labels, the index of its in-plan parent (or -1), and the labels of the
+// existing bead it names as parent (nil when it names none or it could not be
+// read).
+type PlanNode struct {
+	Labels       []string
+	ParentIndex  int
+	ParentLabels []string
+}
+
+// OwnerLabelsForPlan applies OwnerLabelForChild to every node of a bulk
+// create, in dependency order: a node under an in-plan parent takes that
+// parent's EFFECTIVE labels (after its own resolution), so a whole subtree
+// created under another city's bead stays in that city's lane. A cycle or a
+// bad parent index resolves as "no in-plan parent".
+func OwnerLabelsForPlan(nodes []PlanNode, owner string) [][]string {
+	out := make([][]string, len(nodes))
+	done := make([]bool, len(nodes))
+	visiting := make([]bool, len(nodes))
+	var resolve func(i int) []string
+	resolve = func(i int) []string {
+		if done[i] {
+			return out[i]
+		}
+		if visiting[i] {
+			return nodes[i].Labels // cycle: fall back to the authored labels
+		}
+		visiting[i] = true
+		parentLabels := nodes[i].ParentLabels
+		if p := nodes[i].ParentIndex; p >= 0 && p < len(nodes) && p != i {
+			parentLabels = resolve(p)
+		}
+		out[i] = OwnerLabelForChild(nodes[i].Labels, parentLabels, owner)
+		visiting[i] = false
+		done[i] = true
+		return out[i]
+	}
+	for i := range nodes {
+		resolve(i)
+	}
+	return out
+}

@@ -464,6 +464,22 @@ func WithBdStoreOwnerLabel(owner string) BdStoreOption {
 	}
 }
 
+// ownerParentLabels returns the labels of the bead a create names as parent,
+// for the owner stamp's inheritance rule, or nil when there is no parent or
+// it cannot be read (the create then carries the creator's owner and bd's
+// own inheritance decides the rest).
+func (s *BdStore) ownerParentLabels(parentID string) []string {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil
+	}
+	return parent.Labels
+}
+
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
 // ledger no longer serves, so its SQL-backed reads stop believing the empty
 // result bd hands back for beads it cannot see: a read scoped to one bead
@@ -1128,7 +1144,13 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 	if len(b.Needs) > 0 {
 		args = append(args, "--deps", strings.Join(b.Needs, ","))
 	}
-	if labels := federation.EnsureOwnerLabel(b.Labels, s.ownerLabel); len(labels) > 0 {
+	labels := b.Labels
+	if s.ownerLabel != "" {
+		// Read the parent first: bd copies its labels onto the child, and a
+		// child of another city's bead must carry that owner, not a second.
+		labels = federation.OwnerLabelForChild(b.Labels, s.ownerParentLabels(b.ParentID), s.ownerLabel)
+	}
+	if len(labels) > 0 {
 		args = append(args, "--labels", strings.Join(labels, ","))
 	}
 	if b.ParentID != "" {

@@ -300,18 +300,20 @@ can signal liveness to the dashboard, and
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
-On a city whose city.toml sets [federation] identity = "&lt;name&gt;", "gc bd
-create" (in the city scope and every rig scope) appends
---labels owner:&lt;name&gt;, so every bead this city creates in a bead store it
+On a city whose city.toml sets [federation] identity = "&lt;name&gt;", every
+bead "gc bd create" makes (in the city scope and every rig scope) is
+labeled owner:&lt;name&gt;, so every bead this city creates in a bead store it
 shares with other cities names the city that owns it; each federated
 city's claim path refuses beads owned by another city. An owner: label
-you pass yourself via -l/--labels/--label is kept as given, and the
-gc-only --no-owner-label flag (stripped before dispatch) skips the stamp
-for one create. A create argv gc cannot scan, and a batch create
-(--graph, --file, --stdin: its fields live in the file or stream, where bd
-never reads --labels, so label each item yourself), is forwarded exactly
-as typed with a one-line notice on stderr, never refused. With the
-identity unset, create is untouched.
+you pass yourself, or one bd copies from the bead's --parent, is kept as
+given (a child stays in its parent's lane), and the gc-only
+--no-owner-label flag (stripped before dispatch) leaves one create
+unlabeled. The argv itself reaches bd exactly as typed: the label is
+applied AFTER the create, to the bead bd reports it created (one label
+write per created bead, batch creates included), so nothing gc does not
+understand about bd's create surface can break a create or leave a bead
+silently unlabeled. A create whose output names no bead is said out loud
+on stderr. With the identity unset, create is untouched.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need

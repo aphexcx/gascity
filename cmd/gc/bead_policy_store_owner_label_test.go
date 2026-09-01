@@ -139,3 +139,68 @@ func TestBeadPolicyStoreStampsTheOwnerLabelInsideATransaction(t *testing.T) {
 		t.Fatalf("labels = %v, want %v", got.Labels, want)
 	}
 }
+
+// TestBeadPolicyStoreChildOfAnOwnedParentInheritsThatOwner: on every backend
+// — not only bd, which copies parent labels itself — a child created under
+// another city's bead stays in that city's lane, through Create, a
+// transaction, and a graph node that names an existing parent.
+func TestBeadPolicyStoreChildOfAnOwnedParentInheritsThatOwner(t *testing.T) {
+	mem := beads.NewMemStore()
+	parent, err := mem.Create(beads.Bead{Title: "jadegate epic", Type: "epic", Labels: []string{"owner:jadegate"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanParent, err := mem.Create(beads.Bead{Title: "unowned epic", Type: "epic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := wrapStoreWithBeadPolicies(mem, federatedTestConfig("citadel"))
+
+	child, err := store.Create(beads.Bead{Title: "child", ParentID: parent.ID, Labels: []string{"pool:x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mem.Get(child.ID); !reflect.DeepEqual(got.Labels, []string{"pool:x", "owner:jadegate"}) {
+		t.Fatalf("Create child labels = %v, want the parent's owner", got.Labels)
+	}
+
+	var txChild beads.Bead
+	if err := store.Tx("t", func(tx beads.Tx) error {
+		var err error
+		txChild, err = tx.Create(beads.Bead{Title: "tx child", ParentID: parent.ID})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mem.Get(txChild.ID); !reflect.DeepEqual(got.Labels, []string{"owner:jadegate"}) {
+		t.Fatalf("Tx child labels = %v, want the parent's owner", got.Labels)
+	}
+
+	own, err := store.Create(beads.Bead{Title: "own child", ParentID: orphanParent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mem.Get(own.ID); !reflect.DeepEqual(got.Labels, []string{"owner:citadel"}) {
+		t.Fatalf("child of an unowned parent labels = %v, want the creator's owner", got.Labels)
+	}
+
+	backing := &recordingGraphApplyStore{Store: mem}
+	graph := wrapStoreWithBeadPolicies(backing, federatedTestConfig("citadel"))
+	applier, _ := beads.GraphApplyFor(graph)
+	if _, err := applier.ApplyGraphPlan(context.Background(), &beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{
+		{Key: "under-jadegate", Title: "x", ParentID: parent.ID},
+		{Key: "under-unowned", Title: "y", ParentID: orphanParent.ID},
+		{Key: "in-plan", Title: "z", ParentKey: "under-jadegate"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, 3)
+	for _, n := range backing.plan.Nodes {
+		got = append(got, strings.Join(n.Labels, ","))
+	}
+	// The in-plan child follows its parent's EFFECTIVE lane: a subtree created
+	// under another city's bead stays in that city's lane.
+	if want := []string{"owner:jadegate", "owner:citadel", "owner:jadegate"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("graph node labels = %v, want %v", got, want)
+	}
+}

@@ -34,12 +34,14 @@ gc bd create "title" --no-owner-label       # Federated city: skip the owner:<id
 ```
 
 On a city whose `city.toml` sets `[federation] identity = "<name>"` (a bead
-store shared with other cities), every `gc bd create` — city scope and every
-rig scope — also carries `owner:<name>`, and each federated city's claim path
-refuses beads owned by another city. Pass your own `owner:` label to create
-a bead for another city on purpose, or `--no-owner-label` to leave one
-unlabeled (claimable by anyone). `gc maintenance owner-backfill` labels
-legacy beads (dry run by default; `--apply` to write).
+store shared with other cities), every bead `gc bd create` makes — city scope
+and every rig scope — is labeled `owner:<name>` right after bd creates it, and
+each federated city's claim path refuses beads owned by another city. Pass
+your own `owner:` label to create a bead for another city on purpose; a child
+created `--parent` another city's bead keeps that city's owner (it stays in
+its parent's lane); `--no-owner-label` leaves one bead unlabeled (claimable by
+anyone). `gc maintenance owner-backfill` labels legacy beads (dry run by
+default; `--apply` to write).
 
 ## Finding work
 

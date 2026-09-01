@@ -85,7 +85,7 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
-	b.Labels = federation.EnsureOwnerLabel(b.Labels, s.ownerLabel())
+	b.Labels = s.ownerLabelsForCreate(b)
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
 }
@@ -100,7 +100,7 @@ func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error
 		return s.Store.Tx(commitMsg, fn)
 	}
 	return s.Store.Tx(commitMsg, func(tx beads.Tx) error {
-		return fn(ownerStampingTx{Tx: tx, owner: owner})
+		return fn(ownerStampingTx{Tx: tx, store: s})
 	})
 }
 
@@ -108,12 +108,37 @@ func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error
 // federated city: every other verb is the inner transaction's.
 type ownerStampingTx struct {
 	beads.Tx
-	owner string
+	store *beadPolicyStore
 }
 
 func (tx ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
-	b.Labels = federation.EnsureOwnerLabel(b.Labels, tx.owner)
+	b.Labels = tx.store.ownerLabelsForCreate(b)
 	return tx.Tx.Create(b)
+}
+
+// ownerLabelsForCreate applies the owner rule to one create: an owner on the
+// bead wins, else its parent's (read through the wrapped store), else this
+// city's. Reads the parent only on a federated city.
+func (s *beadPolicyStore) ownerLabelsForCreate(b beads.Bead) []string {
+	owner := s.ownerLabel()
+	if owner == "" {
+		return b.Labels
+	}
+	return federation.OwnerLabelForChild(b.Labels, s.ownerParentLabels(b.ParentID), owner)
+}
+
+// ownerParentLabels returns the labels of the bead a create names as parent,
+// or nil when there is none or it cannot be read.
+func (s *beadPolicyStore) ownerParentLabels(parentID string) []string {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil
+	}
+	return parent.Labels
 }
 
 // ownerLabel is the owner:<identity> label a federated city stamps on every
@@ -139,8 +164,31 @@ func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads
 	}
 	stamped := *plan
 	stamped.Nodes = make([]beads.GraphApplyNode, len(plan.Nodes))
+	index := make(map[string]int, len(plan.Nodes))
 	for i, node := range plan.Nodes {
-		node.Labels = federation.EnsureOwnerLabel(node.Labels, owner)
+		if node.Key != "" {
+			index[node.Key] = i
+		}
+	}
+	read := make(map[string][]string)
+	nodes := make([]federation.PlanNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		pn := federation.PlanNode{Labels: node.Labels, ParentIndex: -1}
+		if node.ParentKey != "" {
+			if p, ok := index[node.ParentKey]; ok {
+				pn.ParentIndex = p
+			}
+		} else if id := strings.TrimSpace(node.ParentID); id != "" {
+			if _, seen := read[id]; !seen {
+				read[id] = s.ownerParentLabels(id)
+			}
+			pn.ParentLabels = read[id]
+		}
+		nodes[i] = pn
+	}
+	labels := federation.OwnerLabelsForPlan(nodes, owner)
+	for i, node := range plan.Nodes {
+		node.Labels = labels[i]
 		stamped.Nodes[i] = node
 	}
 	return &stamped

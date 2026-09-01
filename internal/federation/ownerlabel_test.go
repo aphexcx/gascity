@@ -95,3 +95,32 @@ func TestHandoffLabels(t *testing.T) {
 		t.Fatal("an empty identity never matches and no labels yield no targets")
 	}
 }
+
+// TestOwnerLabelForChild is the one rule for a create that names a parent:
+// an owner already on the child wins; else the parent's owner is the child's
+// (the child stays in its parent's lane, whatever city created it); else the
+// creating city's; and no owner at all when the city is not federated.
+func TestOwnerLabelForChild(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		parent []string
+		owner  string
+		want   []string
+	}{
+		{"explicit owner on the child wins", []string{"owner:boomtown"}, []string{"owner:jadegate"}, "owner:citadel", []string{"owner:boomtown"}},
+		{"parent's owner is inherited", []string{"pool:x"}, []string{"hold:mayor", "owner:jadegate"}, "owner:citadel", []string{"pool:x", "owner:jadegate"}},
+		{"parent without an owner: the creator's", nil, []string{"hold:mayor"}, "owner:citadel", []string{"owner:citadel"}},
+		{"no parent: the creator's", nil, nil, "owner:citadel", []string{"owner:citadel"}},
+		{"not federated, parent owned: still inherited", nil, []string{"owner:jadegate"}, "", []string{"owner:jadegate"}},
+		{"not federated, nothing to inherit: untouched", []string{"a"}, nil, "", []string{"a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := federation.OwnerLabelForChild(tt.labels, tt.parent, tt.owner)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("OwnerLabelForChild(%v, %v, %q) = %v, want %v", tt.labels, tt.parent, tt.owner, got, tt.want)
+			}
+		})
+	}
+}
