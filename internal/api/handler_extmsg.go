@@ -384,9 +384,9 @@ const extmsgInboundReceiptBudget = 15 * time.Second
 // reached a terminal, so it could not report delivery even in principle, and a
 // caller gating on it was gating on nothing (pc_2e2378b9918e).
 //
-// On budget expiry the fan-out is deliberately NOT cancelled and the receipt
+// On budget expiry the fan-out is deliberately NOT canceled and the receipt
 // says "pending". A paste already handed to a terminal cannot be un-sent, so
-// cancelling would not undo a partial delivery — it would only destroy the
+// canceling would not undo a partial delivery — it would only destroy the
 // remaining ones. The honest report is that gc does not yet know, which leaves
 // the retry decision with the caller that owns the dedup claim.
 //

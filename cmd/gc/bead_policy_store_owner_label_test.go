@@ -53,7 +53,7 @@ type recordingGraphApplyStore struct {
 	plan *beads.GraphApplyPlan
 }
 
-func (s *recordingGraphApplyStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+func (s *recordingGraphApplyStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) { //nolint:unparam // a recording fake never fails; the plan it received is the assertion
 	s.plan = plan
 	return &beads.GraphApplyResult{}, nil
 }
