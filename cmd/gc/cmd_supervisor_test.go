@@ -6879,7 +6879,7 @@ func TestRunSupervisorHardenedListenerBindFailureIsAllOrNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer occupied.Close()
+	defer func() { _ = occupied.Close() }()
 	taken := occupied.Addr().(*net.TCPAddr).Port
 	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(taken)+"\nwrite_auth_verify_key = \"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\"\n")
 	var stdout, stderr bytes.Buffer

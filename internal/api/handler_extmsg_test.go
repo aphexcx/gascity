@@ -183,7 +183,7 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 		t.Fatal("named sender should not be materialized before notify")
 	}
 
-	srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
+	_, _ = srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
 		Conversation:    ref,
 		ActorDisplay:    "worker",
 		ActorKind:       "agent",
@@ -255,7 +255,7 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 		t.Fatalf("UpsertParticipant(project-lead): %v", err)
 	}
 
-	srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
+	_, _ = srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
 		Conversation:   ref,
 		ActorDisplay:   "Alice",
 		ActorKind:      "human",

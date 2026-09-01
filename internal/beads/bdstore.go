@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -365,6 +366,12 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
+	// ownerLabel, when set, is the "owner:<identity>" label stamped on every
+	// bead this store creates that names no owner of its own — the in-process
+	// twin of the `gc bd create` argv injector on a federated city. See
+	// internal/federation.
+	ownerLabel string
+
 	// relocatedClasses names the coordination classes this ledger does not
 	// serve. Empty on every city that keeps all classes on one store, which is
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
@@ -444,6 +451,34 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
 	}
+}
+
+// WithBdStoreOwnerLabel stamps owner (the full "owner:<identity>" label) on
+// every bead this store creates that carries no owner label of its own, so an
+// in-process create matches what `gc bd create` injects on a federated city
+// (internal/federation). An explicit owner label on the bead is kept as
+// given. Empty disables the stamp, which leaves the create argv unchanged.
+func WithBdStoreOwnerLabel(owner string) BdStoreOption {
+	return func(s *BdStore) {
+		s.ownerLabel = owner
+	}
+}
+
+// ownerParentLabels returns the labels of the bead a create names as parent,
+// for the owner stamp's inheritance rule — nil, and no error, when it names
+// none — or the error that kept the parent from being read. The two are told
+// apart on purpose: bd copies the parent's labels onto the child whatever gc
+// could read, so an unread parent is not an unowned one.
+func (s *BdStore) ownerParentLabels(parentID string) ([]string, error) {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil, nil
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil, err
+	}
+	return parent.Labels, nil
 }
 
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
@@ -1110,8 +1145,29 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 	if len(b.Needs) > 0 {
 		args = append(args, "--deps", strings.Join(b.Needs, ","))
 	}
-	if len(b.Labels) > 0 {
-		args = append(args, "--labels", strings.Join(b.Labels, ","))
+	labels := b.Labels
+	inherit := true
+	if s.ownerLabel != "" {
+		// Read the parent first: bd copies its labels onto the child, and a
+		// child of another city's bead must carry that owner, not a second —
+		// unless the child names its own owner, in which case bd's copying is
+		// turned off for this create and the parent's other labels travel
+		// explicitly. A parent that could not be read has an owner gc never
+		// saw: a child that names its own owner keeps bd's copying off
+		// regardless — the one operand bd cannot move — so no unseen owner
+		// lands beside the one it was given. (Its other labels cannot travel;
+		// they could not be read.)
+		parentLabels, parentErr := s.ownerParentLabels(b.ParentID)
+		labels, inherit = federation.ChildLabels(b.Labels, parentLabels, s.ownerLabel)
+		if parentErr != nil && federation.HasOwnerLabel(b.Labels) {
+			inherit = false
+		}
+	}
+	if len(labels) > 0 {
+		args = append(args, "--labels", strings.Join(labels, ","))
+	}
+	if !inherit {
+		args = append(args, "--no-inherit-labels")
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)

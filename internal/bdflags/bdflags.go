@@ -3,7 +3,8 @@
 // and the gc lint check that validates bd invocations embedded in prompt
 // templates, so the two call sites cannot drift apart from each other.
 //
-// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0).
+// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0; global flags
+// refreshed against bd v1.2.2 on 2026-09-01).
 package bdflags
 
 import "sort"
@@ -11,14 +12,14 @@ import "sort"
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true,
+	"--actor": true, "--database": true, "--db": true, "-C": true, "--directory": true,
+	"--dolt-auto-commit": true, "--mem-profile": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
 var globalBoolFlags = map[string]bool{
-	"--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
+	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true, "--json": true,
+	"--no-color": true, "--profile": true, "-q": true, "--quiet": true, "--readonly": true,
 	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
 }
 
@@ -34,11 +35,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--due": true, "-e": true, "--estimate": true, "--event-actor": true,
 		"--event-category": true, "--event-payload": true, "--event-target": true,
 		"--external-ref": true, "-f": true, "--file": true, "--graph": true,
-		"--id": true, "-l": true, "--labels": true, "--metadata": true,
+		"--id": true, "-l": true, "--label": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
-		"--waits-for-gate": true, "--wisp-type": true,
+		"-s": true, "--status": true, "--storage-class": true, "--title": true, "-t": true, "--type": true,
+		"--waits-for": true, "--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {
 		"--acceptance": true, "--add-label": true, "--append-notes": true,
@@ -114,8 +115,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 // global set. Same keying convention as valueFlagsBySub.
 var boolFlagsBySub = map[string]map[string]bool{
 	"create": {
-		"--dry-run": true, "--ephemeral": true, "--force": true, "--no-history": true,
-		"--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
+		"--allow-empty-description": true, "--dry-run": true, "--ephemeral": true, "--force": true,
+		"--no-history": true, "--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
@@ -167,6 +168,28 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"dep list":   {},
 	"dep remove": {},
+}
+
+// gcOwnedBoolFlagsBySub holds the boolean flags "gc bd" itself owns on top of
+// bd's manifest, keyed like valueFlagsBySub. cmd/gc/cmd_bd.go consumes them
+// before dispatch, so they are valid on "gc bd <sub>" and an unknown flag on a
+// bare "bd <sub>" — the same split scan.go's gcScopeValueFlags makes for
+// --rig/--city. They are kept out of the bd manifests above so the manifest
+// freshness check and the write-mutation ID guard keep describing bd alone.
+var gcOwnedBoolFlagsBySub = map[string]map[string]bool{
+	// --no-owner-label skips the owner:<identity> label "gc bd create" stamps
+	// on a federated city (internal/federation).
+	"create": {"--no-owner-label": true},
+}
+
+// GCOwnedBoolFlags returns the boolean flags "gc bd" accepts on sub beyond
+// bd's own manifest, or nil when it owns none there.
+func GCOwnedBoolFlags(sub string) map[string]bool {
+	subFlags, ok := gcOwnedBoolFlagsBySub[sub]
+	if !ok {
+		return nil
+	}
+	return mergeFlagSets(subFlags)
 }
 
 // GlobalValueFlags returns the flags accepted by every bd subcommand that

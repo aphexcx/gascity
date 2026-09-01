@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -84,8 +86,140 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
+	b.Labels = s.ownerLabelsForCreate(b)
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
+}
+
+// Tx hands the caller a transaction whose Create stamps the owner label like
+// the store's own Create does: session beads, idempotency records and the
+// like are created transactionally, and "every bead this city creates" has
+// no transactional exception.
+func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
+	owner := s.ownerLabel()
+	if owner == "" || fn == nil {
+		return s.Store.Tx(commitMsg, fn)
+	}
+	return s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(&ownerStampingTx{Tx: tx, store: s, created: make(map[string][]string)})
+	})
+}
+
+// ownerStampingTx is the transaction the policy wrapper hands out on a
+// federated city: every other verb is the inner transaction's. It remembers
+// what it created, because a parent created earlier in the same transaction
+// is not yet visible through the outer store and its children must still
+// inherit its lane. What it remembers is its own copy: the bead handed back
+// belongs to the caller, who may edit it in place, and an edit to that copy
+// must not move the lane a later child inherits.
+type ownerStampingTx struct {
+	beads.Tx
+	store   *beadPolicyStore
+	created map[string][]string
+}
+
+func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
+	parentLabels, seen := tx.created[strings.TrimSpace(b.ParentID)]
+	if !seen {
+		parentLabels = tx.store.ownerParentLabels(b.ParentID)
+	}
+	b.Labels = tx.store.ownerLabelsForCreateUnder(b, parentLabels)
+	created, err := tx.Tx.Create(b)
+	if err == nil && created.ID != "" {
+		labels := created.Labels
+		if len(labels) == 0 {
+			labels = b.Labels
+		}
+		tx.created[created.ID] = slices.Clone(labels)
+	}
+	return created, err
+}
+
+// ownerLabelsForCreate applies the owner rule to one create: an owner on the
+// bead wins, else its parent's (read through the wrapped store), else this
+// city's. Reads the parent only on a federated city.
+func (s *beadPolicyStore) ownerLabelsForCreate(b beads.Bead) []string {
+	if s.ownerLabel() == "" {
+		return b.Labels
+	}
+	return s.ownerLabelsForCreateUnder(b, s.ownerParentLabels(b.ParentID))
+}
+
+// ownerLabelsForCreateUnder is ownerLabelsForCreate with the parent's labels
+// already in hand.
+func (s *beadPolicyStore) ownerLabelsForCreateUnder(b beads.Bead, parentLabels []string) []string {
+	owner := s.ownerLabel()
+	if owner == "" {
+		return b.Labels
+	}
+	return federation.OwnerLabelForChild(b.Labels, parentLabels, owner)
+}
+
+// ownerParentLabels returns the labels of the bead a create names as parent,
+// or nil when there is none or it cannot be read.
+func (s *beadPolicyStore) ownerParentLabels(parentID string) []string {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return nil
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil
+	}
+	return parent.Labels
+}
+
+// ownerLabel is the owner:<identity> label a federated city stamps on every
+// bead it creates (internal/federation), or "" when the city is not
+// federated. Every store gc opens is wrapped here, so this is the one
+// in-process door whatever backend serves the create.
+func (s *beadPolicyStore) ownerLabel() string {
+	if s.cfg == nil {
+		return ""
+	}
+	label, _ := s.cfg.Federation.OwnerLabel()
+	return label
+}
+
+// stampGraphPlanOwner returns plan with the owner label on every node that
+// names no owner of its own. A graph apply is a bulk create — molecule roots,
+// steps, control beads — so each node is stamped as a single create would be.
+// It works on a copy: the caller's plan stays theirs.
+func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads.GraphApplyPlan {
+	owner := s.ownerLabel()
+	if owner == "" || plan == nil {
+		return plan
+	}
+	stamped := *plan
+	stamped.Nodes = make([]beads.GraphApplyNode, len(plan.Nodes))
+	index := make(map[string]int, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		if node.Key != "" {
+			index[node.Key] = i
+		}
+	}
+	read := make(map[string][]string)
+	nodes := make([]federation.PlanNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		pn := federation.PlanNode{Labels: node.Labels, ParentIndex: -1}
+		if node.ParentKey != "" {
+			if p, ok := index[node.ParentKey]; ok {
+				pn.ParentIndex = p
+			}
+		} else if id := strings.TrimSpace(node.ParentID); id != "" {
+			if _, seen := read[id]; !seen {
+				read[id] = s.ownerParentLabels(id)
+			}
+			pn.ParentLabels = read[id]
+		}
+		nodes[i] = pn
+	}
+	labels := federation.OwnerLabelsForPlan(nodes, owner)
+	for i, node := range plan.Nodes {
+		node.Labels = labels[i]
+		stamped.Nodes[i] = node
+	}
+	return &stamped
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -250,6 +384,7 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	plan = s.stampGraphPlanOwner(plan)
 	if plan == nil {
 		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}

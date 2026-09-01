@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/federation"
 )
 
 // ApplyGraphPlan creates a bead graph via a single hidden bd command so the
@@ -25,7 +28,10 @@ func (s *BdStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyP
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 
-	data, err := json.Marshal(plan)
+	// A graph apply is a bulk create, so the owner label this store stamps on
+	// a single create lands on every node here too — on a copy, since the
+	// plan is the caller's and ValidateGraphApplyResult reads it back.
+	data, err := json.Marshal(s.stampGraphPlanOwner(plan))
 	if err != nil {
 		return nil, fmt.Errorf("marshaling graph apply plan: %w", err)
 	}
@@ -89,4 +95,55 @@ func graphStorageFlags(storage StorageClass) (ephemeral bool, noHistory bool, er
 // graph directly into ephemeral storage.
 func (s *BdStore) SupportsEphemeralGraphApply() bool {
 	return true
+}
+
+// stampGraphPlanOwner returns plan with the store's owner label on every node
+// that names no owner of its own, or plan itself when there is no owner label
+// to stamp. The caller's plan is never mutated.
+func (s *BdStore) stampGraphPlanOwner(plan *GraphApplyPlan) *GraphApplyPlan {
+	if s.ownerLabel == "" || plan == nil {
+		return plan
+	}
+	stamped := *plan
+	stamped.Nodes = make([]GraphApplyNode, len(plan.Nodes))
+	labels := federation.OwnerLabelsForPlan(graphPlanOwnerNodes(plan, func(id string) []string {
+		// bd's graph create copies no parent labels, so nothing here rides on
+		// the read succeeding: an unread parent stamps as an unowned one did.
+		parentLabels, _ := s.ownerParentLabels(id)
+		return parentLabels
+	}), s.ownerLabel)
+	for i, node := range plan.Nodes {
+		node.Labels = labels[i]
+		stamped.Nodes[i] = node
+	}
+	return &stamped
+}
+
+// graphPlanOwnerNodes projects a plan onto the owner rule's inputs: each
+// node's authored labels, its in-plan parent by key, and the labels of an
+// existing parent bead read through parentLabels (memoized per id).
+func graphPlanOwnerNodes(plan *GraphApplyPlan, parentLabels func(id string) []string) []federation.PlanNode {
+	index := make(map[string]int, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		if node.Key != "" {
+			index[node.Key] = i
+		}
+	}
+	read := make(map[string][]string)
+	nodes := make([]federation.PlanNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		pn := federation.PlanNode{Labels: node.Labels, ParentIndex: -1}
+		if node.ParentKey != "" {
+			if p, ok := index[node.ParentKey]; ok {
+				pn.ParentIndex = p
+			}
+		} else if id := strings.TrimSpace(node.ParentID); id != "" && parentLabels != nil {
+			if _, seen := read[id]; !seen {
+				read[id] = parentLabels(id)
+			}
+			pn.ParentLabels = read[id]
+		}
+		nodes[i] = pn
+	}
+	return nodes
 }

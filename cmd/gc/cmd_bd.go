@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -121,6 +123,21 @@ can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
+On a city whose city.toml sets [federation] identity = "<name>", every
+bead "gc bd create" makes (in the city scope and every rig scope) is
+labeled owner:<name>, so every bead this city creates in a bead store it
+shares with other cities names the city that owns it; each federated
+city's claim path refuses beads owned by another city. An owner: label
+you pass yourself, or one bd copies from the bead's --parent, is kept as
+given (a child stays in its parent's lane), and the gc-only
+--no-owner-label flag (stripped before dispatch) leaves one create
+unlabeled. The argv itself reaches bd exactly as typed: the label is
+applied AFTER the create, to the bead bd reports it created (one label
+write per created bead, batch creates included), so nothing gc does not
+understand about bd's create surface can break a create or leave a bead
+silently unlabeled. A create whose output names no bead is said out loud
+on stderr. With the identity unset, create is untouched.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.`,
@@ -130,7 +147,8 @@ auto-export behavior, invoke bd directly.`,
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
   gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
-  gc bd release-if-current my-project-abc worker-1`,
+  gc bd release-if-current my-project-abc worker-1
+  gc bd create "title" --no-owner-label   # skip the owner:<identity> stamp on a federated city`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Plumb doBd's numeric exit code through exitForCode so the
@@ -260,6 +278,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// On a federated city every bead this city creates names its owner
+	// (internal/federation). The argv reaches bd as typed — only the gc-owned
+	// opt-out is stripped — and the bead bd reports created is labeled
+	// afterwards, through the store, unless it already carries an owner. See
+	// cmd_bd_owner_label.go for why the stamp follows the create.
+	owner, federated := cfg.Federation.OwnerLabel()
+	var ownerOptOut bool
+	bdArgs, ownerOptOut = stripBdNoOwnerLabel(bdArgs)
+	stampOwner := false
+	if federated && !ownerOptOut {
+		switch bdCreateVerdict(bdArgs) {
+		case bdVerbCreate:
+			stampOwner = !bdHasBoolFlag(bdArgs, "--dry-run")
+		case bdVerbHidden:
+			if slices.Contains(bdArgs, "create") || slices.Contains(bdArgs, "new") {
+				fmt.Fprintln(stderr, bdOwnerLabelHiddenVerbNotice) //nolint:errcheck // best-effort stderr
+			}
+		}
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)
@@ -421,7 +459,35 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			return code
 		}
 	}
-	return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
+	if !stampOwner {
+		return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
+	}
+	// Tee bd's stdout so the created ids can be read out of it; the operator
+	// still sees every byte. Whatever bd reported it created is labeled even
+	// when bd then exited non-zero (a batch that persisted some beads and
+	// failed on a later one), and the create's exit code stays the exit code:
+	// the stamp is a follow-up write that reports its own outcome on stderr.
+	// A create that named no bead is said out loud whatever the exit code —
+	// after a failure, gc cannot tell "created nothing" from "created some, in
+	// a shape gc does not read".
+	var created bytes.Buffer
+	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, &created)
+	ids := bdCreatedIDs(created.String())
+	if len(ids) == 0 {
+		notice := bdOwnerLabelNotAppliedNotice
+		if code != 0 {
+			notice = bdOwnerLabelNotAppliedOnFailureNotice
+		}
+		fmt.Fprintln(stderr, notice) //nolint:errcheck // best-effort stderr
+		return code
+	}
+	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: opening the %s store: %v\n", strings.Join(ids, ", "), scopeLabel(target), err) //nolint:errcheck // best-effort stderr
+		return code
+	}
+	stampCreatedBeads(store, ids, owner, stderr)
+	return code
 }
 
 // runBdSubprocess executes one bd invocation for doBd's passthrough handoff:
@@ -429,11 +495,25 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 // doBd's exit-code contract (bd's own exit code, or bdSilentFallbackExitCode
 // when bd exited 0 but silently fell back to the on-disk store).
 func runBdSubprocess(bdPath string, bdArgs []string, cityPath string, target execStoreTarget, env []string, stdout, stderr io.Writer) int {
+	return runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, nil)
+}
+
+// runBdSubprocessTee is runBdSubprocess with bd's stdout additionally copied
+// to stdoutTee (nil for none), for a caller that must read what bd printed —
+// the owner-label stamp reads the created ids — without taking a byte of it
+// away from the operator.
+func runBdSubprocessTee(bdPath string, bdArgs []string, cityPath string, target execStoreTarget, env []string, stdout, stderr, stdoutTee io.Writer) int {
 	dir := target.ScopeRoot
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
+	if stdoutTee != nil {
+		// The tee comes FIRST: io.MultiWriter stops at the first failing
+		// writer, and the operator's sink can close early (`| head`), which
+		// must not cost the copy the stamp reads.
+		cmd.Stdout = io.MultiWriter(stdoutTee, stdout)
+	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
 	// marker. Only stderr is teed: bd writes its auto-import banner there,

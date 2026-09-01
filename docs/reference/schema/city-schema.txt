@@ -1215,6 +1215,10 @@
           "$ref": "#/$defs/MaintenanceConfig",
           "description": "Maintenance configures periodic store-maintenance loops."
         },
+        "federation": {
+          "$ref": "#/$defs/FederationConfig",
+          "description": "Federation names this city in a bead store it shares with other cities\n(see FederationConfig). Unset on a non-federated city."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1602,6 +1606,17 @@
         "agent"
       ],
       "description": "ExtMsgDefaultRoute routes unbound inbound conversations from one external messaging provider (and optionally a single adapter account) to a configured agent."
+    },
+    "FederationConfig": {
+      "properties": {
+        "identity": {
+          "type": "string",
+          "description": "Identity is this city's name in the federated store — \"citadel\",\n\"jadegate\", \"boomtown\". When set, every bead gc creates in any store of\nthis city (city scope and every rig scope) carries the label\nowner:\u003cidentity\u003e, and the claim path reads the same key to tell which\nowner labels are foreign. It is an explicit key rather than the\nworkspace name because the workspace name is a machine-local label that\nneed not be distinct across the federation. Must match\n^[a-z0-9][a-z0-9-]*$. Unset means not federated: nothing is stamped and\nnothing is refused."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "FederationConfig is the federation table: how this city names itself in a bead store it shares with other cities."
     },
     "FormulasConfig": {
       "properties": {},

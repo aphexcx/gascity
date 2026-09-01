@@ -167,11 +167,14 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 	valueFlags := ValueFlags(key)
 	boolFlags := BoolFlags(key)
 	if viaGC {
-		// Safe to mutate in place: ValueFlags returns a freshly allocated map
-		// per call (mergeFlagSets), so this never leaks scope flags into
-		// another invocation's or consumer's manifest.
+		// Safe to mutate in place: ValueFlags and BoolFlags return a freshly
+		// allocated map per call (mergeFlagSets), so this never leaks gc-owned
+		// flags into another invocation's or consumer's manifest.
 		for flag := range gcScopeValueFlags {
 			valueFlags[flag] = true
+		}
+		for flag := range GCOwnedBoolFlags(key) {
+			boolFlags[flag] = true
 		}
 	}
 	j := flagStart

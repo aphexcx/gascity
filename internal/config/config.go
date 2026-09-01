@@ -289,6 +289,9 @@ type City struct {
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
+	// Federation names this city in a bead store it shares with other cities
+	// (see FederationConfig). Unset on a non-federated city.
+	Federation FederationConfig `toml:"federation,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -4629,6 +4632,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
+	if err := validateFederation(cfg.Federation); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

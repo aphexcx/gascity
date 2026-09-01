@@ -213,6 +213,14 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 	if relocated := relocatedBeadClasses(cfg); len(relocated) > 0 {
 		opts = append(opts, beads.WithBdStoreRelocatedClasses(relocated...))
 	}
+	// A federated city names itself on every bead it creates; the bd-backed
+	// stores built here stamp through the same helper as the policy wrapper
+	// and the `gc bd create` argv injector (internal/federation).
+	if cfg != nil {
+		if owner, ok := cfg.Federation.OwnerLabel(); ok {
+			opts = append(opts, beads.WithBdStoreOwnerLabel(owner))
+		}
+	}
 	return opts
 }
 

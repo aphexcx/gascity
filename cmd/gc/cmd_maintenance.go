@@ -21,14 +21,18 @@ import (
 func newMaintenanceCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "maintenance",
-		Short: "Dolt store maintenance (gc + snapshot)",
-		Long: `Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+		Short: "Store maintenance (Dolt gc + snapshot, federation owner backfill)",
+		Long: `Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md)
+and one-off store maintenance verbs.
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
-in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.`,
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+'owner-backfill' labels this city's legacy beads with the federation owner label
+([federation] identity) and runs against the store directly.`,
 	}
 	cmd.AddCommand(newMaintenanceStatusCmd(stdout, stderr))
 	cmd.AddCommand(newMaintenanceDoltGCCmd(stdout, stderr))
+	cmd.AddCommand(newMaintenanceOwnerBackfillCmd(stdout, stderr))
 	return cmd
 }
 
