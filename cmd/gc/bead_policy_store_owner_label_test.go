@@ -231,6 +231,35 @@ func TestBeadPolicyStoreTxChildInheritsAnInTransactionParent(t *testing.T) {
 	}
 }
 
+// TestBeadPolicyStoreTxRemembersItsOwnCopyOfAParentsLabels: what the
+// transaction remembers about a bead it created is its own copy. The caller
+// owns the bead it got back and may edit it in place; that must not move the
+// lane a later child inherits — the stored parent does not follow the edit,
+// and neither may the child.
+func TestBeadPolicyStoreTxRemembersItsOwnCopyOfAParentsLabels(t *testing.T) {
+	mem := beads.NewMemStore()
+	store := wrapStoreWithBeadPolicies(&invisibleUntilCommitStore{Store: mem}, federatedTestConfig("citadel"))
+	var parent, child beads.Bead
+	if err := store.Tx("t", func(tx beads.Tx) error {
+		var err error
+		parent, err = tx.Create(beads.Bead{Title: "jadegate epic", Labels: []string{"owner:jadegate"}})
+		if err != nil {
+			return err
+		}
+		parent.Labels[0] = "owner:boomtown" // the caller's copy, edited in place
+		child, err = tx.Create(beads.Bead{Title: "child", ParentID: parent.ID})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := mem.Get(parent.ID); !reflect.DeepEqual(got.Labels, []string{"owner:jadegate"}) {
+		t.Fatalf("stored parent labels = %v, want unchanged by the caller's edit", got.Labels)
+	}
+	if got, _ := mem.Get(child.ID); !reflect.DeepEqual(got.Labels, []string{"owner:jadegate"}) {
+		t.Fatalf("child labels = %v, want the stored parent's owner, not the caller's edited copy", got.Labels)
+	}
+}
+
 // invisibleUntilCommitStore hides every bead from Get while a transaction is
 // open, the way a real transactional backend does.
 type invisibleUntilCommitStore struct {

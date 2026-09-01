@@ -24,6 +24,11 @@ const (
 	// bdOwnerLabelNotAppliedNotice: gc could not find a created bead in bd's
 	// output.
 	bdOwnerLabelNotAppliedNotice = "gc bd: owner label not applied (could not read the created bead id from bd's output)"
+	// bdOwnerLabelNotAppliedOnFailureNotice: bd exited non-zero and named no
+	// created bead. A batch can persist beads before failing, in a shape gc
+	// does not read, so the operator is told rather than left to assume
+	// nothing was created.
+	bdOwnerLabelNotAppliedOnFailureNotice = "gc bd: owner label not applied (bd exited non-zero and named no created bead in its output; if it created any, label each with gc bd update <id> --add-label owner:<identity>)"
 	// bdOwnerLabelHiddenVerbNotice: a leading flag neither global manifest
 	// knows hides the verb, so gc cannot tell a create from a read and must
 	// not mutate what a read printed.
@@ -47,7 +52,9 @@ const (
 //     argv variant can move.
 //
 // A create whose output names no bead (a format gc does not know) is said
-// out loud, once, on stderr; a --dry-run creates nothing and is left alone.
+// out loud, once, on stderr, whatever bd's exit code — a failed batch may have
+// persisted beads before it failed; a --dry-run creates nothing and is left
+// alone.
 
 // bdFlagTokens walks the flag tokens of a create argv before a `--`
 // terminator, skipping the VALUE of every value flag bd's create surface and
@@ -118,40 +125,76 @@ const (
 // flag's VALUE is never the verb: `--actor create show x` is a show, and
 // stamping what it printed would mutate a read.
 func bdCreateVerdict(bdArgs []string) bdVerb {
-	if bdLeadingFlagsHideTheVerb(bdArgs) {
+	verb, hidden := bdVerbAfterGlobals(bdArgs)
+	if hidden {
 		return bdVerbHidden
 	}
-	switch sub, _ := bdflags.SplitGlobalFlags(bdArgs); sub {
+	switch verb {
 	case "create", "new":
 		return bdVerbCreate
 	}
 	return bdVerbOther
 }
 
-// bdLeadingFlagsHideTheVerb reports whether a flag before the verb is one
-// neither global manifest knows. SplitGlobalFlags skips such a flag as if it
-// took no value, so `--future-flag x create t` would read x as the verb: the
-// verb is undecidable from this argv.
-func bdLeadingFlagsHideTheVerb(bdArgs []string) bool {
+// bdVerbAfterGlobals walks the flags before the verb the way bd does — cobra's
+// subcommand search decides which token is the verb, pflag's shorthand rules
+// decide what each flag token means — and returns the verb, or hidden when a
+// leading flag is one neither global manifest knows: bd would read a value gc
+// cannot see (`--future-flag x create t` may be a create or an x), so the verb
+// is undecidable from this argv.
+//
+// cobra's search skips a `--flag` or a lone `-f` together with the next token
+// when the flag takes a value, skips every other dash token on its own, and
+// takes the first remaining token as the verb. pflag then reads a dash token
+// as a long flag, or as a cluster of shorthands in which each letter is a
+// boolean or a value flag that takes the rest of the token (`-C/path`,
+// `-C=/path`), an `=` after a boolean ending the cluster (`-v=false`). The
+// one place the two disagree is a cluster whose LAST letter takes a value with
+// nothing attached (`-vC dir`): pflag would take dir, cobra reads it as the
+// verb, and bd runs what cobra found.
+func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
 	valueFlags := bdflags.GlobalValueFlags()
 	boolFlags := bdflags.GlobalBoolFlags()
 	for i := 0; i < len(bdArgs); i++ {
 		tok := bdArgs[i]
-		if !strings.HasPrefix(tok, "-") || tok == "-" || tok == "--" {
-			return false // the verb (or a positional) — the leading flags are done
-		}
-		name, _, inline := strings.Cut(tok, "=")
 		switch {
-		case boolFlags[name]:
-		case valueFlags[name]:
-			if !inline {
-				i++
+		case tok == "--":
+			return "", false // bd's flags end here; nothing after is a verb
+		case tok == "-":
+			continue // skipped by the search, a positional to the verb's parser
+		case !strings.HasPrefix(tok, "-"):
+			return tok, false
+		case strings.HasPrefix(tok, "--"):
+			name, _, inline := strings.Cut(tok, "=")
+			switch {
+			case boolFlags[name]:
+			case valueFlags[name]:
+				if !inline {
+					i++
+				}
+			default:
+				return "", true
 			}
 		default:
-			return true
+			for j := 1; j < len(tok); j++ {
+				short := "-" + tok[j:j+1]
+				switch {
+				case boolFlags[short] && j+1 < len(tok) && tok[j+1] == '=':
+					j = len(tok) // `-v=false`: an inline value ends the cluster
+				case boolFlags[short]:
+				case valueFlags[short] && j+1 < len(tok):
+					j = len(tok) // `-C/path`, `-C=/path`: the rest is its value
+				case valueFlags[short] && len(tok) == 2:
+					i++ // `-C path`: the next token is its value
+				case valueFlags[short]:
+					// `-vC path`: cobra reads path as the verb (see above)
+				default:
+					return "", true
+				}
+			}
 		}
 	}
-	return false
+	return "", false
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`

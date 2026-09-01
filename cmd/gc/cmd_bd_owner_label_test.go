@@ -47,13 +47,31 @@ func TestStripBdNoOwnerLabel(t *testing.T) {
 // costs a scan of output that names no created bead, while a miss leaves a
 // bead unlabeled.
 func TestBdLooksLikeCreate(t *testing.T) {
-	create := [][]string{{"create", "t"}, {"new", "t"}, {"--actor", "bob", "create", "t"}, {"--database", "shared", "new", "t"}, {"create", "--graph", "p.json"}}
+	create := [][]string{
+		{"create", "t"},
+		{"new", "t"},
+		{"--actor", "bob", "create", "t"},
+		{"--database", "shared", "new", "t"},
+		{"create", "--graph", "p.json"},
+		// pflag's shorthand forms of bd's globals: a cluster of booleans, a
+		// value attached to a shorthand (with or without `=`), a cluster that
+		// ends in a value flag with its value attached, an inline boolean.
+		{"-vv", "create", "t"},
+		{"-C/tmp", "create", "t"},
+		{"-C=/tmp", "create", "t"},
+		{"-qC/tmp", "create", "t"},
+		{"-v=false", "create", "t"},
+		// cobra searches for the verb without consuming what a cluster's last
+		// value flag will take: `bd -vC create t u` runs create with -C=t.
+		{"-vC", "create", "t", "u"},
+	}
 	// A global flag's VALUE is never the verb: `--actor create show x` is a
 	// show, and stamping what it prints would mutate a read.
-	other := [][]string{{"list"}, {"show", "--", "create"}, {"--actor", "create", "show", "ci-1", "--json"}, {"update", "x", "--add-label", "create"}, {}}
+	other := [][]string{{"list"}, {"show", "--", "create"}, {"--actor", "create", "show", "ci-1", "--json"}, {"-C", "create", "show", "ci-1"}, {"update", "x", "--add-label", "create"}, {}}
 	// A leading flag neither global manifest knows hides the verb: gc cannot
-	// tell a create from a show, so it must not stamp — only say so.
-	hidden := [][]string{{"--future-flag", "x", "create", "t"}, {"--future-flag", "x", "list"}}
+	// tell a create from a show, so it must not stamp — only say so. A
+	// shorthand gc does not know hides it wherever it sits in a cluster.
+	hidden := [][]string{{"--future-flag", "x", "create", "t"}, {"--future-flag", "x", "list"}, {"-x", "create", "t"}, {"-vx", "create", "t"}, {"-vxC/tmp", "create", "t"}}
 	for _, args := range create {
 		if got := bdCreateVerdict(args); got != bdVerbCreate {
 			t.Errorf("bdCreateVerdict(%v) = %v, want create", args, got)
@@ -115,6 +133,8 @@ func TestBdCreatedIDs(t *testing.T) {
 // and records every invocation. update never fails.
 const createFakeBd = `#!/bin/sh
 printf '%s\n' "$*" >> "${CAPTURE_PATH}"
+# bd's leading globals sit before the verb (a cluster like -vv, an attached value like -C/path).
+while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
 case "$1" in
   create|new)
     if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi
@@ -177,6 +197,8 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"a hidden verb is never stamped, only said", federatedDemoCityTOML, []string{"--future-flag", "x", "create", "t"}, "", "", "--future-flag x create t", false, bdOwnerLabelHiddenVerbNotice},
 		{"a value that spells the opt-out is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--no-owner-label"}, "", "", "create t --description --no-owner-label", true, ""},
 		{"an explicit owner beats an inherited one", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "-l", "owner:boomtown"}, "owner:boomtown,owner:jadegate", "", "create child --parent demo-0 -l owner:boomtown", false, ""},
+		{"a shorthand cluster before the verb is stamped", federatedDemoCityTOML, []string{"-vv", "create", "t"}, "", "", "-vv create t", true, ""},
+		{"an attached shorthand value before the verb is stamped", federatedDemoCityTOML, []string{"-C/tmp", "create", "t"}, "", "", "-C/tmp create t", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,6 +269,30 @@ func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("calls = %q, want %q", calls, want)
 		}
+	}
+}
+
+// TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead: a create that exited
+// non-zero and whose output names no bead is said out loud too — a batch can
+// persist beads before failing, in a shape gc does not read — and the exit
+// code stays bd's. Nothing is stamped: there is no id to stamp.
+func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("LABELS", "")
+	t.Setenv("CREATE_OUT", "created something, format unknown")
+	t.Setenv("CREATE_EXIT", "3")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
+		t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), bdOwnerLabelNotAppliedOnFailureNotice) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), bdOwnerLabelNotAppliedOnFailureNotice)
+	}
+	if calls := strings.Join(fakeBdCalls(t, capture), "\n"); strings.Contains(calls, "update") {
+		t.Fatalf("calls = %q, want no stamp write without a created id", calls)
 	}
 }
 

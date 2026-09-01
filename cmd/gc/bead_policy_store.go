@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -108,7 +109,9 @@ func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error
 // federated city: every other verb is the inner transaction's. It remembers
 // what it created, because a parent created earlier in the same transaction
 // is not yet visible through the outer store and its children must still
-// inherit its lane.
+// inherit its lane. What it remembers is its own copy: the bead handed back
+// belongs to the caller, who may edit it in place, and an edit to that copy
+// must not move the lane a later child inherits.
 type ownerStampingTx struct {
 	beads.Tx
 	store   *beadPolicyStore
@@ -127,7 +130,7 @@ func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
 		if len(labels) == 0 {
 			labels = b.Labels
 		}
-		tx.created[created.ID] = labels
+		tx.created[created.ID] = slices.Clone(labels)
 	}
 	return created, err
 }

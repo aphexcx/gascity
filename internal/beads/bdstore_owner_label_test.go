@@ -178,3 +178,34 @@ func TestBdStoreCreateExplicitOwnerUnderAForeignParentIsExclusive(t *testing.T) 
 		t.Fatalf("args = %q, want --no-inherit-labels so bd does not copy the parent's owner", joined)
 	}
 }
+
+// TestBdStoreCreateExplicitOwnerStaysExclusiveWhenTheParentIsUnreadable: the
+// parent could not be read, so nothing is known about the owner bd would copy
+// onto the child. A child that names its own owner keeps bd's copying off
+// regardless — the one operand bd cannot move — and ends with exactly the
+// owner it was given; the parent's other labels cannot be carried, since they
+// could not be read.
+func TestBdStoreCreateExplicitOwnerStaysExclusiveWhenTheParentIsUnreadable(t *testing.T) {
+	var createArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return nil, errors.New("bd show: boom")
+		case "create":
+			createArgs = args
+			return []byte(`{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z"}`), nil
+		}
+		return nil, errors.New("unexpected: " + strings.Join(args, " "))
+	}
+	s := beads.NewBdStore("/city", runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
+	if _, err := s.Create(beads.Bead{Title: "t", ParentID: "P", Labels: []string{"owner:boomtown"}}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(createArgs, " ")
+	if got, _ := bdCreateLabelsArg(t, createArgs); got != "owner:boomtown" {
+		t.Fatalf("--labels = %q, want exactly the explicit owner; args=%q", got, joined)
+	}
+	if !strings.Contains(joined, "--no-inherit-labels") {
+		t.Fatalf("args = %q, want --no-inherit-labels: the parent is unreadable, so its owner must not be copied", joined)
+	}
+}

@@ -106,7 +106,12 @@ func (s *BdStore) stampGraphPlanOwner(plan *GraphApplyPlan) *GraphApplyPlan {
 	}
 	stamped := *plan
 	stamped.Nodes = make([]GraphApplyNode, len(plan.Nodes))
-	labels := federation.OwnerLabelsForPlan(graphPlanOwnerNodes(plan, s.ownerParentLabels), s.ownerLabel)
+	labels := federation.OwnerLabelsForPlan(graphPlanOwnerNodes(plan, func(id string) []string {
+		// bd's graph create copies no parent labels, so nothing here rides on
+		// the read succeeding: an unread parent stamps as an unowned one did.
+		parentLabels, _ := s.ownerParentLabels(id)
+		return parentLabels
+	}), s.ownerLabel)
 	for i, node := range plan.Nodes {
 		node.Labels = labels[i]
 		stamped.Nodes[i] = node

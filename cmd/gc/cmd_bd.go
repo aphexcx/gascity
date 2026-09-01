@@ -467,13 +467,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// when bd then exited non-zero (a batch that persisted some beads and
 	// failed on a later one), and the create's exit code stays the exit code:
 	// the stamp is a follow-up write that reports its own outcome on stderr.
+	// A create that named no bead is said out loud whatever the exit code —
+	// after a failure, gc cannot tell "created nothing" from "created some, in
+	// a shape gc does not read".
 	var created bytes.Buffer
 	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, &created)
 	ids := bdCreatedIDs(created.String())
 	if len(ids) == 0 {
-		if code == 0 {
-			fmt.Fprintln(stderr, bdOwnerLabelNotAppliedNotice) //nolint:errcheck // best-effort stderr
+		notice := bdOwnerLabelNotAppliedNotice
+		if code != 0 {
+			notice = bdOwnerLabelNotAppliedOnFailureNotice
 		}
+		fmt.Fprintln(stderr, notice) //nolint:errcheck // best-effort stderr
 		return code
 	}
 	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)

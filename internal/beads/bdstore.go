@@ -465,19 +465,20 @@ func WithBdStoreOwnerLabel(owner string) BdStoreOption {
 }
 
 // ownerParentLabels returns the labels of the bead a create names as parent,
-// for the owner stamp's inheritance rule, or nil when there is no parent or
-// it cannot be read (the create then carries the creator's owner and bd's
-// own inheritance decides the rest).
-func (s *BdStore) ownerParentLabels(parentID string) []string {
+// for the owner stamp's inheritance rule — nil, and no error, when it names
+// none — or the error that kept the parent from being read. The two are told
+// apart on purpose: bd copies the parent's labels onto the child whatever gc
+// could read, so an unread parent is not an unowned one.
+func (s *BdStore) ownerParentLabels(parentID string) ([]string, error) {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
-		return nil
+		return nil, nil
 	}
 	parent, err := s.Get(parentID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return parent.Labels
+	return parent.Labels, nil
 }
 
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
@@ -1151,8 +1152,16 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 		// child of another city's bead must carry that owner, not a second —
 		// unless the child names its own owner, in which case bd's copying is
 		// turned off for this create and the parent's other labels travel
-		// explicitly.
-		labels, inherit = federation.ChildLabels(b.Labels, s.ownerParentLabels(b.ParentID), s.ownerLabel)
+		// explicitly. A parent that could not be read has an owner gc never
+		// saw: a child that names its own owner keeps bd's copying off
+		// regardless — the one operand bd cannot move — so no unseen owner
+		// lands beside the one it was given. (Its other labels cannot travel;
+		// they could not be read.)
+		parentLabels, parentErr := s.ownerParentLabels(b.ParentID)
+		labels, inherit = federation.ChildLabels(b.Labels, parentLabels, s.ownerLabel)
+		if parentErr != nil && federation.HasOwnerLabel(b.Labels) {
+			inherit = false
+		}
 	}
 	if len(labels) > 0 {
 		args = append(args, "--labels", strings.Join(labels, ","))
