@@ -257,3 +257,36 @@ func TestDemandClaimDivergenceStaysOffTheExportAllowlist(t *testing.T) {
 		t.Fatal("session.demand_claim_divergence is on the redacted-export allowlist; that is an egress-surface change and needs its own review")
 	}
 }
+
+// TestDivergenceClassificationTreatsCrossCityFencedRowAsBenign: a
+// demand-spawned seat that correctly fences its foreign trigger (jg-66rdw8)
+// drains no_work, and the after-the-fact classification must not then call the
+// same open, routed row a divergence — the seat's query served it and the seat
+// declined it by rule, which the fence already logged. The two controls pin
+// that the fence, not the labels, is what flips the verdict: the same row
+// handed off to this city, or owned by it, is still-claimable and still
+// classifies as divergence.
+func TestDivergenceClassificationTreatsCrossCityFencedRowAsBenign(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	opts := divergenceOptions(demandSpawnEnv()...)
+	opts.FederationIdentity = "jadegate"
+	row := func(labels ...string) beads.Bead {
+		return beads.Bead{ID: demandSpawnTriggerID, Status: "open", Type: "task", Metadata: routed, Labels: labels}
+	}
+
+	status, class := classifyDemandTrigger(demandSpawnTriggerID, "/rig", opts,
+		demandDivergenceOpsForBead(row("owner:citadel"), nil))
+	if class != events.DemandClaimBenign || status != "open" {
+		t.Fatalf("fenced foreign row classified (%q, %q), want (open, %s)", status, class, events.DemandClaimBenign)
+	}
+	for name, labels := range map[string][]string{
+		"handed off": {"owner:citadel", "handoff:jadegate"},
+		"own":        {"owner:jadegate"},
+		"unlabeled":  nil,
+	} {
+		if _, class := classifyDemandTrigger(demandSpawnTriggerID, "/rig", opts,
+			demandDivergenceOpsForBead(row(labels...), nil)); class != events.DemandClaimDivergence {
+			t.Fatalf("%s row (still claimable here) classified %q, want %s", name, class, events.DemandClaimDivergence)
+		}
+	}
+}

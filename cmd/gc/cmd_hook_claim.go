@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/federation"
 )
 
 const hookClaimCommandName = "hook"
@@ -139,6 +140,15 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// FederationIdentity is this city's name in a bead store it shares with
+	// other cities — city.toml [federation] identity, validated lowercase at
+	// config load (config.FederationConfig) — and the identity the cross-city
+	// claim fence compares a candidate's owner:/handoff: labels against
+	// (federation.MayClaim). cmdHookWithOptions sets it from the loaded config.
+	// Empty means the city is not federated: the fence is off and nothing here
+	// runs, which is also the mode every direct doHookClaim caller (tests,
+	// mostly) runs in unless it opts in.
+	FederationIdentity string
 }
 
 type hookClaimOps struct {
@@ -159,8 +169,10 @@ type hookClaimOps struct {
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
 	StampWorkMeta hookStampWorkMetaFunc
-	// ReadWorkMeta is the post-stamp authoritative readback used only to
-	// establish the durable lifecycle-start emission point.
+	// ReadWorkMeta is the authoritative per-bead read: the post-stamp readback
+	// that establishes the durable lifecycle-start emission point, and the read
+	// the cross-city write fence takes of the one bead about to be written or
+	// served (installCrossCityWriteFence, hookCrossCityRefusedBeforeServe).
 	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
 	EmitExecutionStepStarted func(beads.Bead, string, []string, string)
 	// PublishRunMap writes best-effort session-to-run correlation without
@@ -191,6 +203,16 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// WorkLegs is the whole federated fan-out this claim runs across, set by
+	// claimHookWorkWithRunner next to ClassRoute.observeWorkLegs. The
+	// cross-city adoption re-check resolves a bead the current leg cannot find
+	// through these before it is served (hookCrossCityRefusedBeforeServe).
+	// Empty on a direct caller, which then has only its own leg.
+	WorkLegs []hookStore
+	// crossCityWriteFenced records that installCrossCityWriteFence has wrapped
+	// the write seams, so the federated loop's per-store copies of the ops are
+	// not wrapped twice (two authoritative reads per write).
+	crossCityWriteFenced bool
 }
 
 type (
@@ -270,6 +292,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	ops.applyDefaults()
+	ops.installCrossCityWriteFence(*opts, stderr)
 	now := ops.Now
 
 	// F-A. A provider callback is not a turn: its stdout goes to the hook
@@ -307,7 +330,44 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+	// The cross-city claim fence runs HERE, once, on the whole candidate set:
+	// every tier below (adoption, ready-assignment promotion, the fresh-claim
+	// CAS, and the class-route escalation behind them) reads only what survives
+	// it, so none of them — nor a tier added later — can reach a claim write on a
+	// bead another city owns. Fenced-out work is dropped, not errored: the
+	// session takes the remaining candidates or the shared no-work drain.
+	candidates = fenceCrossCityHookCandidates(candidates, *opts, "candidate", stderr)
+	if len(candidates) == 0 {
+		return hookClaimResult{}
+	}
+
+	for {
+		result, bead, ok := hookClaimExistingAssignment(candidates, *opts)
+		if !ok {
+			break
+		}
+		// Adoption mints no claim, but serving the bead leads straight to writes
+		// (the identity stamp, the continuation preassign, the worker's own
+		// heartbeats), so the store's copy is re-checked before it is served. A
+		// refused bead is dropped, not served.
+		//
+		// The assigned tier reads city-wide, so a session's own in_progress bead
+		// can live in another federated leg or in a binding: the re-check resolves
+		// it through the class route and every work leg before it judges. A bead
+		// no leg can read is never served on the strength of the row — ownership
+		// of a bead this session already holds is then unresolved, and this fails
+		// closed like the ready-assignment tier does on a mutation failure, rather
+		// than serve it unverified, or drain as idle and let the seat be reaped
+		// away from its own in-progress work.
+		refused, err := hookCrossCityRefusedBeforeServe(bead, *opts, *ops, dir, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: existing assignment %s: cross-city fence could not verify the bead: %v\n", bead.ID, err) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
+		if refused {
+			candidates = withoutHookCandidate(candidates, bead.ID)
+			continue
+		}
 		// minted=false: adoption returns work this session already owned.
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
 	}
@@ -506,6 +566,13 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
+			if errors.Is(err, errCrossCityFenced) {
+				// Refused by the cross-city write fence before any mutation, and
+				// already logged: another city's bead is not ours to promote, and
+				// a refusal is not a write failure, so it neither fails closed nor
+				// marks the drain claims_errored.
+				continue
+			}
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
@@ -623,6 +690,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		if err != nil {
+			if errors.Is(err, errCrossCityFenced) {
+				// Refused by the cross-city write fence before any mutation, and
+				// already logged. Not a claim error: the drain stays no_work.
+				continue
+			}
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
 				// Stop immediately: trying another candidate or draining would strand
@@ -678,6 +750,183 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 	maps.Copy(metadata, claimed.Metadata)
 	claimed.Metadata = metadata
 	return claimed
+}
+
+// The cross-city claim fence (jadegate jg-66rdw8 / citadel gp-0uj) is the
+// refusal side of the federation owner-label convention (internal/federation):
+// a bead carrying owner:<identity> for another city is not this city's to
+// claim unless it also carries handoff:<this-identity>; legacy unlabeled beads
+// stay claimable. The rule itself is federation.MayClaim, shared verbatim with
+// the reconciler's orphan release and the retired-session re-home so the three
+// can never disagree about whose bead it is; this city's identity is city.toml
+// [federation] identity (hookClaimOptions.FederationIdentity), and an unset
+// identity means not federated — the fence is off and nothing below runs.
+// Nothing is ever written to a refused bead, and a refusal is never an error.
+//
+// Layer 1, fenceCrossCityHookCandidates, filters the decoded candidate set
+// once, on the labels the work query returned, upstream of every tier that can
+// serve or mutate a bead. It costs no I/O and drops most foreign work before
+// any tier — present or future — reads it.
+//
+// Layer 2, installCrossCityWriteFence and hookCrossCityRefusedBeforeServe,
+// re-checks the store's own copy of the ONE bead about to be written or served,
+// through the ReadWorkMeta seam (which the class route wraps, so a
+// binding-resident bead is read from its binding). It closes what layer 1
+// cannot see: a work_query whose projection omits labels, and a label that
+// changed between the query snapshot and the write. A copy that cannot be read
+// is never written or served: on a write seam the failure surfaces as the
+// seam's own error; on adoption the bead is first resolved through the class
+// route and every federated work leg, and fails closed if no leg holds it.
+func fenceCrossCityHookCandidates(candidates []beads.Bead, opts hookClaimOptions, tier string, stderr io.Writer) []beads.Bead {
+	identity := strings.TrimSpace(opts.FederationIdentity)
+	if identity == "" {
+		return candidates
+	}
+	kept := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		if ok, reason := federation.MayClaim(candidate.Labels, identity); !ok {
+			logCrossCityHookRefusal(stderr, candidate.ID, reason, tier)
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept
+}
+
+// errCrossCityFenced is returned by a write seam the cross-city fence refused.
+// Nothing was written and the refusal is already logged; every tier treats it
+// as a skipped candidate (no-work), never as a claim error — a claims_errored
+// drain or a fail-closed exit would turn a correct refusal into the very retry
+// loop the fence exists to end.
+var errCrossCityFenced = errors.New("cross-city fence refused the write")
+
+// installCrossCityWriteFence wraps the hook's two claim-time write seams —
+// Claim (the fresh-claim and ready-promotion CAS) and AssignContinuation (the
+// sibling preassign) — with an authoritative re-check of the bead about to be
+// written, read through ReadWorkMeta from the store the write will land in.
+//
+// The write never runs unverified. A refusal surfaces as errCrossCityFenced
+// (already logged; every tier skips the candidate as no-work). A read that
+// FAILS surfaces as an error wrapping the read failure, so the tiers handle it
+// exactly as they handle the write itself failing at that point — a not-found
+// (a bead held in another federated leg) is skipped and the loop moves on to
+// the leg that holds it; any other failure is a claims_errored skip, or on the
+// ready-assignment tier the fail-closed exit that tier already takes — and the
+// drain never launders a store failure into idle. Idempotent across the
+// federated loop's per-store copies of the ops. Inert on a non-federated city
+// (see hookClaimOptions.FederationIdentity).
+func (ops *hookClaimOps) installCrossCityWriteFence(opts hookClaimOptions, stderr io.Writer) {
+	if ops.crossCityWriteFenced || strings.TrimSpace(opts.FederationIdentity) == "" {
+		return
+	}
+	ops.crossCityWriteFenced = true
+	base := *ops
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		refused, err := hookCrossCityRefusedAtWrite(ctx, dir, env, beadID, opts, base, "claim", stderr)
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("cross-city fence: %s could not be verified before the claim, nothing written: %w", beadID, err)
+		}
+		if refused {
+			return beads.Bead{}, false, errCrossCityFenced
+		}
+		return base.Claim(ctx, dir, env, beadID, assignee)
+	}
+	ops.AssignContinuation = func(ctx context.Context, dir string, env []string, beadID, assignee string) error {
+		refused, err := hookCrossCityRefusedAtWrite(ctx, dir, env, beadID, opts, base, "continuation", stderr)
+		if err != nil {
+			return fmt.Errorf("cross-city fence: %s could not be verified before the preassign, nothing written: %w", beadID, err)
+		}
+		if refused {
+			return errCrossCityFenced
+		}
+		return base.AssignContinuation(ctx, dir, env, beadID, assignee)
+	}
+}
+
+// hookCrossCityRefusedAtWrite reads the authoritative bead through
+// base.ReadWorkMeta and applies federation.MayClaim to it, logging a refusal.
+// A read failure is returned as-is (wrapping preserved) so the caller can fail
+// closed on the seam's own terms; it is never treated as a verdict.
+func hookCrossCityRefusedAtWrite(ctx context.Context, dir string, env []string, beadID string, opts hookClaimOptions, base hookClaimOps, tier string, stderr io.Writer) (bool, error) {
+	if base.ReadWorkMeta == nil {
+		return false, errors.New("no authoritative bead reader is wired")
+	}
+	bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, opts.Assignee)
+	if err != nil {
+		return false, err
+	}
+	ok, reason := federation.MayClaim(bead.Labels, opts.FederationIdentity)
+	if !ok {
+		logCrossCityHookRefusal(stderr, beadID, reason, tier)
+	}
+	return !ok, nil
+}
+
+// hookCrossCityRefusedBeforeServe is layer 2 for the adoption tier, which
+// writes nothing itself but leads straight to writes. It always re-reads the
+// store's copy: the row's labels were true at the query snapshot, and a bead
+// relabeled foreign since then must not be served, stamped, preassigned and
+// heartbeated on the strength of a stale row. The read costs one store
+// round-trip per adoption tick, against a tick that already paid for the work
+// query itself.
+//
+// The current leg is asked first, through ReadWorkMeta (class-routed, so a
+// binding-resident bead is read from its binding). The assigned tier reads
+// city-wide, so an own in_progress bead this leg cannot FIND may be held by
+// another work leg of the fan-out: each other leg in ops.WorkLegs is asked in
+// turn — legs are told apart by dir AND env, the hookStore identity
+// sameHookStore encodes — and the first that holds the bead decides. A bead no
+// leg holds is returned as the not-found, and a read that fails with anything
+// else is returned as-is; the caller (tryHookClaim) fails closed on both. Inert
+// on a non-federated city (see hookClaimOptions.FederationIdentity).
+func hookCrossCityRefusedBeforeServe(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (bool, error) {
+	if strings.TrimSpace(opts.FederationIdentity) == "" {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	refused, err := hookCrossCityRefusedAtWrite(ctx, dir, opts.Env, bead.ID, opts, ops, "adoption", stderr)
+	if err == nil || !errors.Is(err, beads.ErrNotFound) {
+		return refused, err
+	}
+	current := hookStore{dir: dir, env: opts.Env}
+	for _, leg := range ops.WorkLegs {
+		// The loop hands tryHookClaim the leg's own env when it has one and the
+		// shared query env otherwise, so a leg with no env of its own is the
+		// current leg whenever the dir matches.
+		if sameHookStore(leg, current) || (len(leg.env) == 0 && strings.TrimSpace(leg.dir) == strings.TrimSpace(dir)) {
+			continue
+		}
+		refused, legErr := hookCrossCityRefusedAtWrite(ctx, leg.dir, leg.env, bead.ID, opts, ops, "adoption", stderr)
+		if legErr == nil {
+			return refused, nil
+		}
+		if !errors.Is(legErr, beads.ErrNotFound) {
+			return false, legErr
+		}
+	}
+	return false, err
+}
+
+// withoutHookCandidate returns candidates minus every row carrying id.
+func withoutHookCandidate(candidates []beads.Bead, id string) []beads.Bead {
+	kept := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ID != id {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+// logCrossCityHookRefusal writes the refusal line an incident responder greps
+// for — federation.ClaimRefusalLine, identical across the hook and the
+// reconciler: the bead, the owner value(s) as the bead spells them, this
+// identity, the handoff label that would have permitted the write — followed by
+// which hook write it was (tier: candidate, adoption, claim, continuation).
+func logCrossCityHookRefusal(stderr io.Writer, beadID, reason, tier string) {
+	fmt.Fprintf(stderr, "gc hook --claim: %s tier=%s: owned by another city; skipping without writing (add the missing handoff label to hand it to this city)\n", //nolint:errcheck
+		federation.ClaimRefusalLine(beadID, reason), tier)
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
@@ -760,7 +1009,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
 	publishHookClaimRunMap(bead, opts, ops, stderr)
-	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
+	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
 		return 1
@@ -945,7 +1194,7 @@ func writeHookClaimDrain(reason string, jsonOut, drainAck bool, drainAckFn hookD
 	return 1
 }
 
-func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
+func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) ([]string, error) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	if rootID == "" || group == "" {
@@ -966,7 +1215,15 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
 			continue
 		}
+		// The sibling preassign is the hook's second assignee write. The siblings
+		// come from their own read (ListContinuation), so the candidate fence
+		// never saw them; the write seam itself is fenced
+		// (installCrossCityWriteFence), and a refused sibling is skipped, not an
+		// error — it is another city's step, not a failed write.
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, opts.Assignee); err != nil {
+			if errors.Is(err, errCrossCityFenced) {
+				continue
+			}
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)

@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -1226,6 +1227,15 @@ func reassignWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
+					// Cross-city claim fence (jg-66rdw8): re-homing is an ownership
+					// write, and a retired session that held another city's bead
+					// (the state a pre-fence claim left behind) must not hand it
+					// on to its successor. Same rule and same line as the hook and
+					// the orphan release. Inert on a non-federated city.
+					if ok, reason := federation.MayClaim(item.Labels, federationIdentity(cfg)); !ok {
+						fmt.Fprintf(stderr, "session beads: %s: another city's work is not re-homed from retired session %s onto %s\n", federation.ClaimRefusalLine(item.ID, reason), retiredSession.ID, newSessionID) //nolint:errcheck
+						continue
+					}
 					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
@@ -1275,6 +1285,15 @@ func reassignWorkAssignedToRetiredSessionInfo(
 						continue
 					}
 					seen[key] = struct{}{}
+					// Cross-city claim fence (jg-66rdw8): re-homing is an ownership
+					// write, and a retired session that held another city's bead
+					// (the state a pre-fence claim left behind) must not hand it
+					// on to its successor. Same rule and same line as the hook and
+					// the orphan release. Inert on a non-federated city.
+					if ok, reason := federation.MayClaim(item.Labels, federationIdentity(cfg)); !ok {
+						fmt.Fprintf(stderr, "session beads: %s: another city's work is not re-homed from retired session %s onto %s\n", federation.ClaimRefusalLine(item.ID, reason), retiredSession.ID, newSessionID) //nolint:errcheck
+						continue
+					}
 					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}

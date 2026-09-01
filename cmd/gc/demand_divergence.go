@@ -32,6 +32,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/federation"
 )
 
 // demandSpawnOriginValue is the presence-only marker the controller sets on a
@@ -110,6 +111,17 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 		return "unreadable", events.DemandClaimUnknown
 	}
 	status = strings.ToLower(strings.TrimSpace(bead.Status))
+	// A row the cross-city fence refuses is not claimable by THIS city's seat:
+	// the seat's own query did serve it and the seat declined it by rule
+	// (fenceCrossCityHookCandidates), which already logged why. That is not the
+	// readers disagreeing — it is a row the controller counted that no seat of
+	// this city may take until the other half of the convention (the demand and
+	// reconciler side) stops counting foreign work here. Counting it as
+	// divergence would fire a second, false "still claimable" line every tick
+	// and bury the metric this counter exists to keep at zero.
+	if ok, _ := federation.MayClaim(bead.Labels, opts.FederationIdentity); !ok {
+		return status, events.DemandClaimBenign
+	}
 	// The invariant is about a row that is STILL claimable by a worker for this
 	// template: open, unassigned, route-matching, and not excluded by the shared
 	// serving rules. Anything else means the row moved on — which is what a

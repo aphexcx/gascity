@@ -415,15 +415,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
-	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	legs := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
 	// On a split city the ready tiers of workQuery are already city-wide, so
 	// running the whole query once per store re-asks the same question R+1 times
 	// and re-opens every leg each time. Pin the city-wide read to the primary
 	// entry and leave the extras on the single-store command they ran before the
-	// swap, which still covers the per-store crash-recovery and ephemeral tiers
-	// `gc ready` does not answer. No-op on a single-store city and for a custom
-	// work_query, where both forms are the same string.
-	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	// swap. No-op on a single-store city and for a custom work_query, where both
+	// forms are the same string; otherwise the extras are dropped from the QUERY
+	// fan-out (the city-wide reader already covers them).
+	// The unscoped fan-out (legs) still reaches the claim as ops.WorkLegs, so
+	// the cross-city adoption re-check can resolve a bead whichever leg holds it.
+	stores := scopeFederatedHookStores(legs, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -474,8 +476,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:          queryEnv,
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
+			// The cross-city claim fence compares owner:/handoff: labels against
+			// this city's [federation] identity; unset means not federated and
+			// the fence is off (federation.MayClaim).
+			FederationIdentity: strings.TrimSpace(cfg.Federation.Identity),
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, legs, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -611,7 +617,7 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores, legs []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -624,6 +630,10 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 		return 1
 	}
 	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	// legs is the fan-out BEFORE scopeFederatedHookStores pinned the city-wide
+	// read to the primary: the query runs on stores, but the cross-city adoption
+	// re-check must be able to reach every leg that can hold a bead.
+	ops.WorkLegs = legs
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
@@ -652,7 +662,15 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 // relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
-	ops.ClassRoute.observeWorkLegs(stores)
+	if ops.WorkLegs == nil {
+		ops.WorkLegs = stores
+	}
+	// The route is armed with the UNSCOPED fan-out: on a split city the query
+	// is pinned to the primary (scopeFederatedHookStores), but a not-found there
+	// must still be checked against the work legs that can hold the bead before
+	// it opens the binding escalation — a co-resident binding copy must not
+	// answer for a work copy another leg holds.
+	ops.ClassRoute.observeWorkLegs(ops.WorkLegs)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
