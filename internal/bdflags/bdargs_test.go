@@ -52,8 +52,8 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // -V/--version) is boolean and consumes nothing.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--actor": true, "--db": true, "-C": true, "--directory": true,
-		"--dolt-auto-commit": true,
+		"--actor": true, "--database": true, "--db": true, "-C": true, "--directory": true,
+		"--dolt-auto-commit": true, "--mem-profile": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
@@ -69,8 +69,8 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 // Sourced from `bd --help` (bd 1.1.0), the same pass as the value-flag table.
 func TestGlobalBoolFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--global": true, "--ignore-schema-skew": true, "--json": true,
-		"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
+		"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true, "--json": true,
+		"--no-color": true, "--profile": true, "-q": true, "--quiet": true, "--readonly": true,
 		"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
 	}
 	if got := GlobalBoolFlags(); !reflect.DeepEqual(got, want) {

@@ -1,6 +1,10 @@
 package beads_test
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,5 +68,41 @@ func TestBdStoreCreateWithoutAnOwnerLabelIsUnchanged(t *testing.T) {
 	}
 	if _, ok := bdCreateLabelsArg(t, gotArgs); ok {
 		t.Fatalf("args = %q, want no --labels without an owner", gotArgs)
+	}
+}
+
+// TestBdStoreApplyGraphPlanStampsTheOwnerLabel: the option promises every
+// create, and a graph apply is a bulk create through `bd create --graph`.
+func TestBdStoreApplyGraphPlanStampsTheOwnerLabel(t *testing.T) {
+	var captured beads.GraphApplyPlan
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			t.Fatalf("reading graph plan: %v", err)
+		}
+		if err := json.Unmarshal(data, &captured); err != nil {
+			t.Fatalf("unmarshal graph plan: %v", err)
+		}
+		return []byte(`{"ids":{"root":"bd-root","step":"bd-step","foreign":"bd-foreign"}}`), nil
+	}
+	s := beads.NewBdStore(t.TempDir(), runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
+	plan := &beads.GraphApplyPlan{Nodes: []beads.GraphApplyNode{
+		{Key: "root", Title: "root"},
+		{Key: "step", Title: "step", Labels: []string{"pool:x"}},
+		{Key: "foreign", Title: "foreign", Labels: []string{"owner:jadegate"}},
+	}}
+	if _, err := s.ApplyGraphPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(captured.Nodes))
+	for _, n := range captured.Nodes {
+		got = append(got, strings.Join(n.Labels, ","))
+	}
+	want := []string{"owner:citadel", "pool:x,owner:citadel", "owner:jadegate"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("node labels sent to bd = %v, want %v", got, want)
+	}
+	if plan.Nodes[0].Labels != nil || !reflect.DeepEqual(plan.Nodes[1].Labels, []string{"pool:x"}) {
+		t.Fatalf("caller's plan was mutated: %+v", plan.Nodes)
 	}
 }

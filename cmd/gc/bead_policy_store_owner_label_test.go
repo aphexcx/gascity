@@ -116,3 +116,26 @@ func TestBdStoreOptionsForConfigCarryTheOwnerLabel(t *testing.T) {
 		t.Fatalf("args = %q, want no --labels without an identity", joined)
 	}
 }
+
+// TestBeadPolicyStoreStampsTheOwnerLabelInsideATransaction: Store.Tx hands
+// the caller a transaction whose Create must stamp like the store's own —
+// session beads and idempotency records are created that way.
+func TestBeadPolicyStoreStampsTheOwnerLabelInsideATransaction(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), federatedTestConfig("citadel"))
+	var created beads.Bead
+	err := store.Tx("test: tx create", func(tx beads.Tx) error {
+		var err error
+		created, err = tx.Create(beads.Bead{Title: "in tx", Labels: []string{"hold:mayor"}})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"hold:mayor", "owner:citadel"}; !reflect.DeepEqual(got.Labels, want) {
+		t.Fatalf("labels = %v, want %v", got.Labels, want)
+	}
+}

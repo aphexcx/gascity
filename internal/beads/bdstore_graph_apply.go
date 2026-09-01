@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gastownhall/gascity/internal/federation"
 )
 
 // ApplyGraphPlan creates a bead graph via a single hidden bd command so the
@@ -25,7 +27,10 @@ func (s *BdStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyP
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}
 
-	data, err := json.Marshal(plan)
+	// A graph apply is a bulk create, so the owner label this store stamps on
+	// a single create lands on every node here too — on a copy, since the
+	// plan is the caller's and ValidateGraphApplyResult reads it back.
+	data, err := json.Marshal(s.stampGraphPlanOwner(plan))
 	if err != nil {
 		return nil, fmt.Errorf("marshaling graph apply plan: %w", err)
 	}
@@ -89,4 +94,20 @@ func graphStorageFlags(storage StorageClass) (ephemeral bool, noHistory bool, er
 // graph directly into ephemeral storage.
 func (s *BdStore) SupportsEphemeralGraphApply() bool {
 	return true
+}
+
+// stampGraphPlanOwner returns plan with the store's owner label on every node
+// that names no owner of its own, or plan itself when there is no owner label
+// to stamp. The caller's plan is never mutated.
+func (s *BdStore) stampGraphPlanOwner(plan *GraphApplyPlan) *GraphApplyPlan {
+	if s.ownerLabel == "" || plan == nil {
+		return plan
+	}
+	stamped := *plan
+	stamped.Nodes = make([]GraphApplyNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		node.Labels = federation.EnsureOwnerLabel(node.Labels, s.ownerLabel)
+		stamped.Nodes[i] = node
+	}
+	return &stamped
 }

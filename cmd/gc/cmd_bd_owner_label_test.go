@@ -33,6 +33,10 @@ func TestRewriteBdCreateOwnerLabel(t *testing.T) {
 		{"the stamp lands before a -- terminator", "owner:citadel", []string{"create", "--", "t"}, []string{"create", "--labels", "owner:citadel", "--", "t"}, false},
 		{"an unknown flag is ambiguous and untouched", "owner:citadel", []string{"create", "t", "--weird", "x"}, []string{"create", "t", "--weird", "x"}, true},
 		{"an attached short value is ambiguous and untouched", "owner:citadel", []string{"create", "t", "-lfoo"}, []string{"create", "t", "-lfoo"}, true},
+		{"the opt-out is stripped even when the rest is ambiguous", "owner:citadel", []string{"create", "t", "--no-owner-label", "-p1"}, []string{"create", "t", "-p1"}, true},
+		{"bd 1.2.2 globals before the verb are known", "owner:citadel", []string{"--database", "shared", "create", "t"}, []string{"--database", "shared", "create", "t", "--labels", "owner:citadel"}, false},
+		{"an unknown global before a create is ambiguous", "owner:citadel", []string{"--future-flag", "x", "create", "t"}, []string{"--future-flag", "x", "create", "t"}, true},
+		{"an unknown global before another verb is not create", "owner:citadel", []string{"--future-flag", "x", "list"}, []string{"--future-flag", "x", "list"}, false},
 		{"other verbs pass through", "owner:citadel", []string{"update", "x", "--add-label", "y"}, []string{"update", "x", "--add-label", "y"}, false},
 		{"no verb passes through", "owner:citadel", []string{"--json"}, []string{"--json"}, false},
 	}

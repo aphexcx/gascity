@@ -26,12 +26,19 @@ const bdOwnerLabelNotInjectedNotice = "gc bd: owner label not injected (ambiguou
 //
 // It scans fail-closed, like bdMutationWriteIDs: a flag the create manifest
 // does not know may consume the next token, so the label could land as a
-// positional and become the title. Such an argv is reported ambiguous and
-// returned UNCHANGED — not refused, not stamped — because a create that
-// worked yesterday must keep working today, and bd is the one to reject a
-// flag it does not take. The stamp lands before a `--` terminator so it is
-// read as a flag, never as a positional.
+// positional and become the title — and a global flag the manifest does not
+// know may hide the verb itself. Such an argv is reported ambiguous and
+// returned as it came, minus the gc-owned opt-out (which bd would reject) —
+// not refused, not stamped — because a create that worked yesterday must
+// keep working today, and bd is the one to reject a flag it does not take.
+// The stamp lands before a `--` terminator so it is read as a flag, never as
+// a positional.
 func rewriteBdCreateOwnerLabel(bdArgs []string, owner string) ([]string, bool) {
+	if bdLeadingFlagsHideTheVerb(bdArgs) {
+		// The verb cannot be located, so neither can a create be stamped nor
+		// its absence trusted; say so only when a create may be in there.
+		return stripBdNoOwnerLabel(bdArgs), slices.Contains(bdArgs, "create")
+	}
 	sub, rest := bdflags.SplitGlobalFlags(bdArgs)
 	if sub != "create" {
 		return bdArgs, false
@@ -71,7 +78,7 @@ func rewriteBdCreateOwnerLabel(bdArgs []string, owner string) ([]string, bool) {
 		case valueFlags[name]:
 			if !inline {
 				if i+1 >= len(rest) {
-					return bdArgs, true // a value flag with no value: bd's error to give
+					return stripBdNoOwnerLabel(bdArgs), true // a value flag with no value: bd's error to give
 				}
 				i++
 				value = rest[i]
@@ -83,7 +90,7 @@ func rewriteBdCreateOwnerLabel(bdArgs []string, owner string) ([]string, bool) {
 				hasOwner = true
 			}
 		default:
-			return bdArgs, true
+			return stripBdNoOwnerLabel(bdArgs), true
 		}
 	}
 	if optOut || hasOwner || owner == "" {
@@ -94,6 +101,50 @@ func rewriteBdCreateOwnerLabel(bdArgs []string, owner string) ([]string, bool) {
 		return slices.Insert(out, terminator, stamp...), false
 	}
 	return append(out, stamp...), false
+}
+
+// bdLeadingFlagsHideTheVerb reports whether a flag before the verb is one
+// neither global manifest knows. SplitGlobalFlags skips such a flag as if it
+// took no value, so `--future-flag x create t` would read x as the verb: the
+// verb is undecidable from this argv.
+func bdLeadingFlagsHideTheVerb(bdArgs []string) bool {
+	valueFlags := bdflags.GlobalValueFlags()
+	boolFlags := bdflags.GlobalBoolFlags()
+	for i := 0; i < len(bdArgs); i++ {
+		tok := bdArgs[i]
+		if !strings.HasPrefix(tok, "-") || tok == "-" || tok == "--" {
+			return false // the verb (or a positional) — the leading flags are done
+		}
+		name, _, inline := strings.Cut(tok, "=")
+		switch {
+		case boolFlags[name]:
+		case valueFlags[name]:
+			if !inline {
+				i++
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// stripBdNoOwnerLabel returns bdArgs without the gc-owned opt-out tokens that
+// precede a `--` terminator: whatever else happens to the argv, bd must never
+// see a flag only gc takes.
+func stripBdNoOwnerLabel(bdArgs []string) []string {
+	out := make([]string, 0, len(bdArgs))
+	seenTerminator := false
+	for _, tok := range bdArgs {
+		if tok == "--" {
+			seenTerminator = true
+		}
+		if !seenTerminator && tok == bdNoOwnerLabelFlag {
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
 }
 
 // bdCreateLabelFlag reports whether name is one of bd create's label flags:

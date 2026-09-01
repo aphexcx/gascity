@@ -90,6 +90,32 @@ func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
 }
 
+// Tx hands the caller a transaction whose Create stamps the owner label like
+// the store's own Create does: session beads, idempotency records and the
+// like are created transactionally, and "every bead this city creates" has
+// no transactional exception.
+func (s *beadPolicyStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
+	owner := s.ownerLabel()
+	if owner == "" || fn == nil {
+		return s.Store.Tx(commitMsg, fn)
+	}
+	return s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(ownerStampingTx{Tx: tx, owner: owner})
+	})
+}
+
+// ownerStampingTx is the transaction the policy wrapper hands out on a
+// federated city: every other verb is the inner transaction's.
+type ownerStampingTx struct {
+	beads.Tx
+	owner string
+}
+
+func (tx ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
+	b.Labels = federation.EnsureOwnerLabel(b.Labels, tx.owner)
+	return tx.Tx.Create(b)
+}
+
 // ownerLabel is the owner:<identity> label a federated city stamps on every
 // bead it creates (internal/federation), or "" when the city is not
 // federated. Every store gc opens is wrapped here, so this is the one

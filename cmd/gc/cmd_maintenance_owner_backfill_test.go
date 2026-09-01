@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,4 +78,76 @@ func TestOwnerBackfillRowsKeepStoreOrder(t *testing.T) {
 // idempotent on a second run, refused without [federation] identity.
 func TestMaintenanceOwnerBackfillScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "maintenance-owner-backfill.txtar")))
+}
+
+// staleReadStore serves Get from a substitute bead, standing in for a bead
+// that changed between the backfill's list and its write.
+type staleReadStore struct {
+	beads.Store
+	fresh map[string]beads.Bead
+}
+
+func (s *staleReadStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.fresh[id]; ok {
+		return b, nil
+	}
+	return s.Store.Get(id)
+}
+
+// TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting: --apply must not
+// trust the dry-run snapshot. A bead that was closed, given an owner, or lost
+// its OURS signal since the list is skipped, and only a bead that still
+// classifies OURS on a live read is labeled.
+func TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting(t *testing.T) {
+	mem := beads.NewMemStore()
+	mk := func(title, assignee string, labels ...string) beads.Bead {
+		b, err := mem.Create(beads.Bead{Title: title, Assignee: assignee, Labels: labels})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	still := mk("still ours", "ci-1")
+	closed := mk("closed since", "ci-2")
+	owned := mk("owned since", "ci-3")
+	moved := mk("reassigned since", "ci-4")
+	rows := ownerBackfillRows([]beads.Bead{still, closed, owned, moved}, "ci", nil)
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4 OURS candidates", len(rows))
+	}
+	closedNow := closed
+	closedNow.Status = "closed"
+	ownedNow := owned
+	ownedNow.Labels = []string{"owner:jadegate"}
+	movedNow := moved
+	movedNow.Assignee = "jg-9"
+	store := &staleReadStore{Store: mem, fresh: map[string]beads.Bead{closed.ID: closedNow, owned.ID: ownedNow, moved.ID: movedNow}}
+
+	var stdout, stderr bytes.Buffer
+	labeled, skipped, failed := applyOwnerBackfill(store, rows, "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 1 || skipped != 3 || failed != 0 {
+		t.Fatalf("labeled/skipped/failed = %d/%d/%d, want 1/3/0; stdout=%q stderr=%q", labeled, skipped, failed, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "labeled "+still.ID+" owner:citadel") {
+		t.Fatalf("stdout = %q, want the one labeled line", stdout.String())
+	}
+	for _, id := range []string{closed.ID, owned.ID, moved.ID} {
+		if !strings.Contains(stdout.String(), "skipped "+id) {
+			t.Errorf("stdout = %q, want a skipped line for %s", stdout.String(), id)
+		}
+		got, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if beadLabelsContain(got.Labels, "owner:citadel") {
+			t.Errorf("%s was labeled despite changing under the backfill: %v", id, got.Labels)
+		}
+	}
+	got, err := mem.Get(still.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beadLabelsContain(got.Labels, "owner:citadel") {
+		t.Fatalf("%s labels = %v, want owner:citadel", still.ID, got.Labels)
+	}
 }

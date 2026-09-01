@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -184,25 +185,88 @@ func cmdMaintenanceOwnerBackfill(rigName string, apply bool, stdout, stderr io.W
 		return 0
 	}
 
-	labeled, failed := 0, 0
-	for _, row := range rows {
-		if row.Bucket != ownerBackfillOurs {
-			continue
-		}
-		if err := store.Update(row.Bead.ID, beads.UpdateOpts{Labels: []string{owner}}); err != nil {
-			failed++
-			fmt.Fprintf(stderr, "%s: labeling %s: %v\n", cmdName, row.Bead.ID, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
-		labeled++
-		fmt.Fprintf(stdout, "labeled %s %s\n", row.Bead.ID, owner) //nolint:errcheck // best-effort stdout
+	labeled, skipped, failed := applyOwnerBackfill(store, rows, owner, hqPrefix, func(target string) bool { return config.FindAgent(cfg, target) != nil }, stdout, stderr)
+	summary := fmt.Sprintf("%d labeled %s, %d left unlabeled (%s)", labeled, owner, unknown, ownerBackfillUnknown)
+	if skipped > 0 {
+		summary += fmt.Sprintf(", %d skipped (changed since the list)", skipped)
 	}
-	fmt.Fprintf(stdout, "%d labeled %s, %d left unlabeled (%s)\n", labeled, owner, unknown, ownerBackfillUnknown) //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(stdout, summary) //nolint:errcheck // best-effort stdout
 	if failed > 0 {
 		fmt.Fprintf(stderr, "%s: %d bead(s) could not be labeled\n", cmdName, failed) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
+}
+
+// applyOwnerBackfill labels the OURS rows, re-reading each bead live first.
+// The rows are a snapshot: between the list and the write a bead can close,
+// gain an owner from the other city's sync, or lose the signal that made it
+// OURS, and a blind add would then label a closed bead or put two owners on
+// one. A bead that no longer classifies OURS on the live read is skipped with
+// the reason. When the store proves a revision for the re-read (a positive
+// one — a zero revision is "unknown", not "zero") and can write conditionally,
+// the write is fenced on it, so a change between the re-read and the write is
+// a skip too; otherwise the re-read is the check and the add-if-absent label
+// path is the write.
+func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPrefix string, poolResolves func(target string) bool, stdout, stderr io.Writer) (labeled, skipped, failed int) {
+	const cmdName = "gc maintenance owner-backfill"
+	conditional, _ := beads.ConditionalWriterFor(store)
+	for _, row := range rows {
+		if row.Bucket != ownerBackfillOurs {
+			continue
+		}
+		id := row.Bead.ID
+		fresh, err := store.Get(id)
+		if err != nil {
+			failed++
+			fmt.Fprintf(stderr, "%s: re-reading %s: %v\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if reason, ok := ownerBackfillStillOurs(fresh, hqPrefix, poolResolves); !ok {
+			skipped++
+			fmt.Fprintf(stdout, "skipped %s: %s\n", id, reason) //nolint:errcheck // best-effort stdout
+			continue
+		}
+		opts := beads.UpdateOpts{Labels: []string{owner}}
+		if conditional != nil && fresh.Revision > 0 {
+			err = conditional.UpdateIfMatch(id, fresh.Revision, opts)
+			var precondition *beads.PreconditionFailedError
+			switch {
+			case errors.As(err, &precondition):
+				skipped++
+				fmt.Fprintf(stdout, "skipped %s: changed while labeling (revision %d is now %d)\n", id, precondition.Expected, precondition.Current) //nolint:errcheck // best-effort stdout
+				continue
+			case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+				err = store.Update(id, opts)
+			}
+		} else {
+			err = store.Update(id, opts)
+		}
+		if err != nil {
+			failed++
+			fmt.Fprintf(stderr, "%s: labeling %s: %v\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		labeled++
+		fmt.Fprintf(stdout, "labeled %s %s\n", id, owner) //nolint:errcheck // best-effort stdout
+	}
+	return labeled, skipped, failed
+}
+
+// ownerBackfillStillOurs re-classifies one live bead with the rule the dry run
+// used and names what changed when it no longer qualifies.
+func ownerBackfillStillOurs(fresh beads.Bead, hqPrefix string, poolResolves func(target string) bool) (string, bool) {
+	rows := ownerBackfillRows([]beads.Bead{fresh}, hqPrefix, poolResolves)
+	switch {
+	case len(rows) == 0:
+		if federation.HasOwnerLabel(fresh.Labels) {
+			return "now carries " + federation.OwnerLabelPrefix + federation.OwnerOf(fresh.Labels), false
+		}
+		return "now " + fresh.Status, false
+	case rows[0].Bucket != ownerBackfillOurs:
+		return "no longer attributable (" + rows[0].Rule + ")", false
+	}
+	return "", true
 }
 
 // ownerBackfillCandidates reads the open and in_progress beads live: a

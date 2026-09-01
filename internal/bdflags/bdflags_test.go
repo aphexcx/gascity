@@ -408,3 +408,23 @@ func TestScanUnknownFlagsAcceptsGCOwnedCreateFlagOnlyViaGC(t *testing.T) {
 		t.Fatalf("bd create --no-owner-label: findings = %+v, want exactly the unknown flag", f)
 	}
 }
+
+// bd 1.2.2 grew global flags the manifest must know, or a value flag's value
+// is read as the verb by every consumer that locates the subcommand.
+func TestGlobalFlagsTrackBd122(t *testing.T) {
+	value := GlobalValueFlags()
+	for _, f := range []string{"--database", "--mem-profile"} {
+		if !value[f] {
+			t.Errorf("GlobalValueFlags()[%q] = false, want true", f)
+		}
+	}
+	boolFlags := GlobalBoolFlags()
+	for _, f := range []string{"--cpu-profile", "--no-color"} {
+		if !boolFlags[f] {
+			t.Errorf("GlobalBoolFlags()[%q] = false, want true", f)
+		}
+	}
+	if sub, rest := SplitGlobalFlags([]string{"--database", "shared", "create", "t"}); sub != "create" || !reflect.DeepEqual(rest, []string{"t"}) {
+		t.Fatalf("SplitGlobalFlags = (%q, %v), want (create, [t])", sub, rest)
+	}
+}
