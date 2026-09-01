@@ -34,7 +34,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--due": true, "-e": true, "--estimate": true, "--event-actor": true,
 		"--event-category": true, "--event-payload": true, "--event-target": true,
 		"--external-ref": true, "-f": true, "--file": true, "--graph": true,
-		"--id": true, "-l": true, "--labels": true, "--metadata": true,
+		"--id": true, "-l": true, "--label": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
 		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
@@ -167,6 +167,28 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"dep list":   {},
 	"dep remove": {},
+}
+
+// gcOwnedBoolFlagsBySub holds the boolean flags "gc bd" itself owns on top of
+// bd's manifest, keyed like valueFlagsBySub. cmd/gc/cmd_bd.go consumes them
+// before dispatch, so they are valid on "gc bd <sub>" and an unknown flag on a
+// bare "bd <sub>" — the same split scan.go's gcScopeValueFlags makes for
+// --rig/--city. They are kept out of the bd manifests above so the manifest
+// freshness check and the write-mutation ID guard keep describing bd alone.
+var gcOwnedBoolFlagsBySub = map[string]map[string]bool{
+	// --no-owner-label skips the owner:<identity> label "gc bd create" stamps
+	// on a federated city (internal/federation).
+	"create": {"--no-owner-label": true},
+}
+
+// GCOwnedBoolFlags returns the boolean flags "gc bd" accepts on sub beyond
+// bd's own manifest, or nil when it owns none there.
+func GCOwnedBoolFlags(sub string) map[string]bool {
+	subFlags, ok := gcOwnedBoolFlagsBySub[sub]
+	if !ok {
+		return nil
+	}
+	return mergeFlagSets(subFlags)
 }
 
 // GlobalValueFlags returns the flags accepted by every bd subcommand that

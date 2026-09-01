@@ -121,6 +121,17 @@ can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
+On a city whose city.toml sets [federation] identity = "<name>", "gc bd
+create" (in the city scope and every rig scope) appends
+--labels owner:<name>, so every bead this city creates in a bead store it
+shares with other cities names the city that owns it; each federated
+city's claim path refuses beads owned by another city. An owner: label
+you pass yourself via -l/--labels/--label is kept as given, and the
+gc-only --no-owner-label flag (stripped before dispatch) skips the stamp
+for one create. A create argv gc cannot scan is forwarded exactly as
+typed with a one-line notice on stderr, never refused. With the identity
+unset, create is untouched.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.`,
@@ -130,7 +141,8 @@ auto-export behavior, invoke bd directly.`,
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
   gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
-  gc bd release-if-current my-project-abc worker-1`,
+  gc bd release-if-current my-project-abc worker-1
+  gc bd create "title" --no-owner-label   # skip the owner:<identity> stamp on a federated city`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Plumb doBd's numeric exit code through exitForCode so the
@@ -260,6 +272,21 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	// On a federated city every bead this city creates names its owner
+	// (internal/federation): stamp `create` with --labels owner:<identity>
+	// unless the operator named an owner or opted out, and strip the gc-owned
+	// opt-out either way. An argv the scanner cannot parse is forwarded as
+	// typed with one notice — never refused — so no create that worked before
+	// the stamp existed breaks because of it.
+	owner, federated := cfg.Federation.OwnerLabel()
+	if rewritten, ambiguous := rewriteBdCreateOwnerLabel(bdArgs, owner); ambiguous {
+		if federated {
+			fmt.Fprintln(stderr, bdOwnerLabelNotInjectedNotice) //nolint:errcheck // best-effort stderr
+		}
+	} else {
+		bdArgs = rewritten
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs, cityName != "", stderr)

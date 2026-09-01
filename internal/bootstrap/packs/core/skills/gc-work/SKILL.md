@@ -30,7 +30,16 @@ gc bd create "title" --rig beads            # Create in beads db (be- prefix)
 gc bd create "title"                        # Create in current directory's .beads/
 gc bd create "title" -t bug                 # Create with type
 gc bd create "title" --label priority=high  # Create with labels
+gc bd create "title" --no-owner-label       # Federated city: skip the owner:<identity> stamp
 ```
+
+On a city whose `city.toml` sets `[federation] identity = "<name>"` (a bead
+store shared with other cities), every `gc bd create` — city scope and every
+rig scope — also carries `owner:<name>`, and each federated city's claim path
+refuses beads owned by another city. Pass your own `owner:` label to create
+a bead for another city on purpose, or `--no-owner-label` to leave one
+unlabeled (claimable by anyone). `gc maintenance owner-backfill` labels
+legacy beads (dry run by default; `--apply` to write).
 
 ## Finding work
 
@@ -41,15 +50,17 @@ gc bd ready                               # List beads available for claiming
 gc bd ready --label role:worker           # Filter by label
 gc bd show <id>                           # Show bead details
 gc ready                                  # Same frontier, federated over every store the city uses
+gc ready --label owner:<identity>         # One city's lane of a shared (federated) store
+gc ready --exclude-label owner:<other>    # Everything but another city's lane
 ```
 
 On a city that serves a coordination class from its own `[storage]` binding,
 `gc bd ready` (and `gc bd list --ready`) is refused with exit 1: it reads one
 ledger and the city's ready set spans more than one. Use `gc ready` there. It
-takes `--assignee`, `--unassigned`, `--metadata-field`, `--exclude-type`,
-`--exclude-label`, `--sort`, `--limit`, `--include-ephemeral`, `--status` and
-`--json` — not the label, parent, type or priority selectors `gc bd ready`
-forwards.
+takes `--assignee`, `--unassigned`, `--metadata-field`, `--label`,
+`--exclude-type`, `--exclude-label`, `--sort`, `--limit`, `--include-ephemeral`,
+`--status` and `--json` — not the label-any, parent, type or priority selectors
+`gc bd ready` forwards.
 
 ## Claiming and updating
 

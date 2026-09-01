@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -365,6 +366,12 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
+	// ownerLabel, when set, is the "owner:<identity>" label stamped on every
+	// bead this store creates that names no owner of its own — the in-process
+	// twin of the `gc bd create` argv injector on a federated city. See
+	// internal/federation.
+	ownerLabel string
+
 	// relocatedClasses names the coordination classes this ledger does not
 	// serve. Empty on every city that keeps all classes on one store, which is
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
@@ -443,6 +450,17 @@ type BdStoreOption func(*BdStore)
 func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
+	}
+}
+
+// WithBdStoreOwnerLabel stamps owner (the full "owner:<identity>" label) on
+// every bead this store creates that carries no owner label of its own, so an
+// in-process create matches what `gc bd create` injects on a federated city
+// (internal/federation). An explicit owner label on the bead is kept as
+// given. Empty disables the stamp, which leaves the create argv unchanged.
+func WithBdStoreOwnerLabel(owner string) BdStoreOption {
+	return func(s *BdStore) {
+		s.ownerLabel = owner
 	}
 }
 
@@ -1110,8 +1128,8 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 	if len(b.Needs) > 0 {
 		args = append(args, "--deps", strings.Join(b.Needs, ","))
 	}
-	if len(b.Labels) > 0 {
-		args = append(args, "--labels", strings.Join(b.Labels, ","))
+	if labels := federation.EnsureOwnerLabel(b.Labels, s.ownerLabel); len(labels) > 0 {
+		args = append(args, "--labels", strings.Join(labels, ","))
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)

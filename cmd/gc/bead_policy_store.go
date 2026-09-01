@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -84,8 +85,39 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
+	b.Labels = federation.EnsureOwnerLabel(b.Labels, s.ownerLabel())
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
+}
+
+// ownerLabel is the owner:<identity> label a federated city stamps on every
+// bead it creates (internal/federation), or "" when the city is not
+// federated. Every store gc opens is wrapped here, so this is the one
+// in-process door whatever backend serves the create.
+func (s *beadPolicyStore) ownerLabel() string {
+	if s.cfg == nil {
+		return ""
+	}
+	label, _ := s.cfg.Federation.OwnerLabel()
+	return label
+}
+
+// stampGraphPlanOwner returns plan with the owner label on every node that
+// names no owner of its own. A graph apply is a bulk create — molecule roots,
+// steps, control beads — so each node is stamped as a single create would be.
+// It works on a copy: the caller's plan stays theirs.
+func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads.GraphApplyPlan {
+	owner := s.ownerLabel()
+	if owner == "" || plan == nil {
+		return plan
+	}
+	stamped := *plan
+	stamped.Nodes = make([]beads.GraphApplyNode, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		node.Labels = federation.EnsureOwnerLabel(node.Labels, owner)
+		stamped.Nodes[i] = node
+	}
+	return &stamped
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -250,6 +282,7 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	plan = s.stampGraphPlanOwner(plan)
 	if plan == nil {
 		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}

@@ -1,0 +1,77 @@
+# gc maintenance owner-backfill: dry run by default, --apply labels only OURS,
+# idempotent on a second run, refused without [federation] identity.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+cd $WORK/city
+
+# Dry run: every unlabeled open/in_progress bead is bucketed; nothing is written.
+exec gc maintenance owner-backfill
+stdout 'owner-backfill \(dry run\): scope city, identity citadel, session prefix "ci-"'
+stdout '^OURS\tci-1\tassignee=ci-abc12\tassignee carries this city.s session prefix "ci-"$'
+stdout '^OURS\tci-5\tassignee=ci-wisp-77\tassignee carries this city.s session prefix "ci-"$'
+stdout '^THEIRS-OR-UNKNOWN\tci-2\tassignee=jg-xyz\tno attributable signal$'
+stdout '^THEIRS-OR-UNKNOWN\tci-6\tassignee=-\tno attributable signal$'
+! stdout 'ci-3'
+! stdout 'ci-4'
+stdout '2 OURS, 2 THEIRS-OR-UNKNOWN; dry run, nothing written \(pass --apply to label OURS\)'
+
+# Apply: only OURS gets owner:citadel, one line per bead changed.
+exec gc maintenance owner-backfill --apply
+stdout '^labeled ci-1 owner:citadel$'
+stdout '^labeled ci-5 owner:citadel$'
+! stdout 'labeled ci-2'
+! stdout 'labeled ci-6'
+stdout '2 labeled owner:citadel, 2 left unlabeled \(THEIRS-OR-UNKNOWN\)'
+
+# The labeled beads are no longer candidates; the second run changes nothing.
+exec gc maintenance owner-backfill --apply
+! stdout 'labeled ci-'
+stdout '0 labeled owner:citadel, 2 left unlabeled \(THEIRS-OR-UNKNOWN\)'
+
+exec gc maintenance owner-backfill
+! stdout '^OURS'
+stdout '0 OURS, 2 THEIRS-OR-UNKNOWN'
+
+# --rig names a rig scope explicitly; an unknown rig is an error.
+! exec gc maintenance owner-backfill --rig nope
+stderr 'unknown rig "nope"'
+
+# Without [federation] identity the verb refuses with exit 2.
+cd $WORK/plain
+! exec gc maintenance owner-backfill
+stderr 'gc maintenance owner-backfill: \[federation\] identity is not set in city.toml'
+
+-- city/city.toml --
+[workspace]
+name = "city"
+prefix = "ci"
+
+[federation]
+identity = "citadel"
+
+[beads]
+provider = "file"
+-- city/.gc/file-beads-layout --
+scope-local-v1
+-- city/.gc/beads.json --
+{"seq":6,"beads":[
+ {"id":"ci-1","title":"ours by session","status":"open","issue_type":"task","assignee":"ci-abc12"},
+ {"id":"ci-2","title":"theirs by session","status":"open","issue_type":"task","assignee":"jg-xyz"},
+ {"id":"ci-3","title":"already labeled","status":"open","issue_type":"task","assignee":"ci-abc12","labels":["owner:jadegate"]},
+ {"id":"ci-4","title":"closed","status":"closed","issue_type":"task","assignee":"ci-abc12"},
+ {"id":"ci-5","title":"ours in progress","status":"in_progress","issue_type":"task","assignee":"ci-wisp-77"},
+ {"id":"ci-6","title":"unassigned legacy","status":"open","issue_type":"task"}
+]}
+-- plain/city.toml --
+[workspace]
+name = "plain"
+
+[beads]
+provider = "file"
+-- plain/.gc/file-beads-layout --
+scope-local-v1
+-- plain/.gc/beads.json --
+{"seq":0,"beads":[]}

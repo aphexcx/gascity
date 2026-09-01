@@ -372,3 +372,39 @@ func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
 		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
 	}
 }
+
+// The hidden --label alias bd accepts on create consumes a value; without it
+// in the manifest `gc bd create --label x "title"` reads x as the title.
+func TestCreateLabelAliasConsumesAValue(t *testing.T) {
+	if !ValueFlags("create")["--label"] {
+		t.Fatal(`ValueFlags(create)["--label"] = false, want true`)
+	}
+	got := Positionals("create", []string{"--label", "owner:x", "title"})
+	if !reflect.DeepEqual(got, []string{"title"}) {
+		t.Fatalf("Positionals = %v, want [title]", got)
+	}
+}
+
+// --no-owner-label is owned by `gc bd`, like --rig and --city: valid on
+// `gc bd create`, an unknown flag on bare `bd create`.
+func TestGCOwnedCreateFlagIsNotClaimedForBd(t *testing.T) {
+	if !GCOwnedBoolFlags("create")["--no-owner-label"] {
+		t.Fatal(`GCOwnedBoolFlags(create)["--no-owner-label"] = false, want true`)
+	}
+	if BoolFlags("create")["--no-owner-label"] {
+		t.Fatal("bd's own create manifest must not claim the gc-owned --no-owner-label")
+	}
+	if GCOwnedBoolFlags("update") != nil {
+		t.Fatal("GCOwnedBoolFlags(update) should be nil: no gc-owned flags there")
+	}
+}
+
+func TestScanUnknownFlagsAcceptsGCOwnedCreateFlagOnlyViaGC(t *testing.T) {
+	if f := ScanUnknownFlags([]byte("gc bd create \"t\" --no-owner-label\n")); len(f) != 0 {
+		t.Fatalf("gc bd create --no-owner-label: findings = %+v, want none", f)
+	}
+	f := ScanUnknownFlags([]byte("bd create \"t\" --no-owner-label\n"))
+	if len(f) != 1 || f[0].Flag != "--no-owner-label" {
+		t.Fatalf("bd create --no-owner-label: findings = %+v, want exactly the unknown flag", f)
+	}
+}

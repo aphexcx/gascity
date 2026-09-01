@@ -1748,6 +1748,14 @@ exit 0
 // bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
 func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
 	t.Helper()
+	fakeBdCityTestSetup(t, "[workspace]\nname = \"demo\"\n", fakeBdScript)
+}
+
+// fakeBdCityTestSetup is silentFallbackTestSetup with the city.toml supplied,
+// for a test that needs a city-level setting (e.g. [federation] identity) in
+// front of the same fake bd.
+func fakeBdCityTestSetup(t *testing.T, cityTOML, fakeBdScript string) {
+	t.Helper()
 
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -1761,9 +1769,7 @@ func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
 	cityDir := t.TempDir()
 	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := "issue_prefix: demo\n" +

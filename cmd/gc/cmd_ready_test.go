@@ -789,6 +789,7 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 	held := mustCreateReadyBead(t, store, beads.Bead{Title: "held", Type: "task", Labels: []string{"hold:mayor"}})
 	epic := mustCreateReadyBead(t, store, beads.Bead{Title: "epic", Type: "epic"})
 	assigned := mustCreateReadyBead(t, store, beads.Bead{Title: "assigned", Type: "task"})
+	owned := mustCreateReadyBead(t, store, beads.Bead{Title: "owned and held", Type: "task", Labels: []string{"owner:citadel", "hold:mayor"}})
 	owner := "worker-1"
 	if err := store.Update(assigned.ID, beads.UpdateOpts{Assignee: &owner}); err != nil {
 		t.Fatalf("assign %s: %v", assigned.ID, err)
@@ -799,10 +800,13 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 		opts readyOpts
 		want []string
 	}{
-		{"unassigned drops claimed work", readyOpts{unassigned: true}, []string{plain.ID, held.ID, epic.ID}},
+		{"unassigned drops claimed work", readyOpts{unassigned: true}, []string{plain.ID, held.ID, epic.ID, owned.ID}},
 		{"assignee keeps only that identity", readyOpts{assignee: owner}, []string{assigned.ID}},
-		{"exclude-type drops epics", readyOpts{excludeTypes: []string{"epic"}}, []string{plain.ID, held.ID, assigned.ID}},
+		{"exclude-type drops epics", readyOpts{excludeTypes: []string{"epic"}}, []string{plain.ID, held.ID, assigned.ID, owned.ID}},
 		{"exclude-label drops held work", readyOpts{excludeLabels: []string{"hold:mayor"}}, []string{plain.ID, epic.ID, assigned.ID}},
+		{"label keeps only work carrying it", readyOpts{labels: []string{"hold:mayor"}}, []string{held.ID, owned.ID}},
+		{"every --label must be present", readyOpts{labels: []string{"hold:mayor", "owner:citadel"}}, []string{owned.ID}},
+		{"label and exclude-label compose", readyOpts{labels: []string{"hold:mayor"}, excludeLabels: []string{"owner:citadel"}}, []string{held.ID}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -41,6 +41,7 @@ City is the top-level configuration for a Gas City instance.
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
+| `federation` | FederationConfig |  |  | Federation names this city in a bead store it shares with other cities (see FederationConfig). Unset on a non-federated city. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
 | `webhooks` | WebhookPolicyConfig |  |  | WebhookPolicy holds city-level webhook governance (the [webhooks] table, notably allow_public grants). Authored only in the root city.toml; never merged from packs or fragments so a pack cannot grant itself exposure. |
@@ -420,6 +421,14 @@ ExtMsgDefaultRoute routes unbound inbound conversations from one external messag
 | `provider` | string | **yes** |  | Provider is the external messaging provider name as registered by the adapter (e.g. "telegram"). Required. |
 | `account_id` | string |  |  | AccountID narrows the route to one adapter account. Empty matches every account of the provider that has no account-specific route. |
 | `agent` | string | **yes** |  | Agent is the configured agent identity to route to. It must resolve to a configured named session so the delivery layer can cold-wake a session for it. |
+
+## FederationConfig
+
+FederationConfig is the federation table: how this city names itself in a bead store it shares with other cities.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `identity` | string |  |  | Identity is this city's name in the federated store — "citadel", "jadegate", "boomtown". When set, every bead gc creates in any store of this city (city scope and every rig scope) carries the label owner:&lt;identity&gt;, and the claim path reads the same key to tell which owner labels are foreign. It is an explicit key rather than the workspace name because the workspace name is a machine-local label that need not be distinct across the federation. Must match ^[a-z0-9][a-z0-9-]*$. Unset means not federated: nothing is stamped and nothing is refused. |
 
 ## FormulasConfig
 

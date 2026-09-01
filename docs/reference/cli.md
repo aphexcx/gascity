@@ -57,7 +57,7 @@ gc [flags]
 | [gc login](#gc-login) | Log in to a hosted Gas City service |
 | [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
+| [gc maintenance](#gc-maintenance) | Store maintenance (Dolt gc + snapshot, federation owner backfill) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc metrics](#gc-metrics) | Inspect or control Gas City command usage metrics |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
@@ -300,6 +300,17 @@ can signal liveness to the dashboard, and
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
+On a city whose city.toml sets [federation] identity = "&lt;name&gt;", "gc bd
+create" (in the city scope and every rig scope) appends
+--labels owner:&lt;name&gt;, so every bead this city creates in a bead store it
+shares with other cities names the city that owns it; each federated
+city's claim path refuses beads owned by another city. An owner: label
+you pass yourself via -l/--labels/--label is kept as given, and the
+gc-only --no-owner-label flag (stripped before dispatch) skips the stamp
+for one create. A create argv gc cannot scan is forwarded exactly as
+typed with a one-line notice on stderr, never refused. With the identity
+unset, create is untouched.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
@@ -318,6 +329,7 @@ gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
 gc bd heartbeat my-project-abc     # renew claim lease + stamp gc.last_heartbeat_at=now
 gc bd release-if-current my-project-abc worker-1
+gc bd create "title" --no-owner-label   # skip the owner:<identity> stamp on a federated city
 ```
 
 ## gc beads
@@ -2573,10 +2585,13 @@ gc mail thread <id> [flags]
 
 ## gc maintenance
 
-Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md)
+and one-off store maintenance verbs.
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
 in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+'owner-backfill' labels this city's legacy beads with the federation owner label
+([federation] identity) and runs against the store directly.
 
 ```
 gc maintenance
@@ -2585,6 +2600,7 @@ gc maintenance
 | Subcommand | Description |
 |------------|-------------|
 | [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
+| [gc maintenance owner-backfill](#gc-maintenance-owner-backfill) | Label this city's legacy beads with owner:&lt;identity&gt; (dry run by default) |
 | [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
 
 ## gc maintenance dolt-gc
@@ -2599,6 +2615,39 @@ gc maintenance dolt-gc [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit machine-readable JSON |
 | `--wait` | bool |  | block until the run completes (exit 1 on failure) |
+
+## gc maintenance owner-backfill
+
+Backfill the federation owner label onto beads created before this city set
+[federation] identity in city.toml.
+
+Every open or in_progress bead in the store that carries no owner:* label is
+listed in one of two buckets with the rule that decided it:
+
+  OURS               the assignee is a session id carrying this city's HQ
+                     prefix, or a pool: label names an agent this city's
+                     config resolves
+  THEIRS-OR-UNKNOWN  nothing this city minted itself points at the bead
+
+The default is a dry run: nothing is written. --apply adds owner:&lt;identity&gt;
+to the OURS bucket only, one line per bead changed, and is idempotent: a
+labeled bead is no longer a candidate. THEIRS-OR-UNKNOWN is never touched —
+unlabeled legacy work stays claimable by anyone, per the federation
+convention — and closed beads are never read. The city (HQ) store is the
+default scope; --rig backfills one rig's store instead. The command refuses
+(exit 2) when [federation] identity is unset.
+
+It runs against the store directly, unlike 'status' and 'dolt-gc', which
+route through the supervisor.
+
+```
+gc maintenance owner-backfill [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | write owner:&lt;identity&gt; onto the OURS bucket (default: dry run) |
+| `--rig` | string |  | backfill this rig's store instead of the city (HQ) store |
 
 ## gc maintenance status
 
@@ -3354,6 +3403,14 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-type=epic --exclude-label "hold:mayor" \
            --sort oldest --limit 20 --json
 
+--label keeps only beads carrying that label, and every --label given must
+be present. On a city that shares a bead store with other cities, the lane a
+bead belongs to is its owner:&lt;identity&gt; label (see [federation] in city.toml),
+so --label owner:&lt;identity&gt; and --exclude-label owner:&lt;other&gt; are how a human
+reads one city's lane out of the shared queue:
+  gc ready --label owner:citadel
+  gc ready --exclude-label owner:jadegate
+
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
@@ -3374,6 +3431,7 @@ gc ready [flags]
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--label` | stringArray |  | keep only beads carrying this label; every --label given must be present (repeatable) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
 | `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
