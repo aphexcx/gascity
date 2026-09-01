@@ -164,6 +164,7 @@ type readyOpts struct {
 	assignee       string
 	unassigned     bool
 	metadataFields []string
+	labels         []string
 	excludeTypes   []string
 	excludeLabels  []string
 	sortOrder      string
@@ -202,6 +203,14 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-type=epic --exclude-label "hold:mayor" \
            --sort oldest --limit 20 --json
 
+--label keeps only beads carrying that label, and every --label given must
+be present. On a city that shares a bead store with other cities, the lane a
+bead belongs to is its owner:<identity> label (see [federation] in city.toml),
+so --label owner:<identity> and --exclude-label owner:<other> are how a human
+reads one city's lane out of the shared queue:
+  gc ready --label owner:citadel
+  gc ready --exclude-label owner:jadegate
+
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
 read is the true top-N of the merged set rather than the top-N of whichever
@@ -234,6 +243,7 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
+	cmd.Flags().StringArrayVar(&opts.labels, "label", nil, "keep only beads carrying this label; every --label given must be present (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
 	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
@@ -446,8 +456,8 @@ func readyStatusSelector(status string) (string, error) {
 }
 
 // filterReadyBeads applies the predicates the store readers cannot express
-// natively: --assignee, --unassigned, --exclude-type, --exclude-label and
-// --metadata-field.
+// natively: --assignee, --unassigned, --label, --exclude-type, --exclude-label
+// and --metadata-field.
 //
 // They are applied in Go rather than pushed into each leg on purpose: the legs
 // are different backends with different filter semantics, and a predicate
@@ -472,6 +482,9 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 		if exclude[b.Type] {
 			continue
 		}
+		if !beadCarriesEveryLabel(b, opts.labels) {
+			continue
+		}
 		if beadCarriesExcludedLabel(b, opts.excludeLabels) {
 			continue
 		}
@@ -481,6 +494,18 @@ func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFie
 		out = append(out, b)
 	}
 	return out
+}
+
+// beadCarriesEveryLabel reports whether b carries each of the required labels
+// (all of them, not any: `bd ready --label` is the conjunctive form and
+// --label-any the disjunctive one, and only the former is taken here).
+func beadCarriesEveryLabel(b beads.Bead, required []string) bool {
+	for _, label := range required {
+		if label = strings.TrimSpace(label); label != "" && !beadLabelsContain(b.Labels, label) {
+			return false
+		}
+	}
+	return true
 }
 
 func beadCarriesExcludedLabel(b beads.Bead, excluded []string) bool {

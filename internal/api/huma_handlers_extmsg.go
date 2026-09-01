@@ -134,7 +134,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		// actually reached agent terminals, so a caller holding a dedup claim
 		// can gate on it. See extmsgNotifyInboundWithReceipt for the budget and
 		// for why an over-budget fan-out reports pending instead of being
-		// cancelled.
+		// canceled.
 		delivery := s.extmsgNotifyInboundWithReceipt(ctx, message)
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
@@ -224,7 +224,10 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 			ReplyToMessageID:  input.Body.ReplyToMessageID,
 		}
 		s.runBackground(func(ctx context.Context) {
-			s.extmsgNotifyMembers(ctx, broadcast)
+			// Fire-and-forget by design: the outbound fan-out reports nothing
+			// back to the caller; the inbound path with a receipt is
+			// extmsgNotifyInboundWithReceipt.
+			_, _ = s.extmsgNotifyMembers(ctx, broadcast)
 		})
 	}
 	out := &ExtMsgOutboundOutput{}

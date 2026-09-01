@@ -27,7 +27,7 @@ func clearRemoteMailIdentityEnv(t *testing.T) {
 
 // seedLocalCity creates a minimal local city named "alpha" and points the
 // explicit city env at it, so the remote sender resolves "<local city>/…".
-func seedLocalCity(t *testing.T) string {
+func seedLocalCity(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "alpha-home")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -37,7 +37,6 @@ func seedLocalCity(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_CITY", dir)
-	return dir
 }
 
 // The default remote sender is city-qualified ("<local city>/<identity>") with
@@ -308,8 +307,8 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet:
+		switch r.Method {
+		case http.MethodGet:
 			_, _ = w.Write([]byte(`{"items":[],"total":0}`))
 		default:
 			w.WriteHeader(http.StatusCreated)

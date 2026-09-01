@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"github.com/gastownhall/gascity/internal/extmsg"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/extmsg"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/cityinit"
