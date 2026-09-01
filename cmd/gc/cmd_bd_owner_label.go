@@ -148,7 +148,8 @@ func bdCreateVerdict(bdArgs []string) bdVerb {
 // takes the first remaining token as the verb. pflag then reads a dash token
 // as a long flag, or as a cluster of shorthands in which each letter is a
 // boolean or a value flag that takes the rest of the token (`-C/path`,
-// `-C=/path`), an `=` after a boolean ending the cluster (`-v=false`). The
+// `-C=/path`), a non-empty `=value` after a boolean ending the cluster
+// (`-v=false`; a bare `-v=` leaves `=` as a shorthand pflag rejects). The
 // one place the two disagree is a cluster whose LAST letter takes a value with
 // nothing attached (`-vC dir`): pflag would take dir, cobra reads it as the
 // verb, and bd runs what cobra found.
@@ -180,6 +181,9 @@ func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
 				short := "-" + tok[j:j+1]
 				switch {
 				case boolFlags[short] && j+1 < len(tok) && tok[j+1] == '=':
+					if j+2 == len(tok) {
+						return "", true // `-v=`: pflag reads the bare `=` as a shorthand it does not know
+					}
 					j = len(tok) // `-v=false`: an inline value ends the cluster
 				case boolFlags[short]:
 				case valueFlags[short] && j+1 < len(tok):

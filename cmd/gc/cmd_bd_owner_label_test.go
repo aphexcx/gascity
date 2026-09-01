@@ -71,7 +71,17 @@ func TestBdLooksLikeCreate(t *testing.T) {
 	// A leading flag neither global manifest knows hides the verb: gc cannot
 	// tell a create from a show, so it must not stamp — only say so. A
 	// shorthand gc does not know hides it wherever it sits in a cluster.
-	hidden := [][]string{{"--future-flag", "x", "create", "t"}, {"--future-flag", "x", "list"}, {"-x", "create", "t"}, {"-vx", "create", "t"}, {"-vxC/tmp", "create", "t"}}
+	hidden := [][]string{
+		{"--future-flag", "x", "create", "t"},
+		{"--future-flag", "x", "list"},
+		{"-x", "create", "t"},
+		{"-vx", "create", "t"},
+		{"-vxC/tmp", "create", "t"},
+		// A bare `=` after a boolean shorthand is not an inline value: pflag
+		// reads the `=` as the next shorthand, one it does not know.
+		{"-v=", "create", "t"},
+		{"-vv=", "create", "t"},
+	}
 	for _, args := range create {
 		if got := bdCreateVerdict(args); got != bdVerbCreate {
 			t.Errorf("bdCreateVerdict(%v) = %v, want create", args, got)
