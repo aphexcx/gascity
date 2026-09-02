@@ -295,14 +295,14 @@ func TestPrimeHookContextSuffix_StepMarkerRidesAfterDelivery(t *testing.T) {
 				t.Fatalf("preview should render the step with no afterDelivery, got %q cb=%v", preview.text, preview.afterDelivery != nil)
 			}
 
-			real := primeHookContextSuffix(city, true, ctx, io.Discard, true)
-			if !strings.Contains(real.text, step.Description) || real.afterDelivery == nil {
-				t.Fatalf("real hook should render the step with an afterDelivery, got %q cb=%v", real.text, real.afterDelivery != nil)
+			live := primeHookContextSuffix(city, true, ctx, io.Discard, true)
+			if !strings.Contains(live.text, step.Description) || live.afterDelivery == nil {
+				t.Fatalf("real hook should render the step with an afterDelivery, got %q cb=%v", live.text, live.afterDelivery != nil)
 			}
 			if _, ok := readWispStepInjectState(city, "sess-prime"); ok {
 				t.Fatal("marker must not exist before afterDelivery runs")
 			}
-			real.afterDelivery()
+			live.afterDelivery()
 			if st, ok := readWispStepInjectState(city, "sess-prime"); !ok || st.StepID != step.ID || st.ConversationID != "conv-p" {
 				t.Fatalf("afterDelivery should record the marker, got %+v ok=%v", st, ok)
 			}
