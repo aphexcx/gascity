@@ -74,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handle afterwards. A reminder without that provenance — an older item, or
   one queued by a producer on a storeless provider (`fake`/`fail`/`exec:`)
   whose inbox no other process can see — is delivered exactly as before, and
-  a lookup error holds the item for a later pass rather than guessing. A
+  a lookup error holds only that item for a later pass (the rest of the
+  batch is still delivered or withdrawn) rather than guessing. A
   second notify for the same message supersedes its pending reminder;
   reminders for different messages stay independent.
   Fable 5.1 prompt audit, jadegate scan G-1.

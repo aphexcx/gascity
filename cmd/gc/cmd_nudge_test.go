@@ -3874,7 +3874,7 @@ func TestSplitQueuedNudgesForDelivery_BlocksCanceledWaitNudge(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
+	deliverable, blocked, _, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -3905,7 +3905,7 @@ func TestSplitQueuedNudgesForDelivery_AllowsReadyLegacyWaitNudge(t *testing.T) {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
+	deliverable, blocked, _, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",

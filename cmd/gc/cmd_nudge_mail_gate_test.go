@@ -79,15 +79,15 @@ func TestSplitQueuedNudgesForDelivery_WithdrawsReadMailRemindersOnly(t *testing.
 			return mailReminderUnread, nil
 		}),
 	}
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{
+	deliverable, blocked, held, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{
 		{ID: "m1", Agent: "worker", Source: "mail", Message: "You have mail from human", Reference: mailRef("read-msg")},
 		{ID: "m2", Agent: "worker", Source: "mail", Message: "You have mail from human", Reference: mailRef("read-msg")},
 		{ID: "m3", Agent: "worker", Source: "mail", Message: "You have mail from mayor", Reference: mailRef("unread-msg")},
 		{ID: "m4", Agent: "worker", Source: "mail", Message: "You have mail from human"}, // no provenance
 		{ID: "s1", Agent: "worker", Source: "session", Message: "check for assigned work"},
 	})
-	if err != nil {
-		t.Fatalf("splitQueuedNudgesForDelivery: %v", err)
+	if err != nil || len(held) != 0 {
+		t.Fatalf("splitQueuedNudgesForDelivery: err=%v held=%#v", err, held)
 	}
 	var ids []string
 	for _, item := range deliverable {
@@ -104,12 +104,47 @@ func TestSplitQueuedNudgesForDelivery_WithdrawsReadMailRemindersOnly(t *testing.
 	}
 }
 
-func TestSplitQueuedNudgesForDelivery_MailLookupErrorReturnsError(t *testing.T) {
+// TestSplitQueuedNudgesForDelivery_MailLookupErrorHoldsOnlyThatItem pins the
+// codex round-5 finding: a failed gate read holds the affected reminder and
+// nothing else — unrelated session nudges and readable reminders in the same
+// batch are still classified.
+func TestSplitQueuedNudgesForDelivery_MailLookupErrorHoldsOnlyThatItem(t *testing.T) {
 	lookupErr := errors.New("store unavailable")
-	gate := queuedNudgeDeliveryGate{mailState: func(string) (mailReminderState, error) { return mailReminderUnread, lookupErr }}
-	_, _, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{{ID: "m1", Source: "mail", Reference: mailRef("x")}})
+	gate := queuedNudgeDeliveryGate{mailState: func(id string) (mailReminderState, error) {
+		switch id {
+		case "broken":
+			return mailReminderUnread, lookupErr
+		case "read":
+			return mailReminderRead, nil
+		default:
+			return mailReminderUnread, nil
+		}
+	}}
+	deliverable, blocked, held, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{
+		{ID: "m1", Source: "mail", Reference: mailRef("broken")},
+		{ID: "m2", Source: "mail", Reference: mailRef("read")},
+		{ID: "m3", Source: "mail", Reference: mailRef("unread")},
+		{ID: "s1", Source: "session"},
+		{ID: "m4", Source: "mail", Reference: mailRef("broken")},
+	})
 	if !errors.Is(err, lookupErr) {
-		t.Fatalf("err = %v, want the lookup error so the caller releases the claim", err)
+		t.Fatalf("err = %v, want the lookup error for diagnostics", err)
+	}
+	ids := func(items []queuedNudge) string {
+		var out []string
+		for _, item := range items {
+			out = append(out, item.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := ids(held); got != "m1,m4" {
+		t.Fatalf("held = %s, want m1,m4", got)
+	}
+	if got := ids(deliverable); got != "m3,s1" {
+		t.Fatalf("deliverable = %s, want m3,s1", got)
+	}
+	if got := ids(blocked[nudgeBlockReasonMailRead]); got != "m2" {
+		t.Fatalf("blocked mail-read = %s, want m2", got)
 	}
 }
 
@@ -454,5 +489,73 @@ func TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead(t *testing.T) {
 	}
 	if !queueEmpty() {
 		t.Fatal("delivered reminder must leave the queue")
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerMailGateOutageDoesNotStarveOtherNudges
+// pins the codex round-5 finding through the poller: when the messaging
+// store cannot be opened, mail reminders with provenance are held (claims
+// released, back to pending) while a session nudge in the same batch is still
+// delivered.
+func TestTryDeliverQueuedNudgesByPollerMailGateOutageDoesNotStarveOtherNudges(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	outage := errors.New("messaging store down")
+	prev := openMailGateWorkStore
+	openMailGateWorkStore = func(string) (beads.Store, error) { return nil, outage }
+	t.Cleanup(func() { openMailGateWorkStore = prev })
+
+	now := time.Now().Add(-time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", now, queuedNudgeOptions{Reference: mailRef("gc-msg1")})); err != nil {
+		t.Fatalf("enqueue mail: %v", err)
+	}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check for assigned work", now)); err != nil {
+		t.Fatalf("enqueue session: %v", err)
+	}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, obs)
+	if !delivered {
+		t.Fatalf("the session nudge must still be delivered during a mail-gate outage (err=%v)", err)
+	}
+	if !errors.Is(err, outage) {
+		t.Fatalf("the hold reason should ride on the returned error, got %v", err)
+	}
+	var texts []string
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			texts = append(texts, call.Message)
+		}
+	}
+	if len(texts) != 1 || !strings.Contains(texts[0], "check for assigned work") || strings.Contains(texts[0], "You have mail") {
+		t.Fatalf("exactly the session nudge should have been delivered, got %q", texts)
+	}
+	pending, inFlight, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Source != "mail" || len(inFlight) != 0 {
+		t.Fatalf("the held mail reminder must be back in pending with its claim released: pending=%#v inFlight=%#v", pending, inFlight)
 	}
 }

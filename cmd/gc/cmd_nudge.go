@@ -537,18 +537,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if len(rejected) > 0 {
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
-	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore.Store, deliverySessStore), candidates)
-	if err != nil {
-		// Release the claims so the next drain or poller pass retries
-		// promptly instead of waiting out the in-flight lease.
-		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
-		if inject {
-			fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
-			return 0
-		}
-		fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
-		return 1
+	items, blocked, held, holdErr := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore.Store, deliverySessStore), items)
+	if len(held) > 0 {
+		// Release only the held claims so the next drain or poller pass
+		// retries them promptly instead of waiting out the in-flight lease;
+		// the rest of the pass proceeds.
+		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(held))
+		fmt.Fprintf(stderr, "gc nudge drain: holding %d nudge(s) whose gate read failed: %v\n", len(held), holdErr) //nolint:errcheck
 	}
 	if len(blocked) > 0 {
 		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
@@ -1506,11 +1501,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			bookkeepErr = fmt.Errorf("dead-lettering fence-mismatched nudges: %w", recErr)
 		}
 	}
-	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore, deliverySessStore), candidates)
-	if err != nil {
-		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
-		return false, errors.Join(bookkeepErr, err, relErr)
+	items, blocked, held, holdErr := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore, deliverySessStore), items)
+	if len(held) > 0 {
+		// Release only the held claims; the rest of the pass proceeds. The
+		// hold reason rides on bookkeepErr for the caller's diagnostics.
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(held))
+		bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("holding %d nudge(s) whose gate read failed: %w", len(held), holdErr), relErr)
 	}
 	if len(blocked) > 0 {
 		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, blocked); termErr != nil {
@@ -1878,19 +1874,28 @@ func memoizeMailStateLookup(lookup func(string) (mailReminderState, error)) func
 	}
 }
 
-// splitQueuedNudgesForDelivery partitions claimed nudges into deliverable items
-// and reason-tagged blocked items using the pass's delivery gate (see
-// queuedNudgeDeliveryGate and blockedQueuedNudgeReason).
-func splitQueuedNudgesForDelivery(gate queuedNudgeDeliveryGate, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+// splitQueuedNudgesForDelivery partitions claimed nudges into deliverable
+// items, reason-tagged blocked items, and held items using the pass's
+// delivery gate (see queuedNudgeDeliveryGate and blockedQueuedNudgeReason).
+// A gate read that fails holds ONLY that item: it is returned in held (the
+// caller releases its claim so a later pass retries it) and the joined
+// errors are returned for diagnostics, while every other item is still
+// classified and delivered. One unreadable wait bead or one message the
+// messaging store cannot serve must not starve a target's unrelated session
+// nudges and valid reminders (codex round 5).
+func splitQueuedNudgesForDelivery(gate queuedNudgeDeliveryGate, items []queuedNudge) (deliverable []queuedNudge, blocked map[string][]queuedNudge, held []queuedNudge, holdErr error) {
 	if len(items) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	deliverable := make([]queuedNudge, 0, len(items))
-	blocked := make(map[string][]queuedNudge)
+	deliverable = make([]queuedNudge, 0, len(items))
+	blocked = make(map[string][]queuedNudge)
+	var errs []error
 	for _, item := range items {
 		reason, shouldBlock, err := blockedQueuedNudgeReason(gate, item)
 		if err != nil {
-			return nil, nil, err
+			held = append(held, item)
+			errs = append(errs, fmt.Errorf("nudge %s: %w", item.ID, err))
+			continue
 		}
 		if shouldBlock {
 			blocked[reason] = append(blocked[reason], item)
@@ -1898,7 +1903,7 @@ func splitQueuedNudgesForDelivery(gate queuedNudgeDeliveryGate, items []queuedNu
 		}
 		deliverable = append(deliverable, item)
 	}
-	return deliverable, blocked, nil
+	return deliverable, blocked, held, errors.Join(errs...)
 }
 
 // blockedQueuedNudgeReason is the single delivery-time decision over a claimed
