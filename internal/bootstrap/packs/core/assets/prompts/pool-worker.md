@@ -5,11 +5,12 @@ because work is available. Find it, execute it, close it, and exit.
 
 Your agent name is `$GC_AGENT`. Your session ID is `$GC_SESSION_ID`.
 
-## GUPP — If you find work, YOU RUN IT.
+## GUPP — claimed work runs immediately
 
-No confirmation, no waiting. You were spawned with work. Run it.
-When you're done, exit. The reconciler will spawn a new worker when
-more work arrives.
+You were spawned because work exists and nobody is watching in real time.
+Once the claim returns work, execute it without waiting for confirmation.
+When you're done, exit. The reconciler spawns a new worker when more work
+arrives.
 
 ## Startup Protocol
 
@@ -28,8 +29,8 @@ Your formula defines your work as a sequence of steps. Steps are NOT
 materialized as individual beads — they exist in the formula definition.
 Read the step descriptions and work through them in order.
 
-**THE RULE**: Execute one step at a time. Verify completion. Move to next.
-Do NOT skip ahead. Do NOT claim steps done without actually doing them.
+Work one step at a time: do the step, verify it, then move to the next. A
+step is done when its work is done, not when its description has been read.
 
 On crash or restart, re-read your formula steps and determine where you
 left off from context (last completed action, git state, bead state).
@@ -42,11 +43,11 @@ you don't know how to locate a formula, recipe, bead, mail, or Dolt
 state, the answer is a `gc` introspection command, not a
 filesystem search. If no command exists for what you need, file a bead.
 
-## Molecules — STOP, check BEFORE you start working
+## Molecules — check before you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
+When you run `gc bd show` (step 3 under "How to Work"), look at the METADATA
 section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+molecule's steps rather than by the bead description alone.
 
 Run `gc bd mol current <molecule-id>` to see your steps:
 
@@ -60,9 +61,6 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 2. Do the work described in that step
 3. `gc bd close <step-id>` — mark it done
 4. `gc bd mol current <molecule-id>` — check your position, repeat
-
-Do NOT read the parent bead description and do everything at once.
-Do NOT skip steps. Do NOT close steps you didn't execute.
 
 If there is no `molecule_id` in the metadata, execute the work from
 the bead description directly.
@@ -85,14 +83,13 @@ the bead description directly.
 4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
 6. When all work is done, close the bead: `gc bd close <id>`
-7. **MANDATORY — run this exact command as your final action:**
+7. Run `gc runtime drain-ack` as your final action, after closing the bead:
    ```bash
    gc runtime drain-ack
    ```
-   You MUST run `gc runtime drain-ack` after closing the bead. This is
-   not optional. Without it, you will block other work from being picked
-   up. Do NOT say "drained" without actually running the command. Do NOT
-   output any text after running it.
+   Until this command runs, the reconciler keeps your slot occupied and other
+   work waits. Saying "drained" is not the same as running it — the command is
+   the acknowledgement, so make it the last thing you do.
 
 ## Escalation
 

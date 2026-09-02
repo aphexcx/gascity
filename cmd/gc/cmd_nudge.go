@@ -25,6 +25,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -446,19 +448,29 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// (codex/gemini) stay one valid document rather than two concatenated objects.
 	// See clock_inject.go and wisp_step_inject.go.
 	var wispExtra string // set after target resolution; captured by defer closure
+	// wispDelivered records the once-per-step marker; it runs only after the
+	// payload carrying the full step has been written successfully.
+	var wispDelivered func()
 	emittedHookContext := false
 	var injectPrefix string
+	// conversationID is the provider's own session id from the hook stdin; it
+	// keys the once-per-step formula injection (wisp_step_inject_once.go).
+	var conversationID string
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
+		hookInput := readHookStdin()
+		injectPrefix = clockInjectLine() + contextInjectLine(hookInput)
+		conversationID = hookConversationID(hookInput)
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
 				if line != "" {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line)
+					if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line); err == nil && wispDelivered != nil {
+						wispDelivered()
+					}
 				}
 			}
 		}()
@@ -487,7 +499,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	if inject {
-		wispExtra = wispStepInjectionContent(target.cityPath)
+		// Full step on first sight (or a step change), a one-line pointer on
+		// every prompt after that — see wisp_step_inject_once.go.
+		wispExtra, wispDelivered = wispStepInjectionForPrompt(
+			target.cityPath,
+			firstNonEmpty(target.sessionID, targetID),
+			wispStepConversationKey(target.continuationEpoch, conversationID),
+		)
 	}
 
 	now := time.Now()
@@ -519,18 +537,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if len(rejected) > 0 {
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
-	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
-	if err != nil {
-		// Release the claims so the next drain or poller pass retries
-		// promptly instead of waiting out the in-flight lease.
-		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
-		if inject {
-			fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
-			return 0
-		}
-		fmt.Fprintf(stderr, "gc nudge drain: validating claimed nudges: %v\n", err) //nolint:errcheck
-		return 1
+	items, blocked, held, holdErr := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore.Store, deliverySessStore), items)
+	if len(held) > 0 {
+		// Release only the held claims so the next drain or poller pass
+		// retries them promptly instead of waiting out the in-flight lease;
+		// the rest of the pass proceeds.
+		_ = releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(held))
+		fmt.Fprintf(stderr, "gc nudge drain: holding %d nudge(s) whose gate read failed: %v\n", len(held), holdErr) //nolint:errcheck
 	}
 	if len(blocked) > 0 {
 		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
@@ -560,6 +573,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// combined context is written.
 		emittedHookContext = true
 		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
+		if writeErr == nil && wispDelivered != nil {
+			wispDelivered()
+		}
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}
@@ -1202,7 +1218,7 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 	}
 }
 
-func sendMailNotify(target nudgeTarget, sender string) error {
+func sendMailNotify(target nudgeTarget, sender, messageID string) error {
 	store, err := openNudgeBeadStoreErr(target.cityPath)
 	if err != nil {
 		return err
@@ -1214,16 +1230,23 @@ func sendMailNotify(target nudgeTarget, sender string) error {
 	if err != nil {
 		return err
 	}
-	return sendMailNotifyWithWorker(target, store.Store, sp, sender)
+	return sendMailNotifyWithWorker(target, store.Store, sp, sender, messageID)
 }
 
 func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
-	return sendMailNotifyWithWorker(target, nil, sp, "human")
+	return sendMailNotifyWithWorker(target, nil, sp, "human", "")
 }
 
-func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender string) error {
+// sendMailNotifyWithWorker delivers or queues the "You have mail" reminder.
+// messageID is the mail just sent ("" when the caller has none); when the
+// producing mail provider is bead-backed it rides into the queued item as a
+// `mail` reference (mailNudgeReference) so the delivery gate can withdraw the
+// reminder once that message is read.
+func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
+	queueOpts := queuedNudgeOptionsFromTarget(target)
+	queueOpts.Reference = mailNudgeReference(messageID)
 	// Session-class store for the observe/handle reads and the last-nudge stamp
 	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
 	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
@@ -1259,7 +1282,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))
+		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queueOpts)
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
@@ -1270,7 +1293,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queueOpts)); err != nil {
 		return err
 	}
 	if obs.Running {
@@ -1478,11 +1501,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			bookkeepErr = fmt.Errorf("dead-lettering fence-mismatched nudges: %w", recErr)
 		}
 	}
-	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
-	if err != nil {
-		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
-		return false, errors.Join(bookkeepErr, err, relErr)
+	items, blocked, held, holdErr := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore, deliverySessStore), items)
+	if len(held) > 0 {
+		// Release only the held claims; the rest of the pass proceeds. The
+		// hold reason rides on bookkeepErr for the caller's diagnostics.
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(held))
+		bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("holding %d nudge(s) whose gate read failed: %w", len(held), holdErr), relErr)
 	}
 	if len(blocked) > 0 {
 		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, blocked); termErr != nil {
@@ -1678,22 +1702,200 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 	return deliverable, rejected
 }
 
-// splitQueuedNudgesForDelivery partitions claimed nudges into deliverable items
-// and reason-tagged blocked items. The sessFront param is the session
-// coordination-class write front door: blockedQueuedNudgeReason reads the
-// referenced gc:wait bead (coordclass.ClassSessions) to gate wait-sourced
-// nudges. Callers construct it at the root over the session-class store (via
-// cliSessionStore) so a [beads.classes.sessions] relocation reaches it.
-func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
-	if len(items) == 0 {
-		return nil, nil, nil
+// Mail-reminder provenance and gate.
+//
+// A `mail` reminder is keyed on the send event (`gc mail send --notify`) and
+// used to carry nothing else, so nothing on the queued-delivery path could
+// ask whether the mail it announced was still unread; a reminder re-queued by
+// the retry ladder after a copy had already landed came back as a fresh
+// instruction up to the retry cap. The producer now stamps the reminder with
+// the message it announces — Reference{Kind: nudgeReferenceKindMail, ID:
+// <message bead id>} — but only when its mail provider is bead-backed, i.e.
+// when the message's read state lives in the bead store a later consumer can
+// read. That reference is the gate's provenance: a reminder without one (an
+// older item, or a producer on a storeless provider such as exec:/fake whose
+// inbox no other process can see) delivers exactly as before, so a provider
+// difference between the producing and delivering processes can never
+// withdraw a legitimate reminder. The queue's supersession on (agent, source,
+// reference) means a second notify for the SAME message replaces its pending
+// reminder, while reminders for different messages stay independent (#2968).
+
+const (
+	// nudgeReferenceKindMail marks a mail reminder's reference as the mail
+	// message bead it announces.
+	nudgeReferenceKindMail = "mail"
+	// nudgeBlockReasonMailRead is the withdraw reason for a mail reminder whose
+	// message has been read by the time it is delivered.
+	nudgeBlockReasonMailRead = "mail-read"
+	// nudgeBlockReasonMailGone is the withdraw reason for a mail reminder whose
+	// message no longer exists (archived/deleted) by the time it is delivered.
+	nudgeBlockReasonMailGone = "mail-gone"
+)
+
+// mailNudgeReference returns the provenance reference for a mail reminder, or
+// nil when there is none to give: no message id, or a storeless producing
+// provider whose read state no consumer can look up.
+func mailNudgeReference(messageID string) *nudgeReference {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" || isStorelessMailProviderName(mailProviderName()) {
+		return nil
 	}
-	deliverable := make([]queuedNudge, 0, len(items))
-	blocked := make(map[string][]queuedNudge)
-	for _, item := range items {
-		reason, shouldBlock, err := blockedQueuedNudgeReason(sessFront, item)
+	return &nudgeReference{Kind: nudgeReferenceKindMail, ID: messageID}
+}
+
+// mailReminderState is what the delivery gate learns about a referenced mail
+// message.
+type mailReminderState int
+
+const (
+	mailReminderUnread mailReminderState = iota
+	mailReminderRead
+	mailReminderGone
+)
+
+// queuedNudgeDeliveryGate carries the state reads that decide, at delivery
+// time, whether a claimed nudge is still wanted: the session front door for
+// wait-sourced items (the referenced gc:wait bead) and the mail-message
+// lookup for mail-sourced items that carry provenance. blockedQueuedNudgeReason
+// is the one decision point over it; both delivery consumers — the
+// UserPromptSubmit drain hook and the poller/dispatcher — build the gate
+// through newQueuedNudgeDeliveryGate so neither can skip an operand.
+type queuedNudgeDeliveryGate struct {
+	// sessFront is the session coordination-class write front door: the
+	// wait-bead reads route through it so a [beads.classes.sessions]
+	// relocation reaches the gate. Callers construct it over the session-class
+	// store (via cliSessionStore).
+	sessFront *session.Store
+	// mailState reports the read state of the mail message a reminder
+	// references. nil means no mail gate is configured for this pass — there
+	// is no store, or the delivering process's mail provider is storeless
+	// (fake/fail/exec:) so it cannot read message state — and mail-sourced
+	// items then deliver as they always did. A lookup error holds the item:
+	// the caller releases the claim and a later pass retries, rather than
+	// delivering or withdrawing on a guess.
+	mailState func(messageID string) (mailReminderState, error)
+}
+
+// newQueuedNudgeDeliveryGate builds the delivery gate for one pass over a
+// target's claimed nudges. deliveryStore is the nudges-class store the queue
+// records live in (nil when the city has no store); deliverySessStore is the
+// session-class store the caller derived from it.
+func newQueuedNudgeDeliveryGate(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) queuedNudgeDeliveryGate {
+	gate := queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(deliverySessStore)}
+	if lookup := mailStateLookupForNudgeTarget(target, deliveryStore); lookup != nil {
+		gate.mailState = memoizeMailStateLookup(lookup)
+	}
+	return gate
+}
+
+// openMailGateWorkStore opens the city WORK store the mail gate reads through.
+// The messaging-class store the lookup needs is derived from it, exactly as
+// `gc mail check` derives it, and never from the nudges-class delivery store:
+// with nudges relocated while messaging stays on work, a nudges-rooted lookup
+// would find no message and withdraw every legitimate reminder. Variable so
+// tests can substitute a store and observe its close.
+var openMailGateWorkStore = openCityStoreAt
+
+// mailStateLookupForNudgeTarget returns the mail-message lookup for the mail
+// gate, or nil when no gate can be configured (see
+// queuedNudgeDeliveryGate.mailState). deliveryStore is only the signal that
+// the city has a bead store at all; the lookup itself opens the city work
+// store, derives the messaging- and session-class stores from it, reads the
+// message through the bead-backed provider, and closes the handle it opened.
+func mailStateLookupForNudgeTarget(target nudgeTarget, deliveryStore beads.Store) func(string) (mailReminderState, error) {
+	if deliveryStore == nil || strings.TrimSpace(target.cityPath) == "" {
+		return nil
+	}
+	if isStorelessMailProviderName(nudgeMailProviderName(target)) {
+		return nil
+	}
+	return func(messageID string) (mailReminderState, error) {
+		workStore, err := openMailGateWorkStore(target.cityPath)
 		if err != nil {
-			return nil, nil, err
+			return mailReminderUnread, fmt.Errorf("opening the work store for the mail gate: %w", err)
+		}
+		defer closeMailGateWorkStore(workStore)
+		msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), workStore, target.cfg, target.cityPath, nil)
+		sessStore := cliSessionStore(workStore, target.cfg, target.cityPath)
+		mp := beadmail.NewWithStores(msgStore, sessStore)
+		m, err := mp.Get(messageID)
+		if err != nil {
+			if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
+				return mailReminderGone, nil
+			}
+			return mailReminderUnread, fmt.Errorf("reading mail %s for the mail gate: %w", messageID, err)
+		}
+		if m.Read {
+			return mailReminderRead, nil
+		}
+		return mailReminderUnread, nil
+	}
+}
+
+// closeMailGateWorkStore releases the handle mailStateLookupForNudgeTarget
+// opened, through the same unwrap-then-CloseStore path the API server uses
+// for the stores it opens (closeBeadStoreHandle). Backends that hold a
+// database handle would otherwise leak one per mail-gated delivery pass in
+// the long-lived poller and supervisor dispatcher. Only the opened work store
+// is released — the routed class stores derived from it are shared bindings
+// when relocated and identity (the same handle) when not.
+func closeMailGateWorkStore(store beads.Store) {
+	_ = closeBeadStoreHandle(store)
+}
+
+// nudgeMailProviderName is mailProviderName resolved against the target's
+// city instead of the process environment's city discovery, so the poller and
+// the supervisor dispatcher gate on the city they are delivering for.
+func nudgeMailProviderName(target nudgeTarget) string {
+	if v := os.Getenv("GC_MAIL"); v != "" {
+		return v
+	}
+	if target.cfg != nil {
+		return target.cfg.Mail.Provider
+	}
+	return mailProviderNameForCity(target.cityPath)
+}
+
+// memoizeMailStateLookup caches each message's answer for the rest of one
+// delivery pass, so several reminders for the same message cost one read.
+func memoizeMailStateLookup(lookup func(string) (mailReminderState, error)) func(string) (mailReminderState, error) {
+	type answer struct {
+		state mailReminderState
+		err   error
+	}
+	seen := map[string]answer{}
+	return func(messageID string) (mailReminderState, error) {
+		if a, ok := seen[messageID]; ok {
+			return a.state, a.err
+		}
+		state, err := lookup(messageID)
+		seen[messageID] = answer{state: state, err: err}
+		return state, err
+	}
+}
+
+// splitQueuedNudgesForDelivery partitions claimed nudges into deliverable
+// items, reason-tagged blocked items, and held items using the pass's
+// delivery gate (see queuedNudgeDeliveryGate and blockedQueuedNudgeReason).
+// A gate read that fails holds ONLY that item: it is returned in held (the
+// caller releases its claim so a later pass retries it) and the joined
+// errors are returned for diagnostics, while every other item is still
+// classified and delivered. One unreadable wait bead or one message the
+// messaging store cannot serve must not starve a target's unrelated session
+// nudges and valid reminders (codex round 5).
+func splitQueuedNudgesForDelivery(gate queuedNudgeDeliveryGate, items []queuedNudge) (deliverable []queuedNudge, blocked map[string][]queuedNudge, held []queuedNudge, holdErr error) {
+	if len(items) == 0 {
+		return nil, nil, nil, nil
+	}
+	deliverable = make([]queuedNudge, 0, len(items))
+	blocked = make(map[string][]queuedNudge)
+	var errs []error
+	for _, item := range items {
+		reason, shouldBlock, err := blockedQueuedNudgeReason(gate, item)
+		if err != nil {
+			held = append(held, item)
+			errs = append(errs, fmt.Errorf("nudge %s: %w", item.ID, err))
+			continue
 		}
 		if shouldBlock {
 			blocked[reason] = append(blocked[reason], item)
@@ -1701,11 +1903,53 @@ func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge)
 		}
 		deliverable = append(deliverable, item)
 	}
-	return deliverable, blocked, nil
+	return deliverable, blocked, held, errors.Join(errs...)
 }
 
-func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
-	if !sessFront.Backed() || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+// blockedQueuedNudgeReason is the single delivery-time decision over a claimed
+// nudge: wait-sourced items are gated on their referenced wait bead's state,
+// mail-sourced items with provenance on whether the message they announce is
+// still unread (see the mail-reminder provenance comment above), and every
+// other item delivers. Without this check a reminder that outlived its mail —
+// read in the meantime, or re-queued by the retry ladder after a copy had
+// already landed — was re-delivered as a fresh instruction, up to the retry
+// cap (the five-echo reports from both cities, 2026-09-01).
+func blockedQueuedNudgeReason(gate queuedNudgeDeliveryGate, item queuedNudge) (string, bool, error) {
+	switch item.Source {
+	case "mail":
+		return blockedMailQueuedNudgeReason(gate, item)
+	case "wait":
+		return blockedWaitQueuedNudgeReason(gate.sessFront, item)
+	default:
+		return "", false, nil
+	}
+}
+
+func blockedMailQueuedNudgeReason(gate queuedNudgeDeliveryGate, item queuedNudge) (string, bool, error) {
+	// Provenance first: without a mail reference the item's read state is
+	// unknowable here (older item, or a storeless producer), so it delivers.
+	if item.Reference == nil || item.Reference.Kind != nudgeReferenceKindMail || strings.TrimSpace(item.Reference.ID) == "" {
+		return "", false, nil
+	}
+	if gate.mailState == nil {
+		return "", false, nil
+	}
+	state, err := gate.mailState(item.Reference.ID)
+	if err != nil {
+		return "", false, err
+	}
+	switch state {
+	case mailReminderRead:
+		return nudgeBlockReasonMailRead, true, nil
+	case mailReminderGone:
+		return nudgeBlockReasonMailGone, true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func blockedWaitQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
+	if sessFront == nil || !sessFront.Backed() || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
 	wait, err := sessFront.GetWait(item.Reference.ID)

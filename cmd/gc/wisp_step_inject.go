@@ -11,32 +11,33 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
-// wispStepInjectionContent resolves the agent's current in-progress formula
-// step bead and returns it formatted as a <system-reminder> block, or "" if
-// none is found or any error occurs. Designed for best-effort use in hook
-// injection paths — callers must never fail hard on an empty return.
+// resolveWispStepForInjection resolves the agent's current in-progress formula
+// step bead for the hook injection paths, or nil when none is found or any
+// lookup fails. Designed for best-effort use — callers must never fail hard on
+// a nil return. The once-per-step wrappers in wisp_step_inject_once.go decide
+// between the full reminder (formatWispStepReminder) and the pointer.
 //
 // Store priority: if GC_RIG_ROOT is set the rig store is queried (where
 // rig-scoped polecat work beads live), otherwise the city store at cityPath.
 // When cityPath is empty the function falls back to GC_CITY from the env.
-func wispStepInjectionContent(cityPath string) string {
+func resolveWispStepForInjection(cityPath string) *beads.Bead {
 	effective := cityPath
 	if effective == "" {
 		effective = strings.TrimSpace(os.Getenv("GC_CITY"))
 	}
 	store := openWispStepStore(effective)
 	if store == nil {
-		return ""
+		return nil
 	}
 	assignees := wispStepAssignees()
 	if len(assignees) == 0 {
-		return ""
+		return nil
 	}
 	b, err := resolveActiveWispStep(store, assignees)
 	if err != nil || b == nil {
-		return ""
+		return nil
 	}
-	return formatWispStepReminder(b)
+	return b
 }
 
 // openWispStepStore opens the bead store to query for active wisp steps.

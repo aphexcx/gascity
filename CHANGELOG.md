@@ -22,8 +22,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ready` for the entire outage. Non-2xx health checks behave exactly as
   before; services that never set the header are unaffected.
 
+### Changed
+
+- **The active formula step is injected once per step, not once per prompt.**
+  The `UserPromptSubmit` hook (`gc nudge drain --inject`) used to re-emit the
+  whole active step description as a `<system-reminder>` on every prompt
+  (≈1.2–1.5k tokens per turn for `mol-do-work`) with no change detection.
+  It now emits the full step the first time it sees a step for a session
+  and conversation (keyed on the session's continuation epoch, which every
+  fresh wake and `gc session reset` bumps for every provider, plus the
+  provider's hook-stdin session id when it supplies one), and a one-line pointer (`Active step: <title>
+  (<id>)`, telling the model to `gc bd show` it if it has not read the
+  description in this conversation) on every prompt after that, until the
+  active step changes or a new provider conversation starts. `gc prime
+  --hook` at SessionStart still injects the full step and never records
+  (whether a SessionStart hook's stdout reaches the model is adapter-
+  specific). The per-session marker lives under the city runtime root
+  (`inject/wisp-step/`), is recorded only after the prompt hook's write
+  succeeded, claims nothing about what the model saw, and is pruned after
+  48 h idle; if it cannot be read or written the hook falls back to the
+  previous full injection. Fable 5.1 prompt audit, jadegate scan G-3.
+- **`pool-worker.md` (the bundled default worker prompt when `formula_v2`
+  is off) drops the shouting register.** `YOU RUN IT`, `THE RULE`,
+  `CRITICAL`, `MANDATORY`/`MUST`/"not optional" and the nine `Do NOT`s are
+  rewritten as plain rules with their reasons, the step rule is stated once
+  instead of three times, the drain-ack step keeps its reason without the
+  emphasis stack or the "output nothing after it" suppressor, and the
+  Molecules section's cross-reference points at step 3 of "How to Work"
+  (it had said step 4 since the drain check was inserted as step 2 on
+  2026-06-05). The wide-filesystem-search guard, the ordered lifecycle,
+  Escalation and Context Exhaustion are unchanged. Fable 5.1 prompt audit
+  hunks M1–M5 (citadel) / F-1–F-5 (jadegate).
+
 ### Fixed
 
+- **`[mail] You have mail from …` reminders no longer echo after the mail
+  is read.** A `gc mail send --notify` reminder was keyed on the send event
+  only: nothing on the queued-delivery path asked whether the mail it
+  announced was still unread, so a reminder that was re-queued by the retry
+  ladder (15 s × 5) after a copy had already landed — or that was simply
+  delivered late — arrived as a fresh instruction up to five times, each
+  one costing the agent a tool call. The producer now stamps the queued
+  reminder with the message it announces (a `mail` reference to the message
+  bead) whenever its mail provider is bead-backed, and both delivery
+  consumers (the `UserPromptSubmit` drain hook and the poller/supervisor
+  dispatcher) gate such reminders through the same delivery gate that
+  already gates `source=wait` items: the reminder is delivered while the
+  message is unread and withdrawn (`mail-read`, or `mail-gone` when the
+  message was archived) otherwise, reading the message through the
+  messaging-class store derived from the city work store and releasing the
+  handle afterwards. A reminder without that provenance — an older item, or
+  one queued by a producer on a storeless provider (`fake`/`fail`/`exec:`)
+  whose inbox no other process can see — is delivered exactly as before, and
+  a lookup error holds only that item for a later pass (the rest of the
+  batch is still delivered or withdrawn) rather than guessing. A
+  second notify for the same message supersedes its pending reminder;
+  reminders for different messages stay independent.
+  Fable 5.1 prompt audit, jadegate scan G-1.
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

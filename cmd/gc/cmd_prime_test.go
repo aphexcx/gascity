@@ -795,7 +795,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			}
 
 			// Seed an in-progress molecule with an in-progress step child assigned
-			// to the agent so wispStepInjectionContent resolves an active step.
+			// to the agent so resolveWispStepForInjection resolves an active step.
 			store, err := openCityStoreAt(cityDir)
 			if err != nil {
 				t.Fatalf("openCityStoreAt: %v", err)
