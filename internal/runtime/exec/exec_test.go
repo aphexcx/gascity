@@ -352,7 +352,7 @@ func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
 // the adapter creates the box and then blocks until the start is cut off. The
 // teardown must still run even though the caller's context is already dead.
 //
-// The start is failed by cancelling the caller's context once the adapter has
+// The start is failed by canceling the caller's context once the adapter has
 // provably created its box, not by a fixed start deadline racing the adapter's
 // own startup: with a 200 ms deadline, sh + `cat` + the create write lost that
 // race on a loaded host (26 of 40 runs against a concurrent cmd/gc package run)
