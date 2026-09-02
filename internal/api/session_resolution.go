@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -177,7 +179,7 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 	}
 	now := time.Now().UTC()
 	for _, info := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID); err != nil {
+		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID, federationIdentityOf(s.state.Config())); err != nil {
 			return err
 		}
 		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
@@ -193,7 +195,24 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 	return nil
 }
 
-func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
+// federationIdentityOf is this city's [federation] identity as the cross-city
+// claim fence reads it (federation.MayClaim), or "" on a nil or non-federated
+// config, which turns the fence off.
+func federationIdentityOf(cfg *config.City) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Federation.Identity)
+}
+
+// reassignOpenWorkAssignedToSession re-homes a retired session's open work onto
+// its replacement. Re-homing is an ownership write, so on a federated city it
+// applies the cross-city claim fence (federation.MayClaim, jg-66rdw8): a bead
+// another city owns — the state a pre-fence claim left behind — is left with
+// the retired session rather than handed to a successor, and logged with the
+// same line the hook and the reconciler write. identity "" (not federated)
+// turns the fence off.
+func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID, identity string) error {
 	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
 		return nil
 	}
@@ -204,6 +223,10 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 		}
 		for _, item := range work {
 			if session.IsSessionBeadOrRepairable(item) {
+				continue
+			}
+			if ok, reason := federation.MayClaim(item.Labels, identity); !ok {
+				log.Printf("session resolution: %s: another city's work is not re-homed from retired session %s onto %s", federation.ClaimRefusalLine(item.ID, reason), oldID, newID)
 				continue
 			}
 			if err := store.Update(item.ID, beads.UpdateOpts{Assignee: &newID}); err != nil {

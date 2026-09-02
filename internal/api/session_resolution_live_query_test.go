@@ -31,7 +31,7 @@ func TestReassignOpenWorkAssignedToSession_UsesLiveOpenOwnership(t *testing.T) {
 		t.Fatalf("Update(%s, reassigned): %v", work.ID, err)
 	}
 
-	if err := reassignOpenWorkAssignedToSession(cache, "retired-session", "new-canonical"); err != nil {
+	if err := reassignOpenWorkAssignedToSession(cache, "retired-session", "new-canonical", ""); err != nil {
 		t.Fatalf("reassignOpenWorkAssignedToSession: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestReassignOpenWorkAssignedToSession_IncludesEphemeralWork(t *testing.T) {
 		t.Fatalf("Create(work): %v", err)
 	}
 
-	if err := reassignOpenWorkAssignedToSession(store, "retired-session", "new-canonical"); err != nil {
+	if err := reassignOpenWorkAssignedToSession(store, "retired-session", "new-canonical", ""); err != nil {
 		t.Fatalf("reassignOpenWorkAssignedToSession: %v", err)
 	}
 
