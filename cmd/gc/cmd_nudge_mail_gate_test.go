@@ -95,6 +95,9 @@ type closeCountingStore struct {
 	closes int
 }
 
+// CloseStore satisfies the release seam closeBeadStoreHandle looks for.
+//
+//nolint:unparam // the seam's signature is fixed; this double never fails
 func (c *closeCountingStore) CloseStore() error { c.closes++; return nil }
 
 // TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore pins the codex
