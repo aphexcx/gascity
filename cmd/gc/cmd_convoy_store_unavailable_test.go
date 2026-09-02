@@ -233,3 +233,82 @@ func TestConvoyStrandedAcrossStoresSkipsDarkStore(t *testing.T) {
 		t.Errorf("stderr = %q, want a warning naming the dark store", stderr.String())
 	}
 }
+
+// A by-id READ (convoy status) degrades: the healthy store answers and the
+// dark sibling comes back as a skipped candidate for the caller to warn about.
+func TestResolveConvoyStoreForCommandReadDegradesUnderDarkSibling(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, skipped, err := resolveConvoyStoreForCommand(convoy.ID, convoyDarkTestCity(), "/city", convoyReadDegraded, convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if err != nil {
+		t.Fatalf("read resolution: %v", err)
+	}
+	if store != cityStore {
+		t.Fatal("read resolution returned wrong store")
+	}
+	if len(skipped) != 1 || skipped[0].path != "/rigs/hello-world" || !errors.Is(skipped[0].err, errConvoyStoreDark) {
+		t.Fatalf("skipped = %+v, want the dark rig store with its error", skipped)
+	}
+}
+
+// A by-id MUTATION (convoy target/add/close/land) must not act under partial
+// visibility: the bead may also live in the dark store, so unique ownership
+// cannot be proven. The refusal names the dark store and wraps its error, and
+// hands back no store to mutate.
+func TestResolveConvoyStoreForCommandMutationRefusesUnderDarkSibling(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, skipped, err := resolveConvoyStoreForCommand(convoy.ID, convoyDarkTestCity(), "/city", convoyMutationStrict, convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if err == nil {
+		t.Fatal("mutation resolution = nil error, want refusal under partial visibility")
+	}
+	if store != nil || skipped != nil {
+		t.Fatalf("mutation resolution returned store=%v skipped=%v, want nothing to act on", store, skipped)
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("mutation resolution = %v, must not claim not-found", err)
+	}
+	if !errors.Is(err, errConvoyStoreDark) || !strings.Contains(err.Error(), "/rigs/hello-world") {
+		t.Fatalf("mutation resolution = %v, want it to name the dark store and wrap its error", err)
+	}
+	if !strings.Contains(err.Error(), "unique ownership") {
+		t.Fatalf("mutation resolution = %v, want it to say why it refused", err)
+	}
+}
+
+// Strict is not over-strict: with every store readable a mutation resolves
+// exactly as before.
+func TestResolveConvoyStoreForCommandMutationResolvesWhenAllStoresReadable(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, skipped, err := resolveConvoyStoreForCommand(convoy.ID, convoyDarkTestCity(), "/city", convoyMutationStrict, convoyDarkOpenStore(t, cityStore, beads.NewMemStore()))
+	if err != nil || store != cityStore || len(skipped) != 0 {
+		t.Fatalf("mutation resolution = (%v, %v, %v), want the city store, no skips, no error", store, skipped, err)
+	}
+}
+
+// The bd-hook autoclose resolver acts on what it resolves, so it takes the
+// strict rule: a dark sibling is a refusal, and the caller falls back rather
+// than closing a copy whose ownership is unprovable.
+func TestResolveOwningStoreDirRefusesUnderDarkSibling(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, dir, err := resolveOwningStoreDir(convoy.ID, convoyDarkTestCity(), "/city", convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if err == nil {
+		t.Fatal("resolveOwningStoreDir = nil error, want refusal under partial visibility")
+	}
+	if store != nil || dir != "" {
+		t.Fatalf("resolveOwningStoreDir returned store=%v dir=%q, want nothing to act on", store, dir)
+	}
+	if !errors.Is(err, errConvoyStoreDark) || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("resolveOwningStoreDir = %v, want the dark store's error and not not-found", err)
+	}
+}

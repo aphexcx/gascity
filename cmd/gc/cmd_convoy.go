@@ -569,11 +569,61 @@ func warnSkippedConvoyStores(stderr io.Writer, cmdName string, skipped []storePr
 	fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 }
 
-// resolveOwningStoreDir is resolveOwningStoreDirWithSkipped for callers that
-// have no channel to report skipped stores (bd hook autoclose).
+// convoyStoreVisibility says what a by-id convoy resolution does when a
+// candidate store could not be consulted (its probe failed with something
+// other than not-found).
+type convoyStoreVisibility int
+
+const (
+	// convoyReadDegraded answers from the readable stores and reports the
+	// rest. A read cannot be made wrong by a store it could not see, only
+	// less complete, and the warning says so.
+	convoyReadDegraded convoyStoreVisibility = iota
+	// convoyMutationStrict refuses. A mutation acts on the bead it resolved,
+	// and unique ownership cannot be proven while a participant is
+	// unreadable — the duplicate-residence state this scan exists to detect
+	// may be hiding in the dark store. This is the rule
+	// internal/convoy's MemberClasses.resolveMember applies to member
+	// resolution, carried to the CLI's by-id mutations.
+	convoyMutationStrict
+)
+
+// partialVisibilityError is the refusal a strict resolution returns when a
+// candidate store was skipped: it names the stores and wraps the first cause.
+func partialVisibilityError(beadID string, skipped []storeProbeFailure) error {
+	return fmt.Errorf("cannot prove unique ownership of %s: could not consult %s: %w", beadID, skippedStorePaths(skipped), skipped[0].err)
+}
+
+// resolveConvoyStoreForCommand is the by-id resolution behind the convoy
+// commands, with the visibility policy applied: under convoyReadDegraded a
+// found store comes back with the skipped candidates for the caller to warn
+// about; under convoyMutationStrict any skipped candidate is a refusal and
+// nothing comes back. openStore is injected so the policy is testable
+// without a real store on disk.
+func resolveConvoyStoreForCommand(convoyID string, cfg *config.City, cityPath string, visibility convoyStoreVisibility, openStore func(string) (beads.Store, error)) (beads.Store, []storeProbeFailure, error) {
+	store, _, skipped, err := resolveOwningStoreDirWithSkipped(convoyID, cfg, cityPath, openStore)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(skipped) > 0 && visibility == convoyMutationStrict {
+		return nil, nil, partialVisibilityError(convoyID, skipped)
+	}
+	return store, skipped, nil
+}
+
+// resolveOwningStoreDir is the strict form of resolveOwningStoreDirWithSkipped
+// for callers that ACT on the resolved bead and have no channel to report
+// skipped stores (bd hook autoclose): a skipped candidate is a refusal, not a
+// warning, because ownership is unprovable while a participant is unreadable.
 func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
-	store, dir, _, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
-	return store, dir, err
+	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(skipped) > 0 {
+		return nil, "", partialVisibilityError(beadID, skipped)
+	}
+	return store, dir, nil
 }
 
 // resolveOwningStoreDirWithSkipped resolves the store that owns beadID and the
@@ -789,26 +839,31 @@ func formatConvoyProgress(progress convoyProgressJSON) string {
 	return text
 }
 
-func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (beads.Store, int) {
+// openConvoyStoreByID resolves the store that owns convoyID for a by-id
+// convoy command. visibility says what happens when a candidate store cannot
+// be consulted: reads (convoyReadDegraded) answer from the readable stores and
+// warn; mutations (convoyMutationStrict) refuse, because a bead they cannot
+// prove uniquely addressable is not a bead they may change.
+func openConvoyStoreByID(convoyID string, visibility convoyStoreVisibility, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	return openConvoyStoreByIDAt(convoyID, cityPath, stderr, cmdName)
+	return openConvoyStoreByIDAt(convoyID, cityPath, visibility, stderr, cmdName)
 }
 
 // openConvoyStoreByIDAt is openConvoyStoreByID with a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
 // to a fallback or mutation path.
-func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName string) (beads.Store, int) {
+func openConvoyStoreByIDAt(convoyID, cityPath string, visibility convoyStoreVisibility, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	store, _, skipped, err := resolveOwningStoreDirWithSkipped(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+	store, skipped, err := resolveConvoyStoreForCommand(convoyID, cfg, cityPath, visibility, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
@@ -1028,7 +1083,7 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 
 // doConvoyStatusFallback is the direct-bd path for "gc convoy status".
 func doConvoyStatusFallback(cityPath, convoyID string, jsonOut bool, stdout, stderr io.Writer) int {
-	store, code := openConvoyStoreByIDAt(convoyID, cityPath, stderr, "gc convoy status")
+	store, code := openConvoyStoreByIDAt(convoyID, cityPath, convoyReadDegraded, stderr, "gc convoy status")
 	if store == nil {
 		return code
 	}
@@ -1177,7 +1232,7 @@ func cmdConvoyTargetJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy target")
+	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy target")
 	if store == nil {
 		return code
 	}
@@ -1261,7 +1316,7 @@ func cmdConvoyAddJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy add")
+	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy add")
 	if store == nil {
 		return code
 	}
@@ -1348,7 +1403,7 @@ func cmdConvoyCloseJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy close")
+	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy close")
 	if store == nil {
 		return code
 	}
@@ -1733,7 +1788,7 @@ func cmdConvoyLandJSON(args []string, opts landOpts, jsonOut bool, stdout, stder
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, stderr, "gc convoy land")
+	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy land")
 	if store == nil {
 		return code
 	}
