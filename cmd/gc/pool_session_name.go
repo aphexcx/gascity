@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -151,6 +152,18 @@ func releaseOrphanedPoolAssignments(
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
+			continue
+		}
+		// The cross-city claim fence (jg-66rdw8 / gp-0uj), reconciler side. On a
+		// federated store another city's in_progress bead is assigned to a
+		// session THIS city has never heard of, which is exactly the orphan
+		// shape below — and reopening it here is the re-route that fed the
+		// hw-57b63 loop every lease expiry: reopen → counted as demand → a seat
+		// spawns → the startup claim takes it. The same federation.MayClaim the
+		// hook applies decides here, before any liveness gate spends a read,
+		// and logs the same line. Inert on a non-federated city.
+		if ok, reason := federation.MayClaim(wb.Labels, federationIdentity(cfg)); !ok {
+			log.Printf("releaseOrphanedPoolAssignments: %s: another city's work is not this city's to reopen; leaving it as it is", federation.ClaimRefusalLine(wb.ID, reason))
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
