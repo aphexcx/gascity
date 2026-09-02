@@ -22,6 +22,7 @@ a:coordClassStoreCandidates	(^|[^A-Za-z0-9_])coordClassStoreCandidates\(
 a:workAssignmentStores	(^|[^A-Za-z0-9_])workAssignmentStores\(
 a:openAllConvoyStoresAt	(^|[^A-Za-z0-9_])openAllConvoyStoresAt\(
 a:openConvoyStores	(^|[^A-Za-z0-9_])openConvoyStores\(
+a:openConvoyStoresWithSkipped	(^|[^A-Za-z0-9_])openConvoyStoresWithSkipped\(
 a:openSourceWorkflowStores	(^|[^A-Za-z0-9_])openSourceWorkflowStores\(
 a:convoyStoreCandidates	(^|[^A-Za-z0-9_])convoyStoreCandidates\(
 # (b) direct binding-gate re-derivation. Asking "is this class relocated" a
