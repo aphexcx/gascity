@@ -250,7 +250,7 @@ census() {
 	((${#present[@]})) || return 0
 	find "${present[@]}" -type f -name '*.go' ! -name '*_test.go' -print0 |
 		sort -z |
-		xargs -0 --no-run-if-empty awk -v patfile="$patterns_file" '
+		xargs -0 -r awk -v patfile="$patterns_file" '
 			BEGIN {
 				npat = 0
 				while ((getline line < patfile) > 0) {
@@ -331,45 +331,54 @@ if [[ ! -r "$baseline_file" ]]; then
 	exit 1
 fi
 
-declare -A baseline_count=()
-declare -A current_count=()
-
+# The ratchet comparison runs in awk rather than bash associative arrays:
+# macOS ships /bin/bash 3.2, which has no `declare -A`, and this guard runs on
+# the hosts that build the install line. Both sides are keyed
+# `path <TAB> function <TAB> pattern`, exactly as the baseline file is.
+#
 # `ast:` rows belong to the OTHER half of the guard (TestResidencyResolverBoundary,
 # scripts/residency_boundary_test.go), which shares this baseline file so there is
 # one ratchet rather than two that can disagree. This half ignores them.
-while IFS=$'\t' read -r path fn pattern count; do
-	[[ -z "${path:-}" || "${path:0:1}" == "#" ]] && continue
-	[[ "$pattern" == ast:* ]] && continue
-	baseline_count["$path	$fn	$pattern"]=$count
-done <"$baseline_file"
+baseline_rows=$(awk -F'\t' '
+	$1 == "" || substr($1, 1, 1) == "#" { next }
+	index($3, "ast:") == 1 { next }
+	{ print }
+' "$baseline_file")
 
-if ((${#baseline_count[@]} == 0)); then
+if [[ -z "$baseline_rows" ]]; then
 	note "baseline $baseline_file declares no site; the ratchet has no denominator"
 	exit 1
 fi
 
-while IFS=$'\t' read -r path fn pattern count; do
-	[[ -z "${path:-}" ]] && continue
-	current_count["$path	$fn	$pattern"]=$count
-done <<<"$current"
+# One line per violation: GROW|SHRINK <TAB> path <TAB> function <TAB> pattern <TAB> have <TAB> want.
+violations=$(awk -F'\t' '
+	FNR == NR { if ($1 != "") want[$1 "\t" $2 "\t" $3] = $4 + 0; next }
+	$1 != "" { have[$1 "\t" $2 "\t" $3] = $4 + 0 }
+	END {
+		for (key in have) {
+			w = (key in want) ? want[key] : 0
+			if (have[key] > w) printf "GROW\t%s\t%d\t%d\n", key, have[key], w
+		}
+		for (key in want) {
+			h = (key in have) ? have[key] : 0
+			if (h < want[key]) printf "SHRINK\t%s\t%d\t%d\n", key, h, want[key]
+		}
+	}
+' <(printf '%s\n' "$baseline_rows") <(printf '%s\n' "$current") | sort)
 
-for key in "${!current_count[@]}"; do
-	have=${current_count[$key]}
-	want=${baseline_count[$key]:-0}
-	if ((have > want)); then
-		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — a NEW store-enumeration site. Consume internal/storeref (Plan/ResolveOwner/Union) or annotate the line with `// residency:allow <reason>`.\n' "${key//	/ }" "$have" "$want"
+while IFS=$'\t' read -r kind path fn pattern have want; do
+	[[ -z "${kind:-}" ]] && continue
+	case "$kind" in
+	GROW)
+		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — a NEW store-enumeration site. Consume internal/storeref (Plan/ResolveOwner/Union) or annotate the line with `// residency:allow <reason>`.\n' "$path" "$fn" "$pattern" "$have" "$want"
 		failed=1
-	fi
-done
-
-for key in "${!baseline_count[@]}"; do
-	want=${baseline_count[$key]}
-	have=${current_count[$key]:-0}
-	if ((have < want)); then
-		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "${key//	/ }" "$have" "$want"
+		;;
+	SHRINK)
+		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "$path" "$fn" "$pattern" "$have" "$want"
 		failed=1
-	fi
-done
+		;;
+	esac
+done <<<"$violations"
 
 if ((failed)); then
 	echo "---"

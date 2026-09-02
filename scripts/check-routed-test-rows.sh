@@ -76,9 +76,18 @@ if (( ${#manifest_files[@]} == 0 )); then
     exit 1
 fi
 
-declare -A in_manifest=()
+# in_manifest REL -> succeeds when REL is listed in the manifest. A linear scan
+# over the (small) manifest rather than an associative array: macOS ships
+# /bin/bash 3.2, which has no `declare -A`, and this guard runs on those hosts.
+in_manifest() {
+    local listed
+    for listed in "${manifest_files[@]}"; do
+        [[ "$listed" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 for rel in "${manifest_files[@]}"; do
-    in_manifest["$rel"]=1
     f="$repo_root/$rel"
     if [[ ! -f "$f" ]]; then
         echo "MANIFEST FILE MISSING: $rel (listed in the manifest but not on disk)"
@@ -96,7 +105,7 @@ done
 shopt -s nullglob
 for test_file in "$cmd_dir"/cmd_*_test.go; do
     rel="cmd/gc/$(basename "$test_file")"
-    [[ -n "${in_manifest[$rel]:-}" ]] && continue
+    in_manifest "$rel" && continue
     present=$(count_rows "$test_file")
     if (( present == 0 )); then
         continue
