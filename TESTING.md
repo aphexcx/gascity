@@ -270,7 +270,8 @@ change as any other waiver.
 ## Waiver expiry clocks
 
 The runtime provider ledger (`internal/testutil/providerledger`) carries dated
-waivers, is untagged, and runs in `make check` and `.githooks/pre-push`. A date
+waivers, is untagged, and runs in `make check` and a Go-touching
+`.githooks/pre-push`. A date
 passing is therefore enough on its own to turn every Go-touching push red with
 no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
 when all eight remaining runtime waivers shared one expiry, and both times it
@@ -279,7 +280,8 @@ was cleared by whoever happened to be blocked rather than by the waiver's owner.
 **One clock.** The provider ledger asks `internal/testpolicy/waiverclock` and
 never reads `time.Now()` itself. In this fork the resource census
 (`internal/testpolicy/resourcecensus`) does not yet ask the clock: its baseline
-expiries (2026-10-01) stay fatal on the day, in every mode.
+expiries (2026-10-01) fail from the day after they pass, in every mode, with no
+warn-ahead.
 
 **Structural defects are not on the clock.** A missing owner, a malformed or
 absent date, an expiry parked past the horizon ceiling — none of these can
@@ -288,8 +290,8 @@ whoever wrote them. The clock governs one thing: a date that passed while the
 code sat still.
 
 **Mode ownership.** `GC_WAIVER_CLOCK` selects `grace` or `strict`. Grace is the
-fleet mode: it is what `make check`, pre-commit and pre-push run, and it is what
-an unset environment gets, so a lane that scrubs its environment fails safe
+fleet mode: it is what `make check` and a Go-touching pre-push run (pre-commit
+runs no ledger tests), and it is what an unset environment gets, so a lane that scrubs its environment fails safe
 instead of silently strict. Strict belongs only to a lane the owner is
 answerable for — `scripts/waiver-clock-audit`. This fork has no nightly job
 for it yet, so run it by hand (or from a city order) around each install
