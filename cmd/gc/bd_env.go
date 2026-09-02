@@ -38,9 +38,23 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	}
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
-		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		pinBdStoreRoot(env, dir)
 		return env, err
 	})
+}
+
+// pinBdStoreRoot pins the store a bd child operates on. BEADS_DIR names the
+// database bd opens; GC_STORE_ROOT names the store directory, and it is what
+// the bd on_close hook chain (gc convoy/wisp/molecule autoclose) reads back as
+// the store the close came from — under partial store visibility autoclose
+// acts only on that store (convoyAutocloseStoreRoot, resolveAutocloseOwner).
+// `gc bd` always projected both; gc's own store runners projected only
+// BEADS_DIR, which let a GC_STORE_ROOT inherited from an outer gc process (a
+// hook-spawned gc closing a convoy in another store) name the wrong store.
+// Every runner that pins BEADS_DIR pins GC_STORE_ROOT with it.
+func pinBdStoreRoot(env map[string]string, storeRoot string) {
+	env["BEADS_DIR"] = filepath.Join(storeRoot, ".beads")
+	env["GC_STORE_ROOT"] = storeRoot
 }
 
 // bdContextCommandRunnerForCity delegates complete external bindings to the
@@ -53,7 +67,7 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 			return nil, err
 		}
 		env["BD_BIN"] = bdBin
-		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		pinBdStoreRoot(env, dir)
 		env["GC_RIG"] = ""
 		env["GC_RIG_ROOT"] = ""
 		env["BEADS_DOLT_AUTO_START"] = "0"
@@ -336,7 +350,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
-		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
+		pinBdStoreRoot(env, dir)
 		applyControllerBdEnv(env)
 		return env, err
 	})
@@ -1345,7 +1359,7 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
 	// discovery is not sufficient for rig-scoped operations.
-	env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
+	pinBdStoreRoot(env, rigPath)
 	env["GC_RIG_ROOT"] = rigPath
 	var explicitRig *config.Rig
 	if cfg != nil {
@@ -1419,7 +1433,7 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
-	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
+	pinBdStoreRoot(env, cityPath)
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
 	// Suppress bd's built-in Dolt auto-start. The gc controller manages the

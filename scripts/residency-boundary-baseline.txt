@@ -61,10 +61,12 @@ cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStores	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openAllConvoyStoresAt	1
-cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openConvoyStores	1
-cmd/gc/cmd_convoy.go	openConvoyStores	a:convoyStoreCandidates	1
+cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openConvoyStoresWithSkipped	1
 cmd/gc/cmd_convoy.go	openConvoyStores	a:openConvoyStores	1
-cmd/gc/cmd_convoy.go	resolveOwningStoreDir	a:openConvoyStores	1
+cmd/gc/cmd_convoy.go	openConvoyStores	a:openConvoyStoresWithSkipped	1
+cmd/gc/cmd_convoy.go	openConvoyStoresWithSkipped	a:convoyStoreCandidates	1
+cmd/gc/cmd_convoy.go	openConvoyStoresWithSkipped	a:openConvoyStoresWithSkipped	1
+cmd/gc/cmd_convoy.go	resolveOwningStoreDirWithSkipped	a:openConvoyStoresWithSkipped	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	a:openConvoyStores	1
 cmd/gc/cmd_convoy_dispatch.go	collectSourceWorkflowMatches	a:openSourceWorkflowStores	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	b:graphClassBinding	1
