@@ -349,12 +349,26 @@ func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
 }
 
 // TestStartTearsDownBoxWhenStartOpIsCanceled covers the production failure path:
-// the adapter creates the box and then blocks past gc's own start deadline. The
+// the adapter creates the box and then blocks until the start is cut off. The
 // teardown must still run even though the caller's context is already dead.
+//
+// The start is failed by canceling the caller's context once the adapter has
+// provably created its box — not by a fixed start deadline racing the adapter's
+// own startup (with a 200 ms deadline, sh + `cat` + the create write lost that
+// race on a loaded host, 26 of 40 runs against a concurrent cmd/gc package run,
+// and the test failed on an empty create log). gc's own start deadline takes
+// the identical path through runWithContext, so startTimeout is left as an
+// outer bound only.
+//
+// "The box exists" is a fact the adapter hands over through a FIFO, not a file
+// the test polls for: the adapter opens the pipe to read only after its create
+// write, and the test's write-side open returns exactly then.
 func TestStartTearsDownBoxWhenStartOpIsCanceled(t *testing.T) {
 	dir := t.TempDir()
 	createFile := filepath.Join(dir, "create.log")
 	stopFile := filepath.Join(dir, "stop.log")
+	barrier := filepath.Join(dir, "created.fifo")
+	mkfifo(t, barrier)
 	script := writeScript(t, dir, `
 op="$1"
 name="$2"
@@ -363,21 +377,108 @@ case "$op" in
   start)
     cat > /dev/null
     echo "$name" >> "`+createFile+`"
-    sleep `+startupWatchBlockingSleep+`
+    cat "`+barrier+`"
     ;;
   stop) echo "stop $name" >> "`+stopFile+`" ;;
   *) exit 2 ;;
 esac
 `)
 	p := NewProvider(script)
-	p.startTimeout = 200 * time.Millisecond
+	p.startTimeout = 30 * time.Second
 
-	err := p.Start(context.Background(), "test-sess", runtime.Config{})
-	if err == nil {
-		t.Fatal("Start succeeded, want deadline failure")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{})
+	}()
+
+	type opened struct {
+		w   *os.File
+		err error
+	}
+	created := make(chan opened, 1)
+	go func() {
+		w, err := os.OpenFile(barrier, os.O_WRONLY, 0)
+		created <- opened{w: w, err: err}
+	}()
+
+	// Every exit of this test — pass, t.Fatal, or a stuck select — goes
+	// through settle, deferred once: it cancels, joins Start and the opener
+	// (each read exactly once, each bounded, so no path can block on a channel
+	// it has already drained), and closes the pipe ends. t.Fatal runs deferred
+	// calls, so no failure branch needs its own join.
+	var (
+		startErr    error
+		startWaited bool // one bounded wait, attempted at most once
+		startJoined bool // that wait received Start's result
+		opener      opened
+		openerSeen  bool
+		release     *os.File
+	)
+	joinStart := func() {
+		if startWaited {
+			return
+		}
+		startWaited = true
+		select {
+		case startErr = <-done:
+			startJoined = true
+		case <-time.After(60 * time.Second):
+			t.Log("Start did not return within 60s of cancellation; not waiting further")
+		}
+	}
+	joinOpener := func() {
+		if openerSeen {
+			return
+		}
+		if release == nil {
+			release = releaseBarrier(t, barrier)
+		}
+		select {
+		case opener = <-created:
+			openerSeen = true
+		case <-time.After(10 * time.Second):
+			t.Log("barrier opener did not return within 10s of being released; not waiting further")
+		}
+	}
+	defer func() {
+		cancel()
+		joinStart()
+		joinOpener()
+		if opener.w != nil {
+			_ = opener.w.Close()
+		}
+		if release != nil {
+			_ = release.Close()
+		}
+	}()
+
+	select {
+	case opener = <-created:
+		openerSeen = true
+		if opener.err != nil {
+			t.Fatalf("open barrier for writing: %v", opener.err)
+		}
+		// The write end stays open until settle: closing it would hand the
+		// adapter EOF and let it finish on its own instead of being cut off.
+	case startErr = <-done:
+		startJoined = true
+		t.Fatalf("Start returned before the adapter created the box: %v", startErr)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the adapter to create the box")
 	}
 	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
-		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+		t.Fatalf("create log = %q, want the adapter to have created the box before it reached the barrier", got)
+	}
+
+	cancel()
+	joinStart()
+	if !startJoined {
+		t.Fatal("Start did not return after the caller's context died")
+	}
+	if startErr == nil {
+		t.Fatal("Start succeeded, want cancellation failure")
 	}
 	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
 		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
@@ -1538,12 +1639,18 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	// The readiness marker is written by the foreground child itself, once it
+	// is a process of its own — not by the leader just before it forks. A
+	// marker written by the leader leaves a window, after the marker and
+	// before the child exists, in which the interrupt lands on the leader
+	// alone; the leader then defers its trap until the child it is about to
+	// run returns, and the forced kill wins first. Under load on macOS
+	// (/bin/sh = bash 3.2) that window caught 5 of 30 runs.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    sh -c ': > "%s"; exec sleep 30'
     ;;
   *) exit 2 ;;
 esac

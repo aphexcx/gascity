@@ -68,6 +68,11 @@
 # passes when it cannot evaluate manufactures false confidence.
 
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
+# The aggregation is for the CHECKS. Every command substitution that produces
+# the verdict's data — the census, the baseline rows, the comparison — checks
+# its own status and refuses to pass when it did not run to completion, so a
+# truncated census (an unreadable directory, a failing awk) can never look like
+# a clean tree. pipefail makes a failure anywhere in those pipelines visible.
 
 emit_baseline=0
 self_test=0
@@ -250,7 +255,7 @@ census() {
 	((${#present[@]})) || return 0
 	find "${present[@]}" -type f -name '*.go' ! -name '*_test.go' -print0 |
 		sort -z |
-		xargs -0 --no-run-if-empty awk -v patfile="$patterns_file" '
+		xargs -0 -r awk -v patfile="$patterns_file" '
 			BEGIN {
 				npat = 0
 				while ((getline line < patfile) > 0) {
@@ -312,7 +317,10 @@ if ((failed)); then
 	exit 1
 fi
 
-current=$(census)
+current=$(census) || {
+	note "the census did not run to completion; refusing to pass"
+	exit 1
+}
 
 if ((emit_baseline)); then
 	printf '%s\n' "# residency-boundary baseline: path <TAB> function <TAB> pattern <TAB> count."
@@ -331,45 +339,87 @@ if [[ ! -r "$baseline_file" ]]; then
 	exit 1
 fi
 
-declare -A baseline_count=()
-declare -A current_count=()
-
+# The ratchet comparison runs in awk rather than bash associative arrays:
+# macOS ships /bin/bash 3.2, which has no `declare -A`, and this guard runs on
+# the hosts that build the install line. Both sides are keyed
+# `path <TAB> function <TAB> pattern`, exactly as the baseline file is.
+#
 # `ast:` rows belong to the OTHER half of the guard (TestResidencyResolverBoundary,
 # scripts/residency_boundary_test.go), which shares this baseline file so there is
 # one ratchet rather than two that can disagree. This half ignores them.
-while IFS=$'\t' read -r path fn pattern count; do
-	[[ -z "${path:-}" || "${path:0:1}" == "#" ]] && continue
-	[[ "$pattern" == ast:* ]] && continue
-	baseline_count["$path	$fn	$pattern"]=$count
-done <"$baseline_file"
+baseline_rows=$(awk -F'\t' '
+	$1 == "" || substr($1, 1, 1) == "#" { next }
+	index($3, "ast:") == 1 { next }
+	{ print }
+' "$baseline_file") || {
+	note "could not read the baseline rows out of $baseline_file; refusing to pass"
+	exit 1
+}
 
-if ((${#baseline_count[@]} == 0)); then
+if [[ -z "$baseline_rows" ]]; then
 	note "baseline $baseline_file declares no site; the ratchet has no denominator"
 	exit 1
 fi
 
-while IFS=$'\t' read -r path fn pattern count; do
-	[[ -z "${path:-}" ]] && continue
-	current_count["$path	$fn	$pattern"]=$count
-done <<<"$current"
+# One line per finding: GROW|SHRINK|MALFORMED <TAB> path <TAB> function <TAB> pattern <TAB> have <TAB> want.
+# A row whose count is not a non-negative integer is a MALFORMED finding, not a
+# zero: the ratchet must never pass on a row it could not read. The pipeline's
+# own failure is a refusal too (pipefail is on), so a broken awk or sort cannot
+# turn into an empty finding list.
+violations=$(awk -F'\t' '
+	function malformed(side, row) {
+		gsub(/\t/, " ", row)
+		printf "MALFORMED\t%s\t%s\t-\t0\t0\n", side, row
+	}
+	FNR == NR {
+		if ($1 == "") next
+		if (NF < 4 || $4 !~ /^[0-9]+$/) { malformed("baseline", $0); next }
+		want[$1 "\t" $2 "\t" $3] = $4 + 0
+		next
+	}
+	{
+		if ($1 == "") next
+		if (NF < 4 || $4 !~ /^[0-9]+$/) { malformed("current", $0); next }
+		have[$1 "\t" $2 "\t" $3] = $4 + 0
+	}
+	END {
+		for (key in have) {
+			w = (key in want) ? want[key] : 0
+			if (have[key] > w) printf "GROW\t%s\t%d\t%d\n", key, have[key], w
+		}
+		for (key in want) {
+			h = (key in have) ? have[key] : 0
+			if (h < want[key]) printf "SHRINK\t%s\t%d\t%d\n", key, h, want[key]
+		}
+	}
+' <(printf '%s\n' "$baseline_rows") <(printf '%s\n' "$current") | sort) || {
+	note "the ratchet comparison did not run to completion; refusing to pass"
+	exit 1
+}
 
-for key in "${!current_count[@]}"; do
-	have=${current_count[$key]}
-	want=${baseline_count[$key]:-0}
-	if ((have > want)); then
-		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — a NEW store-enumeration site. Consume internal/storeref (Plan/ResolveOwner/Union) or annotate the line with `// residency:allow <reason>`.\n' "${key//	/ }" "$have" "$want"
-		failed=1
-	fi
-done
+# The verdict is decided here, from the finding list itself, so the report loop
+# below can only add detail, never take a failure away.
+if [[ -n "$violations" ]]; then
+	failed=1
+fi
 
-for key in "${!baseline_count[@]}"; do
-	want=${baseline_count[$key]}
-	have=${current_count[$key]:-0}
-	if ((have < want)); then
-		printf 'RESIDENCY-BOUNDARY: %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "${key//	/ }" "$have" "$want"
-		failed=1
-	fi
-done
+while IFS=$'\t' read -r kind path fn pattern have want; do
+	[[ -z "${kind:-}" ]] && continue
+	case "$kind" in
+	GROW)
+		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — a NEW store-enumeration site. Consume internal/storeref (Plan/ResolveOwner/Union) or annotate the line with `// residency:allow <reason>`.\n' "$path" "$fn" "$pattern" "$have" "$want"
+		;;
+	SHRINK)
+		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "$path" "$fn" "$pattern" "$have" "$want"
+		;;
+	MALFORMED)
+		printf 'RESIDENCY-BOUNDARY: unreadable %s row (count must be a non-negative integer): %s\n' "$path" "$fn"
+		;;
+	*)
+		printf 'RESIDENCY-BOUNDARY: unexpected finding kind %s\n' "$kind"
+		;;
+	esac
+done < <(printf '%s\n' "$violations")
 
 if ((failed)); then
 	echo "---"

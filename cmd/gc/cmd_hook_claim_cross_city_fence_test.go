@@ -931,7 +931,7 @@ func TestClaimHookWorkCrossCityFenceResolvesAcrossFederatedLegs(t *testing.T) {
 		}
 		reads := map[string]int{}
 		ops := quietOps()
-		ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, id, _ string) (beads.Bead, error) {
+		ops.ReadWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string) (beads.Bead, error) {
 			reads[dir]++
 			switch dir {
 			case "broken":
