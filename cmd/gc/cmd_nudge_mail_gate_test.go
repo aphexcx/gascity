@@ -17,14 +17,23 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
+func mailRef(id string) *nudgeReference {
+	return &nudgeReference{Kind: nudgeReferenceKindMail, ID: id}
+}
+
 // TestBlockedQueuedNudgeReason_MailReadState is the spec for the mail half of
-// the delivery gate: a mail-sourced reminder delivers only while the recipient
-// still has unread mail; a read inbox withdraws it; a lookup error holds it
-// (returned to the caller, which releases the claim); no configured lookup
-// delivers as before; and the gate never touches other sources.
+// the delivery gate. A mail reminder is gated only when it carries provenance
+// (a `mail` reference to the message it announces) AND the delivering
+// process has a mail-state lookup: unread delivers, read withdraws as
+// mail-read, a vanished message withdraws as mail-gone, a lookup error holds
+// (returned to the caller, which releases the claim). No provenance or no
+// lookup delivers as before, and other sources are never touched.
 func TestBlockedQueuedNudgeReason_MailReadState(t *testing.T) {
 	lookupErr := errors.New("store unavailable")
-	unread := func(v bool) func() (bool, error) { return func() (bool, error) { return v, nil } }
+	state := func(st mailReminderState) func(string) (mailReminderState, error) {
+		return func(string) (mailReminderState, error) { return st, nil }
+	}
+	withProv := queuedNudge{Source: "mail", Reference: mailRef("gc-msg1")}
 	cases := []struct {
 		name       string
 		gate       queuedNudgeDeliveryGate
@@ -33,13 +42,17 @@ func TestBlockedQueuedNudgeReason_MailReadState(t *testing.T) {
 		wantBlock  bool
 		wantErr    error
 	}{
-		{"mail-unread-delivers", queuedNudgeDeliveryGate{unreadMail: unread(true)}, queuedNudge{Source: "mail"}, "", false, nil},
-		{"mail-read-withdraws", queuedNudgeDeliveryGate{unreadMail: unread(false)}, queuedNudge{Source: "mail"}, nudgeBlockReasonMailRead, true, nil},
-		{"mail-lookup-error-holds", queuedNudgeDeliveryGate{unreadMail: func() (bool, error) { return false, lookupErr }}, queuedNudge{Source: "mail"}, "", false, lookupErr},
-		{"mail-no-gate-delivers", queuedNudgeDeliveryGate{}, queuedNudge{Source: "mail"}, "", false, nil},
-		{"session-source-ignores-read-inbox", queuedNudgeDeliveryGate{unreadMail: unread(false)}, queuedNudge{Source: "session"}, "", false, nil},
-		{"queue-source-ignores-read-inbox", queuedNudgeDeliveryGate{unreadMail: unread(false)}, queuedNudge{Source: "queue"}, "", false, nil},
-		{"wait-source-without-front-door-passes", queuedNudgeDeliveryGate{unreadMail: unread(false)}, queuedNudge{Source: "wait", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false, nil},
+		{"unread-delivers", queuedNudgeDeliveryGate{mailState: state(mailReminderUnread)}, withProv, "", false, nil},
+		{"read-withdraws", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, withProv, nudgeBlockReasonMailRead, true, nil},
+		{"gone-withdraws", queuedNudgeDeliveryGate{mailState: state(mailReminderGone)}, withProv, nudgeBlockReasonMailGone, true, nil},
+		{"lookup-error-holds", queuedNudgeDeliveryGate{mailState: func(string) (mailReminderState, error) { return mailReminderUnread, lookupErr }}, withProv, "", false, lookupErr},
+		{"no-provenance-delivers-even-if-read", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "mail"}, "", false, nil},
+		{"foreign-reference-kind-delivers", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false, nil},
+		{"empty-reference-id-delivers", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "mail", Reference: mailRef(" ")}, "", false, nil},
+		{"no-lookup-delivers", queuedNudgeDeliveryGate{}, withProv, "", false, nil},
+		{"session-source-ignores-mail-state", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "session", Reference: mailRef("gc-msg1")}, "", false, nil},
+		{"queue-source-ignores-mail-state", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "queue"}, "", false, nil},
+		{"wait-source-without-front-door-passes", queuedNudgeDeliveryGate{mailState: state(mailReminderRead)}, queuedNudge{Source: "wait", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,35 +67,47 @@ func TestBlockedQueuedNudgeReason_MailReadState(t *testing.T) {
 	}
 }
 
-func TestSplitQueuedNudgesForDelivery_WithdrawsReadMailReminderOnly(t *testing.T) {
-	calls := 0
+func TestSplitQueuedNudgesForDelivery_WithdrawsReadMailRemindersOnly(t *testing.T) {
+	calls := map[string]int{}
 	gate := queuedNudgeDeliveryGate{
-		sessFront:  sessionFrontDoor(beads.NewMemStore()),
-		unreadMail: memoizeUnreadMailLookup(func() (bool, error) { calls++; return false, nil }),
+		sessFront: sessionFrontDoor(beads.NewMemStore()),
+		mailState: memoizeMailStateLookup(func(id string) (mailReminderState, error) {
+			calls[id]++
+			if id == "read-msg" {
+				return mailReminderRead, nil
+			}
+			return mailReminderUnread, nil
+		}),
 	}
 	deliverable, blocked, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{
-		{ID: "m1", Agent: "worker", Source: "mail", Message: "You have mail from human"},
-		{ID: "m2", Agent: "worker", Source: "mail", Message: "You have mail from mayor"},
+		{ID: "m1", Agent: "worker", Source: "mail", Message: "You have mail from human", Reference: mailRef("read-msg")},
+		{ID: "m2", Agent: "worker", Source: "mail", Message: "You have mail from human", Reference: mailRef("read-msg")},
+		{ID: "m3", Agent: "worker", Source: "mail", Message: "You have mail from mayor", Reference: mailRef("unread-msg")},
+		{ID: "m4", Agent: "worker", Source: "mail", Message: "You have mail from human"}, // no provenance
 		{ID: "s1", Agent: "worker", Source: "session", Message: "check for assigned work"},
 	})
 	if err != nil {
 		t.Fatalf("splitQueuedNudgesForDelivery: %v", err)
 	}
-	if len(deliverable) != 1 || deliverable[0].ID != "s1" {
-		t.Fatalf("deliverable = %#v, want only s1", deliverable)
+	var ids []string
+	for _, item := range deliverable {
+		ids = append(ids, item.ID)
+	}
+	if strings.Join(ids, ",") != "m3,m4,s1" {
+		t.Fatalf("deliverable = %v, want m3,m4,s1", ids)
 	}
 	if got := blocked[nudgeBlockReasonMailRead]; len(got) != 2 {
 		t.Fatalf("blocked = %#v, want m1 and m2 under %s", blocked, nudgeBlockReasonMailRead)
 	}
-	if calls != 1 {
-		t.Fatalf("unread lookup ran %d times, want 1 (memoized per pass)", calls)
+	if calls["read-msg"] != 1 || calls["unread-msg"] != 1 {
+		t.Fatalf("lookup calls = %v, want one per message (memoized per pass)", calls)
 	}
 }
 
 func TestSplitQueuedNudgesForDelivery_MailLookupErrorReturnsError(t *testing.T) {
 	lookupErr := errors.New("store unavailable")
-	gate := queuedNudgeDeliveryGate{unreadMail: func() (bool, error) { return false, lookupErr }}
-	_, _, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{{ID: "m1", Source: "mail"}})
+	gate := queuedNudgeDeliveryGate{mailState: func(string) (mailReminderState, error) { return mailReminderUnread, lookupErr }}
+	_, _, err := splitQueuedNudgesForDelivery(gate, []queuedNudge{{ID: "m1", Source: "mail", Reference: mailRef("x")}})
 	if !errors.Is(err, lookupErr) {
 		t.Fatalf("err = %v, want the lookup error so the caller releases the claim", err)
 	}
@@ -100,41 +125,30 @@ type closeCountingStore struct {
 //nolint:unparam // the seam's signature is fixed; this double never fails
 func (c *closeCountingStore) CloseStore() error { c.closes++; return nil }
 
-// TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore pins the codex
-// round-2/3 findings: both the mailbox resolution and the unread read derive
-// from the city WORK store (never the nudges-class delivery store), and the
-// handle the lookup opens is closed after each evaluation. With the stores
-// split, a session and its mail that live only in the work store must still
-// resolve and count as unread.
-func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) {
+// TestMailStateLookupForNudgeTarget_ReadsTheMessageFromTheWorkStore pins the
+// codex round-2/3 findings: the message is read through the messaging-class
+// store derived from the city WORK store (never the nudges-class delivery
+// store), and the handle the lookup opens is closed after each evaluation.
+func TestMailStateLookupForNudgeTarget_ReadsTheMessageFromTheWorkStore(t *testing.T) {
 	clearGCEnv(t)
 	work := &closeCountingStore{Store: beads.NewMemStore()}
-	nudgesStore := beads.NewMemStore() // relocated nudges class: holds neither sessions nor mail
+	nudgesStore := beads.NewMemStore() // relocated nudges class: holds no mail
 	prev := openMailGateWorkStore
 	openMailGateWorkStore = func(string) (beads.Store, error) { return work, nil }
 	t.Cleanup(func() { openMailGateWorkStore = prev })
 
-	sess, err := work.Create(beads.Bead{
-		Title: "Session: worker", Type: session.BeadType, Status: "open",
-		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "state": string(session.StateActive)},
-	})
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
 	mp := beadmail.New(work.Store)
-	msg, err := mp.Send("human", sess.ID, "hello", "please look")
+	msg, err := mp.Send("human", "worker", "hello", "please look")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	target := nudgeTarget{cityPath: t.TempDir(), sessionID: sess.ID, cfg: &config.City{}}
-	lookup := mailUnreadLookupForNudgeTarget(target, nudgesStore)
+	target := nudgeTarget{cityPath: t.TempDir(), sessionID: "gc-s1", cfg: &config.City{}}
+	lookup := mailStateLookupForNudgeTarget(target, nudgesStore)
 	if lookup == nil {
 		t.Fatal("expected a configured mail gate")
 	}
-	unread, err := lookup()
-	if err != nil || !unread {
-		t.Fatalf("mail in the work store must count as unread: unread=%v err=%v", unread, err)
+	if st, err := lookup(msg.ID); err != nil || st != mailReminderUnread {
+		t.Fatalf("fresh mail in the work store must read as unread: state=%v err=%v", st, err)
 	}
 	if work.closes != 1 {
 		t.Fatalf("work store closes = %d after one lookup, want 1", work.closes)
@@ -142,52 +156,131 @@ func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) 
 	if err := mp.MarkRead(msg.ID); err != nil {
 		t.Fatalf("MarkRead: %v", err)
 	}
-	if unread, err := lookup(); err != nil || unread {
-		t.Fatalf("after MarkRead the inbox must read as empty: unread=%v err=%v", unread, err)
+	if st, err := lookup(msg.ID); err != nil || st != mailReminderRead {
+		t.Fatalf("after MarkRead the message must read as read: state=%v err=%v", st, err)
 	}
-	if work.closes != 2 {
-		t.Fatalf("work store closes = %d after two lookups, want 2", work.closes)
+	if st, err := lookup("gc-does-not-exist"); err != nil || st != mailReminderGone {
+		t.Fatalf("an unknown message must read as gone: state=%v err=%v", st, err)
+	}
+	if err := mp.Archive(msg.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	if st, err := lookup(msg.ID); err != nil || st != mailReminderGone {
+		t.Fatalf("an archived message must read as gone: state=%v err=%v", st, err)
+	}
+	if work.closes != 4 {
+		t.Fatalf("work store closes = %d after four lookups, want 4", work.closes)
 	}
 
 	broken := errors.New("work store unavailable")
 	openMailGateWorkStore = func(string) (beads.Store, error) { return nil, broken }
-	if _, err := mailUnreadLookupForNudgeTarget(target, nudgesStore)(); !errors.Is(err, broken) {
+	if _, err := mailStateLookupForNudgeTarget(target, nudgesStore)(msg.ID); !errors.Is(err, broken) {
 		t.Fatalf("a work-store open failure must surface as a lookup error (hold), got %v", err)
 	}
 }
 
-func TestMailUnreadLookupForNudgeTarget_NotConfiguredCases(t *testing.T) {
+func TestMailStateLookupForNudgeTarget_NotConfiguredCases(t *testing.T) {
 	store := beads.NewMemStore()
 	base := nudgeTarget{cityPath: t.TempDir(), sessionID: "gc-s1", cfg: &config.City{}}
-	if got := mailUnreadLookupForNudgeTarget(base, nil); got != nil {
+	if got := mailStateLookupForNudgeTarget(base, nil); got != nil {
 		t.Fatal("nil delivery store must yield no gate")
 	}
 	noCity := base
 	noCity.cityPath = ""
-	if got := mailUnreadLookupForNudgeTarget(noCity, store); got != nil {
+	if got := mailStateLookupForNudgeTarget(noCity, store); got != nil {
 		t.Fatal("empty city path must yield no gate")
-	}
-	noIdentity := base
-	noIdentity.sessionID = ""
-	if got := mailUnreadLookupForNudgeTarget(noIdentity, store); got != nil {
-		t.Fatal("a target with no identity must yield no gate")
 	}
 	for _, name := range []string{"fake", "fail", "exec:/bin/true"} {
 		storeless := base
 		storeless.cfg = &config.City{Mail: config.MailConfig{Provider: name}}
-		if got := mailUnreadLookupForNudgeTarget(storeless, store); got != nil {
+		if got := mailStateLookupForNudgeTarget(storeless, store); got != nil {
 			t.Fatalf("storeless mail provider %q must yield no gate", name)
 		}
 	}
-	if got := mailUnreadLookupForNudgeTarget(base, store); got == nil {
-		t.Fatal("bead-backed provider with a store and identity must yield a gate")
+	if got := mailStateLookupForNudgeTarget(base, store); got == nil {
+		t.Fatal("bead-backed provider with a store must yield a gate")
+	}
+}
+
+// TestMailNudgeReference_StampsOnlyBeadBackedProducers pins the codex round-4
+// finding: provenance is stamped only when the PRODUCING process's mail
+// provider is bead-backed; a storeless producer (whose inbox no other process
+// can read) or a missing message id yields no reference, so a later consumer
+// on a different provider delivers the reminder unchanged.
+func TestMailNudgeReference_StampsOnlyBeadBackedProducers(t *testing.T) {
+	clearGCEnv(t)
+	if ref := mailNudgeReference("gc-msg1"); ref == nil || ref.Kind != nudgeReferenceKindMail || ref.ID != "gc-msg1" {
+		t.Fatalf("bead-backed producer should stamp the message reference, got %#v", ref)
+	}
+	if ref := mailNudgeReference(""); ref != nil {
+		t.Fatalf("no message id must yield no reference, got %#v", ref)
+	}
+	for _, name := range []string{"fake", "fail", "exec:/bin/true"} {
+		t.Setenv("GC_MAIL", name)
+		if ref := mailNudgeReference("gc-msg1"); ref != nil {
+			t.Fatalf("storeless producer %q must yield no reference, got %#v", name, ref)
+		}
+	}
+}
+
+// TestSendMailNotifyReferenceSupersedesSameMessageOnly: two notifies for the
+// SAME message collapse to one pending reminder (queue supersession on the
+// reference), while notifies for different messages stay independent — the
+// #2968 contract (TestSendMailNotifyQueuesIndependentRemindersForEachMail)
+// with provenance attached.
+func TestSendMailNotifyReferenceSupersedesSameMessageOnly(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "mayor", Title: "Mayor", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	prevManaged := nudgeCityUsesManagedReconciler
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler = prevManaged })
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{Agents: []config.Agent{{Name: "mayor", Provider: "claude"}}},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+		identity:    "mayor",
+		agent:       config.Agent{Name: "mayor", Provider: "claude"},
+	}
+	for _, id := range []string{"gc-msg1", "gc-msg1", "gc-msg2"} {
+		if err := sendMailNotifyWithWorker(target, store, fake, "human", id); err != nil {
+			t.Fatalf("sendMailNotifyWithWorker(%s): %v", id, err)
+		}
+	}
+	pending, inFlight, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending)+len(inFlight) != 2 {
+		t.Fatalf("pending+inFlight = %d, want 2 (msg1 superseded once, msg2 independent); pending=%#v inFlight=%#v", len(pending)+len(inFlight), pending, inFlight)
+	}
+	seen := map[string]bool{}
+	for _, item := range append(pending, inFlight...) {
+		if item.Reference == nil || item.Reference.Kind != nudgeReferenceKindMail {
+			t.Fatalf("queued mail reminder must carry the message reference, got %#v", item)
+		}
+		seen[item.Reference.ID] = true
+	}
+	if !seen["gc-msg1"] || !seen["gc-msg2"] {
+		t.Fatalf("expected reminders for msg1 and msg2, got %v", seen)
 	}
 }
 
 // TestTryDeliverQueuedNudgesByPollerWithdrawsMailReminderOnceRead runs the
-// poller consumer end to end over a real bead store: a mail reminder delivers
-// while the mail is unread and is withdrawn — no Nudge call, queue drained —
-// once the recipient has read it.
+// poller consumer end to end over a real bead store: a mail reminder with
+// provenance delivers while its message is unread and is withdrawn — no Nudge
+// call, queue drained — once the recipient has read it.
 func TestTryDeliverQueuedNudgesByPollerWithdrawsMailReminderOnceRead(t *testing.T) {
 	clearGCEnv(t)
 	t.Setenv("GC_BEADS", "file")
@@ -229,7 +322,7 @@ func TestTryDeliverQueuedNudgesByPollerWithdrawsMailReminderOnceRead(t *testing.
 	}
 	enqueue := func() {
 		t.Helper()
-		item := newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", time.Now().Add(-time.Minute), queuedNudgeOptions{})
+		item := newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", time.Now().Add(-time.Minute), queuedNudgeOptions{Reference: mailRef(msg.ID)})
 		if err := enqueueQueuedNudge(dir, item); err != nil {
 			t.Fatalf("enqueueQueuedNudge: %v", err)
 		}
@@ -265,7 +358,10 @@ func TestTryDeliverQueuedNudgesByPollerWithdrawsMailReminderOnceRead(t *testing.
 }
 
 // TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead is the same contract
-// through the UserPromptSubmit drain hook.
+// through the UserPromptSubmit drain hook, plus the cross-process case codex
+// round 4 asked for: a reminder without provenance (storeless producer, or an
+// older item) is delivered by a bead-backed consumer even when its inbox is
+// otherwise fully read.
 func TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -297,9 +393,9 @@ func TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	enqueue := func() {
+	enqueue := func(ref *nudgeReference) {
 		t.Helper()
-		item := newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: created.ID})
+		item := newQueuedNudgeWithOptions("worker", "You have mail from human", "mail", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: created.ID, Reference: ref})
 		if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
 			t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
 		}
@@ -321,8 +417,20 @@ func TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead(t *testing.T) {
 		ctx, _ := hook["additionalContext"].(string)
 		return ctx
 	}
+	queueEmpty := func() bool {
+		t.Helper()
+		target, err := resolveNudgeTarget(created.ID)
+		if err != nil {
+			t.Fatalf("resolveNudgeTarget: %v", err)
+		}
+		pending, inFlight, _, err := listQueuedNudgesForTarget(cityDir, target, time.Now())
+		if err != nil {
+			t.Fatalf("listQueuedNudgesForTarget: %v", err)
+		}
+		return len(pending) == 0 && len(inFlight) == 0
+	}
 
-	enqueue()
+	enqueue(mailRef(msg.ID))
 	if got := drain(); !strings.Contains(got, "You have mail from human") {
 		t.Fatalf("unread mail: reminder should be injected, got %q", got)
 	}
@@ -330,19 +438,21 @@ func TestCmdNudgeDrainInjectWithdrawsMailReminderOnceRead(t *testing.T) {
 	if err := mp.MarkRead(msg.ID); err != nil {
 		t.Fatalf("MarkRead: %v", err)
 	}
-	enqueue()
+	enqueue(mailRef(msg.ID))
 	if got := drain(); strings.Contains(got, "You have mail") {
 		t.Fatalf("read mail: reminder must be withdrawn, got %q", got)
 	}
-	target, err := resolveNudgeTarget(created.ID)
-	if err != nil {
-		t.Fatalf("resolveNudgeTarget: %v", err)
+	if !queueEmpty() {
+		t.Fatal("withdrawn reminder must leave the queue")
 	}
-	pending, inFlight, _, err := listQueuedNudgesForTarget(cityDir, target, time.Now())
-	if err != nil {
-		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+
+	// Cross-process provenance: no reference → delivered even though the
+	// inbox is fully read.
+	enqueue(nil)
+	if got := drain(); !strings.Contains(got, "You have mail from human") {
+		t.Fatalf("a reminder without provenance must be delivered unchanged, got %q", got)
 	}
-	if len(pending) != 0 || len(inFlight) != 0 {
-		t.Fatalf("withdrawn reminder must leave the queue: pending=%#v inFlight=%#v", pending, inFlight)
+	if !queueEmpty() {
+		t.Fatal("delivered reminder must leave the queue")
 	}
 }

@@ -58,21 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`[mail] You have mail from …` reminders no longer echo after the mail
   is read.** A `gc mail send --notify` reminder was keyed on the send event
-  only: nothing on the queued-delivery path asked whether the recipient
-  still had unread mail, so a reminder that was re-queued by the retry
+  only: nothing on the queued-delivery path asked whether the mail it
+  announced was still unread, so a reminder that was re-queued by the retry
   ladder (15 s × 5) after a copy had already landed — or that was simply
   delivered late — arrived as a fresh instruction up to five times, each
-  one costing the agent a tool call. Both delivery consumers (the
-  `UserPromptSubmit` drain hook and the poller/supervisor dispatcher) now
-  gate `source=mail` items through the same delivery gate that already
-  gates `source=wait` items: the reminder is delivered only while the
-  recipient has unread mail (session and messaging class stores both derived
-  from the city work store, the handle closed after each read) and is
-  withdrawn (`mail-read`) otherwise. A
-  lookup error holds the item for a later pass rather than guessing; cities
-  on a storeless mail provider (`fake`/`fail`/`exec:`) keep the previous
-  behavior. Independent reminders for separate mails are still queued
-  separately (the second mail is never deduped against an unread first).
+  one costing the agent a tool call. The producer now stamps the queued
+  reminder with the message it announces (a `mail` reference to the message
+  bead) whenever its mail provider is bead-backed, and both delivery
+  consumers (the `UserPromptSubmit` drain hook and the poller/supervisor
+  dispatcher) gate such reminders through the same delivery gate that
+  already gates `source=wait` items: the reminder is delivered while the
+  message is unread and withdrawn (`mail-read`, or `mail-gone` when the
+  message was archived) otherwise, reading the message through the
+  messaging-class store derived from the city work store and releasing the
+  handle afterwards. A reminder without that provenance — an older item, or
+  one queued by a producer on a storeless provider (`fake`/`fail`/`exec:`)
+  whose inbox no other process can see — is delivered exactly as before, and
+  a lookup error holds the item for a later pass rather than guessing. A
+  second notify for the same message supersedes its pending reminder;
+  reminders for different messages stay independent.
   Fable 5.1 prompt audit, jadegate scan G-1.
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
