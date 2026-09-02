@@ -343,17 +343,37 @@ baseline_rows=$(awk -F'\t' '
 	$1 == "" || substr($1, 1, 1) == "#" { next }
 	index($3, "ast:") == 1 { next }
 	{ print }
-' "$baseline_file")
+' "$baseline_file") || {
+	note "could not read the baseline rows out of $baseline_file; refusing to pass"
+	exit 1
+}
 
 if [[ -z "$baseline_rows" ]]; then
 	note "baseline $baseline_file declares no site; the ratchet has no denominator"
 	exit 1
 fi
 
-# One line per violation: GROW|SHRINK <TAB> path <TAB> function <TAB> pattern <TAB> have <TAB> want.
+# One line per finding: GROW|SHRINK|MALFORMED <TAB> path <TAB> function <TAB> pattern <TAB> have <TAB> want.
+# A row whose count is not a non-negative integer is a MALFORMED finding, not a
+# zero: the ratchet must never pass on a row it could not read. The pipeline's
+# own failure is a refusal too (pipefail is on), so a broken awk or sort cannot
+# turn into an empty finding list.
 violations=$(awk -F'\t' '
-	FNR == NR { if ($1 != "") want[$1 "\t" $2 "\t" $3] = $4 + 0; next }
-	$1 != "" { have[$1 "\t" $2 "\t" $3] = $4 + 0 }
+	function malformed(side, row) {
+		gsub(/\t/, " ", row)
+		printf "MALFORMED\t%s\t%s\t-\t0\t0\n", side, row
+	}
+	FNR == NR {
+		if ($1 == "") next
+		if (NF < 4 || $4 !~ /^[0-9]+$/) { malformed("baseline", $0); next }
+		want[$1 "\t" $2 "\t" $3] = $4 + 0
+		next
+	}
+	{
+		if ($1 == "") next
+		if (NF < 4 || $4 !~ /^[0-9]+$/) { malformed("current", $0); next }
+		have[$1 "\t" $2 "\t" $3] = $4 + 0
+	}
 	END {
 		for (key in have) {
 			w = (key in want) ? want[key] : 0
@@ -364,21 +384,34 @@ violations=$(awk -F'\t' '
 			if (h < want[key]) printf "SHRINK\t%s\t%d\t%d\n", key, h, want[key]
 		}
 	}
-' <(printf '%s\n' "$baseline_rows") <(printf '%s\n' "$current") | sort)
+' <(printf '%s\n' "$baseline_rows") <(printf '%s\n' "$current") | sort) || {
+	note "the ratchet comparison did not run to completion; refusing to pass"
+	exit 1
+}
+
+# The verdict is decided here, from the finding list itself, so the report loop
+# below can only add detail, never take a failure away.
+if [[ -n "$violations" ]]; then
+	failed=1
+fi
 
 while IFS=$'\t' read -r kind path fn pattern have want; do
 	[[ -z "${kind:-}" ]] && continue
 	case "$kind" in
 	GROW)
 		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — a NEW store-enumeration site. Consume internal/storeref (Plan/ResolveOwner/Union) or annotate the line with `// residency:allow <reason>`.\n' "$path" "$fn" "$pattern" "$have" "$want"
-		failed=1
 		;;
 	SHRINK)
 		printf 'RESIDENCY-BOUNDARY: %s %s %s: %d sites, baseline %d — the baseline must SHRINK in the same commit that retires a site. Run `scripts/check-residency-boundary.sh --emit-baseline > scripts/residency-boundary-baseline.txt`.\n' "$path" "$fn" "$pattern" "$have" "$want"
-		failed=1
+		;;
+	MALFORMED)
+		printf 'RESIDENCY-BOUNDARY: unreadable %s row (count must be a non-negative integer): %s\n' "$path" "$fn"
+		;;
+	*)
+		printf 'RESIDENCY-BOUNDARY: unexpected finding kind %s\n' "$kind"
 		;;
 	esac
-done <<<"$violations"
+done < <(printf '%s\n' "$violations")
 
 if ((failed)); then
 	echo "---"
