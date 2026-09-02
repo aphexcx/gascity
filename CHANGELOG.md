@@ -34,8 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the `gc bd show` command to re-read it) on every prompt after that,
   until the active step changes or a new provider conversation starts. The
   per-session marker lives under the city runtime root
-  (`inject/wisp-step/`); if it cannot be read or written the hook falls back
-  to the previous full injection. Fable 5.1 prompt audit, jadegate scan G-3.
+  (`inject/wisp-step/`), is recorded only after the hook payload was
+  actually written (a failed write leaves the next prompt full), and
+  markers idle for 48 h are pruned whenever a new one is recorded; if the
+  marker cannot be read or written the hook falls back to the previous full
+  injection. Fable 5.1 prompt audit, jadegate scan G-3.
 - **`pool-worker.md` (the bundled default worker prompt when `formula_v2`
   is off) drops the shouting register.** `YOU RUN IT`, `THE RULE`,
   `CRITICAL`, `MANDATORY`/`MUST`/"not optional" and the nine `Do NOT`s are

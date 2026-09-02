@@ -27,19 +27,21 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 		return primeHookContextInjection{}
 	}
 	// Full active-step reminder at prime; the real hook invocation (not a
-	// --json preview) also records it so the per-prompt hook emits the pointer
-	// form until the step changes (wisp_step_inject_once.go).
-	injection := primeHookContextInjection{text: wispStepInjectionAtSessionStart(
+	// --json preview) also records it — through afterDelivery, i.e. only once
+	// the payload is written — so the per-prompt hook emits the pointer form
+	// until the step changes (wisp_step_inject_once.go).
+	stepText, stepDelivered := wispStepInjectionAtSessionStart(
 		cityPath,
 		firstNonEmpty(os.Getenv("GC_SESSION_ID"), os.Getenv("GC_ALIAS")),
 		hookContext.ProviderSessionID,
 		consumeHandoff,
-	)}
+	)
+	injection := primeHookContextInjection{text: stepText, afterDelivery: stepDelivered}
 	if primeHookSessionStart(hookContext) {
 		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text
 		if consumeHandoff {
-			injection.afterDelivery = autoHandoff.afterDelivery
+			injection.afterDelivery = chainAfterDelivery(stepDelivered, autoHandoff.afterDelivery)
 		}
 		// dip-bj7pgj: an autonomous/promptless restart runs this SessionStart
 		// hook but never the UserPromptSubmit mail hook, so also surface ordinary

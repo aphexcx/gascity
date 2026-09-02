@@ -447,6 +447,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// (codex/gemini) stay one valid document rather than two concatenated objects.
 	// See clock_inject.go and wisp_step_inject.go.
 	var wispExtra string // set after target resolution; captured by defer closure
+	// wispDelivered records the once-per-step marker; it runs only after the
+	// payload carrying the full step has been written successfully.
+	var wispDelivered func()
 	emittedHookContext := false
 	var injectPrefix string
 	// conversationID is the provider's own session id from the hook stdin; it
@@ -464,7 +467,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
 				if line != "" {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line)
+					if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line); err == nil && wispDelivered != nil {
+						wispDelivered()
+					}
 				}
 			}
 		}()
@@ -495,7 +500,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		// Full step on first sight (or a step change), a one-line pointer on
 		// every prompt after that — see wisp_step_inject_once.go.
-		wispExtra = wispStepInjectionForPrompt(target.cityPath, firstNonEmpty(target.sessionID, targetID), conversationID)
+		wispExtra, wispDelivered = wispStepInjectionForPrompt(target.cityPath, firstNonEmpty(target.sessionID, targetID), conversationID)
 	}
 
 	now := time.Now()
@@ -568,6 +573,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// combined context is written.
 		emittedHookContext = true
 		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
+		if writeErr == nil && wispDelivered != nil {
+			wispDelivered()
+		}
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}

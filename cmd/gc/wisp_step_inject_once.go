@@ -30,9 +30,19 @@ import (
 // by the gc session (bead id, else the alias/id the hook resolved) and stamped
 // with the provider's own conversation id from the hook stdin when the
 // provider supplies one. A different conversation id or a different step
-// re-injects in full. The state is best-effort: when it cannot be read or
-// written, the full reminder is emitted, so a broken state file degrades to
-// the previous per-prompt behavior, never to silence.
+// re-injects in full. The marker is recorded only AFTER the hook payload has
+// been written (the callers run the returned callback on a successful write),
+// so a failed write leaves no claim that the conversation saw the step. The
+// state is best-effort: when it cannot be read or written, the full reminder
+// is emitted, so a broken state file degrades to the previous per-prompt
+// behavior, never to silence. Files untouched for wispStepInjectStateTTL are
+// pruned opportunistically whenever a marker is recorded, so churn of
+// ephemeral sessions does not grow the directory without bound; a pruned
+// live session simply re-receives the full step once.
+
+// wispStepInjectStateTTL is how long a per-session marker survives without a
+// new record before an opportunistic prune removes it.
+const wispStepInjectStateTTL = 48 * time.Hour
 
 // wispStepInjectState is the record of the last step whose full description
 // was injected for one session.
@@ -43,27 +53,32 @@ type wispStepInjectState struct {
 }
 
 // wispStepInjectionAtSessionStart is the SessionStart form: always the full
-// reminder. When record is true it also stamps the step as injected, so the
-// first UserPromptSubmit that follows emits the pointer rather than a second
-// full copy; preview callers pass false so a diagnostic render leaves no
-// trace.
-func wispStepInjectionAtSessionStart(cityPath, sessionKey, conversationID string, record bool) string {
+// reminder. When record is true the returned callback stamps the step as
+// injected — the caller runs it once the hook payload has been written — so
+// the first UserPromptSubmit that follows emits the pointer rather than a
+// second full copy. Preview callers pass false and get a nil callback, so a
+// diagnostic render leaves no trace.
+func wispStepInjectionAtSessionStart(cityPath, sessionKey, conversationID string, record bool) (string, func()) {
 	b := resolveWispStepForInjection(cityPath)
 	if b == nil {
-		return ""
+		return "", nil
 	}
+	var delivered func()
 	if record {
-		recordWispStepInjected(wispStepStateCityPath(cityPath), sessionKey, conversationID, b.ID)
+		stateCity, stepID := wispStepStateCityPath(cityPath), b.ID
+		delivered = func() { recordWispStepInjected(stateCity, sessionKey, conversationID, stepID) }
 	}
-	return formatWispStepReminder(b)
+	return formatWispStepReminder(b), delivered
 }
 
 // wispStepInjectionForPrompt is the UserPromptSubmit form: the full reminder
 // for a step this session+conversation has not seen, the pointer otherwise.
-func wispStepInjectionForPrompt(cityPath, sessionKey, conversationID string) string {
+// The callback (nil for the pointer) records the marker and must run only
+// after the payload carrying the full reminder has been written.
+func wispStepInjectionForPrompt(cityPath, sessionKey, conversationID string) (string, func()) {
 	b := resolveWispStepForInjection(cityPath)
 	if b == nil {
-		return ""
+		return "", nil
 	}
 	return wispStepPromptInjection(wispStepStateCityPath(cityPath), sessionKey, conversationID, b)
 }
@@ -71,16 +86,36 @@ func wispStepInjectionForPrompt(cityPath, sessionKey, conversationID string) str
 // wispStepPromptInjection is the decision and render over an already resolved
 // step; split from wispStepInjectionForPrompt so it can be exercised without a
 // bead store. cityPath is where the state lives ("" disables the state and
-// yields the full reminder every time).
-func wispStepPromptInjection(cityPath, sessionKey, conversationID string, b *beads.Bead) string {
+// yields the full reminder every time). The returned callback records the
+// marker; it is nil when the pointer was returned.
+func wispStepPromptInjection(cityPath, sessionKey, conversationID string, b *beads.Bead) (string, func()) {
 	if b == nil {
-		return ""
+		return "", nil
 	}
 	if prev, ok := readWispStepInjectState(cityPath, sessionKey); ok && prev.StepID == b.ID && prev.ConversationID == conversationID {
-		return formatWispStepPointer(b)
+		return formatWispStepPointer(b), nil
 	}
-	recordWispStepInjected(cityPath, sessionKey, conversationID, b.ID)
-	return formatWispStepReminder(b)
+	stepID := b.ID
+	return formatWispStepReminder(b), func() { recordWispStepInjected(cityPath, sessionKey, conversationID, stepID) }
+}
+
+// chainAfterDelivery composes post-write callbacks, skipping nil ones; nil
+// when both are nil so callers can keep testing for "nothing to run".
+func chainAfterDelivery(fns ...func()) func() {
+	var live []func()
+	for _, fn := range fns {
+		if fn != nil {
+			live = append(live, fn)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	return func() {
+		for _, fn := range live {
+			fn()
+		}
+	}
 }
 
 // formatWispStepPointer is the short per-prompt form of formatWispStepReminder:
@@ -151,4 +186,32 @@ func recordWispStepInjected(cityPath, sessionKey, conversationID, stepID string)
 		return
 	}
 	_ = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
+	pruneWispStepInjectState(filepath.Dir(path), path, time.Now())
+}
+
+// pruneWispStepInjectState removes sibling marker files whose last record is
+// older than wispStepInjectStateTTL. Best-effort and bounded by the directory
+// listing; it runs only when a marker is recorded (a step change), never on
+// the per-prompt read path. keep is the file just written and is never
+// removed.
+func pruneWispStepInjectState(dir, keep string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := now.Add(-wispStepInjectStateTTL)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if path == keep {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		_ = os.Remove(path)
+	}
 }
