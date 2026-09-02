@@ -93,7 +93,12 @@ func TestProbeDetachedWork_TmuxExitStatus(t *testing.T) {
 			installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"; exit `+tt.exitCode)
 			t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
-			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			// An explicit, generous timeout: these cases are about the exit
+			// status mapping, and the 1 s product default is a budget for
+			// launching the fake tmux, which a loaded host does not always meet
+			// (two of three cases came back "timeout" under a parallel
+			// `make test`). TestProbeDetachedWork_Timeout owns the timeout path.
+			got := probeDetachedWorkWithTimeout(context.Background(), "tmux:gascity:soak-loop", 10*time.Second)
 			if got.Status != tt.wantStatus {
 				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.wantStatus, got.Err)
 			}

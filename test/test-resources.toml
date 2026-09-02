@@ -23,8 +23,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 484
-baseline_files = 177
+baseline_calls = 485
+baseline_files = 178
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -36,7 +36,7 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 58
+baseline_calls = 63
 baseline_files = 23
 reported_calls = 58
 reported_files = 23
@@ -64,8 +64,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 317
-baseline_files = 121
+baseline_calls = 318
+baseline_files = 122
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -116,8 +116,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 318
-baseline_files = 66
+baseline_calls = 331
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
@@ -129,7 +129,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 43
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
@@ -142,7 +142,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 97
+baseline_calls = 99
 baseline_files = 37
 reported_calls = 92
 reported_files = 34
@@ -434,8 +434,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 317
-baseline_files = 121
+baseline_calls = 318
+baseline_files = 122
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
@@ -486,8 +486,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 318
-baseline_files = 66
+baseline_calls = 331
+baseline_files = 67
 reported_calls = 300
 reported_files = 66
 owner_bead = "ga-cp3hwi"
@@ -499,7 +499,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 43
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
@@ -512,7 +512,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 95
+baseline_calls = 97
 baseline_files = 36
 reported_calls = 92
 reported_files = 34
