@@ -512,14 +512,74 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
-	store, _, err := resolveOwningStoreDir(convoyID, cfg, cityPath, openStore)
+	store, _, _, err := resolveOwningStoreDirWithSkipped(convoyID, cfg, cityPath, openStore)
 	return store, err
 }
 
-// resolveOwningStoreDir resolves the store that owns beadID and the candidate
-// store directory it was found in, probing each prefix-aware convoy store
-// candidate rooted at cityPath. It returns an error when beadID resolves in
-// more than one store (ambiguous) and beads.ErrNotFound when no candidate
+// storeProbeFailure records a convoy store candidate that could not be
+// consulted: its read failed with something other than not-found (a database
+// that refuses to open, a dead server), so it can neither confirm nor deny
+// holding a bead.
+type storeProbeFailure struct {
+	path string
+	err  error
+}
+
+// firstErrorLine returns the headline of a possibly multi-line error. Store
+// errors relayed from a bd subprocess carry the diagnostic headline first and
+// operator hints on the following lines; a one-line warning wants only the
+// headline.
+func firstErrorLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return strings.TrimSpace(line)
+}
+
+// skippedStorePaths names the skipped stores for an error or warning:
+// "store /a" or "stores /a, /b".
+func skippedStorePaths(skipped []storeProbeFailure) string {
+	paths := make([]string, 0, len(skipped))
+	for _, f := range skipped {
+		p := f.path
+		if p == "" {
+			p = "(unnamed store)"
+		}
+		paths = append(paths, p)
+	}
+	noun := "store"
+	if len(paths) > 1 {
+		noun = "stores"
+	}
+	return noun + " " + strings.Join(paths, ", ")
+}
+
+// warnSkippedConvoyStores reports the candidate stores a convoy command could
+// not consult. The command still answered from the stores it could read, so
+// this is a warning rather than a failure — but a store that cannot be read
+// is a store with a problem, so the operator is pointed at gc doctor.
+func warnSkippedConvoyStores(stderr io.Writer, cmdName string, skipped []storeProbeFailure) {
+	if len(skipped) == 0 {
+		return
+	}
+	for _, f := range skipped {
+		fmt.Fprintf(stderr, "%s: warning: skipped unavailable %s: %s\n", cmdName, skippedStorePaths([]storeProbeFailure{f}), firstErrorLine(f.err)) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+}
+
+// resolveOwningStoreDir is resolveOwningStoreDirWithSkipped for callers that
+// have no channel to report skipped stores (bd hook autoclose).
+func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	store, dir, _, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
+	return store, dir, err
+}
+
+// resolveOwningStoreDirWithSkipped resolves the store that owns beadID and the
+// candidate store directory it was found in, probing each prefix-aware convoy
+// store candidate rooted at cityPath. It returns an error when beadID resolves
+// in more than one store (ambiguous) and beads.ErrNotFound when no candidate
 // holds it.
 //
 // The candidate set is the convoy class-store ordering (the graph store the
@@ -527,17 +587,31 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // The scan does not stop at the first hit: it probes every candidate so a bead
 // present in more than one store is rejected rather than silently resolved to
 // one, enforcing the "resolution requires a uniquely addressable bead id"
-// contract. A candidate's not-found probe is skipped; any other error is
-// returned immediately. The returned directory maps back to the owning
+// contract. A candidate's not-found probe is skipped. A candidate whose probe
+// fails with any other error is recorded in the returned skipped list and does
+// not veto the scan: such a store can neither confirm nor deny holding the
+// bead, so the answer comes from the stores that could be read and the caller
+// decides how loudly to report the rest (openConvoyStores already tolerates a
+// candidate that fails to OPEN the same way). When no readable store holds the
+// bead and at least one was skipped, the result is not ErrNotFound — the bead
+// may live in the skipped store — but an error naming the skipped stores and
+// wrapping the first failure. The returned directory maps back to the owning
 // candidate.
-func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+func resolveOwningStoreDirWithSkipped(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, []storeProbeFailure, error) {
 	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
+	return probeOwningStore(candidates, beadID)
+}
+
+// probeOwningStore is the scan half of resolveOwningStoreDirWithSkipped over
+// already-opened candidates.
+func probeOwningStore(candidates []convoyStoreView, beadID string) (beads.Store, string, []storeProbeFailure, error) {
 	var (
 		foundStore beads.Store
 		foundDir   string
+		skipped    []storeProbeFailure
 	)
 	for _, candidate := range candidates {
 		if candidate.store == nil {
@@ -547,18 +621,22 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, "", err
+			skipped = append(skipped, storeProbeFailure{path: candidate.path, err: err})
+			continue
 		}
 		if foundStore != nil {
-			return nil, "", fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
+			return nil, "", skipped, fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, foundDir, candidate.path)
 		}
 		foundStore = candidate.store
 		foundDir = candidate.path
 	}
 	if foundStore == nil {
-		return nil, "", beads.ErrNotFound
+		if len(skipped) > 0 {
+			return nil, "", skipped, fmt.Errorf("bead %s not found in any readable store; could not consult %s: %w", beadID, skippedStorePaths(skipped), skipped[0].err)
+		}
+		return nil, "", nil, beads.ErrNotFound
 	}
-	return foundStore, foundDir, nil
+	return foundStore, foundDir, skipped, nil
 }
 
 func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
@@ -654,16 +732,28 @@ type convoyStatusResultJSON struct {
 	Children      []convoyChildJSON  `json:"children"`
 }
 
-func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
+// collectOpenConvoys gathers the open convoys across stores. A store whose
+// listing fails is skipped and reported in the returned list rather than
+// failing the whole collection: one unreadable rig store must not hide every
+// other store's convoys. Only when no store at all could be read is the
+// failure returned as the error.
+func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, []storeProbeFailure, error) {
 	convoys := make([]convoyWithStore, 0)
+	var skipped []storeProbeFailure
+	readable := 0
 	for _, candidate := range stores {
 		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
-			return nil, err
+			skipped = append(skipped, storeProbeFailure{path: candidate.path, err: err})
+			continue
 		}
+		readable++
 		for _, b := range all {
 			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
 		}
+	}
+	if readable == 0 && len(skipped) > 0 {
+		return nil, skipped, fmt.Errorf("no convoy store could be read (%s): %w", skippedStorePaths(skipped), skipped[0].err)
 	}
 	sort.SliceStable(convoys, func(i, j int) bool {
 		if convoys[i].bead.ID == convoys[j].bead.ID {
@@ -671,7 +761,7 @@ func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 		}
 		return convoys[i].bead.ID < convoys[j].bead.ID
 	})
-	return convoys, nil
+	return convoys, skipped, nil
 }
 
 func convoyProgressFromChildren(children []beads.Bead) convoyProgressJSON {
@@ -718,7 +808,7 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	store, err := resolveConvoyStore(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+	store, _, skipped, err := resolveOwningStoreDirWithSkipped(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
@@ -726,6 +816,7 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
+	warnSkippedConvoyStores(stderr, cmdName, skipped)
 	return store, 0
 }
 
@@ -739,11 +830,12 @@ func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) 
 }
 
 func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+	convoys, skipped, err := collectOpenConvoys(stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	warnSkippedConvoyStores(stderr, "gc convoy list", skipped)
 
 	if jsonOut {
 		return writeConvoyListJSON(convoys, stdout, stderr)
@@ -1429,11 +1521,12 @@ func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, st
 }
 
 func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+	convoys, skipped, err := collectOpenConvoys(stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	warnSkippedConvoyStores(stderr, "gc convoy check", skipped)
 
 	closed := 0
 	for _, item := range convoys {
@@ -1533,11 +1626,12 @@ func doConvoyStrandedAcrossStores(stores []convoyStoreView, stdout, stderr io.Wr
 }
 
 func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+	convoys, skipped, err := collectOpenConvoys(stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy stranded: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	warnSkippedConvoyStores(stderr, "gc convoy stranded", skipped)
 
 	type strandedItem struct {
 		convoyID string
