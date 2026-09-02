@@ -1968,9 +1968,12 @@ const (
 // back). When a candidate could not be consulted, a unique readable hit is
 // NOT proof of where the event came from — the source store may have gone
 // dark after committing the close while a sibling holds a colliding id — so
-// the hit counts only when it is the store the close came from: storeRoot,
-// which gc sets as GC_STORE_ROOT on every bd it runs (and which a hand-run bd
-// leaves as its cwd). Anything else under partial visibility is a veto.
+// the hit counts only when it is the store the close came from: storeRoot.
+// That is GC_STORE_ROOT, which every bd that gc runs carries — the `gc bd`
+// passthrough and gc's own store runners both pin it next to BEADS_DIR
+// (pinBdStoreRoot) — or, for a hand-run bd, BEADS_DIR's parent and then the
+// cwd. Anything else under partial visibility is a veto, reported with the
+// store the close was attributed to so a false veto is diagnosable.
 func resolveAutocloseOwner(beadID string, cfg *config.City, cityPath, storeRoot string, openStore func(string) (beads.Store, error)) (beads.Store, string, autocloseOutcome, []storeProbeFailure, error) {
 	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
 	if len(skipped) == 0 {
@@ -2005,7 +2008,7 @@ func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) 
 	}
 	warnSkippedConvoyStores(stderr, "gc bd hook autoclose", skipped)
 	if outcome == autocloseVetoed {
-		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — cannot prove which store the close came from while a store is unavailable\n", beadID) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — cannot prove which store the close came from while a store is unavailable (close attributed to %s)\n", beadID, storeRoot) //nolint:errcheck // best-effort stderr
 	}
 	return store, dir, outcome
 }

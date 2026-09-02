@@ -325,6 +325,9 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		env[key] = ""
 	}
 	env["BEADS_DIR"] = dir + "/.beads"
+	// Same contract as pinBdStoreRoot: the bd on_close hook chain reads
+	// GC_STORE_ROOT back as the store the close came from.
+	env["GC_STORE_ROOT"] = dir
 	if bdStoreBridgeUsesDoltliteBackend(dir) {
 		env["GC_BEADS_BACKEND"] = "doltlite"
 		env["BEADS_BACKEND"] = "doltlite"

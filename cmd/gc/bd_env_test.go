@@ -677,10 +677,10 @@ func TestBdRuntimeEnvNoRecoveryMatchesRecoveryForExternalTarget(t *testing.T) {
 
 // TestBdRuntimeEnvForRigResolvesSymlinkAlias pins ga-iawy13.8: GC_RIG_ROOT
 // and BEADS_DIR must canonicalize a symlink-alias rig path the same way
-// findCity canonicalizes city paths, not just filepath.Clean it. BEADS_DIR
-// and GC_RIG_ROOT are set unconditionally before any dolt/backend branching,
-// so the error return is deliberately ignored here -- only the two env
-// values are under test.
+// findCity canonicalizes city paths, not just filepath.Clean it. BEADS_DIR,
+// GC_RIG_ROOT and GC_STORE_ROOT are set unconditionally before any
+// dolt/backend branching, so the error return is deliberately ignored here --
+// only those env values are under test.
 func TestBdRuntimeEnvForRigResolvesSymlinkAlias(t *testing.T) {
 	root := t.TempDir()
 	realRoot := filepath.Join(root, "real")
@@ -707,6 +707,47 @@ func TestBdRuntimeEnvForRigResolvesSymlinkAlias(t *testing.T) {
 	}
 	if env["GC_RIG_ROOT"] != rigPath {
 		t.Errorf("GC_RIG_ROOT = %q, want canonical %q (must resolve the symlink alias, not just Clean it)", env["GC_RIG_ROOT"], rigPath)
+	}
+	if env["GC_STORE_ROOT"] != rigPath {
+		t.Errorf("GC_STORE_ROOT = %q, want canonical %q (the bd on_close hook reads it back as the store the close came from)", env["GC_STORE_ROOT"], rigPath)
+	}
+}
+
+// The bd on_close hook chain (gc convoy/wisp/molecule autoclose) reads
+// GC_STORE_ROOT back as the store the close came from and, under partial store
+// visibility, acts only on that store. gc's own bd runners therefore pin it
+// next to BEADS_DIR for both scopes, and a value inherited from an outer gc
+// process — a hook-spawned gc closing a convoy in another store — must not win.
+func TestBdRuntimeEnvPinsStoreRootForCityAndRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_STORE_ROOT", "/ambient/other-store")
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigPath}}}
+
+	cityEnv, err := bdRuntimeEnvWithErrorNoRecovery(cityPath)
+	if err != nil {
+		t.Logf("bdRuntimeEnvWithErrorNoRecovery() error = %v (ignored; the store pins precede backend resolution)", err)
+	}
+	if cityEnv["BEADS_DIR"] != filepath.Join(cityPath, ".beads") {
+		t.Errorf("city BEADS_DIR = %q, want %q", cityEnv["BEADS_DIR"], filepath.Join(cityPath, ".beads"))
+	}
+	if cityEnv["GC_STORE_ROOT"] != cityPath {
+		t.Errorf("city GC_STORE_ROOT = %q, want %q (must override the ambient value)", cityEnv["GC_STORE_ROOT"], cityPath)
+	}
+
+	rigEnv, err := bdRuntimeEnvForRigWithErrorNoRecovery(cityPath, cfg, rigPath)
+	if err != nil {
+		t.Logf("bdRuntimeEnvForRigWithErrorNoRecovery() error = %v (ignored; the store pins precede backend resolution)", err)
+	}
+	if rigEnv["BEADS_DIR"] != filepath.Join(rigPath, ".beads") {
+		t.Errorf("rig BEADS_DIR = %q, want %q", rigEnv["BEADS_DIR"], filepath.Join(rigPath, ".beads"))
+	}
+	if rigEnv["GC_STORE_ROOT"] != rigPath {
+		t.Errorf("rig GC_STORE_ROOT = %q, want %q (must override the ambient value and the city pin)", rigEnv["GC_STORE_ROOT"], rigPath)
 	}
 }
 
@@ -2519,20 +2560,21 @@ func TestBdCommandRunnerForCityPinsCityStoreEnv(t *testing.T) {
 	t.Setenv("BEADS_DIR", "/rig/.beads")
 	t.Setenv("GC_RIG", "demo-rig")
 	t.Setenv("GC_RIG_ROOT", "/rig")
+	t.Setenv("GC_STORE_ROOT", "/rig")
 
 	runner := bdCommandRunnerForCity(cityDir)
-	out, err := runner(cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n' "$GC_CITY_PATH" "$BEADS_DIR" "$GC_RIG" "$GC_RIG_ROOT"`)
+	out, err := runner(cityDir, "sh", "-c", `printf '%s\n%s\n%s\n%s\n%s\n' "$GC_CITY_PATH" "$BEADS_DIR" "$GC_RIG" "$GC_RIG_ROOT" "$GC_STORE_ROOT"`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	lines := strings.Split(string(out), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("lines = %q, want 5 lines including trailing newline", string(out))
+	if len(lines) != 6 {
+		t.Fatalf("lines = %q, want 6 lines including trailing newline", string(out))
 	}
-	lines = lines[:4]
-	if len(lines) != 4 {
-		t.Fatalf("lines = %q, want 4 lines", string(out))
+	lines = lines[:5]
+	if len(lines) != 5 {
+		t.Fatalf("lines = %q, want 5 lines", string(out))
 	}
 	if lines[0] != cityDir {
 		t.Fatalf("GC_CITY_PATH = %q, want %q", lines[0], cityDir)
@@ -2545,6 +2587,9 @@ func TestBdCommandRunnerForCityPinsCityStoreEnv(t *testing.T) {
 	}
 	if lines[3] != "" {
 		t.Fatalf("GC_RIG_ROOT = %q, want empty", lines[3])
+	}
+	if lines[4] != cityDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want %q (the ambient rig value must not reach the city store's bd)", lines[4], cityDir)
 	}
 }
 
