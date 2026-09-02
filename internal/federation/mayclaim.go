@@ -27,7 +27,7 @@ import (
 //     enough.
 //   - every owner:* label names thisIdentity → ok. This city's own work.
 //   - otherwise → refused: an owner label names another city, or a bead
-//     carries owner labels for two cities (a conflict, not a licence — the
+//     carries owner labels for two cities (a conflict, not a license — the
 //     handoff label is the one sanctioned override), or an owner label has no
 //     value at all.
 //

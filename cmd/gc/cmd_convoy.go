@@ -523,6 +523,12 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 	return stores, err
 }
 
+// resolveConvoyStore is the upstream-shaped by-id resolver, kept for the
+// tests that pin its contract; the convoy commands themselves resolve through
+// resolveConvoyStoreForCommand since #7, which is why every remaining call
+// site passes the same city path.
+//
+//nolint:unparam // cityPath is fixed by the remaining (test) callers; the signature is kept in upstream shape to merge cleanly
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
 	store, _, _, err := resolveOwningStoreDirWithSkipped(convoyID, cfg, cityPath, openStore)
 	return store, err

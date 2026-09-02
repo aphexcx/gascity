@@ -33,7 +33,7 @@ func TestMayClaim(t *testing.T) {
 		{"unlabeled ok", nil, "jadegate", true},
 		{"empty labels ok", []string{}, "jadegate", true},
 		{"unrelated labels ok", []string{"hold:mayor", "ownership-review", "owner", "owners:jadegate"}, "jadegate", true},
-		// Two owners is a conflict, not a licence; a bare owner: is malformed.
+		// Two owners is a conflict, not a license; a bare owner: is malformed.
 		{"mixed owner set refused", []string{"owner:citadel", "owner:jadegate"}, "jadegate", false},
 		{"mixed owner set with handoff ok", []string{"owner:citadel", "owner:jadegate", "handoff:jadegate"}, "jadegate", true},
 		{"malformed empty owner value refused", []string{"owner:"}, "jadegate", false},
