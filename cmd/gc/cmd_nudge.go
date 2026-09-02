@@ -500,7 +500,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		// Full step on first sight (or a step change), a one-line pointer on
 		// every prompt after that — see wisp_step_inject_once.go.
-		wispExtra, wispDelivered = wispStepInjectionForPrompt(target.cityPath, firstNonEmpty(target.sessionID, targetID), conversationID)
+		wispExtra, wispDelivered = wispStepInjectionForPrompt(
+			target.cityPath,
+			firstNonEmpty(target.sessionID, targetID),
+			wispStepConversationKey(target.continuationEpoch, conversationID),
+		)
 	}
 
 	now := time.Now()
@@ -1727,29 +1731,31 @@ type queuedNudgeDeliveryGate struct {
 // session-class store the caller derived from it.
 func newQueuedNudgeDeliveryGate(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) queuedNudgeDeliveryGate {
 	gate := queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(deliverySessStore)}
-	if lookup := mailUnreadLookupForNudgeTarget(target, deliveryStore, deliverySessStore); lookup != nil {
+	if lookup := mailUnreadLookupForNudgeTarget(target, deliveryStore); lookup != nil {
 		gate.unreadMail = memoizeUnreadMailLookup(lookup)
 	}
 	return gate
 }
 
-// openMailGateWorkStore opens the city WORK store the mail gate's messaging
-// store is derived from. It is the fallback resolveMailMessagesStore uses
-// when [beads.classes.messaging] is not relocated, so it must be the work
-// store and never the nudges-class delivery store: with nudges relocated and
-// messaging still on work, a nudges-rooted lookup would read an empty inbox
-// and withdraw every legitimate reminder. Variable so tests can split the
-// two stores.
+// openMailGateWorkStore opens the city WORK store the mail gate reads through.
+// Both class stores the lookup needs — the session-class store for mailbox
+// resolution and the messaging-class store for the unread read — are derived
+// from it, exactly as `gc mail check` derives them, and never from the
+// nudges-class delivery store: with nudges relocated while sessions or
+// messaging stay on work, a nudges-rooted lookup would fail to resolve the
+// session or read an empty inbox and would hold or withdraw every legitimate
+// reminder. Variable so tests can substitute a store and observe its close.
 var openMailGateWorkStore = openCityStoreAt
 
 // mailUnreadLookupForNudgeTarget returns the recipient's unread-mail lookup
 // for the mail gate, or nil when no gate can be configured (see
-// queuedNudgeDeliveryGate.unreadMail). The lookup resolves the target's
-// mailbox addresses the way `gc mail check` does (session-class store) and
-// reads unread mail through the bead-backed provider over the messaging-class
-// store derived from the city work store (see openMailGateWorkStore).
-func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) func() (bool, error) {
-	if deliveryStore == nil || deliverySessStore == nil || strings.TrimSpace(target.cityPath) == "" {
+// queuedNudgeDeliveryGate.unreadMail). deliveryStore is only the signal that
+// the city has a bead store at all; the lookup itself opens the city work
+// store, derives the session- and messaging-class stores from it, resolves
+// the target's mailbox addresses the way `gc mail check` does, reads unread
+// mail through the bead-backed provider, and closes the handle it opened.
+func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore beads.Store) func() (bool, error) {
+	if deliveryStore == nil || strings.TrimSpace(target.cityPath) == "" {
 		return nil
 	}
 	if isStorelessMailProviderName(nudgeMailProviderName(target)) {
@@ -1760,22 +1766,35 @@ func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore, deliveryS
 		return nil
 	}
 	return func() (bool, error) {
-		recipient, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, deliverySessStore, identifier)
-		if err != nil {
-			return false, fmt.Errorf("resolving mailbox for nudge target %q: %w", identifier, err)
-		}
 		workStore, err := openMailGateWorkStore(target.cityPath)
 		if err != nil {
 			return false, fmt.Errorf("opening the work store for nudge target %q mail gate: %w", identifier, err)
 		}
+		defer closeMailGateWorkStore(workStore)
+		sessStore := cliSessionStore(workStore, target.cfg, target.cityPath)
+		recipient, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, sessStore, identifier)
+		if err != nil {
+			return false, fmt.Errorf("resolving mailbox for nudge target %q: %w", identifier, err)
+		}
 		msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), workStore, target.cfg, target.cityPath, nil)
-		mp := beadmail.NewWithStores(msgStore, deliverySessStore)
+		mp := beadmail.NewWithStores(msgStore, sessStore)
 		messages, err := collectMailMessages(mp.Check, recipient.recipients)
 		if err != nil {
 			return false, fmt.Errorf("reading unread mail for nudge target %q: %w", identifier, err)
 		}
 		return len(messages) > 0, nil
 	}
+}
+
+// closeMailGateWorkStore releases the handle mailUnreadLookupForNudgeTarget
+// opened, through the same unwrap-then-CloseStore path the API server uses
+// for the stores it opens (closeBeadStoreHandle). Backends that hold a
+// database handle would otherwise leak one per mail-gated delivery pass in
+// the long-lived poller and supervisor dispatcher. Only the opened work store
+// is released — the routed class stores derived from it are shared bindings
+// when relocated and identity (the same handle) when not.
+func closeMailGateWorkStore(store beads.Store) {
+	_ = closeBeadStoreHandle(store)
 }
 
 // nudgeMailProviderName is mailProviderName resolved against the target's

@@ -88,19 +88,30 @@ func TestSplitQueuedNudgesForDelivery_MailLookupErrorReturnsError(t *testing.T) 
 	}
 }
 
-// TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore pins the
-// codex round-2 finding: the messaging store must derive from the city WORK
-// store, not from the nudges-class delivery store. With the two split, mail
-// that lives only in the work store must still count as unread.
+// closeCountingStore wraps a MemStore so a test can observe the mail gate
+// releasing the work-store handle it opened.
+type closeCountingStore struct {
+	beads.Store
+	closes int
+}
+
+func (c *closeCountingStore) CloseStore() error { c.closes++; return nil }
+
+// TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore pins the codex
+// round-2/3 findings: both the mailbox resolution and the unread read derive
+// from the city WORK store (never the nudges-class delivery store), and the
+// handle the lookup opens is closed after each evaluation. With the stores
+// split, a session and its mail that live only in the work store must still
+// resolve and count as unread.
 func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) {
 	clearGCEnv(t)
-	workStore := beads.NewMemStore()
-	nudgesStore := beads.NewMemStore() // relocated nudges class: holds no mail
+	work := &closeCountingStore{Store: beads.NewMemStore()}
+	nudgesStore := beads.NewMemStore() // relocated nudges class: holds neither sessions nor mail
 	prev := openMailGateWorkStore
-	openMailGateWorkStore = func(string) (beads.Store, error) { return workStore, nil }
+	openMailGateWorkStore = func(string) (beads.Store, error) { return work, nil }
 	t.Cleanup(func() { openMailGateWorkStore = prev })
 
-	sess, err := workStore.Create(beads.Bead{
+	sess, err := work.Create(beads.Bead{
 		Title: "Session: worker", Type: session.BeadType, Status: "open",
 		Labels:   []string{session.LabelSession},
 		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "state": string(session.StateActive)},
@@ -108,13 +119,13 @@ func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	mp := beadmail.New(workStore)
+	mp := beadmail.New(work.Store)
 	msg, err := mp.Send("human", sess.ID, "hello", "please look")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	target := nudgeTarget{cityPath: t.TempDir(), sessionID: sess.ID, cfg: &config.City{}}
-	lookup := mailUnreadLookupForNudgeTarget(target, nudgesStore, workStore)
+	lookup := mailUnreadLookupForNudgeTarget(target, nudgesStore)
 	if lookup == nil {
 		t.Fatal("expected a configured mail gate")
 	}
@@ -122,16 +133,22 @@ func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) 
 	if err != nil || !unread {
 		t.Fatalf("mail in the work store must count as unread: unread=%v err=%v", unread, err)
 	}
+	if work.closes != 1 {
+		t.Fatalf("work store closes = %d after one lookup, want 1", work.closes)
+	}
 	if err := mp.MarkRead(msg.ID); err != nil {
 		t.Fatalf("MarkRead: %v", err)
 	}
 	if unread, err := lookup(); err != nil || unread {
 		t.Fatalf("after MarkRead the inbox must read as empty: unread=%v err=%v", unread, err)
 	}
+	if work.closes != 2 {
+		t.Fatalf("work store closes = %d after two lookups, want 2", work.closes)
+	}
 
 	broken := errors.New("work store unavailable")
 	openMailGateWorkStore = func(string) (beads.Store, error) { return nil, broken }
-	if _, err := mailUnreadLookupForNudgeTarget(target, nudgesStore, workStore)(); !errors.Is(err, broken) {
+	if _, err := mailUnreadLookupForNudgeTarget(target, nudgesStore)(); !errors.Is(err, broken) {
 		t.Fatalf("a work-store open failure must surface as a lookup error (hold), got %v", err)
 	}
 }
@@ -139,30 +156,27 @@ func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) 
 func TestMailUnreadLookupForNudgeTarget_NotConfiguredCases(t *testing.T) {
 	store := beads.NewMemStore()
 	base := nudgeTarget{cityPath: t.TempDir(), sessionID: "gc-s1", cfg: &config.City{}}
-	if got := mailUnreadLookupForNudgeTarget(base, nil, store); got != nil {
+	if got := mailUnreadLookupForNudgeTarget(base, nil); got != nil {
 		t.Fatal("nil delivery store must yield no gate")
-	}
-	if got := mailUnreadLookupForNudgeTarget(base, store, nil); got != nil {
-		t.Fatal("nil session store must yield no gate")
 	}
 	noCity := base
 	noCity.cityPath = ""
-	if got := mailUnreadLookupForNudgeTarget(noCity, store, store); got != nil {
+	if got := mailUnreadLookupForNudgeTarget(noCity, store); got != nil {
 		t.Fatal("empty city path must yield no gate")
 	}
 	noIdentity := base
 	noIdentity.sessionID = ""
-	if got := mailUnreadLookupForNudgeTarget(noIdentity, store, store); got != nil {
+	if got := mailUnreadLookupForNudgeTarget(noIdentity, store); got != nil {
 		t.Fatal("a target with no identity must yield no gate")
 	}
 	for _, name := range []string{"fake", "fail", "exec:/bin/true"} {
 		storeless := base
 		storeless.cfg = &config.City{Mail: config.MailConfig{Provider: name}}
-		if got := mailUnreadLookupForNudgeTarget(storeless, store, store); got != nil {
+		if got := mailUnreadLookupForNudgeTarget(storeless, store); got != nil {
 			t.Fatalf("storeless mail provider %q must yield no gate", name)
 		}
 	}
-	if got := mailUnreadLookupForNudgeTarget(base, store, store); got == nil {
+	if got := mailUnreadLookupForNudgeTarget(base, store); got == nil {
 		t.Fatal("bead-backed provider with a store and identity must yield a gate")
 	}
 }

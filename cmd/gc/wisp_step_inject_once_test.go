@@ -198,6 +198,24 @@ func TestFormatWispStepPointer_Sanitizes(t *testing.T) {
 	}
 }
 
+func TestWispStepConversationKey(t *testing.T) {
+	if got := wispStepConversationKey("", ""); got != "" {
+		t.Fatalf("no operands should yield an empty key, got %q", got)
+	}
+	epochOnly := wispStepConversationKey("3", "")
+	hookOnly := wispStepConversationKey("", "conv-a")
+	both := wispStepConversationKey("3", "conv-a")
+	next := wispStepConversationKey("4", "conv-a")
+	for _, tc := range []struct{ a, b string }{{epochOnly, hookOnly}, {epochOnly, both}, {both, next}} {
+		if tc.a == tc.b || tc.a == "" || tc.b == "" {
+			t.Fatalf("keys must be distinct and non-empty: %q vs %q", tc.a, tc.b)
+		}
+	}
+	if got := wispStepConversationKey(" 3 ", " conv-a "); got != both {
+		t.Fatalf("operands should be trimmed, got %q want %q", got, both)
+	}
+}
+
 func TestHookConversationID(t *testing.T) {
 	if got := hookConversationID([]byte(`{"session_id":" abc-123 ","transcript_path":"/t"}`)); got != "abc-123" {
 		t.Fatalf("got %q, want abc-123", got)
@@ -356,6 +374,35 @@ func TestCmdNudgeDrainInjectStepOnceThenPointer(t *testing.T) {
 		t.Fatalf("step change must re-inject the new step in full, got %q", third)
 	}
 	_ = city
+}
+
+// TestCmdNudgeDrainInjectFreshConversationEpochReinjects pins the codex
+// round-3 finding: a provider that runs the hook without stdin still gets the
+// full step again after `gc session reset`, because the marker is keyed on the
+// session bead's continuation epoch, which every fresh wake bumps.
+func TestCmdNudgeDrainInjectFreshConversationEpochReinjects(t *testing.T) {
+	_, store, step := seedWispStepCity(t)
+	created := createWispStepSession(t, store)
+	if err := store.Update(created.ID, beads.UpdateOpts{Metadata: map[string]string{"continuation_epoch": "1"}}); err != nil {
+		t.Fatalf("set epoch 1: %v", err)
+	}
+
+	if got := drainInjectContext(t, created.ID, nil); !strings.Contains(got, step.Description) {
+		t.Fatalf("first prompt should carry the full step, got %q", got)
+	}
+	if got := drainInjectContext(t, created.ID, nil); strings.Contains(got, step.Description) {
+		t.Fatalf("second prompt in the same conversation should be the pointer, got %q", got)
+	}
+	// A fresh wake / gc session reset bumps the continuation epoch.
+	if err := store.Update(created.ID, beads.UpdateOpts{Metadata: map[string]string{"continuation_epoch": "2"}}); err != nil {
+		t.Fatalf("set epoch 2: %v", err)
+	}
+	if got := drainInjectContext(t, created.ID, nil); !strings.Contains(got, step.Description) {
+		t.Fatalf("a new continuation epoch must re-inject the full step, got %q", got)
+	}
+	if got := drainInjectContext(t, created.ID, nil); strings.Contains(got, step.Description) {
+		t.Fatalf("the pointer should follow within the new epoch, got %q", got)
+	}
 }
 
 // TestCmdNudgeDrainInjectFailedWriteDoesNotRecordStep pins the codex round-1

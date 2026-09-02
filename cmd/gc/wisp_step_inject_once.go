@@ -28,9 +28,13 @@ import (
 //
 // State is one small JSON file per session under the city runtime root, keyed
 // by the gc session (bead id, else the alias/id the hook resolved) and stamped
-// with the provider's own conversation id from the hook stdin when the
-// provider supplies one. A different conversation id or a different step
-// re-injects in full.
+// with a conversation key (wispStepConversationKey): the session's
+// continuation epoch — gc's own count of fresh conversations, bumped by
+// `gc session reset` and every fresh wake for every provider — plus the
+// provider's own session id from the hook stdin when the provider supplies
+// one. A different conversation key or a different step re-injects in full.
+// The epoch is the operand no adapter can withhold: providers that run the
+// hook without stdin still get a new key after a reset.
 //
 // What the marker means — and does not mean. No process on this side of the
 // provider can prove the model saw a payload: the hook's stdout can be
@@ -101,6 +105,19 @@ func wispStepPromptInjection(cityPath, sessionKey, conversationID string, b *bea
 	}
 	stepID := b.ID
 	return formatWispStepReminder(b), func() { recordWispStepInjected(cityPath, sessionKey, conversationID, stepID) }
+}
+
+// wispStepConversationKey composes the conversation identity the marker is
+// keyed on from the session bead's continuation epoch (see the file comment)
+// and the provider's hook-stdin session id. Either may be empty; the two are
+// kept in named fields so an empty hook id cannot collide with an epoch.
+func wispStepConversationKey(continuationEpoch, hookSessionID string) string {
+	continuationEpoch = strings.TrimSpace(continuationEpoch)
+	hookSessionID = strings.TrimSpace(hookSessionID)
+	if continuationEpoch == "" && hookSessionID == "" {
+		return ""
+	}
+	return "epoch=" + continuationEpoch + ";hook=" + hookSessionID
 }
 
 // formatWispStepPointer is the short per-prompt form of formatWispStepReminder:

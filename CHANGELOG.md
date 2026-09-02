@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole active step description as a `<system-reminder>` on every prompt
   (≈1.2–1.5k tokens per turn for `mol-do-work`) with no change detection.
   It now emits the full step the first time it sees a step for a session
-  and provider conversation, and a one-line pointer (`Active step: <title>
+  and conversation (keyed on the session's continuation epoch, which every
+  fresh wake and `gc session reset` bumps for every provider, plus the
+  provider's hook-stdin session id when it supplies one), and a one-line pointer (`Active step: <title>
   (<id>)`, telling the model to `gc bd show` it if it has not read the
   description in this conversation) on every prompt after that, until the
   active step changes or a new provider conversation starts. `gc prime
@@ -64,8 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UserPromptSubmit` drain hook and the poller/supervisor dispatcher) now
   gate `source=mail` items through the same delivery gate that already
   gates `source=wait` items: the reminder is delivered only while the
-  recipient has unread mail (read through the messaging-class store derived
-  from the city work store) and is withdrawn (`mail-read`) otherwise. A
+  recipient has unread mail (session and messaging class stores both derived
+  from the city work store, the handle closed after each read) and is
+  withdrawn (`mail-read`) otherwise. A
   lookup error holds the item for a later pass rather than guessing; cities
   on a storeless mail provider (`fake`/`fail`/`exec:`) keep the previous
   behavior. Independent reminders for separate mails are still queued
