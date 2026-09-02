@@ -683,9 +683,15 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// (codex/gemini) stay one valid document rather than two concatenated objects.
 	// See clock_inject.go and wisp_step_inject.go.
 	var wispExtra string // set after target resolution; captured by defer closure
+	// wispDelivered records the once-per-step marker; it runs only after the
+	// payload carrying the full step has been written successfully.
+	var wispDelivered func()
 	emittedHookContext := false
 	var injectPrefix string
 	var contextHookInput []byte
+	// conversationID is the provider's own session id from the hook stdin; it
+	// keys the once-per-step formula injection (wisp_step_inject_once.go).
+	var conversationID string
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
@@ -693,11 +699,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// the context-usage guidance (see context_inject.go).
 		contextHookInput = readHookStdin()
 		injectPrefix = clockInjectLine()
+		conversationID = hookConversationID(contextHookInput)
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
 				if line != "" {
-					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line)
+					if err := writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", line); err == nil && wispDelivered != nil {
+						wispDelivered()
+					}
 				}
 			}
 		}()
@@ -729,7 +738,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if inject {
 		injectPrefix += contextInjectLineForAdvisory(contextHookInput, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
-		wispExtra = wispStepInjectionContent(target.cityPath)
+		// Full step on first sight (or a step change), a one-line pointer on
+		// every prompt after that — see wisp_step_inject_once.go.
+		wispExtra, wispDelivered = wispStepInjectionForPrompt(
+			target.cityPath,
+			firstNonEmpty(target.sessionID, targetID),
+			wispStepConversationKey(target.continuationEpoch, conversationID),
+		)
 	}
 
 	now := time.Now()
@@ -807,6 +822,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		// combined context is written.
 		emittedHookContext = true
 		writeErr = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+wispExtra)
+		if writeErr == nil && wispDelivered != nil {
+			wispDelivered()
+		}
 	} else {
 		_, writeErr = io.WriteString(stdout, out)
 	}

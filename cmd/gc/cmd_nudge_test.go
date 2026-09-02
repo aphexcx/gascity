@@ -6037,7 +6037,8 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 		{"pending-not-ready", waitItem(newWait(waitStatePending)), "wait-not-ready", true},
 		{"missing-bead", waitItem("gc-nope"), "wait-missing", true},
 		{"non-wait-bead", waitItem(nonWait.ID), "wait-reference-invalid", true},
-		{"non-wait-source", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"mail-source-no-mail-gate", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"session-source", queuedNudge{Source: "session"}, "", false},
 		{"nil-reference", queuedNudge{Source: "wait"}, "", false},
 	}
 	for _, tc := range cases {

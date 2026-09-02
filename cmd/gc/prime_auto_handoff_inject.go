@@ -26,7 +26,9 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
+	// Full active-step reminder at prime, never a once-per-step marker: the
+	// UserPromptSubmit hook owns the marker (wisp_step_inject_once.go).
+	injection := primeHookContextInjection{text: wispStepInjectionAtSessionStart(cityPath)}
 	if primeHookSessionStart(hookContext) {
 		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text
