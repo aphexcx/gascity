@@ -22,8 +22,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ready` for the entire outage. Non-2xx health checks behave exactly as
   before; services that never set the header are unaffected.
 
+### Changed
+
+- **The active formula step is injected once per step, not once per prompt.**
+  The `UserPromptSubmit` hook (`gc nudge drain --inject`) used to re-emit the
+  whole active step description as a `<system-reminder>` on every prompt
+  (≈1.2–1.5k tokens per turn for `mol-do-work`) with no change detection.
+  It now emits the full step the first time a session and provider
+  conversation see it — `gc prime --hook` at SessionStart records that
+  first injection — and a one-line pointer (`Active step: <title> (<id>)`,
+  with the `gc bd show` command to re-read it) on every prompt after that,
+  until the active step changes or a new provider conversation starts. The
+  per-session marker lives under the city runtime root
+  (`inject/wisp-step/`); if it cannot be read or written the hook falls back
+  to the previous full injection. Fable 5.1 prompt audit, jadegate scan G-3.
+- **`pool-worker.md` (the bundled default worker prompt when `formula_v2`
+  is off) drops the shouting register.** `YOU RUN IT`, `THE RULE`,
+  `CRITICAL`, `MANDATORY`/`MUST`/"not optional" and the nine `Do NOT`s are
+  rewritten as plain rules with their reasons, the step rule is stated once
+  instead of three times, the drain-ack step keeps its reason without the
+  emphasis stack or the "output nothing after it" suppressor, and the
+  Molecules section's cross-reference points at step 3 of "How to Work"
+  (it had said step 4 since the drain check was inserted as step 2 on
+  2026-06-05). The wide-filesystem-search guard, the ordered lifecycle,
+  Escalation and Context Exhaustion are unchanged. Fable 5.1 prompt audit
+  hunks M1–M5 (citadel) / F-1–F-5 (jadegate).
+
 ### Fixed
 
+- **`[mail] You have mail from …` reminders no longer echo after the mail
+  is read.** A `gc mail send --notify` reminder was keyed on the send event
+  only: nothing on the queued-delivery path asked whether the recipient
+  still had unread mail, so a reminder that was re-queued by the retry
+  ladder (15 s × 5) after a copy had already landed — or that was simply
+  delivered late — arrived as a fresh instruction up to five times, each
+  one costing the agent a tool call. Both delivery consumers (the
+  `UserPromptSubmit` drain hook and the poller/supervisor dispatcher) now
+  gate `source=mail` items through the same delivery gate that already
+  gates `source=wait` items: the reminder is delivered only while the
+  recipient has unread mail and is withdrawn (`mail-read`) otherwise. A
+  lookup error holds the item for a later pass rather than guessing; cities
+  on a storeless mail provider (`fake`/`fail`/`exec:`) keep the previous
+  behavior. Independent reminders for separate mails are still queued
+  separately (the second mail is never deduped against an unread first).
+  Fable 5.1 prompt audit, jadegate scan G-1.
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

@@ -26,7 +26,15 @@ func primeHookContextSuffix(cityPath string, hookMode bool, hookContext primeHoo
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
+	// Full active-step reminder at prime; the real hook invocation (not a
+	// --json preview) also records it so the per-prompt hook emits the pointer
+	// form until the step changes (wisp_step_inject_once.go).
+	injection := primeHookContextInjection{text: wispStepInjectionAtSessionStart(
+		cityPath,
+		firstNonEmpty(os.Getenv("GC_SESSION_ID"), os.Getenv("GC_ALIAS")),
+		hookContext.ProviderSessionID,
+		consumeHandoff,
+	)}
 	if primeHookSessionStart(hookContext) {
 		autoHandoff, autoHandoffIDs := sessionStartAutoHandoffInjection(stderr)
 		injection.text += autoHandoff.text

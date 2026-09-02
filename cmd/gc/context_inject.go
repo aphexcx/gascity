@@ -46,6 +46,19 @@ import (
 // hookStdinInput is the subset of the provider hook JSON we need.
 type hookStdinInput struct {
 	TranscriptPath string `json:"transcript_path"`
+	SessionID      string `json:"session_id"`
+}
+
+// hookConversationID returns the provider's own session id from the hook
+// stdin JSON, or "" when the provider does not supply one. It keys the
+// once-per-step formula injection (wisp_step_inject_once.go) so a new
+// conversation re-receives the full step.
+func hookConversationID(hookInput []byte) string {
+	var in hookStdinInput
+	if err := json.Unmarshal(hookInput, &in); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(in.SessionID)
 }
 
 // transcriptUsage is the usage block shape inside provider transcript entries.

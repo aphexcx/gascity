@@ -20,23 +20,36 @@ import (
 // rig-scoped polecat work beads live), otherwise the city store at cityPath.
 // When cityPath is empty the function falls back to GC_CITY from the env.
 func wispStepInjectionContent(cityPath string) string {
+	b := resolveWispStepForInjection(cityPath)
+	if b == nil {
+		return ""
+	}
+	return formatWispStepReminder(b)
+}
+
+// resolveWispStepForInjection resolves the agent's current formula step bead
+// for the injection paths, or nil when there is none or any lookup fails.
+// Store priority and city fallback are as documented on
+// wispStepInjectionContent. See wisp_step_inject_once.go for the once-per-step
+// wrappers that decide between the full reminder and the pointer.
+func resolveWispStepForInjection(cityPath string) *beads.Bead {
 	effective := cityPath
 	if effective == "" {
 		effective = strings.TrimSpace(os.Getenv("GC_CITY"))
 	}
 	store := openWispStepStore(effective)
 	if store == nil {
-		return ""
+		return nil
 	}
 	assignees := wispStepAssignees()
 	if len(assignees) == 0 {
-		return ""
+		return nil
 	}
 	b, err := resolveActiveWispStep(store, assignees)
 	if err != nil || b == nil {
-		return ""
+		return nil
 	}
-	return formatWispStepReminder(b)
+	return b
 }
 
 // openWispStepStore opens the bead store to query for active wisp steps.

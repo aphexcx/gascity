@@ -3874,7 +3874,7 @@ func TestSplitQueuedNudgesForDelivery_BlocksCanceledWaitNudge(t *testing.T) {
 		t.Fatalf("create wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -3905,7 +3905,7 @@ func TestSplitQueuedNudgesForDelivery_AllowsReadyLegacyWaitNudge(t *testing.T) {
 		t.Fatalf("create legacy wait bead: %v", err)
 	}
 
-	deliverable, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(store), []queuedNudge{{
+	deliverable, blocked, err := splitQueuedNudgesForDelivery(queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(store)}, []queuedNudge{{
 		ID:        "n1",
 		Agent:     "worker",
 		Source:    "wait",
@@ -5101,12 +5101,13 @@ func TestBlockedQueuedNudgeReason_GetWaitErrorMapping(t *testing.T) {
 		{"pending-not-ready", waitItem(newWait(waitStatePending)), "wait-not-ready", true},
 		{"missing-bead", waitItem("gc-nope"), "wait-missing", true},
 		{"non-wait-bead", waitItem(nonWait.ID), "wait-reference-invalid", true},
-		{"non-wait-source", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"mail-source-no-mail-gate", queuedNudge{Source: "mail", Reference: &nudgeReference{Kind: "bead", ID: "x"}}, "", false},
+		{"session-source", queuedNudge{Source: "session"}, "", false},
 		{"nil-reference", queuedNudge{Source: "wait"}, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, block, err := blockedQueuedNudgeReason(sessFront, tc.item)
+			reason, block, err := blockedQueuedNudgeReason(queuedNudgeDeliveryGate{sessFront: sessFront}, tc.item)
 			if err != nil {
 				t.Fatalf("blockedQueuedNudgeReason: %v", err)
 			}

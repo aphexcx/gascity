@@ -927,7 +927,12 @@ func defaultMailIdentityCandidates() []string {
 // isStorelessMailProvider reports whether the configured mail provider
 // bypasses the city bead store (exec scripts and test doubles).
 func isStorelessMailProvider() bool {
-	v := mailProviderName()
+	return isStorelessMailProviderName(mailProviderName())
+}
+
+// isStorelessMailProviderName reports whether a mail provider name denotes a
+// provider with no bead store behind it (exec: scripts and the test doubles).
+func isStorelessMailProviderName(v string) bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 

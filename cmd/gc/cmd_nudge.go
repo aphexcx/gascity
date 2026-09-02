@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -448,12 +449,17 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var wispExtra string // set after target resolution; captured by defer closure
 	emittedHookContext := false
 	var injectPrefix string
+	// conversationID is the provider's own session id from the hook stdin; it
+	// keys the once-per-step formula injection (wisp_step_inject_once.go).
+	var conversationID string
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
+		hookInput := readHookStdin()
+		injectPrefix = clockInjectLine() + contextInjectLine(hookInput)
+		conversationID = hookConversationID(hookInput)
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
@@ -487,7 +493,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	if inject {
-		wispExtra = wispStepInjectionContent(target.cityPath)
+		// Full step on first sight (or a step change), a one-line pointer on
+		// every prompt after that — see wisp_step_inject_once.go.
+		wispExtra = wispStepInjectionForPrompt(target.cityPath, firstNonEmpty(target.sessionID, targetID), conversationID)
 	}
 
 	now := time.Now()
@@ -520,7 +528,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore.Store, deliverySessStore), candidates)
 	if err != nil {
 		// Release the claims so the next drain or poller pass retries
 		// promptly instead of waiting out the in-flight lease.
@@ -1479,7 +1487,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 	}
 	candidates := items
-	items, blocked, err := splitQueuedNudgesForDelivery(sessionFrontDoor(deliverySessStore), candidates)
+	items, blocked, err := splitQueuedNudgesForDelivery(newQueuedNudgeDeliveryGate(target, deliveryStore, deliverySessStore), candidates)
 	if err != nil {
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
 		return false, errors.Join(bookkeepErr, err, relErr)
@@ -1678,20 +1686,119 @@ func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queu
 	return deliverable, rejected
 }
 
+// nudgeBlockReasonMailRead is the withdraw reason for a mail-sourced nudge
+// whose recipient has no unread mail left by the time it is delivered.
+const nudgeBlockReasonMailRead = "mail-read"
+
+// queuedNudgeDeliveryGate carries the state reads that decide, at delivery
+// time, whether a claimed nudge is still wanted: the session front door for
+// wait-sourced items (the referenced gc:wait bead) and the recipient's
+// unread-mail lookup for mail-sourced items. blockedQueuedNudgeReason is the
+// one decision point over it; both delivery consumers — the UserPromptSubmit
+// drain hook and the poller/dispatcher — build the gate through
+// newQueuedNudgeDeliveryGate so neither can skip an operand.
+type queuedNudgeDeliveryGate struct {
+	// sessFront is the session coordination-class write front door: the
+	// wait-bead reads route through it so a [beads.classes.sessions]
+	// relocation reaches the gate. Callers construct it over the session-class
+	// store (via cliSessionStore).
+	sessFront *session.Store
+	// unreadMail reports whether the target still has unread mail. nil means
+	// no mail gate is configured for this pass — there is no store, or the
+	// city's mail provider is storeless (fake/fail/exec:) so this process
+	// cannot see its read state — and mail-sourced items then deliver as they
+	// always did. A lookup error holds the item: the caller releases the claim
+	// and a later pass retries, rather than delivering or withdrawing on a
+	// guess.
+	unreadMail func() (bool, error)
+}
+
+// newQueuedNudgeDeliveryGate builds the delivery gate for one pass over a
+// target's claimed nudges. deliveryStore is the nudges-class store the queue
+// records live in (nil when the city has no store); deliverySessStore is the
+// session-class store the caller derived from it.
+func newQueuedNudgeDeliveryGate(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) queuedNudgeDeliveryGate {
+	gate := queuedNudgeDeliveryGate{sessFront: sessionFrontDoor(deliverySessStore)}
+	if lookup := mailUnreadLookupForNudgeTarget(target, deliveryStore, deliverySessStore); lookup != nil {
+		gate.unreadMail = memoizeUnreadMailLookup(lookup)
+	}
+	return gate
+}
+
+// mailUnreadLookupForNudgeTarget returns the recipient's unread-mail lookup
+// for the mail gate, or nil when no gate can be configured (see
+// queuedNudgeDeliveryGate.unreadMail). The lookup resolves the target's
+// mailbox addresses the way `gc mail check` does and reads unread mail
+// through the bead-backed provider over the same stores the delivery pass
+// already holds.
+func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) func() (bool, error) {
+	if deliveryStore == nil || deliverySessStore == nil || strings.TrimSpace(target.cityPath) == "" {
+		return nil
+	}
+	if isStorelessMailProviderName(nudgeMailProviderName(target)) {
+		return nil
+	}
+	identifier := firstNonEmpty(target.sessionID, target.alias, target.identity, target.sessionName)
+	if identifier == "" {
+		return nil
+	}
+	return func() (bool, error) {
+		recipient, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, deliverySessStore, identifier)
+		if err != nil {
+			return false, fmt.Errorf("resolving mailbox for nudge target %q: %w", identifier, err)
+		}
+		msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), deliveryStore, target.cfg, target.cityPath, nil)
+		mp := beadmail.NewWithStores(msgStore, deliverySessStore)
+		messages, err := collectMailMessages(mp.Check, recipient.recipients)
+		if err != nil {
+			return false, fmt.Errorf("reading unread mail for nudge target %q: %w", identifier, err)
+		}
+		return len(messages) > 0, nil
+	}
+}
+
+// nudgeMailProviderName is mailProviderName resolved against the target's
+// city instead of the process environment's city discovery, so the poller and
+// the supervisor dispatcher gate on the city they are delivering for.
+func nudgeMailProviderName(target nudgeTarget) string {
+	if v := os.Getenv("GC_MAIL"); v != "" {
+		return v
+	}
+	if target.cfg != nil {
+		return target.cfg.Mail.Provider
+	}
+	return mailProviderNameForCity(target.cityPath)
+}
+
+// memoizeUnreadMailLookup caches the first answer for the rest of one delivery
+// pass: every claimed item in a pass belongs to the same target, so one read
+// serves them all.
+func memoizeUnreadMailLookup(lookup func() (bool, error)) func() (bool, error) {
+	var (
+		done   bool
+		unread bool
+		err    error
+	)
+	return func() (bool, error) {
+		if !done {
+			unread, err = lookup()
+			done = true
+		}
+		return unread, err
+	}
+}
+
 // splitQueuedNudgesForDelivery partitions claimed nudges into deliverable items
-// and reason-tagged blocked items. The sessFront param is the session
-// coordination-class write front door: blockedQueuedNudgeReason reads the
-// referenced gc:wait bead (coordclass.ClassSessions) to gate wait-sourced
-// nudges. Callers construct it at the root over the session-class store (via
-// cliSessionStore) so a [beads.classes.sessions] relocation reaches it.
-func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
+// and reason-tagged blocked items using the pass's delivery gate (see
+// queuedNudgeDeliveryGate and blockedQueuedNudgeReason).
+func splitQueuedNudgesForDelivery(gate queuedNudgeDeliveryGate, items []queuedNudge) ([]queuedNudge, map[string][]queuedNudge, error) {
 	if len(items) == 0 {
 		return nil, nil, nil
 	}
 	deliverable := make([]queuedNudge, 0, len(items))
 	blocked := make(map[string][]queuedNudge)
 	for _, item := range items {
-		reason, shouldBlock, err := blockedQueuedNudgeReason(sessFront, item)
+		reason, shouldBlock, err := blockedQueuedNudgeReason(gate, item)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1704,8 +1811,41 @@ func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge)
 	return deliverable, blocked, nil
 }
 
-func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
-	if !sessFront.Backed() || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+// blockedQueuedNudgeReason is the single delivery-time decision over a claimed
+// nudge: wait-sourced items are gated on their referenced wait bead's state,
+// mail-sourced items on whether the recipient still has unread mail, and
+// every other source delivers. A "mail" reminder is keyed on the send event
+// (`gc mail send --notify`), so without this check a reminder that outlived
+// its mail — read in the meantime, or re-queued by the retry ladder after a
+// copy had already landed — was re-delivered as a fresh instruction, up to
+// the retry cap (the five-echo reports from both cities, 2026-09-01).
+func blockedQueuedNudgeReason(gate queuedNudgeDeliveryGate, item queuedNudge) (string, bool, error) {
+	switch item.Source {
+	case "mail":
+		return blockedMailQueuedNudgeReason(gate, item)
+	case "wait":
+		return blockedWaitQueuedNudgeReason(gate.sessFront, item)
+	default:
+		return "", false, nil
+	}
+}
+
+func blockedMailQueuedNudgeReason(gate queuedNudgeDeliveryGate, _ queuedNudge) (string, bool, error) {
+	if gate.unreadMail == nil {
+		return "", false, nil
+	}
+	unread, err := gate.unreadMail()
+	if err != nil {
+		return "", false, err
+	}
+	if !unread {
+		return nudgeBlockReasonMailRead, true, nil
+	}
+	return "", false, nil
+}
+
+func blockedWaitQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
+	if sessFront == nil || !sessFront.Backed() || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
 	wait, err := sessFront.GetWait(item.Reference.ID)
