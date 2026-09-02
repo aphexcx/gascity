@@ -141,9 +141,10 @@ Dated waivers owned by ${owner} have lapsed or are about to.
 
 ${matching}
 
-The fleet's push path runs these same ledgers in grace mode, so a lapse
-warns for 14 days before it blocks anyone. This bead exists so that window
-gets used.
+The fleet's push path runs the provider ledger in grace mode, so a lapse
+there warns for 14 days before it blocks anyone. This bead exists so that
+window gets used. (In this fork the resource census is not on the clock:
+its expiries fail from the day after the date, with no grace.)
 
 Two resolutions, both yours:
 
