@@ -37,6 +37,7 @@ func writeFakeBdBridgeScript(t *testing.T, binDir, envFile, argsFile string) {
 set -eu
 printf 'BEADS_DIR=%s
 GC_BIN=%s
+GC_STORE_ROOT=%s
 GC_DOLT_HOST=%s
 GC_DOLT_PORT=%s
 GC_DOLT_USER=%s
@@ -53,7 +54,7 @@ BEADS_BACKEND=%s
 GC_BEADS_PREFIX=%s
 BD_EXPORT_AUTO=%s
 ' \
-  "${BEADS_DIR:-}" "${GC_BIN:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
+  "${BEADS_DIR:-}" "${GC_BIN:-}" "${GC_STORE_ROOT:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_CREDENTIALS_FILE:-}" "${GC_BEADS:-}" "${GC_BEADS_BACKEND:-}" "${BEADS_BACKEND:-}" "${GC_BEADS_PREFIX:-}" \
   "${BD_EXPORT_AUTO:-}" > "` + envFile + `"
@@ -162,6 +163,9 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 	}
 	if got := envMap["GC_BIN"]; got != wantGCBin {
 		t.Fatalf("GC_BIN = %q, want canonical %q (ambient value must not leak)", got, wantGCBin)
+	}
+	if got := envMap["GC_STORE_ROOT"]; got != scopeDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want %q (the bd on_close hook reads it back as the store the close came from)", got, scopeDir)
 	}
 	if got := envMap["GC_DOLT_HOST"]; got != "db.example.internal" {
 		t.Fatalf("GC_DOLT_HOST = %q, want db.example.internal", got)

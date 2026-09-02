@@ -17,8 +17,8 @@
 #
 #   (a) base-enumerator consumption — BeadStores(), rigBeadStores(),
 #       coordClassStoreCandidates(, workAssignmentStores(,
-#       openAllConvoyStoresAt(, openConvoyStores(, openSourceWorkflowStores(,
-#       convoyStoreCandidates(. None of these ever contains a class binding, so
+#       openAllConvoyStoresAt(, openConvoyStores(, openConvoyStoresWithSkipped(,
+#       openSourceWorkflowStores(, convoyStoreCandidates(. None of these ever contains a class binding, so
 #       every list built from one is binding-blind by construction.
 #   (b) direct binding-gate re-derivation — graphClassBinding(,
 #       routes.storeFor(, storeref.ClassCandidates(. Asking "is this class

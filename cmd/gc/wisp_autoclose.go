@@ -39,7 +39,7 @@ func newWispAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 // doWispAutoclose is the CLI entry point for wisp autoclose.
 // It resolves the current store through the provider-aware resolver using the
 // projected store-root environment and delegates to the testable core.
-func doWispAutoclose(beadID string, stdout, _ io.Writer) {
+func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return
@@ -54,9 +54,13 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// Attachments are ClassGraph wherever the just-closed bead lives; without
 	// this the hook reads an empty graph on a migrated city and reports success.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	case autocloseResolved:
 		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 		return
+	case autocloseVetoed:
+		return
+	case autocloseFallback:
 	}
 
 	store, err := openStoreAtForCity(storeRoot, cityPath)

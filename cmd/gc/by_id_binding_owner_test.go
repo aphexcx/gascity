@@ -209,14 +209,17 @@ func TestAutocloseOwningStoreAnnouncesAFaultOnce(t *testing.T) {
 	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
 
 	for range 2 {
-		if store, _, ok := autocloseOwningStore("hq-1", cityPath); ok {
+		if store, _, outcome := autocloseOwningStore("hq-1", cityPath, cityPath, cliStorageStderr); outcome == autocloseResolved {
 			t.Fatalf("a failing binding resolved to %p; the fault must not be answered by the work ledger", store)
 		}
 	}
 
-	warnings := bytes.Count(sink.Bytes(), []byte("gc autoclose: resolving the store that owns"))
-	if warnings != 1 {
-		t.Errorf("the fault was announced %d times over two closes, want exactly 1: %s", warnings, sink.String())
+	// The fork's autoclose owner resolution (jg-vftq2q) announces a fault on
+	// the hook's own stderr once per close invocation (each close is its own
+	// hook process in production), so two closes announce twice.
+	warnings := bytes.Count(sink.Bytes(), []byte("gc bd hook autoclose:"))
+	if warnings != 2 {
+		t.Errorf("the fault was announced %d times over two closes, want one per close: %s", warnings, sink.String())
 	}
 	if !bytes.Contains(sink.Bytes(), []byte("bad day")) {
 		t.Errorf("the announcement does not carry the store's own cause: %s", sink.String())
@@ -231,10 +234,10 @@ func TestAutocloseOwningStoreStaysQuietOnAbsence(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	sink := captureCLIStorageStderr(t)
 
-	if store, _, ok := autocloseOwningStore("hq-nothing-here", cityPath); ok {
+	if store, _, outcome := autocloseOwningStore("hq-nothing-here", cityPath, cityPath, cliStorageStderr); outcome == autocloseResolved {
 		t.Fatalf("an absent id resolved to %p", store)
 	}
-	if bytes.Contains(sink.Bytes(), []byte("gc autoclose:")) {
+	if bytes.Contains(sink.Bytes(), []byte("gc bd hook autoclose:")) {
 		t.Errorf("absence was announced as a fault: %s", sink.String())
 	}
 }

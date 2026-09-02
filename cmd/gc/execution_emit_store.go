@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -41,7 +42,10 @@ func executionEmitStore(store beads.Store, cityPath string) beads.Store {
 		return store
 	}
 	return executionEmitWorkStore{Store: store, resolveOwning: func(id string) (beads.Store, bool) {
-		owning, _, ok := autocloseOwningStore(id, cityPath)
-		return owning, ok
+		// A read-only anchor resolution: the city root stands in for the
+		// store the event came from, and a skipped-store veto (the fork's
+		// autoclose policy) simply leaves the anchor on the wrapped store.
+		owning, _, outcome := autocloseOwningStore(id, cityPath, cityPath, io.Discard)
+		return owning, outcome == autocloseResolved
 	}}
 }

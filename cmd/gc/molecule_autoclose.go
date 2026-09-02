@@ -79,9 +79,13 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// The root is ClassGraph wherever the just-closed bead lives, so the graph
 	// leg routes off the owning store rather than following it.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
+	switch store, dir, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	case autocloseResolved:
 		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 		return
+	case autocloseVetoed:
+		return
+	case autocloseFallback:
 	}
 
 	store, err := openStoreAtForCity(storeRoot, cityPath)
