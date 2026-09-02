@@ -68,6 +68,11 @@
 # passes when it cannot evaluate manufactures false confidence.
 
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
+# The aggregation is for the CHECKS. Every command substitution that produces
+# the verdict's data — the census, the baseline rows, the comparison — checks
+# its own status and refuses to pass when it did not run to completion, so a
+# truncated census (an unreadable directory, a failing awk) can never look like
+# a clean tree. pipefail makes a failure anywhere in those pipelines visible.
 
 emit_baseline=0
 self_test=0
@@ -312,7 +317,10 @@ if ((failed)); then
 	exit 1
 fi
 
-current=$(census)
+current=$(census) || {
+	note "the census did not run to completion; refusing to pass"
+	exit 1
+}
 
 if ((emit_baseline)); then
 	printf '%s\n' "# residency-boundary baseline: path <TAB> function <TAB> pattern <TAB> count."
