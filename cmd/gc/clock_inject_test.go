@@ -167,7 +167,7 @@ func TestCmdNudgeDrainInjectStepInSingleJSONDocument(t *testing.T) {
 			cityDir := t.TempDir()
 			writeNamedSessionCityTOML(t, cityDir)
 			t.Setenv("GC_CITY", cityDir)
-			// wispStepInjectionContent matches the active step's assignee against
+			// resolveWispStepForInjection matches the active step's assignee against
 			// this identity.
 			t.Setenv("GC_ALIAS", "worker")
 
@@ -192,7 +192,7 @@ func TestCmdNudgeDrainInjectStepInSingleJSONDocument(t *testing.T) {
 			}
 
 			// Seed an in-progress molecule with an in-progress step child assigned
-			// to the agent so wispStepInjectionContent resolves an active step.
+			// to the agent so resolveWispStepForInjection resolves an active step.
 			mol := mustCreateInProgressStore(t, store, beads.Bead{
 				Title:    "Formula: mol-worker",
 				Type:     "molecule",
