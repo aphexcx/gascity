@@ -410,15 +410,17 @@ esac
 	// calls, so no failure branch needs its own join.
 	var (
 		startErr    error
-		startJoined bool
+		startWaited bool // one bounded wait, attempted at most once
+		startJoined bool // that wait received Start's result
 		opener      opened
 		openerSeen  bool
 		release     *os.File
 	)
 	joinStart := func() {
-		if startJoined {
+		if startWaited {
 			return
 		}
+		startWaited = true
 		select {
 		case startErr = <-done:
 			startJoined = true
