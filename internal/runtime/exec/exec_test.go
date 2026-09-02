@@ -353,16 +353,22 @@ func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
 // teardown must still run even though the caller's context is already dead.
 //
 // The start is failed by canceling the caller's context once the adapter has
-// provably created its box, not by a fixed start deadline racing the adapter's
-// own startup: with a 200 ms deadline, sh + `cat` + the create write lost that
-// race on a loaded host (26 of 40 runs against a concurrent cmd/gc package run)
-// and the test failed on an empty create log. gc's own start deadline takes the
-// same path — runWithContext sees a done context either way — so startTimeout
-// is left as an outer bound only.
+// provably created its box — not by a fixed start deadline racing the adapter's
+// own startup (with a 200 ms deadline, sh + `cat` + the create write lost that
+// race on a loaded host, 26 of 40 runs against a concurrent cmd/gc package run,
+// and the test failed on an empty create log). gc's own start deadline takes
+// the identical path through runWithContext, so startTimeout is left as an
+// outer bound only.
+//
+// "The box exists" is a fact the adapter hands over through a FIFO, not a file
+// the test polls for: the adapter opens the pipe to read only after its create
+// write, and the test's write-side open returns exactly then.
 func TestStartTearsDownBoxWhenStartOpIsCanceled(t *testing.T) {
 	dir := t.TempDir()
 	createFile := filepath.Join(dir, "create.log")
 	stopFile := filepath.Join(dir, "stop.log")
+	barrier := filepath.Join(dir, "created.fifo")
+	mkfifo(t, barrier)
 	script := writeScript(t, dir, `
 op="$1"
 name="$2"
@@ -371,7 +377,7 @@ case "$op" in
   start)
     cat > /dev/null
     echo "$name" >> "`+createFile+`"
-    sleep `+startupWatchBlockingSleep+`
+    cat "`+barrier+`"
     ;;
   stop) echo "stop $name" >> "`+stopFile+`" ;;
   *) exit 2 ;;
@@ -387,29 +393,58 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	createDeadline := time.NewTimer(10 * time.Second)
-	defer createDeadline.Stop()
-	createPoll := time.NewTicker(10 * time.Millisecond)
-	defer createPoll.Stop()
-	for !strings.Contains(readLog(t, createFile), "test-sess") {
-		select {
-		case err := <-done:
-			t.Fatalf("Start returned before the adapter created the box: %v", err)
-		case <-createPoll.C:
-		case <-createDeadline.C:
-			t.Fatal("timed out waiting for the adapter to create the box")
+	type opened struct {
+		w   *os.File
+		err error
+	}
+	created := make(chan opened, 1)
+	go func() {
+		w, err := os.OpenFile(barrier, os.O_WRONLY, 0)
+		created <- opened{w: w, err: err}
+	}()
+	// On a failure path the opener above may still be blocked; pair it with a
+	// reader so it returns, then join it and Start before failing.
+	failBeforeCreated := func(format string, args ...any) {
+		t.Helper()
+		r := releaseBarrier(t, barrier)
+		cancel()
+		<-done
+		if o := <-created; o.w != nil {
+			_ = o.w.Close()
 		}
+		if r != nil {
+			_ = r.Close()
+		}
+		t.Fatalf(format, args...)
+	}
+
+	select {
+	case o := <-created:
+		if o.err != nil {
+			cancel()
+			<-done
+			t.Fatalf("open barrier for writing: %v", o.err)
+		}
+		// Keep the write end open: closing it would hand the adapter EOF and let
+		// it finish on its own instead of being cut off.
+		defer func() { _ = o.w.Close() }()
+	case err := <-done:
+		failBeforeCreated("Start returned before the adapter created the box: %v", err)
+	case <-time.After(10 * time.Second):
+		failBeforeCreated("timed out waiting for the adapter to create the box")
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want the adapter to have created the box before it reached the barrier", got)
 	}
 
 	cancel()
-	var err error
 	select {
-	case err = <-done:
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start succeeded, want cancellation failure")
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after the caller's context died")
-	}
-	if err == nil {
-		t.Fatal("Start succeeded, want cancellation failure")
 	}
 	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
 		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
