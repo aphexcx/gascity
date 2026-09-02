@@ -402,49 +402,81 @@ esac
 		w, err := os.OpenFile(barrier, os.O_WRONLY, 0)
 		created <- opened{w: w, err: err}
 	}()
-	// On a failure path the opener above may still be blocked; pair it with a
-	// reader so it returns, then join it and Start before failing.
-	failBeforeCreated := func(format string, args ...any) {
-		t.Helper()
-		r := releaseBarrier(t, barrier)
-		cancel()
-		<-done
-		if o := <-created; o.w != nil {
-			_ = o.w.Close()
+
+	// Every exit of this test — pass, t.Fatal, or a stuck select — goes
+	// through settle, deferred once: it cancels, joins Start and the opener
+	// (each read exactly once, each bounded, so no path can block on a channel
+	// it has already drained), and closes the pipe ends. t.Fatal runs deferred
+	// calls, so no failure branch needs its own join.
+	var (
+		startErr    error
+		startJoined bool
+		opener      opened
+		openerSeen  bool
+		release     *os.File
+	)
+	joinStart := func() {
+		if startJoined {
+			return
 		}
-		if r != nil {
-			_ = r.Close()
+		select {
+		case startErr = <-done:
+			startJoined = true
+		case <-time.After(60 * time.Second):
+			t.Log("Start did not return within 60s of cancellation; not waiting further")
 		}
-		t.Fatalf(format, args...)
 	}
+	joinOpener := func() {
+		if openerSeen {
+			return
+		}
+		if release == nil {
+			release = releaseBarrier(t, barrier)
+		}
+		select {
+		case opener = <-created:
+			openerSeen = true
+		case <-time.After(10 * time.Second):
+			t.Log("barrier opener did not return within 10s of being released; not waiting further")
+		}
+	}
+	defer func() {
+		cancel()
+		joinStart()
+		joinOpener()
+		if opener.w != nil {
+			_ = opener.w.Close()
+		}
+		if release != nil {
+			_ = release.Close()
+		}
+	}()
 
 	select {
-	case o := <-created:
-		if o.err != nil {
-			cancel()
-			<-done
-			t.Fatalf("open barrier for writing: %v", o.err)
+	case opener = <-created:
+		openerSeen = true
+		if opener.err != nil {
+			t.Fatalf("open barrier for writing: %v", opener.err)
 		}
-		// Keep the write end open: closing it would hand the adapter EOF and let
-		// it finish on its own instead of being cut off.
-		defer func() { _ = o.w.Close() }()
-	case err := <-done:
-		failBeforeCreated("Start returned before the adapter created the box: %v", err)
+		// The write end stays open until settle: closing it would hand the
+		// adapter EOF and let it finish on its own instead of being cut off.
+	case startErr = <-done:
+		startJoined = true
+		t.Fatalf("Start returned before the adapter created the box: %v", startErr)
 	case <-time.After(10 * time.Second):
-		failBeforeCreated("timed out waiting for the adapter to create the box")
+		t.Fatal("timed out waiting for the adapter to create the box")
 	}
 	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
 		t.Fatalf("create log = %q, want the adapter to have created the box before it reached the barrier", got)
 	}
 
 	cancel()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("Start succeeded, want cancellation failure")
-		}
-	case <-time.After(10 * time.Second):
+	joinStart()
+	if !startJoined {
 		t.Fatal("Start did not return after the caller's context died")
+	}
+	if startErr == nil {
+		t.Fatal("Start succeeded, want cancellation failure")
 	}
 	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
 		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
