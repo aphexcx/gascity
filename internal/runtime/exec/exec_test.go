@@ -349,8 +349,16 @@ func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
 }
 
 // TestStartTearsDownBoxWhenStartOpIsCanceled covers the production failure path:
-// the adapter creates the box and then blocks past gc's own start deadline. The
+// the adapter creates the box and then blocks until the start is cut off. The
 // teardown must still run even though the caller's context is already dead.
+//
+// The start is failed by cancelling the caller's context once the adapter has
+// provably created its box, not by a fixed start deadline racing the adapter's
+// own startup: with a 200 ms deadline, sh + `cat` + the create write lost that
+// race on a loaded host (26 of 40 runs against a concurrent cmd/gc package run)
+// and the test failed on an empty create log. gc's own start deadline takes the
+// same path — runWithContext sees a done context either way — so startTimeout
+// is left as an outer bound only.
 func TestStartTearsDownBoxWhenStartOpIsCanceled(t *testing.T) {
 	dir := t.TempDir()
 	createFile := filepath.Join(dir, "create.log")
@@ -370,21 +378,38 @@ case "$op" in
 esac
 `)
 	p := NewProvider(script)
-	// 2 s, not 200 ms: the budget has to cover the adapter's whole startup —
-	// sh, `cat` to EOF, the create write — before the deadline may fire, and
-	// under a parallel `make test` on a loaded host 200 ms was not enough: the
-	// deadline cut the shell before its first write and the test failed on an
-	// empty create log (26 of 40 runs against a concurrent cmd/gc package
-	// run). The deadline still lands long before the 30 s block ends, which
-	// is the case under test.
-	p.startTimeout = 2 * time.Second
+	p.startTimeout = 30 * time.Second
 
-	err := p.Start(context.Background(), "test-sess", runtime.Config{})
-	if err == nil {
-		t.Fatal("Start succeeded, want deadline failure")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{})
+	}()
+
+	createDeadline := time.NewTimer(10 * time.Second)
+	defer createDeadline.Stop()
+	createPoll := time.NewTicker(10 * time.Millisecond)
+	defer createPoll.Stop()
+	for !strings.Contains(readLog(t, createFile), "test-sess") {
+		select {
+		case err := <-done:
+			t.Fatalf("Start returned before the adapter created the box: %v", err)
+		case <-createPoll.C:
+		case <-createDeadline.C:
+			t.Fatal("timed out waiting for the adapter to create the box")
+		}
 	}
-	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
-		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+
+	cancel()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after the caller's context died")
+	}
+	if err == nil {
+		t.Fatal("Start succeeded, want cancellation failure")
 	}
 	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
 		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
