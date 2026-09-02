@@ -293,22 +293,66 @@ func TestResolveConvoyStoreForCommandMutationResolvesWhenAllStoresReadable(t *te
 	}
 }
 
-// The bd-hook autoclose resolver acts on what it resolves, so it takes the
-// strict rule: a dark sibling is a refusal, and the caller falls back rather
-// than closing a copy whose ownership is unprovable.
-func TestResolveOwningStoreDirRefusesUnderDarkSibling(t *testing.T) {
+// A candidate that fails to OPEN is as unreadable as one whose reads fail:
+// the scan records it as skipped, so a read degrades with a warning and a
+// mutation refuses. Open failures must not vanish before the policy runs.
+func TestResolveConvoyStoreForCommandCountsOpenFailureAsSkipped(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+	openStore := func(dir string) (beads.Store, error) {
+		switch dir {
+		case "/city":
+			return cityStore, nil
+		case "/rigs/hello-world":
+			return nil, errConvoyStoreDark
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return nil, nil
+		}
+	}
+
+	store, skipped, err := resolveConvoyStoreForCommand(convoy.ID, convoyDarkTestCity(), "/city", convoyReadDegraded, openStore)
+	if err != nil || store != cityStore {
+		t.Fatalf("read resolution = (%v, %v), want the city store", store, err)
+	}
+	if len(skipped) != 1 || skipped[0].path != "/rigs/hello-world" || !errors.Is(skipped[0].err, errConvoyStoreDark) {
+		t.Fatalf("skipped = %+v, want the unopenable rig store with its open error", skipped)
+	}
+
+	store, skipped, err = resolveConvoyStoreForCommand(convoy.ID, convoyDarkTestCity(), "/city", convoyMutationStrict, openStore)
+	if err == nil || store != nil || skipped != nil {
+		t.Fatalf("mutation resolution = (%v, %v, %v), want refusal", store, skipped, err)
+	}
+	if !errors.Is(err, errConvoyStoreDark) || !strings.Contains(err.Error(), "/rigs/hello-world") {
+		t.Fatalf("mutation resolution = %v, want the unopenable store named and its error wrapped", err)
+	}
+}
+
+// Opening is fatal only when nothing opened; the first failure is the error.
+func TestOpenConvoyStoresWithSkippedFailsOnlyWhenNothingOpens(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	_, skipped, err := openConvoyStoresWithSkipped(convoyDarkTestCity(), "/city", "", func(string) (beads.Store, error) {
+		return nil, errConvoyStoreDark
+	})
+	if !errors.Is(err, errConvoyStoreDark) || skipped != nil {
+		t.Fatalf("openConvoyStoresWithSkipped = (%v, %v), want the first open error and no skipped list", skipped, err)
+	}
+}
+
+// The bd-hook autoclose resolver is event-driven: a dark store cannot have
+// fired the hook, so the unique readable owner is the event's own store and
+// autoclose acts on it, with the dark sibling reported rather than vetoing.
+func TestResolveOwningStoreDirWithSkippedResolvesAutocloseOwnerUnderDarkSibling(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityStore := beads.NewMemStore()
 	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
 
-	store, dir, err := resolveOwningStoreDir(convoy.ID, convoyDarkTestCity(), "/city", convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
-	if err == nil {
-		t.Fatal("resolveOwningStoreDir = nil error, want refusal under partial visibility")
+	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(convoy.ID, convoyDarkTestCity(), "/city", convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if err != nil || store != cityStore || dir != "/city" {
+		t.Fatalf("autoclose resolution = (%v, %q, %v), want the city store at /city", store, dir, err)
 	}
-	if store != nil || dir != "" {
-		t.Fatalf("resolveOwningStoreDir returned store=%v dir=%q, want nothing to act on", store, dir)
-	}
-	if !errors.Is(err, errConvoyStoreDark) || errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("resolveOwningStoreDir = %v, want the dark store's error and not not-found", err)
+	if len(skipped) != 1 || skipped[0].path != "/rigs/hello-world" {
+		t.Fatalf("skipped = %+v, want the dark rig store reported", skipped)
 	}
 }

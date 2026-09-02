@@ -487,28 +487,40 @@ type convoyStoreView struct {
 	store beads.Store
 }
 
-func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
+// openConvoyStoresWithSkipped opens every convoy store candidate for beadID.
+// A candidate that fails to open is recorded as a skipped probe failure — it
+// can neither confirm nor deny holding a bead, exactly like one whose reads
+// fail later — and does not stop the scan; the caller applies its visibility
+// policy to the skipped list. Opening is an error only when NO candidate
+// opened: the first failure, or "no convoy stores available" when there was
+// nothing to open.
+func openConvoyStoresWithSkipped(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, []storeProbeFailure, error) {
 	var (
-		stores   []convoyStoreView
-		firstErr error
+		stores  []convoyStoreView
+		skipped []storeProbeFailure
 	)
 	for _, dir := range convoyStoreCandidates(cfg, cityPath, beadID) {
 		store, err := openStore(dir)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
+			skipped = append(skipped, storeProbeFailure{path: dir, err: err})
 			continue
 		}
 		stores = append(stores, convoyStoreView{path: dir, store: store})
 	}
 	if len(stores) > 0 {
-		return stores, nil
+		return stores, skipped, nil
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	if len(skipped) > 0 {
+		return nil, nil, skipped[0].err
 	}
-	return nil, fmt.Errorf("no convoy stores available")
+	return nil, nil, fmt.Errorf("no convoy stores available")
+}
+
+// openConvoyStores is openConvoyStoresWithSkipped for a caller that scans
+// whatever opened and has no policy for what did not (gc workflow delete).
+func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
+	stores, _, err := openConvoyStoresWithSkipped(cfg, cityPath, beadID, openStore)
+	return stores, err
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
@@ -611,21 +623,6 @@ func resolveConvoyStoreForCommand(convoyID string, cfg *config.City, cityPath st
 	return store, skipped, nil
 }
 
-// resolveOwningStoreDir is the strict form of resolveOwningStoreDirWithSkipped
-// for callers that ACT on the resolved bead and have no channel to report
-// skipped stores (bd hook autoclose): a skipped candidate is a refusal, not a
-// warning, because ownership is unprovable while a participant is unreadable.
-func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
-	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
-	if err != nil {
-		return nil, "", err
-	}
-	if len(skipped) > 0 {
-		return nil, "", partialVisibilityError(beadID, skipped)
-	}
-	return store, dir, nil
-}
-
 // resolveOwningStoreDirWithSkipped resolves the store that owns beadID and the
 // candidate store directory it was found in, probing each prefix-aware convoy
 // store candidate rooted at cityPath. It returns an error when beadID resolves
@@ -637,31 +634,30 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 // The scan does not stop at the first hit: it probes every candidate so a bead
 // present in more than one store is rejected rather than silently resolved to
 // one, enforcing the "resolution requires a uniquely addressable bead id"
-// contract. A candidate's not-found probe is skipped. A candidate whose probe
-// fails with any other error is recorded in the returned skipped list and does
-// not veto the scan: such a store can neither confirm nor deny holding the
-// bead, so the answer comes from the stores that could be read and the caller
-// decides how loudly to report the rest (openConvoyStores already tolerates a
-// candidate that fails to OPEN the same way). When no readable store holds the
-// bead and at least one was skipped, the result is not ErrNotFound — the bead
-// may live in the skipped store — but an error naming the skipped stores and
-// wrapping the first failure. The returned directory maps back to the owning
-// candidate.
+// contract. A candidate's not-found probe is skipped. A candidate that fails
+// to OPEN, or whose probe fails with any other error, is recorded in the
+// returned skipped list and does not veto the scan: such a store can neither
+// confirm nor deny holding the bead, so the answer comes from the stores that
+// could be read and the caller applies its visibility policy to the rest
+// (resolveConvoyStoreForCommand). When no readable store holds the bead and at
+// least one was skipped, the result is not ErrNotFound — the bead may live in
+// the skipped store — but an error naming the skipped stores and wrapping the
+// first failure. The returned directory maps back to the owning candidate.
 func resolveOwningStoreDirWithSkipped(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, []storeProbeFailure, error) {
-	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
+	candidates, skipped, err := openConvoyStoresWithSkipped(cfg, cityPath, beadID, openStore)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	return probeOwningStore(candidates, beadID)
+	return probeOwningStore(candidates, skipped, beadID)
 }
 
 // probeOwningStore is the scan half of resolveOwningStoreDirWithSkipped over
-// already-opened candidates.
-func probeOwningStore(candidates []convoyStoreView, beadID string) (beads.Store, string, []storeProbeFailure, error) {
+// already-opened candidates; skipped seeds the list with the candidates that
+// failed to open.
+func probeOwningStore(candidates []convoyStoreView, skipped []storeProbeFailure, beadID string) (beads.Store, string, []storeProbeFailure, error) {
 	var (
 		foundStore beads.Store
 		foundDir   string
-		skipped    []storeProbeFailure
 	)
 	for _, candidate := range candidates {
 		if candidate.store == nil {
@@ -708,7 +704,7 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	stores, err := openConvoyStores(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
+	stores, skipped, err := openConvoyStoresWithSkipped(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
@@ -716,6 +712,7 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
+	warnSkippedConvoyStores(stderr, cmdName, skipped)
 	return stores, 0
 }
 
@@ -839,23 +836,24 @@ func formatConvoyProgress(progress convoyProgressJSON) string {
 	return text
 }
 
-// openConvoyStoreByID resolves the store that owns convoyID for a by-id
-// convoy command. visibility says what happens when a candidate store cannot
-// be consulted: reads (convoyReadDegraded) answer from the readable stores and
-// warn; mutations (convoyMutationStrict) refuse, because a bead they cannot
-// prove uniquely addressable is not a bead they may change.
-func openConvoyStoreByID(convoyID string, visibility convoyStoreVisibility, stderr io.Writer, cmdName string) (beads.Store, int) {
+// openConvoyStoreByIDForMutation resolves the store that owns convoyID for an
+// operator-typed by-id mutation (target, add, close, land). It is strict: a
+// candidate store that cannot be consulted is a refusal, because a bead the
+// command cannot prove uniquely addressable is not a bead it may change.
+func openConvoyStoreByIDForMutation(convoyID string, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	return openConvoyStoreByIDAt(convoyID, cityPath, visibility, stderr, cmdName)
+	return openConvoyStoreByIDAt(convoyID, cityPath, convoyMutationStrict, stderr, cmdName)
 }
 
-// openConvoyStoreByIDAt is openConvoyStoreByID with a pre-resolved cityPath,
-// used by routed callers that already resolved the city before dispatching
-// to a fallback or mutation path.
+// openConvoyStoreByIDAt resolves the store that owns convoyID for a by-id
+// convoy command with a pre-resolved cityPath. visibility says what happens
+// when a candidate store cannot be consulted: reads (convoyReadDegraded)
+// answer from the readable stores and warn; mutations (convoyMutationStrict)
+// refuse.
 func openConvoyStoreByIDAt(convoyID, cityPath string, visibility convoyStoreVisibility, stderr io.Writer, cmdName string) (beads.Store, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1232,7 +1230,7 @@ func cmdConvoyTargetJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy target")
+	store, code := openConvoyStoreByIDForMutation(convoyID, stderr, "gc convoy target")
 	if store == nil {
 		return code
 	}
@@ -1316,7 +1314,7 @@ func cmdConvoyAddJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy add")
+	store, code := openConvoyStoreByIDForMutation(convoyID, stderr, "gc convoy add")
 	if store == nil {
 		return code
 	}
@@ -1403,7 +1401,7 @@ func cmdConvoyCloseJSON(args []string, jsonOut bool, stdout, stderr io.Writer) i
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy close")
+	store, code := openConvoyStoreByIDForMutation(convoyID, stderr, "gc convoy close")
 	if store == nil {
 		return code
 	}
@@ -1788,7 +1786,7 @@ func cmdConvoyLandJSON(args []string, opts landOpts, jsonOut bool, stdout, stder
 	if len(args) > 0 {
 		convoyID = args[0]
 	}
-	store, code := openConvoyStoreByID(convoyID, convoyMutationStrict, stderr, "gc convoy land")
+	store, code := openConvoyStoreByIDForMutation(convoyID, stderr, "gc convoy land")
 	if store == nil {
 		return code
 	}
@@ -1923,7 +1921,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// actually owns the bead — prefix-aware, across the city and every rig —
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
-	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+	if store, _, ok := autocloseOwningStore(beadID, cityPath, stderr); ok {
 		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
 		return
 	}
@@ -1945,17 +1943,30 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 // city config cannot be loaded or no candidate store holds the bead, so the
 // caller can fall back to cwd-rooted resolution. The store directory lets
 // molecule autoclose derive the matching store-ref label.
-func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
+//
+// Autoclose is event-driven, and that decides its visibility policy. It runs
+// from bd's on_close hook, and a store that refuses to open cannot have fired
+// that hook, so the close event came from a readable store: when exactly one
+// readable store holds beadID, that store is the event's own — the provenance
+// the operator-typed by-id mutations lack — and autoclose acts on it. A
+// candidate that could not be consulted is reported on stderr, not treated as
+// a veto: a veto here would only demote resolution to the cwd-rooted fallback,
+// which mutates the same store without the store-ref label (#3411).
+func autocloseOwningStore(beadID, cityPath string, stderr io.Writer) (beads.Store, string, bool) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		return nil, "", false
 	}
-	store, dir, err := resolveOwningStoreDir(beadID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			fmt.Fprintf(stderr, "gc bd hook autoclose: %s\n", firstErrorLine(err)) //nolint:errcheck // best-effort stderr
+		}
 		return nil, "", false
 	}
+	warnSkippedConvoyStores(stderr, "gc bd hook autoclose", skipped)
 	return store, dir, true
 }
 
