@@ -370,7 +370,14 @@ case "$op" in
 esac
 `)
 	p := NewProvider(script)
-	p.startTimeout = 200 * time.Millisecond
+	// 2 s, not 200 ms: the budget has to cover the adapter's whole startup —
+	// sh, `cat` to EOF, the create write — before the deadline may fire, and
+	// under a parallel `make test` on a loaded host 200 ms was not enough: the
+	// deadline cut the shell before its first write and the test failed on an
+	// empty create log (26 of 40 runs against a concurrent cmd/gc package
+	// run). The deadline still lands long before the 30 s block ends, which
+	// is the case under test.
+	p.startTimeout = 2 * time.Second
 
 	err := p.Start(context.Background(), "test-sess", runtime.Config{})
 	if err == nil {
