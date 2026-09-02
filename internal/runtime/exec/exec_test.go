@@ -1538,12 +1538,18 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	// The readiness marker is written by the foreground child itself, once it
+	// is a process of its own — not by the leader just before it forks. A
+	// marker written by the leader leaves a window, after the marker and
+	// before the child exists, in which the interrupt lands on the leader
+	// alone; the leader then defers its trap until the child it is about to
+	// run returns, and the forced kill wins first. Under load on macOS
+	// (/bin/sh = bash 3.2) that window caught 5 of 30 runs.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    sh -c ': > "%s"; exec sleep 30'
     ;;
   *) exit 2 ;;
 esac
