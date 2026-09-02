@@ -1927,9 +1927,9 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	var nudged string
-	nf := func(recipient, _ string) error {
-		nudged = recipient
+	var nudged, nudgedMessage string
+	nf := func(recipient, messageID string) error {
+		nudged, nudgedMessage = recipient, messageID
 		return nil
 	}
 
@@ -1943,6 +1943,9 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	}
 	if nudged != "alice" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "alice")
+	}
+	if nudgedMessage != "gc-2" {
+		t.Errorf("nudgeFn called with message %q, want the reply's own id %q (mail-reminder provenance)", nudgedMessage, "gc-2")
 	}
 }
 
@@ -3060,9 +3063,9 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	var nudged string
-	nf := func(recipient, _ string) error {
-		nudged = recipient
+	var nudged, nudgedMessage string
+	nf := func(recipient, messageID string) error {
+		nudged, nudgedMessage = recipient, messageID
 		return nil
 	}
 
@@ -3076,6 +3079,9 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	}
 	if nudged != "mayor" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "mayor")
+	}
+	if nudgedMessage != "gc-1" {
+		t.Errorf("nudgeFn called with message %q, want the sent message's id %q (mail-reminder provenance)", nudgedMessage, "gc-1")
 	}
 }
 
