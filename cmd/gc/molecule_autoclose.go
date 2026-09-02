@@ -76,9 +76,13 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// the city and every rig, and derive the store-ref from that store, so
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
-	if store, dir, ok := autocloseOwningStore(beadID, cityPath, stderr); ok {
+	switch store, dir, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	case autocloseResolved:
 		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
 		return
+	case autocloseVetoed:
+		return
+	case autocloseFallback:
 	}
 
 	store, err := openStoreAtForCity(storeRoot, cityPath)

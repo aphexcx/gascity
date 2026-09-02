@@ -1921,9 +1921,13 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// actually owns the bead — prefix-aware, across the city and every rig —
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
-	if store, _, ok := autocloseOwningStore(beadID, cityPath, stderr); ok {
+	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	case autocloseResolved:
 		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
 		return
+	case autocloseVetoed:
+		return
+	case autocloseFallback:
 	}
 
 	// Fallback: a standalone store reachable only via cwd/BEADS_DIR/
@@ -1937,37 +1941,73 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
 }
 
+// autocloseOutcome is what autocloseOwningStore decided.
+type autocloseOutcome int
+
+const (
+	// autocloseResolved: the returned store and directory name the owner;
+	// act on it.
+	autocloseResolved autocloseOutcome = iota
+	// autocloseFallback: nothing was decided — the city config could not be
+	// loaded, or no candidate holds the bead and every candidate was
+	// readable — so the caller may fall back to its cwd-rooted single-store
+	// resolution, as it always has.
+	autocloseFallback
+	// autocloseVetoed: a candidate could not be consulted and the readable
+	// evidence does not prove which store the close event came from. The
+	// caller must not act, and must not reach for the fallback either.
+	autocloseVetoed
+)
+
+// resolveAutocloseOwner is the visibility policy behind autocloseOwningStore,
+// with the store opener injected so it is testable without a store on disk.
+//
+// Autoclose is event-driven: it runs from bd's on_close hook, and the bead it
+// is asked about was just closed in some store. With every candidate readable
+// the scan's answer stands (or, when nothing holds the bead, the caller falls
+// back). When a candidate could not be consulted, a unique readable hit is
+// NOT proof of where the event came from — the source store may have gone
+// dark after committing the close while a sibling holds a colliding id — so
+// the hit counts only when it is the store the close came from: storeRoot,
+// which gc sets as GC_STORE_ROOT on every bd it runs (and which a hand-run bd
+// leaves as its cwd). Anything else under partial visibility is a veto.
+func resolveAutocloseOwner(beadID string, cfg *config.City, cityPath, storeRoot string, openStore func(string) (beads.Store, error)) (beads.Store, string, autocloseOutcome, []storeProbeFailure, error) {
+	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, openStore)
+	if len(skipped) == 0 {
+		if err != nil {
+			return nil, "", autocloseFallback, nil, err
+		}
+		return store, dir, autocloseResolved, nil, nil
+	}
+	if err == nil && samePath(dir, storeRoot) {
+		return store, dir, autocloseResolved, skipped, nil
+	}
+	return nil, "", autocloseVetoed, skipped, err
+}
+
 // autocloseOwningStore resolves the store that owns beadID, and the store
 // directory it was found in, by probing each prefix-aware convoy store
-// candidate (city + rigs) rooted at cityPath. It returns ok=false when the
-// city config cannot be loaded or no candidate store holds the bead, so the
-// caller can fall back to cwd-rooted resolution. The store directory lets
-// molecule autoclose derive the matching store-ref label.
-//
-// Autoclose is event-driven, and that decides its visibility policy. It runs
-// from bd's on_close hook, and a store that refuses to open cannot have fired
-// that hook, so the close event came from a readable store: when exactly one
-// readable store holds beadID, that store is the event's own — the provenance
-// the operator-typed by-id mutations lack — and autoclose acts on it. A
-// candidate that could not be consulted is reported on stderr, not treated as
-// a veto: a veto here would only demote resolution to the cwd-rooted fallback,
-// which mutates the same store without the store-ref label (#3411).
-func autocloseOwningStore(beadID, cityPath string, stderr io.Writer) (beads.Store, string, bool) {
+// candidate (city + rigs) rooted at cityPath, under the policy
+// resolveAutocloseOwner describes. storeRoot is the store the close event
+// came from (GC_STORE_ROOT / BEADS_DIR / cwd). The store directory lets
+// molecule autoclose derive the matching store-ref label. Skipped candidates
+// and a veto are reported on stderr rather than swallowed.
+func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) (beads.Store, string, autocloseOutcome) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		return nil, "", false
+		return nil, "", autocloseFallback
 	}
-	store, dir, skipped, err := resolveOwningStoreDirWithSkipped(beadID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+	store, dir, outcome, skipped, err := resolveAutocloseOwner(beadID, cfg, cityPath, storeRoot, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
-	if err != nil {
-		if !errors.Is(err, beads.ErrNotFound) {
-			fmt.Fprintf(stderr, "gc bd hook autoclose: %s\n", firstErrorLine(err)) //nolint:errcheck // best-effort stderr
-		}
-		return nil, "", false
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		fmt.Fprintf(stderr, "gc bd hook autoclose: %s\n", firstErrorLine(err)) //nolint:errcheck // best-effort stderr
 	}
 	warnSkippedConvoyStores(stderr, "gc bd hook autoclose", skipped)
-	return store, dir, true
+	if outcome == autocloseVetoed {
+		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — cannot prove which store the close came from while a store is unavailable\n", beadID) //nolint:errcheck // best-effort stderr
+	}
+	return store, dir, outcome
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {

@@ -356,3 +356,69 @@ func TestResolveOwningStoreDirWithSkippedResolvesAutocloseOwnerUnderDarkSibling(
 		t.Fatalf("skipped = %+v, want the dark rig store reported", skipped)
 	}
 }
+
+// Autoclose under partial visibility acts only on the store the close came
+// from. The unique readable owner IS that store here (storeRoot = /city), so
+// autoclose proceeds, with the dark sibling reported.
+func TestResolveAutocloseOwnerActsOnProvenanceStoreUnderDarkSibling(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, dir, outcome, skipped, err := resolveAutocloseOwner(convoy.ID, convoyDarkTestCity(), "/city", "/city", convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if err != nil || outcome != autocloseResolved || store != cityStore || dir != "/city" {
+		t.Fatalf("resolveAutocloseOwner = (%v, %q, %v, %v), want resolved on the city store", store, dir, outcome, err)
+	}
+	if len(skipped) != 1 || skipped[0].path != "/rigs/hello-world" {
+		t.Fatalf("skipped = %+v, want the dark rig store reported", skipped)
+	}
+}
+
+// The same readable hit is NOT proof of provenance when the close came from
+// elsewhere (storeRoot = the dark rig): the source may have gone dark after
+// committing the close while the city holds a colliding id. Veto — and a veto
+// is not a fallback.
+func TestResolveAutocloseOwnerVetoesWhenReadableHitIsNotTheClosingStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+
+	store, _, outcome, skipped, err := resolveAutocloseOwner(convoy.ID, convoyDarkTestCity(), "/city", "/rigs/hello-world", convoyDarkOpenStore(t, cityStore, newConvoyDarkStore()))
+	if outcome != autocloseVetoed || store != nil || err != nil {
+		t.Fatalf("resolveAutocloseOwner = (%v, %v, %v), want a veto with no store", store, outcome, err)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("skipped = %+v, want the dark store reported", skipped)
+	}
+}
+
+// Nothing readable holds the bead and a candidate was dark: the bead may be
+// in the dark store, so this is a veto too, carrying the resolver's error.
+func TestResolveAutocloseOwnerVetoesUnfoundUnderDarkSibling(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	_, _, outcome, skipped, err := resolveAutocloseOwner("gc-404", convoyDarkTestCity(), "/city", "/city", convoyDarkOpenStore(t, beads.NewMemStore(), newConvoyDarkStore()))
+	if outcome != autocloseVetoed || len(skipped) != 1 {
+		t.Fatalf("resolveAutocloseOwner = (%v, %+v), want a veto naming the dark store", outcome, skipped)
+	}
+	if err == nil || errors.Is(err, beads.ErrNotFound) || !errors.Is(err, errConvoyStoreDark) {
+		t.Fatalf("err = %v, want the dark store's error, not not-found", err)
+	}
+}
+
+// With every candidate readable the pre-existing contract holds: a hit is
+// resolved, and an unfound bead lets the caller fall back.
+func TestResolveAutocloseOwnerKeepsContractWhenAllStoresReadable(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	convoy, _ := cityStore.Create(beads.Bead{Title: "deploy", Type: "convoy"})
+	openStore := convoyDarkOpenStore(t, cityStore, beads.NewMemStore())
+
+	store, dir, outcome, skipped, err := resolveAutocloseOwner(convoy.ID, convoyDarkTestCity(), "/city", "/rigs/hello-world", openStore)
+	if err != nil || outcome != autocloseResolved || store != cityStore || dir != "/city" || skipped != nil {
+		t.Fatalf("hit = (%v, %q, %v, %v, %v), want resolved on the city store regardless of storeRoot", store, dir, outcome, skipped, err)
+	}
+	_, _, outcome, skipped, err = resolveAutocloseOwner("gc-404", convoyDarkTestCity(), "/city", "/city", openStore)
+	if outcome != autocloseFallback || skipped != nil || !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("miss = (%v, %v, %v), want fallback with not-found", outcome, skipped, err)
+	}
+}
