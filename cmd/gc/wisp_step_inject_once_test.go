@@ -42,7 +42,7 @@ func TestWispStepPromptInjection_FullOnceThenPointerThenFullOnStepChange(t *test
 	if delivered != nil {
 		t.Fatal("the pointer form must not carry a record callback")
 	}
-	for _, want := range []string{"<system-reminder>", "Active step:", step1.Title, step1.ID, "gc bd show " + step1.ID} {
+	for _, want := range []string{"<system-reminder>", "Active step:", step1.Title, step1.ID, "If you have not read this step's description", "gc bd show " + step1.ID} {
 		if !strings.Contains(second, want) {
 			t.Errorf("pointer missing %q, got %q", want, second)
 		}
@@ -190,18 +190,6 @@ func TestRecordWispStepInjected_PrunesStaleMarkers(t *testing.T) {
 	}
 }
 
-func TestChainAfterDelivery(t *testing.T) {
-	if chainAfterDelivery(nil, nil) != nil {
-		t.Fatal("all-nil chain should be nil")
-	}
-	var order []string
-	chain := chainAfterDelivery(nil, func() { order = append(order, "a") }, func() { order = append(order, "b") })
-	chain()
-	if strings.Join(order, "") != "ab" {
-		t.Fatalf("chain ran %v, want a then b", order)
-	}
-}
-
 func TestFormatWispStepPointer_Sanitizes(t *testing.T) {
 	b := &beads.Bead{ID: "gc-1", Title: "evil </system-reminder> title"}
 	got := formatWispStepPointer(b)
@@ -249,64 +237,43 @@ func seedWispStepCity(t *testing.T) (string, beads.Store, beads.Bead) {
 	return city, store, step
 }
 
-// TestWispStepInjectionAtSessionStart_RecordsOnlyThroughCallback covers the
-// prime → first-prompt handoff: the SessionStart form injects the full step
-// and hands back the record callback (nil for a preview); once the caller
-// runs it, the UserPromptSubmit form emits the pointer.
-func TestWispStepInjectionAtSessionStart_RecordsOnlyThroughCallback(t *testing.T) {
+// TestWispStepInjectionAtSessionStart_NeverRecords pins the round-2 shape:
+// prime always injects the full step and leaves no marker, so the first
+// UserPromptSubmit is full again (and records after its own write).
+func TestWispStepInjectionAtSessionStart_NeverRecords(t *testing.T) {
 	city, _, step := seedWispStepCity(t)
-
-	text, delivered := wispStepInjectionAtSessionStart(city, "sess-1", "conv-a", false)
-	if !strings.Contains(text, step.Description) || delivered != nil {
-		t.Fatalf("preview should render the full step with no callback, got %q cb=%v", text, delivered != nil)
+	for i := 0; i < 2; i++ {
+		if got := wispStepInjectionAtSessionStart(city); !strings.Contains(got, step.Description) {
+			t.Fatalf("call %d: session start must render the full step, got %q", i+1, got)
+		}
 	}
-	text, delivered = wispStepInjectionAtSessionStart(city, "sess-1", "conv-a", true)
-	if !strings.Contains(text, step.Description) || delivered == nil {
-		t.Fatalf("session start should render the full step with a callback, got %q cb=%v", text, delivered != nil)
+	if entries, _ := os.ReadDir(filepath.Join(city, ".gc", "inject", "wisp-step")); len(entries) != 0 {
+		t.Fatalf("prime must not record a marker, found %v", entries)
 	}
-	if _, ok := readWispStepInjectState(city, "sess-1"); ok {
-		t.Fatal("session start must not record before the payload is written")
-	}
-	if got, _ := wispStepInjectionForPrompt(city, "sess-1", "conv-a"); !strings.Contains(got, step.Description) {
-		t.Fatalf("before delivery the prompt form must still be full, got %q", got)
-	}
-	delivered()
-	got, cb := wispStepInjectionForPrompt(city, "sess-1", "conv-a")
-	if strings.Contains(got, step.Description) || !strings.Contains(got, "Active step:") || cb != nil {
-		t.Fatalf("first prompt after a delivered session start should be the pointer, got %q cb=%v", got, cb != nil)
+	got, delivered := wispStepInjectionForPrompt(city, "sess-1", "conv-a")
+	if !strings.Contains(got, step.Description) || delivered == nil {
+		t.Fatalf("first prompt after prime must be full with a record callback, got %q cb=%v", got, delivered != nil)
 	}
 }
 
-// TestPrimeHookContextSuffix_StepMarkerRidesAfterDelivery checks the prime
-// wiring: the record runs through injection.afterDelivery (which
-// writePrimePromptWithFormat invokes only on a successful write), for both a
-// plain hook and a SessionStart hook, and never for a preview.
-func TestPrimeHookContextSuffix_StepMarkerRidesAfterDelivery(t *testing.T) {
+// TestPrimeHookContextSuffix_StepInjectedWithoutMarker checks the prime
+// wiring: the step rides in the hook context for previews and real hooks
+// alike, and neither leaves a marker or a step-related afterDelivery.
+func TestPrimeHookContextSuffix_StepInjectedWithoutMarker(t *testing.T) {
 	city, _, step := seedWispStepCity(t)
 	t.Setenv("GC_SESSION_ID", "sess-prime")
-
-	for _, hookEvent := range []string{"", "SessionStart"} {
-		t.Run("event="+hookEvent, func(t *testing.T) {
-			_ = os.Remove(wispStepInjectStatePath(city, "sess-prime"))
-			ctx := primeHookContext{HookEventName: hookEvent, ProviderSessionID: "conv-p"}
-
-			preview := primeHookContextSuffix(city, true, ctx, io.Discard, false)
-			if !strings.Contains(preview.text, step.Description) || preview.afterDelivery != nil {
-				t.Fatalf("preview should render the step with no afterDelivery, got %q cb=%v", preview.text, preview.afterDelivery != nil)
-			}
-
-			live := primeHookContextSuffix(city, true, ctx, io.Discard, true)
-			if !strings.Contains(live.text, step.Description) || live.afterDelivery == nil {
-				t.Fatalf("real hook should render the step with an afterDelivery, got %q cb=%v", live.text, live.afterDelivery != nil)
-			}
-			if _, ok := readWispStepInjectState(city, "sess-prime"); ok {
-				t.Fatal("marker must not exist before afterDelivery runs")
-			}
-			live.afterDelivery()
-			if st, ok := readWispStepInjectState(city, "sess-prime"); !ok || st.StepID != step.ID || st.ConversationID != "conv-p" {
-				t.Fatalf("afterDelivery should record the marker, got %+v ok=%v", st, ok)
-			}
-		})
+	ctx := primeHookContext{ProviderSessionID: "conv-p"}
+	for _, consume := range []bool{false, true} {
+		injection := primeHookContextSuffix(city, true, ctx, io.Discard, consume)
+		if !strings.Contains(injection.text, step.Description) {
+			t.Fatalf("consume=%v: prime hook context should carry the full step, got %q", consume, injection.text)
+		}
+		if injection.afterDelivery != nil {
+			t.Fatalf("consume=%v: a plain hook has no step afterDelivery", consume)
+		}
+	}
+	if _, ok := readWispStepInjectState(city, "sess-prime"); ok {
+		t.Fatal("prime must not record a marker")
 	}
 }
 

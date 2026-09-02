@@ -88,6 +88,54 @@ func TestSplitQueuedNudgesForDelivery_MailLookupErrorReturnsError(t *testing.T) 
 	}
 }
 
+// TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore pins the
+// codex round-2 finding: the messaging store must derive from the city WORK
+// store, not from the nudges-class delivery store. With the two split, mail
+// that lives only in the work store must still count as unread.
+func TestMailUnreadLookupForNudgeTarget_ReadsMailFromTheWorkStore(t *testing.T) {
+	clearGCEnv(t)
+	workStore := beads.NewMemStore()
+	nudgesStore := beads.NewMemStore() // relocated nudges class: holds no mail
+	prev := openMailGateWorkStore
+	openMailGateWorkStore = func(string) (beads.Store, error) { return workStore, nil }
+	t.Cleanup(func() { openMailGateWorkStore = prev })
+
+	sess, err := workStore.Create(beads.Bead{
+		Title: "Session: worker", Type: session.BeadType, Status: "open",
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "state": string(session.StateActive)},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	mp := beadmail.New(workStore)
+	msg, err := mp.Send("human", sess.ID, "hello", "please look")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	target := nudgeTarget{cityPath: t.TempDir(), sessionID: sess.ID, cfg: &config.City{}}
+	lookup := mailUnreadLookupForNudgeTarget(target, nudgesStore, workStore)
+	if lookup == nil {
+		t.Fatal("expected a configured mail gate")
+	}
+	unread, err := lookup()
+	if err != nil || !unread {
+		t.Fatalf("mail in the work store must count as unread: unread=%v err=%v", unread, err)
+	}
+	if err := mp.MarkRead(msg.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if unread, err := lookup(); err != nil || unread {
+		t.Fatalf("after MarkRead the inbox must read as empty: unread=%v err=%v", unread, err)
+	}
+
+	broken := errors.New("work store unavailable")
+	openMailGateWorkStore = func(string) (beads.Store, error) { return nil, broken }
+	if _, err := mailUnreadLookupForNudgeTarget(target, nudgesStore, workStore)(); !errors.Is(err, broken) {
+		t.Fatalf("a work-store open failure must surface as a lookup error (hold), got %v", err)
+	}
+}
+
 func TestMailUnreadLookupForNudgeTarget_NotConfiguredCases(t *testing.T) {
 	store := beads.NewMemStore()
 	base := nudgeTarget{cityPath: t.TempDir(), sessionID: "gc-s1", cfg: &config.City{}}

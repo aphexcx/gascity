@@ -18,10 +18,10 @@ import (
 
 // Once-per-step injection of the active formula step.
 //
-// The full step description is injected when a session first sees a step —
-// at SessionStart (gc prime --hook) and again whenever the active step
-// changes — and every UserPromptSubmit in between carries a one-line pointer
-// instead. Before this the whole step (≈1–1.5k tokens for mol-do-work) was
+// The full step description is injected at SessionStart (gc prime --hook,
+// unconditionally) and by the UserPromptSubmit hook the first time it sees a
+// step; every UserPromptSubmit after that carries a one-line pointer instead,
+// until the active step or the provider conversation changes. Before this the whole step (≈1–1.5k tokens for mol-do-work) was
 // re-injected on every prompt with no change detection (Fable 5.1 prompt
 // audit, jadegate scan G-3, 2026-09-01): the model retains a once-stated
 // assignment, so the repeats were per-turn cost and transcript noise.
@@ -30,15 +30,25 @@ import (
 // by the gc session (bead id, else the alias/id the hook resolved) and stamped
 // with the provider's own conversation id from the hook stdin when the
 // provider supplies one. A different conversation id or a different step
-// re-injects in full. The marker is recorded only AFTER the hook payload has
-// been written (the callers run the returned callback on a successful write),
-// so a failed write leaves no claim that the conversation saw the step. The
-// state is best-effort: when it cannot be read or written, the full reminder
-// is emitted, so a broken state file degrades to the previous per-prompt
-// behavior, never to silence. Files untouched for wispStepInjectStateTTL are
-// pruned opportunistically whenever a marker is recorded, so churn of
-// ephemeral sessions does not grow the directory without bound; a pruned
-// live session simply re-receives the full step once.
+// re-injects in full.
+//
+// What the marker means — and does not mean. No process on this side of the
+// provider can prove the model saw a payload: the hook's stdout can be
+// discarded by an outer timeout, and some provider adapters never surface
+// `gc prime --hook` output at all. So the marker is deliberately weak: it
+// records that the UserPromptSubmit hook WROTE the full step for this
+// session+conversation (the callback runs only after a successful write),
+// and nothing else. Prime never records. The pointer is therefore written to
+// stand on its own: it names the step and tells the model to `gc bd show` it
+// if it has not read the description in this conversation — a missed full
+// injection costs one command, never a lost assignment.
+//
+// The state is best-effort: when it cannot be read or written, the full
+// reminder is emitted, so a broken state file degrades to the previous
+// per-prompt behavior, never to silence. Files untouched for
+// wispStepInjectStateTTL are pruned opportunistically whenever a marker is
+// recorded, so churn of ephemeral sessions does not grow the directory
+// without bound; a pruned live session simply re-receives the full step once.
 
 // wispStepInjectStateTTL is how long a per-session marker survives without a
 // new record before an opportunistic prune removes it.
@@ -52,23 +62,17 @@ type wispStepInjectState struct {
 	InjectedAt     string `json:"injected_at"`
 }
 
-// wispStepInjectionAtSessionStart is the SessionStart form: always the full
-// reminder. When record is true the returned callback stamps the step as
-// injected — the caller runs it once the hook payload has been written — so
-// the first UserPromptSubmit that follows emits the pointer rather than a
-// second full copy. Preview callers pass false and get a nil callback, so a
-// diagnostic render leaves no trace.
-func wispStepInjectionAtSessionStart(cityPath, sessionKey, conversationID string, record bool) (string, func()) {
+// wispStepInjectionAtSessionStart is the SessionStart (gc prime --hook) form:
+// always the full reminder and never a marker. Whether a SessionStart hook's
+// stdout reaches the model is adapter-specific, so prime makes no claim; the
+// first UserPromptSubmit records after its own write, at the cost of one
+// repeated full step per session start on adapters that do surface both.
+func wispStepInjectionAtSessionStart(cityPath string) string {
 	b := resolveWispStepForInjection(cityPath)
 	if b == nil {
-		return "", nil
+		return ""
 	}
-	var delivered func()
-	if record {
-		stateCity, stepID := wispStepStateCityPath(cityPath), b.ID
-		delivered = func() { recordWispStepInjected(stateCity, sessionKey, conversationID, stepID) }
-	}
-	return formatWispStepReminder(b), delivered
+	return formatWispStepReminder(b)
 }
 
 // wispStepInjectionForPrompt is the UserPromptSubmit form: the full reminder
@@ -99,31 +103,14 @@ func wispStepPromptInjection(cityPath, sessionKey, conversationID string, b *bea
 	return formatWispStepReminder(b), func() { recordWispStepInjected(cityPath, sessionKey, conversationID, stepID) }
 }
 
-// chainAfterDelivery composes post-write callbacks, skipping nil ones; nil
-// when both are nil so callers can keep testing for "nothing to run".
-func chainAfterDelivery(fns ...func()) func() {
-	var live []func()
-	for _, fn := range fns {
-		if fn != nil {
-			live = append(live, fn)
-		}
-	}
-	if len(live) == 0 {
-		return nil
-	}
-	return func() {
-		for _, fn := range live {
-			fn()
-		}
-	}
-}
-
 // formatWispStepPointer is the short per-prompt form of formatWispStepReminder:
-// which step is active and how to re-read it, without the description.
+// which step is active and how to read it, without the description. It makes
+// no claim that the description was seen (see the file comment), so it is
+// sufficient on its own.
 func formatWispStepPointer(b *beads.Bead) string {
 	title := extmsg.SanitizeForSystemReminder(strings.TrimSpace(b.Title))
 	return fmt.Sprintf(
-		"<system-reminder>\nActive step: %s (%s). Its description was injected earlier in this conversation; run `gc bd show %s` to re-read it.\n</system-reminder>\n",
+		"<system-reminder>\nActive step: %s (%s). If you have not read this step's description in this conversation, run `gc bd show %s` before continuing.\n</system-reminder>\n",
 		title, b.ID, b.ID,
 	)
 }

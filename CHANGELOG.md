@@ -28,17 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `UserPromptSubmit` hook (`gc nudge drain --inject`) used to re-emit the
   whole active step description as a `<system-reminder>` on every prompt
   (≈1.2–1.5k tokens per turn for `mol-do-work`) with no change detection.
-  It now emits the full step the first time a session and provider
-  conversation see it — `gc prime --hook` at SessionStart records that
-  first injection — and a one-line pointer (`Active step: <title> (<id>)`,
-  with the `gc bd show` command to re-read it) on every prompt after that,
-  until the active step changes or a new provider conversation starts. The
-  per-session marker lives under the city runtime root
-  (`inject/wisp-step/`), is recorded only after the hook payload was
-  actually written (a failed write leaves the next prompt full), and
-  markers idle for 48 h are pruned whenever a new one is recorded; if the
-  marker cannot be read or written the hook falls back to the previous full
-  injection. Fable 5.1 prompt audit, jadegate scan G-3.
+  It now emits the full step the first time it sees a step for a session
+  and provider conversation, and a one-line pointer (`Active step: <title>
+  (<id>)`, telling the model to `gc bd show` it if it has not read the
+  description in this conversation) on every prompt after that, until the
+  active step changes or a new provider conversation starts. `gc prime
+  --hook` at SessionStart still injects the full step and never records
+  (whether a SessionStart hook's stdout reaches the model is adapter-
+  specific). The per-session marker lives under the city runtime root
+  (`inject/wisp-step/`), is recorded only after the prompt hook's write
+  succeeded, claims nothing about what the model saw, and is pruned after
+  48 h idle; if it cannot be read or written the hook falls back to the
+  previous full injection. Fable 5.1 prompt audit, jadegate scan G-3.
 - **`pool-worker.md` (the bundled default worker prompt when `formula_v2`
   is off) drops the shouting register.** `YOU RUN IT`, `THE RULE`,
   `CRITICAL`, `MANDATORY`/`MUST`/"not optional" and the nine `Do NOT`s are
@@ -63,7 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UserPromptSubmit` drain hook and the poller/supervisor dispatcher) now
   gate `source=mail` items through the same delivery gate that already
   gates `source=wait` items: the reminder is delivered only while the
-  recipient has unread mail and is withdrawn (`mail-read`) otherwise. A
+  recipient has unread mail (read through the messaging-class store derived
+  from the city work store) and is withdrawn (`mail-read`) otherwise. A
   lookup error holds the item for a later pass rather than guessing; cities
   on a storeless mail provider (`fake`/`fail`/`exec:`) keep the previous
   behavior. Independent reminders for separate mails are still queued

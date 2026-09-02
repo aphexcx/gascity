@@ -1733,12 +1733,21 @@ func newQueuedNudgeDeliveryGate(target nudgeTarget, deliveryStore, deliverySessS
 	return gate
 }
 
+// openMailGateWorkStore opens the city WORK store the mail gate's messaging
+// store is derived from. It is the fallback resolveMailMessagesStore uses
+// when [beads.classes.messaging] is not relocated, so it must be the work
+// store and never the nudges-class delivery store: with nudges relocated and
+// messaging still on work, a nudges-rooted lookup would read an empty inbox
+// and withdraw every legitimate reminder. Variable so tests can split the
+// two stores.
+var openMailGateWorkStore = openCityStoreAt
+
 // mailUnreadLookupForNudgeTarget returns the recipient's unread-mail lookup
 // for the mail gate, or nil when no gate can be configured (see
 // queuedNudgeDeliveryGate.unreadMail). The lookup resolves the target's
-// mailbox addresses the way `gc mail check` does and reads unread mail
-// through the bead-backed provider over the same stores the delivery pass
-// already holds.
+// mailbox addresses the way `gc mail check` does (session-class store) and
+// reads unread mail through the bead-backed provider over the messaging-class
+// store derived from the city work store (see openMailGateWorkStore).
 func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore, deliverySessStore beads.Store) func() (bool, error) {
 	if deliveryStore == nil || deliverySessStore == nil || strings.TrimSpace(target.cityPath) == "" {
 		return nil
@@ -1755,7 +1764,11 @@ func mailUnreadLookupForNudgeTarget(target nudgeTarget, deliveryStore, deliveryS
 		if err != nil {
 			return false, fmt.Errorf("resolving mailbox for nudge target %q: %w", identifier, err)
 		}
-		msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), deliveryStore, target.cfg, target.cityPath, nil)
+		workStore, err := openMailGateWorkStore(target.cityPath)
+		if err != nil {
+			return false, fmt.Errorf("opening the work store for nudge target %q mail gate: %w", identifier, err)
+		}
+		msgStore := resolveMailMessagesStore(cliStorageRoutes(target.cityPath), workStore, target.cfg, target.cityPath, nil)
 		mp := beadmail.NewWithStores(msgStore, deliverySessStore)
 		messages, err := collectMailMessages(mp.Check, recipient.recipients)
 		if err != nil {
