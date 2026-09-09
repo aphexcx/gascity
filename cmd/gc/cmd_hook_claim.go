@@ -236,8 +236,8 @@ type hookClaimJSONResult struct {
 	BeadID               string   `json:"bead_id,omitempty"`
 	Assignee             string   `json:"assignee,omitempty"`
 	Route                string   `json:"route,omitempty"`
-	RootBeadID           string   `json:"root_bead_id,omitempty"`
-	ContinuationGroup    string   `json:"continuation_group,omitempty"`
+	RootBeadID           string   `json:"root_bead_id"`
+	ContinuationGroup    string   `json:"continuation_group"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
 }
