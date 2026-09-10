@@ -237,7 +237,7 @@ func closeGeneratedMembersForClosedRoots(store beads.Store) (int, error) {
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
 		closed += n
-		if err != nil {
+		if err != nil && !errors.Is(err, errAutomaticWriteFenced) {
 			closeErr = errors.Join(closeErr, fmt.Errorf("closing terminal workflow subtree %s: %w", root.ID, err))
 		}
 	}
@@ -405,6 +405,9 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 
 		attempted++
 		if err := deleteWorkflowBead(store, c.ID); err != nil {
+			if errors.Is(err, errAutomaticWriteFenced) {
+				continue // another city's row; its own sweep reaps it
+			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue
 		}
@@ -508,6 +511,9 @@ func closeAbandonedRoots(store beads.Store, now time.Time) error {
 		}
 
 		if err := closeMoleculeWithReason(store, root.ID, abandonedRootCloseReason); err != nil {
+			if errors.Is(err, errAutomaticWriteFenced) {
+				continue // another city's row; its own sweep closes it
+			}
 			closeErr = errors.Join(closeErr, fmt.Errorf("closing abandoned root %s: %w", root.ID, err))
 			continue
 		}
@@ -601,6 +607,10 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		}
 		attempted++
 		if err := deleteFn(store, entry.ID); err != nil {
+			if errors.Is(err, errAutomaticWriteFenced) {
+				attempted-- // another city's row; not this sweep's to purge, and not a slot spent
+				continue
+			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
 		}

@@ -803,8 +803,9 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248).
 //
 // gate is this city's cross-city fence (autocloseGateFor(cs.cfg), read under
-// the caller's lock): a closed bead delivered by a federation pull must not
-// make this city re-close a convoy or molecule another city owns.
+// the caller's lock): both stores the autoclosers write through are fenced,
+// so a closed bead delivered by a federation pull never makes this city
+// re-close a convoy, molecule or attached wisp root another city maintains.
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string, gate autocloseGate) {
 	rec := events.Discard
 	if cs.eventProv != nil {
@@ -816,10 +817,12 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	fenced := gate.fence(store, os.Stderr, "gc bead autoclose")
+	fencedGraph := gate.fence(graphStore.Store, os.Stderr, "gc bead autoclose")
 	beadCloseAutocloseDispatch(func() {
-		doConvoyAutocloseWith(store, gate, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, gate, rec, beadID, os.Stderr, graphStore.Store)
+		doConvoyAutocloseWith(fenced, rec, beadID, os.Stderr, os.Stderr)
+		doWispAutocloseWith(fenced, beadID, os.Stderr, fencedGraph)
+		doMoleculeAutocloseWith(fenced, storeRef, rec, beadID, os.Stderr, fencedGraph)
 	})
 }
 

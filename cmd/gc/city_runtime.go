@@ -1440,6 +1440,11 @@ func (cr *CityRuntime) tick(
 	// today, so the GC is byte-identical.
 	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart = time.Now()
+		// The GC's repair, abandoned-root and purge sweeps are automatic
+		// writers of permanent rows; on a federated city they run behind the
+		// cross-city fence (autocloseGate) so only this city's rows are
+		// closed or purged here.
+		graphStore.Store = autocloseGateFor(cr.cfg).fence(graphStore.Store, cr.stderr, cr.logPrefix+": wisp gc")
 		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {

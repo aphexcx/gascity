@@ -85,14 +85,67 @@ func Owners(labels []string) []string {
 	return owners
 }
 
-// ClaimRefusalLine is the one line every refusing call site logs, so an
-// incident responder greps one string — "cross-city-fence refused" — across
-// the hook's stderr, the reconciler's log and the API server's log and gets
-// the same facts in the same order: bead id, owner value(s), this identity, the missing handoff
-// label. Each caller prefixes it with its own logger's context and may append
-// its own detail after it.
-func ClaimRefusalLine(beadID, reason string) string {
+// MayWriteAutomatically is the rule for gc's AUTOMATIC writers — the convoy
+// and molecule autoclose, the attached-wisp close, the wisp GC's repair and
+// purge sweeps: every job that runs in EVERY city holding a copy of a
+// federated store, on the same rows, with nothing but wall-clock ordering
+// between the copies. Two cities that both write the same row produce two
+// closes with their own closed_at, updated_at and row_lock, and the next
+// pull turns them into a dolt conflict (hw-m0t6n, 2026-09-10). So where
+// MayClaim asks "may this city take this bead", this rule asks "is this
+// city THE ONE city that maintains this row", and exactly one city may
+// answer yes:
+//
+//   - thisIdentity empty (after trimming) → ok. Not federated; every row is
+//     this city's alone.
+//   - exactly one owner:* label and it names thisIdentity → ok.
+//   - otherwise → refused: no owner label (a legacy row has no sole
+//     maintainer until it is labeled — gc maintenance owner-backfill is the
+//     door), an owner label naming another city, or two owner labels.
+//
+// handoff:<identity> never licenses an automatic write: a handoff lets the
+// named city CLAIM and work the bead (MayClaim), but the owner's city keeps
+// maintaining the row, so the two never both close it. Labels are compared
+// as exact strings, like MayClaim.
+//
+// reason is empty when ok, and otherwise one greppable run of key=value
+// pairs — the owner value(s) as the bead spells them (or none), this
+// identity, and the rule — that RefusalLine puts the bead id in front of.
+func MayWriteAutomatically(labels []string, thisIdentity string) (ok bool, reason string) {
+	thisIdentity = strings.TrimSpace(thisIdentity)
+	if thisIdentity == "" {
+		return true, ""
+	}
+	owners := Owners(labels)
+	if len(owners) == 1 && owners[0] == thisIdentity {
+		return true, ""
+	}
+	owner := "none"
+	if len(owners) > 0 {
+		quoted := make([]string, 0, len(owners))
+		for _, o := range owners {
+			quoted = append(quoted, logToken(o))
+		}
+		owner = strings.Join(quoted, ",")
+	}
+	return false, "owner=" + owner + " this_identity=" + logToken(thisIdentity) + " rule=sole-owner"
+}
+
+// RefusalLine is the one line every refusing call site logs, so an incident
+// responder greps one string — "cross-city-fence refused" — across the hook's
+// stderr, the reconciler's log and the API server's log and gets the same
+// facts in the same order: bead id, then the rule's reason (owner value(s),
+// this identity, and what would have permitted the write). Each caller
+// prefixes it with its own logger's context and may append its own detail
+// after it.
+func RefusalLine(beadID, reason string) string {
 	return "cross-city-fence refused bead=" + logToken(strings.TrimSpace(beadID)) + " " + reason
+}
+
+// ClaimRefusalLine is RefusalLine for a MayClaim refusal; the reason names
+// the missing handoff label.
+func ClaimRefusalLine(beadID, reason string) string {
+	return RefusalLine(beadID, reason)
 }
 
 // logToken renders s as one value of a key=value log line: bare when it is a
