@@ -263,7 +263,7 @@ func (f *fencedStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
 		}
 	}
 	return f.Store.Tx(commitMsg, func(tx beads.Tx) error {
-		return fn(&fencedTx{Tx: tx, allowed: allowed, parents: parents, fence: f})
+		return fn(&fencedTx{Tx: tx, allowed: allowed, parents: parents, created: map[string][]string{}, fence: f})
 	})
 }
 
@@ -274,6 +274,7 @@ type fencedTx struct {
 	beads.Tx
 	allowed map[string]bool
 	parents map[string][]string // labels of every parent the recording pass named, read outside the lock
+	created map[string][]string // labels of every row this transaction created, so its children can inherit
 	fence   *fencedStore
 }
 
@@ -464,38 +465,77 @@ func (f *fencedStore) parentLabels(parentID string) (labels []string, known bool
 }
 
 // Create stamps the owner label a permanent row should carry (see
-// stampOwner), reading the parent's lane first.
+// stampOwner), reading the parent's lane first. An ownerless permanent
+// child whose parent could not be read has no proven lane, and a lower
+// layer (the policy wrapper, the backend) would otherwise settle it from a
+// cached or defaulted answer: the create is refused instead.
 func (f *fencedStore) Create(b beads.Bead) (beads.Bead, error) {
 	labels, known := f.parentLabels(b.ParentID)
+	if err := f.refuseUnprovenLane(b, known); err != nil {
+		return beads.Bead{}, err
+	}
 	return f.Store.Create(f.gate.stampOwner(b, labels, known))
 }
 
-// Create inside a fenced transaction stamps the owner label the same way —
-// from the parent labels read BEFORE the transaction opened (the recording
-// pass names every parent; nothing is read inside the lock; a parent the
-// recording pass did not name is unknown, so nothing is stamped) — and then
-// permits the new row for the rest of the transaction ONLY by the same rule
-// as any other row, judged from the labels it was created with: creating a
-// row is not a license to maintain it. A row that names another city's
-// owner, or inherited one from its parent, stays refused; an ephemeral row
-// is never fenced; a row whose lane could not be proven is not permitted.
+// refuseUnprovenLane is the create-side refusal: a permanent row that names
+// no owner and whose parent's lane is unknown is not created by an
+// automatic writer of a federated city.
+func (f *fencedStore) refuseUnprovenLane(b beads.Bead, parentKnown bool) error {
+	if parentKnown || b.Ephemeral || federation.HasOwnerLabel(b.Labels) {
+		return nil
+	}
+	id := strings.TrimSpace(b.ID)
+	if id == "" {
+		id = "child-of:" + strings.TrimSpace(b.ParentID)
+	}
+	f.refuse(id, "parent_unreadable="+strconvQuoteToken(strings.TrimSpace(b.ParentID))+" this_identity="+f.gate.identity+" rule=sole-owner")
+	return fmt.Errorf("%w: the lane of a child of %s could not be proven before the create", errAutomaticWriteFenced, strings.TrimSpace(b.ParentID))
+}
+
+// Create inside a fenced transaction stamps the owner label the same way,
+// from a parent lane it can prove without a read under the lock: the labels
+// read BEFORE the transaction opened (the recording pass names every parent
+// it can), or the labels of a parent this same transaction created (a
+// cooked molecule creates its root and then its steps in one Tx). An
+// ownerless permanent child of a parent known neither way is refused, as on
+// the store. The new row is then permitted for the rest of the transaction
+// ONLY by the same rule as any other row, judged from the labels it was
+// created with — creating a row is not a license to maintain it — and that
+// decision REPLACES whatever the recording pass granted the id while it was
+// still absent (a create that supplies its own id on a backend that honors
+// it). A row that names another city's owner, or inherited one, stays
+// refused; an ephemeral row is never fenced.
 func (t *fencedTx) Create(b beads.Bead) (beads.Bead, error) {
-	labels, known := t.parents[b.ParentID]
-	if b.ParentID == "" {
+	parentID := strings.TrimSpace(b.ParentID)
+	labels, known := t.parents[parentID]
+	if !known {
+		labels, known = t.created[parentID]
+	}
+	if parentID == "" {
 		labels, known = nil, true
+	}
+	if err := t.fence.refuseUnprovenLane(b, known); err != nil {
+		return beads.Bead{}, err
 	}
 	stamped := t.fence.gate.stampOwner(b, labels, known)
 	created, err := t.Tx.Create(stamped)
-	if err == nil && created.ID != "" {
-		effective := created.Labels
-		if len(effective) == 0 {
-			effective = stamped.Labels
-		}
-		if stamped.Ephemeral || created.Ephemeral {
-			t.allowed[created.ID] = true
-		} else if ok, _ := federation.MayWriteAutomatically(effective, t.fence.gate.identity); ok {
-			t.allowed[created.ID] = true
-		}
+	if err != nil {
+		return created, err
 	}
-	return created, err
+	effective := created.Labels
+	if len(effective) == 0 {
+		effective = stamped.Labels
+	}
+	permitted := stamped.Ephemeral || created.Ephemeral
+	if !permitted {
+		permitted, _ = federation.MayWriteAutomatically(effective, t.fence.gate.identity)
+	}
+	if requested := strings.TrimSpace(b.ID); requested != "" && requested != created.ID {
+		delete(t.allowed, requested)
+	}
+	if created.ID != "" {
+		t.allowed[created.ID] = permitted
+		t.created[created.ID] = append([]string(nil), effective...)
+	}
+	return created, nil
 }

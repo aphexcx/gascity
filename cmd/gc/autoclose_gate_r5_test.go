@@ -629,3 +629,80 @@ func TestOwnerStampingTxSkipsTheParentReadWhenTheChildNamesItsOwner(t *testing.T
 		t.Fatalf("a child that names no owner must read its parent")
 	}
 }
+
+// A create that supplies its own id, on a backend that honors it, must not
+// keep the permit the recording pass granted that id while it was still
+// absent: the ownership decision REPLACES the earlier permit.
+func TestAutocloseFenceTxExplicitIDCreateReplacesTheRecordingPermit(t *testing.T) {
+	inner := beads.NewMemStore()
+	inner.HonorExplicitIDs = true
+	fenced := (autocloseGate{identity: "citadel"}).fence(inner, io.Discard, "site")
+	err := fenced.Tx("create x then close x", func(tx beads.Tx) error {
+		if _, err := tx.Create(beads.Bead{ID: "x", Title: "theirs", Labels: []string{"owner:jadegate"}}); err != nil {
+			return err
+		}
+		return tx.Close("x")
+	})
+	if !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("Tx err = %v, want errAutomaticWriteFenced", err)
+	}
+	if got, err := inner.Get("x"); err == nil && got.Status == "closed" {
+		t.Fatalf("another city's row x was closed by the transaction that created it")
+	}
+}
+
+// An ownerless permanent child whose parent cannot be read has no proven
+// lane: the fence refuses the create instead of letting a lower layer stamp
+// it from a cached or defaulted answer. A child that names its owner, or an
+// ephemeral row, still passes. Store create and Tx create alike.
+func TestAutocloseFenceCreateRefusesAnOwnerlessChildOfAnUnreadableParent(t *testing.T) {
+	inner := newGCStore([]beads.Bead{{ID: "p", Status: "open", Type: "task", Labels: []string{"owner:jadegate"}}})
+	inner.getErrors["p"] = errors.New("store unreachable")
+	fenced := (autocloseGate{identity: "citadel"}).fence(inner, io.Discard, "site")
+	if _, err := fenced.Create(beads.Bead{Title: "child", ParentID: "p"}); !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("ownerless child of an unreadable parent: err = %v, want errAutomaticWriteFenced", err)
+	}
+	if _, err := fenced.Create(beads.Bead{Title: "child", ParentID: "p", Labels: []string{"owner:jadegate"}}); err != nil {
+		t.Fatalf("child naming its owner: %v", err)
+	}
+	if _, err := fenced.Create(beads.Bead{Title: "wisp", ParentID: "p", Ephemeral: true}); err != nil {
+		t.Fatalf("ephemeral child: %v", err)
+	}
+	err := fenced.Tx("create", func(tx beads.Tx) error {
+		_, err := tx.Create(beads.Bead{Title: "child", ParentID: "p"})
+		return err
+	})
+	if !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("Tx: ownerless child of an unreadable parent: err = %v, want errAutomaticWriteFenced", err)
+	}
+}
+
+// A parent created earlier in the same fenced transaction is known to it
+// (a cooked molecule creates its root and then its steps in one Tx): the
+// child inherits the lane and both stay permitted.
+func TestAutocloseFenceTxKnowsTheParentsItCreated(t *testing.T) {
+	fenced, inner, _ := fencedMem(t, "citadel")
+	var childID string
+	err := fenced.Tx("cook", func(tx beads.Tx) error {
+		root, err := tx.Create(beads.Bead{Title: "root"})
+		if err != nil {
+			return err
+		}
+		child, err := tx.Create(beads.Bead{Title: "step", ParentID: root.ID})
+		if err != nil {
+			return err
+		}
+		childID = child.ID
+		return tx.Close(child.ID)
+	})
+	if err != nil {
+		t.Fatalf("cook: %v", err)
+	}
+	got, err := inner.Get(childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.Labels, ",") != "owner:citadel" || got.Status != "closed" {
+		t.Fatalf("child labels = %q status = %q, want owner:citadel closed", got.Labels, got.Status)
+	}
+}
