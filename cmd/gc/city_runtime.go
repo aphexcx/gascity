@@ -75,7 +75,9 @@ func sweepOrphanedOrderTrackingAtBoot(routes *storageRoutes, cityPath string, cf
 	// dedup above, which compares the bare stores).
 	gate := autocloseGateFor(cfg)
 	for i := range stores {
-		stores[i] = gate.fence(stores[i], stderr, "gc start: order tracking sweep")
+		stores[i] = fenceOrderTrackingSweepStore(stores[i], func(s beads.Store) beads.Store {
+			return gate.fence(s, stderr, "gc start: order tracking sweep")
+		})
 	}
 	for _, store := range stores {
 		if n, err := sweepOrphanedOrderTrackingRetryLimit(store, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
@@ -1835,7 +1837,9 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// federated city every store it sweeps runs behind the cross-city fence
 	// (after the dedup above, which compares the bare stores).
 	for i := range stores {
-		stores[i] = cr.fenceMaintenance(stores[i], "order-tracking sweep")
+		stores[i] = fenceOrderTrackingSweepStore(stores[i], func(s beads.Store) beads.Store {
+			return cr.fenceMaintenance(s, "order-tracking sweep")
+		})
 	}
 	closeOpened := func() {
 		for _, s := range freshlyOpened {

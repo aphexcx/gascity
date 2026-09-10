@@ -62,7 +62,17 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	// inside StaleShadowsBefore; the cross-phase close budget stays in this loop.
 	nudgeCutoff := now.Add(-nudgeTTL)
 	// nudge/mail beads are NoHistory (wisp-tier); StaleShadowsBefore reads both tiers.
-	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, limit, liveIDs)
+	//
+	// Behind the cross-city fence the candidate query is NOT capped: a limit
+	// applied before ownership is known would select the same foreign rows
+	// at the front of the list every pass, refuse them, and never reach this
+	// city's own rows behind them. The close budget below still caps writes.
+	// A non-federated store keeps its bounded query.
+	candidateLimit := limit
+	if _, fenced := nudgeStore.Store.(automaticWriteFilter); fenced {
+		candidateLimit = 0
+	}
+	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, candidateLimit, liveIDs)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep: listing stale nudge beads: %w", err)
 	}
@@ -96,7 +106,11 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if limit == 0 {
 			mailBudget = 0
 		}
-		mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBefore(mailStore, mailCutoff, mailBudget, nudgeMailSweepMailCloseReason)
+		mailCandidateLimit := mailBudget
+		if _, fenced := mailStore.Store.(automaticWriteFilter); fenced {
+			mailCandidateLimit = 0 // same reason as the nudge phase above
+		}
+		mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBeforeWithCandidates(mailStore, mailCutoff, mailCandidateLimit, mailBudget, nudgeMailSweepMailCloseReason)
 		if mailListErr != nil {
 			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
 		}

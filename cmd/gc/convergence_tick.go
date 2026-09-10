@@ -260,6 +260,11 @@ func (cr *CityRuntime) convergenceTickScope(ctx context.Context, scope *converge
 	}
 
 	for _, beadID := range scope.adapter.activeBeadIDs() {
+		// Progression pours the next iteration before it writes the root; the
+		// same authorization as startup reconciliation, for the same reason.
+		if !mayWriteAutomatically(scope.store, beadID) {
+			continue
+		}
 		meta, err := scope.adapter.GetMetadata(beadID)
 		if err != nil {
 			continue
@@ -574,6 +579,13 @@ func (cr *CityRuntime) convergenceStartupReconcileScope(ctx context.Context, sco
 
 	var beadIDs []string
 	for _, b := range all {
+		// Reconciliation pours a root's first wisp BEFORE its first root write
+		// (Create is not fenced), so the root is authorized here: another
+		// city's root gets no child from this city. Skipped, not refused —
+		// its own city reconciles it.
+		if !mayWriteAutomatically(scope.store, b.ID) {
+			continue
+		}
 		beadIDs = append(beadIDs, b.ID)
 	}
 

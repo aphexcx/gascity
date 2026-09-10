@@ -1800,6 +1800,17 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		}
 		return 1
 	}
+	// The core pack runs this command on a schedule (orders/order-tracking-sweep):
+	// an automatic writer with no agent behind it. On a federated city every
+	// store it sweeps — stale-close, retention delete, the wisp-subtree half —
+	// runs behind the cross-city fence, after the dedup above.
+	gate := autocloseGateFor(cfg)
+	for i := range stores {
+		stores[i] = fenceOrderTrackingSweepStore(stores[i], func(s beads.Store) beads.Store {
+			return gate.fence(s, stderr, "gc order sweep-tracking")
+		})
+	}
+	wispStore = gate.fence(wispStore, stderr, "gc order sweep-tracking")
 	now := time.Now()
 	var result orderTrackingSweepResult
 	var sweepErr error
@@ -2075,6 +2086,16 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 		return 1
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
+	// The core pack runs this command on a schedule (orders/nudge-mail-sweep):
+	// an automatic writer with no agent behind it. On a federated city it
+	// sweeps behind the cross-city fence; a city.toml that cannot load is a
+	// failure, never a bare store.
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	swept := autocloseGateFor(cfg).fence(store, stderr, "gc order sweep-nudge-mail")
 
 	// Load nudge state to protect live nudge IDs from being swept. A missing
 	// state file is not an error (LoadState returns empty state), so any error
@@ -2089,9 +2110,9 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 
 	now := time.Now()
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(swept, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRun(store, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRun(swept, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
 }
 
 func cmdOrderSweepNudgeMailDryRun(store beads.Store, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {

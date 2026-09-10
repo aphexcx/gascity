@@ -344,3 +344,85 @@ func (f *fencedStore) Handles() beads.StoreHandles {
 	h := beads.HandlesFor(f.Store)
 	return beads.StoreHandles{Cached: h.Cached, Live: h.Live, Writer: f}
 }
+
+// fenceDemandPrepStores hands the demand-preparation passes their stores.
+// Legacy-bound route canonicalization, slot-suffix collapse and
+// control-dispatcher route repair rewrite gc.routed_to on open, unassigned
+// work with no agent behind it — automatic writers that every city's
+// controller runs on the same shared rows — so on a federated city they
+// write only this city's rows. The result is index-aligned with stores (and
+// so with the beads they came with); one fence per distinct store, so a
+// refused row is logged once. A non-federated city gets stores back as is.
+func fenceDemandPrepStores(cfg *config.City, stores []beads.Store, stderr io.Writer) []beads.Store {
+	gate := autocloseGateFor(cfg)
+	if gate.identity == "" {
+		return stores
+	}
+	fenced := make([]beads.Store, len(stores))
+	byStore := make(map[beads.Store]beads.Store, 4)
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		f, ok := byStore[store]
+		if !ok {
+			f = gate.fence(store, stderr, "demand prep")
+			byStore[store] = f
+		}
+		fenced[i] = f
+	}
+	return fenced
+}
+
+// fenceOrderTrackingSweepStore fences a store the order-tracking sweeps carry
+// inside their scope wrapper. The wrapper embeds a bare beads.Store and does
+// not forward Handles(), so a fence around the WRAPPER would read the row
+// through the wrapper's plain Get — a CachingStore's memoized row — and
+// authorize from a stale owner label. The fence goes around the inner store,
+// where the live handle is, and the wrapper (its label and dedup key) goes
+// back outside it. An unwrapped store is fenced directly.
+func fenceOrderTrackingSweepStore(store beads.Store, fence func(beads.Store) beads.Store) beads.Store {
+	if scoped, ok := store.(orderTrackingSweepScopedStore); ok {
+		scoped.Store = fence(scoped.Store)
+		return scoped
+	}
+	return fence(store)
+}
+
+// bareStore returns the store behind a fence, or store itself. For identity
+// comparisons that must see the database, not the wrapper around it.
+func bareStore(store beads.Store) beads.Store {
+	if f, ok := store.(*fencedStore); ok {
+		return f.Store
+	}
+	return store
+}
+
+// stampOwner labels a permanent row this city's automatic writer creates:
+// the city that creates a row maintains it, so its own follow-up writes
+// (a cooked molecule's steps and deps, a poured wisp's metadata) pass the
+// fence and the other city's are refused. A row that already names an owner
+// keeps it; an ephemeral row is never fenced and never labeled.
+func (g autocloseGate) stampOwner(b beads.Bead) beads.Bead {
+	if b.Ephemeral || len(federation.Owners(b.Labels)) > 0 {
+		return b
+	}
+	b.Labels = append(append(make([]string, 0, len(b.Labels)+1), b.Labels...), federation.OwnerLabelPrefix+g.identity)
+	return b
+}
+
+// Create stamps this city's owner label on a permanent row (see stampOwner).
+func (f *fencedStore) Create(b beads.Bead) (beads.Bead, error) {
+	return f.Store.Create(f.gate.stampOwner(b))
+}
+
+// Create inside a fenced transaction stamps the owner label the same way and
+// permits the new row for the rest of the transaction: a row this city just
+// created is its own, and the recording pass could not have named its id.
+func (t *fencedTx) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := t.Tx.Create(t.fence.gate.stampOwner(b))
+	if err == nil && created.ID != "" {
+		t.allowed[created.ID] = true
+	}
+	return created, err
+}

@@ -94,6 +94,21 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
+// Handles forwards the inner store's readers and writer through the scope
+// wrapper: the cross-city fence sits on the INNER store (see
+// fenceOrderTrackingSweepStore), and both the fence's authorizing read and
+// the sweeps' cache-bypassing re-reads must reach the live handle beneath it.
+func (s orderTrackingSweepScopedStore) Handles() beads.StoreHandles {
+	return beads.HandlesFor(s.Store)
+}
+
+// automaticWriteAllowed forwards the bounded sweeps' pre-filter through the
+// scope wrapper to the fence on the inner store; an unfenced inner store
+// allows everything, as mayWriteAutomatically does.
+func (s orderTrackingSweepScopedStore) automaticWriteAllowed(id string) bool {
+	return mayWriteAutomatically(s.Store, id)
+}
+
 func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
