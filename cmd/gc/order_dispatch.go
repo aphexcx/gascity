@@ -2564,6 +2564,9 @@ func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) 
 	}
 	ids := make([]string, 0, len(runs))
 	for _, run := range runs {
+		if !mayWriteAutomatically(store, run.ID) {
+			continue // another city's row; not this sweep's, and not a slot spent
+		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
 			break
@@ -2786,6 +2789,9 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 			if _, ok := onlyOrders[run.Scoped]; !ok {
 				continue
 			}
+		}
+		if !mayWriteAutomatically(store, run.ID) {
+			continue // another city's row; not this sweep's, and not a slot spent
 		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {

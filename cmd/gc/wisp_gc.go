@@ -406,7 +406,8 @@ func reapOrphanedClosedWisps(store beads.Store, cutoff time.Time, batchCap int) 
 		attempted++
 		if err := deleteWorkflowBead(store, c.ID); err != nil {
 			if errors.Is(err, errAutomaticWriteFenced) {
-				continue // another city's row; its own sweep reaps it
+				attempted-- // another city's row; its own sweep reaps it, and no slot was spent
+				continue
 			}
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("reaping orphaned closed wisp %q: %w", c.ID, err))
 			continue

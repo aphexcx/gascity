@@ -218,28 +218,96 @@ func (f *fencedStore) DepRemove(issueID, dependsOnID string) error {
 	return f.Store.DepRemove(issueID, dependsOnID)
 }
 
-// Tx authorizes OUTSIDE the transaction, then runs it. A store's Tx can hold
-// a lock for the whole callback (the native dolt store holds its read lock;
-// a reconnecting read inside would wait on the same lock forever), so the
-// rows are read before the transaction opens: the callback runs once
-// against a recorder that only collects the ids it writes (beads.Tx has no
-// reads, so a callback's writes are fixed by what it captured and it runs
-// the same way twice), every id is authorized through the wrapped store's
-// live handle, and only then does the real transaction run the callback
-// again — with no fence reads inside it. A callback error on the recording
-// pass is returned as is; a refused id returns the refusal and the
-// transaction never opens. Create is not fenced on either pass.
+// Tx authorizes OUTSIDE the transaction, then runs it with an allowlist
+// inside. A store's Tx can hold a lock for the whole callback (the native
+// dolt store holds its read lock; a reconnecting read inside would wait on
+// the same lock forever), so the rows are read before the transaction
+// opens: the callback runs once against a recorder that only collects the
+// ids it writes, every id is authorized through the wrapped store's live
+// handle, and only then does the real transaction run the callback again
+// behind a Tx that permits exactly those ids and refuses any other without
+// a read. A callback whose control flow depends on write results (the
+// recorder answers every write with success) can therefore name a row on
+// the real pass it did not name on the recording pass — and that write is
+// refused, never read. A callback error on the recording pass is returned
+// as is; a refused id returns the refusal and the transaction never opens.
+// Create is not fenced on either pass.
 func (f *fencedStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
 	rec := &recordingTx{}
 	if err := fn(rec); err != nil {
 		return err
 	}
+	allowed := make(map[string]bool, len(rec.ids))
 	for _, id := range rec.ids {
 		if err := f.allow(id); err != nil {
 			return err
 		}
+		allowed[id] = true
 	}
-	return f.Store.Tx(commitMsg, fn)
+	return f.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(&fencedTx{Tx: tx, allowed: allowed, fence: f})
+	})
+}
+
+// fencedTx is the real pass of a fenced transaction: only the ids the
+// recording pass named and the fence authorized may be written; anything
+// else is refused in memory, without a read.
+type fencedTx struct {
+	beads.Tx
+	allowed map[string]bool
+	fence   *fencedStore
+}
+
+func (t *fencedTx) permit(id string) error {
+	if t.allowed[id] {
+		return nil
+	}
+	t.fence.refuse(id, "this_identity="+t.fence.gate.identity+" rule=sole-owner tx=unrecorded-write")
+	return fmt.Errorf("%w: %s was not named on the transaction's recording pass", errAutomaticWriteFenced, id)
+}
+
+func (t *fencedTx) Update(id string, opts beads.UpdateOpts) error {
+	if err := t.permit(id); err != nil {
+		return err
+	}
+	return t.Tx.Update(id, opts)
+}
+
+func (t *fencedTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := t.permit(id); err != nil {
+		return err
+	}
+	return t.Tx.SetMetadataBatch(id, kvs)
+}
+
+func (t *fencedTx) Close(id string) error {
+	if err := t.permit(id); err != nil {
+		return err
+	}
+	return t.Tx.Close(id)
+}
+
+// automaticWriteFilter is what a fenced store exposes so a BOUNDED sweep can
+// leave out the rows the fence would refuse before spending its budget on
+// them — otherwise a handful of another city's rows at the front of the
+// candidate list would be selected, refused and re-selected every pass,
+// starving this city's own rows behind them. It is not a second door: the
+// write itself is still fenced; this only asks the same question earlier.
+type automaticWriteFilter interface {
+	automaticWriteAllowed(id string) bool
+}
+
+func (f *fencedStore) automaticWriteAllowed(id string) bool {
+	return f.allow(id) == nil
+}
+
+// mayWriteAutomatically reports whether store would let an automatic writer
+// write id: true for any store that is not fenced.
+func mayWriteAutomatically(store beads.Store, id string) bool {
+	if filter, ok := store.(automaticWriteFilter); ok {
+		return filter.automaticWriteAllowed(id)
+	}
+	return true
 }
 
 // recordingTx is the fence's first pass over a transaction callback: it

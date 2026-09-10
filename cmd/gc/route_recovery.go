@@ -48,7 +48,15 @@ func carriedPoolRoute(b beads.Bead) string {
 // routeRecoveryLaneOf returns this runtime's lane, creating it on first use so a
 // directly-constructed CityRuntime (every test, every one-shot) needs no wiring.
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
-	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
+	cr.routeRecoveryOnce.Do(func() {
+		cr.routeRecovery = newRouteRecoveryLane()
+		// Route recovery rewrites routing metadata on open, unassigned beads
+		// with no agent behind it; on a federated city every leg's store is
+		// written through the cross-city fence.
+		cr.routeRecovery.fence = func(store beads.Store) beads.Store {
+			return autocloseGateFor(cr.serviceConfigSnapshot()).fence(store, cr.stderr, cr.logPrefix+": route recovery")
+		}
+	})
 	return cr.routeRecovery
 }
 

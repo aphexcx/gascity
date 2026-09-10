@@ -70,6 +70,13 @@ func sweepOrphanedOrderTrackingAtBoot(routes *storageRoutes, cityPath string, cf
 	if ordersStore := resolveOrderStore(routes, nil, cfg, cityPath, rec); ordersStore != nil && ordersStore != workStore {
 		stores = append(stores, ordersStore)
 	}
+	// The boot sweep closes orphaned tracking rows with no agent behind it;
+	// on a federated city it runs behind the cross-city fence (after the
+	// dedup above, which compares the bare stores).
+	gate := autocloseGateFor(cfg)
+	for i := range stores {
+		stores[i] = gate.fence(stores[i], stderr, "gc start: order tracking sweep")
+	}
 	for _, store := range stores {
 		if n, err := sweepOrphanedOrderTrackingRetryLimit(store, 3, time.Second, orderTrackingSweepCloseBudget); err != nil {
 			fmt.Fprintf(stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr

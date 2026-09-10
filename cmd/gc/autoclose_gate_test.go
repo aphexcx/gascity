@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -791,5 +792,118 @@ func TestRuntimeMaintenanceStoresAreFenced(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A callback whose control flow depends on write results can name a row on
+// the real pass it did not name on the recording pass; that write is refused
+// inside the transaction, without a read.
+func TestAutocloseFenceTxRefusesUnrecordedWrites(t *testing.T) {
+	inner := &txGuardStore{MemStore: beads.NewMemStore()}
+	foreign, _ := inner.Create(beads.Bead{Title: "theirs", Labels: []string{"owner:jadegate"}})
+	var log bytes.Buffer
+	store := (autocloseGate{identity: "citadel"}).fence(inner, &log, "site")
+
+	err := store.Tx("sneaky", func(tx beads.Tx) error {
+		if err := tx.Close("missing"); err != nil {
+			// The recorder answered success; the real transaction says not
+			// found — and the callback reaches for a row it never named.
+			return tx.Close(foreign.ID)
+		}
+		return nil
+	})
+	if !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("Tx = %v, want errAutomaticWriteFenced for the unrecorded write", err)
+	}
+	if got, _ := inner.MemStore.Get(foreign.ID); got.Status != "open" {
+		t.Fatalf("foreign row written on the real pass: %+v", got)
+	}
+	if inner.readsDuringTx != 0 {
+		t.Fatalf("reads during tx = %d, want 0", inner.readsDuringTx)
+	}
+	if !strings.Contains(log.String(), "cross-city-fence refused bead="+foreign.ID+" this_identity=citadel rule=sole-owner tx=unrecorded-write") {
+		t.Fatalf("log = %q", log.String())
+	}
+}
+
+// A bounded sweep must not spend its budget on rows the fence refuses, or
+// another city's rows at the front of the list starve this city's own.
+func TestOrderTrackingSweepsSkipForeignRowsBeforeSpendingTheBudget(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour)
+	seed := func(t *testing.T) (beads.Store, *beads.MemStore, []string, string) {
+		t.Helper()
+		var seedBeads []beads.Bead
+		var foreign []string
+		for _, name := range []string{"a", "b", "c", "d"} {
+			id := "track-" + name
+			seedBeads = append(seedBeads, beads.Bead{ID: id, Title: "order:" + name, Status: "open", Labels: []string{"order-run:" + name, labelOrderTracking, "owner:jadegate"}, CreatedAt: old})
+			foreign = append(foreign, id)
+		}
+		seedBeads = append(seedBeads, beads.Bead{ID: "track-mine", Title: "order:mine", Status: "open", Labels: []string{"order-run:mine", labelOrderTracking, "owner:citadel"}, CreatedAt: old})
+		inner := beads.NewMemStoreFrom(100, seedBeads, nil)
+		return (autocloseGate{identity: "citadel"}).fence(inner, io.Discard, "sweep"), inner, foreign, "track-mine"
+	}
+	assertOnlyMine := func(t *testing.T, inner *beads.MemStore, foreign []string, mine string) {
+		t.Helper()
+		if got, _ := inner.Get(mine); got.Status != "closed" {
+			t.Fatalf("my own tracking row not closed: %q", got.Status)
+		}
+		for _, id := range foreign {
+			if got, _ := inner.Get(id); got.Status != "open" {
+				t.Fatalf("foreign tracking row %s written: %q", id, got.Status)
+			}
+		}
+	}
+
+	t.Run("orphaned", func(t *testing.T) {
+		store, inner, foreign, mine := seed(t)
+		closed, err := sweepOrphanedOrderTrackingLimit(store, 1)
+		if err != nil || closed != 1 {
+			t.Fatalf("sweep = (%d, %v), want (1, nil)", closed, err)
+		}
+		assertOnlyMine(t, inner, foreign, mine)
+	})
+	t.Run("stale", func(t *testing.T) {
+		store, inner, foreign, mine := seed(t)
+		result, err := sweepStaleOrderTrackingWithOptionsLimit(store, time.Now(), time.Hour, nil, "watchdog", false, 1)
+		if err != nil || result.trackingClosed != 1 {
+			t.Fatalf("sweep = (%+v, %v), want one tracking row closed", result, err)
+		}
+		assertOnlyMine(t, inner, foreign, mine)
+	})
+}
+
+// Route recovery rewrites gc.routed_to on open, unassigned beads with no
+// agent behind it; only the row's own city does.
+func TestRouteRecoveryTwoCitiesOnlyOwnerWrites(t *testing.T) {
+	for _, tc := range twoCityCases {
+		t.Run("city="+tc.city, func(t *testing.T) {
+			inner := beads.NewMemStore()
+			b, err := inner.Create(beads.Bead{Title: "unrouted", Labels: []string{"owner:citadel"}, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "pool"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var log bytes.Buffer
+			lane := newRouteRecoveryLane()
+			lane.fence = func(s beads.Store) beads.Store {
+				return (autocloseGate{identity: tc.city}).fence(s, &log, "route recovery")
+			}
+			live, _ := inner.Get(b.ID)
+			out := lane.restoreRoute(lane.fenced(inner), live, false)
+			if out.err != nil {
+				t.Fatalf("restoreRoute err = %v (a refused row is a skip, never an error)", out.err)
+			}
+			got, _ := inner.Get(b.ID)
+			routed := got.Metadata[beadmeta.RoutedToMetadataKey] == "pool"
+			if routed != tc.wantClosed || out.restored != tc.wantClosed {
+				t.Fatalf("routed = %v restored = %v, want %v; log=%q", routed, out.restored, tc.wantClosed, log.String())
+			}
+		})
+	}
+	// The runtime arms the lane with this city's fence.
+	cr := &CityRuntime{cfg: &config.City{Federation: config.FederationConfig{Identity: "jadegate"}}, stderr: io.Discard}
+	lane := cr.routeRecoveryLaneOf()
+	if _, ok := lane.fenced(beads.NewMemStore()).(*fencedStore); !ok {
+		t.Fatalf("the runtime's lane must fence a leg's store on a federated city")
 	}
 }
