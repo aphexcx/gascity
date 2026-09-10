@@ -379,6 +379,12 @@ func (f *fencedStore) Handles() beads.StoreHandles {
 // write only this city's rows. The result is index-aligned with stores (and
 // so with the beads they came with); one fence per distinct store, so a
 // refused row is logged once. A non-federated city gets stores back as is.
+//
+// residency:allow — a constructor INPUT, not a residency answer. It wraps the
+// index-aligned store list the demand build already resolved (through
+// collectOpenUnassignedRoutedWork / collectAssignedWorkBeadsWithStores) and
+// hands it straight back to the same passes; it opens nothing, consults no
+// binding, no namespace and no leg order, and enumerates no store of its own.
 func fenceDemandPrepStores(cfg *config.City, stores []beads.Store, stderr io.Writer) []beads.Store {
 	gate := autocloseGateFor(cfg)
 	if gate.identity == "" {
