@@ -137,9 +137,16 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	liveIDs := liveNudgeIDSet(nudgeState)
 	nq := nudgequeue.NewStore(nudgeStore)
 
-	// Dry-run twin of the sweep: same typed read, same cross-phase budget, no writes.
+	// Dry-run twin of the sweep: same typed read, same cross-phase budget, no
+	// writes — and behind the cross-city fence the same uncapped candidate
+	// query and the same ownership answer, so it counts what the sweep would
+	// close, not what the candidate list happens to start with.
 	nudgeCutoff := now.Add(-nudgeTTL)
-	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, limit, liveIDs)
+	candidateLimit := limit
+	if _, fenced := nudgeStore.Store.(automaticWriteFilter); fenced {
+		candidateLimit = 0
+	}
+	nudgeShadows, err := nq.StaleShadowsBefore(nudgeCutoff, candidateLimit, liveIDs)
 	if err != nil {
 		return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing stale nudge beads: %w", err)
 	}
@@ -147,7 +154,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
 			break
 		}
-		if !shadow.Open {
+		if !shadow.Open || !mayWriteAutomatically(nudgeStore.Store, shadow.BeadID) {
 			continue
 		}
 		result.NudgeClosed++
@@ -160,7 +167,13 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		if limit == 0 {
 			mailBudget = 0
 		}
-		mailCount, err := beadmail.CountReadMessagesBefore(mailStore, mailCutoff, mailBudget)
+		mailCandidateLimit := mailBudget
+		if _, fenced := mailStore.Store.(automaticWriteFilter); fenced {
+			mailCandidateLimit = 0
+		}
+		mailCount, err := beadmail.CountReadMessagesBeforeWithCandidates(mailStore, mailCutoff, mailCandidateLimit, mailBudget, func(b beads.Bead) bool {
+			return mayWriteAutomatically(mailStore.Store, b.ID)
+		})
 		if err != nil {
 			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
 		}

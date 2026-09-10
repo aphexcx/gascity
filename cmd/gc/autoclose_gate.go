@@ -473,17 +473,29 @@ func (f *fencedStore) Create(b beads.Bead) (beads.Bead, error) {
 // Create inside a fenced transaction stamps the owner label the same way —
 // from the parent labels read BEFORE the transaction opened (the recording
 // pass names every parent; nothing is read inside the lock; a parent the
-// recording pass did not name is unknown, so nothing is stamped) — and
-// permits the new row for the rest of the transaction: a row this city just
-// created is its own, and the recording pass could not have named its id.
+// recording pass did not name is unknown, so nothing is stamped) — and then
+// permits the new row for the rest of the transaction ONLY by the same rule
+// as any other row, judged from the labels it was created with: creating a
+// row is not a license to maintain it. A row that names another city's
+// owner, or inherited one from its parent, stays refused; an ephemeral row
+// is never fenced; a row whose lane could not be proven is not permitted.
 func (t *fencedTx) Create(b beads.Bead) (beads.Bead, error) {
 	labels, known := t.parents[b.ParentID]
 	if b.ParentID == "" {
 		labels, known = nil, true
 	}
-	created, err := t.Tx.Create(t.fence.gate.stampOwner(b, labels, known))
+	stamped := t.fence.gate.stampOwner(b, labels, known)
+	created, err := t.Tx.Create(stamped)
 	if err == nil && created.ID != "" {
-		t.allowed[created.ID] = true
+		effective := created.Labels
+		if len(effective) == 0 {
+			effective = stamped.Labels
+		}
+		if stamped.Ephemeral || created.Ephemeral {
+			t.allowed[created.ID] = true
+		} else if ok, _ := federation.MayWriteAutomatically(effective, t.fence.gate.identity); ok {
+			t.allowed[created.ID] = true
+		}
 	}
 	return created, err
 }

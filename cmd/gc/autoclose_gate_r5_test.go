@@ -498,3 +498,134 @@ func TestAutocloseFenceRefusesAnIDCollision(t *testing.T) {
 		t.Fatalf("log = %q, want an id_collision refusal", log.String())
 	}
 }
+
+// A row created inside a fenced transaction is permitted for the rest of
+// it only when this city may maintain it: a row that names another city's
+// owner, or inherits one from its parent, is refused like any other row.
+func TestAutocloseFenceTxDoesNotPermitAForeignRowItCreated(t *testing.T) {
+	fenced, inner, _ := fencedMem(t, "citadel")
+	theirs, _ := inner.Create(beads.Bead{Title: "their root", Labels: []string{"owner:jadegate"}})
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{"names another owner", beads.Bead{Title: "child", Labels: []string{"owner:jadegate"}}},
+		{"inherits another owner", beads.Bead{Title: "child", ParentID: theirs.ID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var created beads.Bead
+			err := fenced.Tx("create then close", func(tx beads.Tx) error {
+				c, err := tx.Create(tc.bead)
+				if err != nil {
+					return err
+				}
+				created = c
+				return tx.Close(c.ID)
+			})
+			if !errors.Is(err, errAutomaticWriteFenced) {
+				t.Fatalf("Tx err = %v, want errAutomaticWriteFenced", err)
+			}
+			if created.ID != "" {
+				if got, getErr := inner.Get(created.ID); getErr == nil && got.Status == "closed" {
+					t.Fatalf("foreign row %s closed by the transaction that created it", created.ID)
+				}
+			}
+		})
+	}
+	// Control: a row this city may maintain is permitted.
+	err := fenced.Tx("create then close", func(tx beads.Tx) error {
+		c, err := tx.Create(beads.Bead{Title: "mine"})
+		if err != nil {
+			return err
+		}
+		return tx.Close(c.ID)
+	})
+	if err != nil {
+		t.Fatalf("own row: %v", err)
+	}
+}
+
+// The dry-run twin of the nudge/mail sweep counts what the sweep would
+// close: behind the fence that is this city's rows only, found behind a
+// foreign backlog just as the sweep finds them.
+func TestNudgeMailDryRunCountsMatchTheSweepBehindAForeignBacklog(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-3 * time.Hour)
+	var seed []beads.Bead
+	for i := range 20 {
+		n := nudgeSeed("nudge-f"+string(rune('a'+i)), "nudge-f"+string(rune('a'+i)), old)
+		n.Labels = append(n.Labels, "owner:jadegate")
+		m := mailSeed("mail-f"+string(rune('a'+i)), old)
+		m.Labels = append(m.Labels, "owner:jadegate")
+		seed = append(seed, n, m)
+	}
+	mine := nudgeSeed("nudge-mine", "nudge-mine", old.Add(time.Minute))
+	mine.Labels = append(mine.Labels, "owner:citadel")
+	mail := mailSeed("mail-mine", old.Add(time.Minute))
+	mail.Labels = append(mail.Labels, "owner:citadel")
+	seed = append(seed, mine, mail)
+	fenced := (autocloseGate{identity: "citadel"}).fence(beads.NewMemStoreFrom(100, seed, nil), io.Discard, "watchdog")
+
+	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: fenced}, beads.MailStore{Store: fenced}, &nudgequeue.State{}, now, 10*time.Minute, 30*time.Minute, 5)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.NudgeClosed != 1 || counts.MailClosed != 1 {
+		t.Fatalf("dry-run would close nudge=%d mail=%d, want 1 each (what the sweep closes)", counts.NudgeClosed, counts.MailClosed)
+	}
+}
+
+// parentReadCountingStore counts the reads a wrapper makes through it.
+type parentReadCountingStore struct {
+	beads.Store
+	gets int
+}
+
+func (s *parentReadCountingStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+// The policy wrapper's transactional Create reads the parent to settle the
+// child's lane. Inside a native transaction that read can wait on the
+// store's own lock, so when the child already names its owner (the fence
+// stamps it before the transaction opens) there is nothing left to read:
+// no parent read under the lock.
+func TestOwnerStampingTxSkipsTheParentReadWhenTheChildNamesItsOwner(t *testing.T) {
+	inner := beads.NewMemStore()
+	parent, err := inner.Create(beads.Bead{Title: "root", Labels: []string{"owner:jadegate"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counting := &parentReadCountingStore{Store: inner}
+	policy := wrapStoreWithBeadPolicies(counting, &config.City{Federation: config.FederationConfig{Identity: "citadel"}})
+	counting.gets = 0
+	err = policy.Tx("create", func(tx beads.Tx) error {
+		_, err := tx.Create(beads.Bead{Title: "child", ParentID: parent.ID, Labels: []string{"owner:jadegate"}})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counting.gets != 0 {
+		t.Fatalf("the transaction read the parent %d time(s) although the child names its owner", counting.gets)
+	}
+	// Control: a child that names no owner still reads its parent to inherit.
+	err = policy.Tx("create", func(tx beads.Tx) error {
+		c, err := tx.Create(beads.Bead{Title: "child", ParentID: parent.ID})
+		if err != nil {
+			return err
+		}
+		if strings.Join(c.Labels, ",") != "owner:jadegate" {
+			return fmt.Errorf("labels = %q, want the parent's owner", c.Labels)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counting.gets == 0 {
+		t.Fatalf("a child that names no owner must read its parent")
+	}
+}
