@@ -51,7 +51,7 @@ func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
-	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	switch store, _, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
 	case autocloseResolved:
 		doWispAutocloseWith(store, beadID, stdout)
 		return

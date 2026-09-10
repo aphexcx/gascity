@@ -748,8 +748,10 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(evt)
 	var storeRef string
+	var gate autocloseGate
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
+		gate = autocloseGateFor(cs.cfg)
 	}
 	cs.mu.RUnlock()
 
@@ -769,7 +771,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 		cs.mu.RUnlock()
 		executionevent.EmitCompletedFromClosedNotification(rec, cs.GraphBeadStore().Store, evt.Payload, evt.Actor)
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef, gate)
 	}
 }
 
@@ -799,7 +801,11 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248).
-func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
+//
+// gate is this city's cross-city fence (autocloseGateFor(cs.cfg), read under
+// the caller's lock): a closed bead delivered by a federation pull must not
+// make this city re-close a convoy or molecule another city owns.
+func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string, gate autocloseGate) {
 	rec := events.Discard
 	if cs.eventProv != nil {
 		rec = cs.eventProv
@@ -811,9 +817,9 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
-		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+		doConvoyAutocloseWith(store, gate, rec, beadID, os.Stderr, os.Stderr)
 		doWispAutocloseWith(store, beadID, os.Stderr, graphStore.Store)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore.Store)
+		doMoleculeAutocloseWith(store, storeRef, gate, rec, beadID, os.Stderr, graphStore.Store)
 	})
 }
 
