@@ -96,6 +96,15 @@ type fencedStore struct {
 func (f *fencedStore) allow(id string) error {
 	bead, err := beads.HandlesFor(f.Store).Live.Get(id)
 	if err != nil {
+		// bd resolves a missing id to a DIFFERENT bead by substring and
+		// reports ErrIDCollision — which wraps ErrNotFound. That is not an
+		// absent row the write may fall through to (the store's own mutators
+		// would land it on the other, possibly foreign, bead), so it is
+		// refused before the plain not-found pass-through.
+		if errors.Is(err, beads.ErrIDCollision) {
+			f.refuse(id, "id_collision="+strconvQuoteToken(err.Error())+" this_identity="+f.gate.identity+" rule=sole-owner")
+			return fmt.Errorf("%w: %s resolved to a different bead: %w", errAutomaticWriteFenced, id, err)
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}

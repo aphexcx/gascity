@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -473,5 +475,26 @@ func TestAssignedWorkCanonicalizationTwoCitiesOnlyOwnerWrites(t *testing.T) {
 				t.Fatalf("assignee = %q, rewritten=%v want %v; log=%q", got.Assignee, rewritten, tc.wantClosed, log.String())
 			}
 		})
+	}
+}
+
+// bd resolves a missing id to a DIFFERENT bead by substring and reports it
+// as ErrIDCollision, which wraps ErrNotFound. That is not an absent row the
+// write may fall through to: the write would land on the other, possibly
+// foreign, bead. The fence refuses it.
+func TestAutocloseFenceRefusesAnIDCollision(t *testing.T) {
+	inner := newGCStore([]beads.Bead{{ID: "x", Status: "open", Type: "task", Labels: []string{"owner:citadel"}}})
+	inner.getErrors["x"] = fmt.Errorf("getting bead %q (resolved to %q): %w", "x", "x-other", beads.ErrIDCollision)
+	var log bytes.Buffer
+	store := (autocloseGate{identity: "citadel"}).fence(inner, &log, "site")
+	if err := store.Close("x"); !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("Close = %v, want errAutomaticWriteFenced", err)
+	}
+	delete(inner.getErrors, "x")
+	if got, _ := inner.Get("x"); got.Status != "open" {
+		t.Fatalf("row written through an id collision: %q", got.Status)
+	}
+	if !strings.Contains(log.String(), "cross-city-fence refused bead=x") || !strings.Contains(log.String(), "id_collision") {
+		t.Fatalf("log = %q, want an id_collision refusal", log.String())
 	}
 }
