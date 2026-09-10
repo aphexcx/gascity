@@ -321,3 +321,157 @@ func TestAutocloseFenceCreateStampsThisCitysOwnerLabel(t *testing.T) {
 		})
 	}
 }
+
+// A child created through the fence keeps its parent's owner — the store's
+// own rule (federation.OwnerLabelForChild): a create under another city's
+// bead never lands a second owner or the wrong lane. Holds for a store
+// create and for a create inside a fenced transaction.
+func TestAutocloseFenceCreateKeepsTheParentsOwner(t *testing.T) {
+	fenced, inner, _ := fencedMem(t, "citadel")
+	theirs, _ := inner.Create(beads.Bead{Title: "their root", Labels: []string{"owner:jadegate"}})
+	mine, _ := inner.Create(beads.Bead{Title: "my root", Labels: []string{"owner:citadel"}})
+	unowned, _ := inner.Create(beads.Bead{Title: "unowned root"})
+	cases := []struct {
+		name   string
+		parent string
+		want   string
+	}{
+		{"their parent", theirs.ID, "owner:jadegate"},
+		{"my parent", mine.ID, "owner:citadel"},
+		{"unowned parent", unowned.ID, "owner:citadel"},
+		{"no parent", "", "owner:citadel"},
+	}
+	for _, via := range []string{"store", "tx"} {
+		for _, tc := range cases {
+			t.Run(via+"/"+tc.name, func(t *testing.T) {
+				b := beads.Bead{Title: "child", ParentID: tc.parent}
+				var created beads.Bead
+				var err error
+				if via == "store" {
+					created, err = fenced.Create(b)
+				} else {
+					err = fenced.Tx("create", func(tx beads.Tx) error {
+						var txErr error
+						created, txErr = tx.Create(b)
+						return txErr
+					})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := inner.Get(created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Join(got.Labels, ",") != tc.want {
+					t.Fatalf("labels = %q, want %q", got.Labels, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// A lifecycle command (approve/iterate/stop) pours the next iteration BEFORE
+// it writes the root; on another city's root it must refuse first, leaving no
+// child behind.
+func TestConvergenceLifecycleNeverPoursForAnotherCitysRoot(t *testing.T) {
+	cr, store := setupConvergenceRuntime(t)
+	cr.cfg.Federation.Identity = "jadegate"
+	scope := cr.newConvergenceScope("", cr.fenceMaintenance(store, "convergence"), cr.cityPath, []string{sharedTestFormulaDir})
+	cr.convScopes[""] = scope
+	root, err := store.Create(beads.Bead{
+		Title:  "loop",
+		Type:   "convergence",
+		Status: "in_progress",
+		Labels: []string{"owner:citadel"},
+		Metadata: map[string]string{
+			convergence.FieldFormula:       "test-formula",
+			convergence.FieldTarget:        "test-agent",
+			convergence.FieldState:         convergence.StateWaitingManual,
+			convergence.FieldMaxIterations: "5",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := cr.handleConvergenceLifecycle(context.Background(), scope, "iterate", root.ID, "tester")
+	if reply.Error == "" {
+		t.Fatalf("iterate on another city's root succeeded")
+	}
+	children, err := store.List(beads.ListQuery{ParentID: root.ID, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 0 {
+		t.Fatalf("children = %d, want 0 (a refused root must pour nothing); error=%q", len(children), reply.Error)
+	}
+}
+
+// Closed-history retention deletes old tracking rows past the retained
+// floor: only the row's own city does, and the other city's refusals are
+// skips — never a sweep error that fails the scheduled command — and never
+// counted toward the bulk-delete confirm gate.
+func TestClosedOrderTrackingRetentionSkipsForeignRowsWithoutError(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-48 * time.Hour)
+	seed := func() []beads.Bead {
+		var out []beads.Bead
+		for i := range 12 {
+			out = append(out, beads.Bead{
+				ID: "track-" + string(rune('a'+i)), Title: "order:x", Status: "closed",
+				Labels:    []string{"order-run:x", labelOrderTracking, "owner:citadel"},
+				CreatedAt: old.Add(time.Duration(i) * time.Minute), UpdatedAt: old.Add(time.Duration(i) * time.Minute),
+			})
+		}
+		return out
+	}
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: time.Hour, retainLast: 10}
+	for _, tc := range []struct {
+		city string
+		want int
+	}{{"citadel", 2}, {"jadegate", 0}} {
+		t.Run("city="+tc.city, func(t *testing.T) {
+			gate := autocloseGate{identity: tc.city}
+			var log bytes.Buffer
+			full := gate.fence(beads.NewMemStoreFrom(100, seed(), nil), &log, "retention")
+			bounded := gate.fence(beads.NewMemStoreFrom(100, seed(), nil), &log, "retention")
+			counted := gate.fence(beads.NewMemStoreFrom(100, seed(), nil), &log, "retention")
+			n, err := sweepClosedOrderTrackingRetention(full, now, policy, nil)
+			if err != nil || n != tc.want {
+				t.Fatalf("retention = (%d, %v), want (%d, nil); log=%q", n, err, tc.want, log.String())
+			}
+			nb, err := sweepClosedOrderTrackingRetentionBounded(bounded, now, policy, nil, 5)
+			if err != nil || nb != tc.want {
+				t.Fatalf("bounded retention = (%d, %v), want (%d, nil); log=%q", nb, err, tc.want, log.String())
+			}
+			c, err := countClosedOrderTrackingRetentionEligible([]beads.Store{counted}, now, policy, nil)
+			if err != nil || c != tc.want {
+				t.Fatalf("eligible count = (%d, %v), want (%d, nil)", c, err, tc.want)
+			}
+		})
+	}
+}
+
+// Assigned-work canonicalization rewrites the assignee and route of work
+// pre-assigned to a legacy bound identity with no live session behind it —
+// the same automatic writer as the unassigned pass, over the same fenced
+// stores.
+func TestAssignedWorkCanonicalizationTwoCitiesOnlyOwnerWrites(t *testing.T) {
+	const legacy = "rig-A/gc.planner"
+	const canonical = "rig-A/planner"
+	for _, tc := range twoCityCases {
+		t.Run("city="+tc.city, func(t *testing.T) {
+			cfg := legacyBoundRecoveryConfig()
+			cfg.Federation.Identity = tc.city
+			wb := workBead("wb-1", legacy, legacy, "open", 5)
+			wb.Labels = []string{"owner:citadel"}
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			var log bytes.Buffer
+			canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, fenceDemandPrepStores(cfg, []beads.Store{mem}, &log), newSessionBeadSnapshot(nil), &log)
+			got, _ := mem.Get("wb-1")
+			if rewritten := got.Assignee == canonical; rewritten != tc.wantClosed {
+				t.Fatalf("assignee = %q, rewritten=%v want %v; log=%q", got.Assignee, rewritten, tc.wantClosed, log.String())
+			}
+		})
+	}
+}

@@ -740,7 +740,10 @@ func buildDesiredStateWithSessionBeads(
 		// agent onto the canonical identity, so the canonical session the
 		// awake/scale accounting wakes for it can actually surface and claim it
 		// (the agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// An automatic writer (it repairs work whose legacy owner is gone —
+		// not writing for an executing session): fenced like the unassigned
+		// pass below. The bare stores stay with the rest of the demand build.
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, fenceDemandPrepStores(cfg, assignedWorkStores, stderr), sessionBeads, stderr)
 		// Re-home open, unassigned work still routed to a legacy bound form of a
 		// now-unbound pool agent. This is the demand/claim half of the migration:
 		// empty-assignee open work never enters the assigned-work collection above,

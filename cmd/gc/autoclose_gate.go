@@ -244,8 +244,17 @@ func (f *fencedStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
 		}
 		allowed[id] = true
 	}
+	// The parents of the rows the callback creates are read here, outside
+	// the transaction, so a create inside it can stamp the child's lane
+	// without a read under the lock.
+	parents := make(map[string][]string, len(rec.parents))
+	for _, parentID := range rec.parents {
+		if labels, known := f.parentLabels(parentID); known {
+			parents[parentID] = labels
+		}
+	}
 	return f.Store.Tx(commitMsg, func(tx beads.Tx) error {
-		return fn(&fencedTx{Tx: tx, allowed: allowed, fence: f})
+		return fn(&fencedTx{Tx: tx, allowed: allowed, parents: parents, fence: f})
 	})
 }
 
@@ -255,6 +264,7 @@ func (f *fencedStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
 type fencedTx struct {
 	beads.Tx
 	allowed map[string]bool
+	parents map[string][]string // labels of every parent the recording pass named, read outside the lock
 	fence   *fencedStore
 }
 
@@ -313,10 +323,17 @@ func mayWriteAutomatically(store beads.Store, id string) bool {
 // recordingTx is the fence's first pass over a transaction callback: it
 // records the row ids the callback writes and writes nothing.
 type recordingTx struct {
-	ids []string
+	ids     []string
+	parents []string // ParentID of every create, so the real pass can stamp the child's lane
 }
 
-func (r *recordingTx) Create(b beads.Bead) (beads.Bead, error) { return b, nil }
+func (r *recordingTx) Create(b beads.Bead) (beads.Bead, error) {
+	if b.ParentID != "" {
+		r.parents = append(r.parents, b.ParentID)
+	}
+	return b, nil
+}
+
 func (r *recordingTx) Update(id string, _ beads.UpdateOpts) error {
 	r.ids = append(r.ids, id)
 	return nil
@@ -398,29 +415,58 @@ func bareStore(store beads.Store) beads.Store {
 	return store
 }
 
-// stampOwner labels a permanent row this city's automatic writer creates:
-// the city that creates a row maintains it, so its own follow-up writes
-// (a cooked molecule's steps and deps, a poured wisp's metadata) pass the
-// fence and the other city's are refused. A row that already names an owner
-// keeps it; an ephemeral row is never fenced and never labeled.
-func (g autocloseGate) stampOwner(b beads.Bead) beads.Bead {
-	if b.Ephemeral || len(federation.Owners(b.Labels)) > 0 {
+// stampOwner labels a permanent row this city's automatic writer creates by
+// the store's own one rule, federation.OwnerLabelForChild: an owner already
+// on the row wins; a child stays in its PARENT's lane (a create under
+// another city's bead never lands a second owner or the wrong lane); only a
+// child of an unowned parent, or a row with no parent, is the creating
+// city's — so its own follow-up writes (a cooked molecule's steps and deps,
+// a poured wisp's metadata) pass the fence and the other city's are refused.
+// parentLabels are the parent's labels as read through the live handle;
+// parentKnown=false means the parent could not be read: no proof of its
+// lane, so nothing is stamped (a bd backend applies the same rule itself).
+// An ephemeral row is never fenced and never labeled.
+func (g autocloseGate) stampOwner(b beads.Bead, parentLabels []string, parentKnown bool) beads.Bead {
+	if b.Ephemeral || !parentKnown {
 		return b
 	}
-	b.Labels = append(append(make([]string, 0, len(b.Labels)+1), b.Labels...), federation.OwnerLabelPrefix+g.identity)
+	b.Labels = federation.OwnerLabelForChild(append(make([]string, 0, len(b.Labels)+1), b.Labels...), parentLabels, federation.OwnerLabelPrefix+g.identity)
 	return b
 }
 
-// Create stamps this city's owner label on a permanent row (see stampOwner).
-func (f *fencedStore) Create(b beads.Bead) (beads.Bead, error) {
-	return f.Store.Create(f.gate.stampOwner(b))
+// parentLabels reads a parent's labels through the wrapped store's live
+// handle. A row with no parent is known (nil labels); a parent that cannot
+// be read is not.
+func (f *fencedStore) parentLabels(parentID string) (labels []string, known bool) {
+	if parentID == "" {
+		return nil, true
+	}
+	parent, err := beads.HandlesFor(f.Store).Live.Get(parentID)
+	if err != nil {
+		return nil, false
+	}
+	return parent.Labels, true
 }
 
-// Create inside a fenced transaction stamps the owner label the same way and
+// Create stamps the owner label a permanent row should carry (see
+// stampOwner), reading the parent's lane first.
+func (f *fencedStore) Create(b beads.Bead) (beads.Bead, error) {
+	labels, known := f.parentLabels(b.ParentID)
+	return f.Store.Create(f.gate.stampOwner(b, labels, known))
+}
+
+// Create inside a fenced transaction stamps the owner label the same way —
+// from the parent labels read BEFORE the transaction opened (the recording
+// pass names every parent; nothing is read inside the lock; a parent the
+// recording pass did not name is unknown, so nothing is stamped) — and
 // permits the new row for the rest of the transaction: a row this city just
 // created is its own, and the recording pass could not have named its id.
 func (t *fencedTx) Create(b beads.Bead) (beads.Bead, error) {
-	created, err := t.Tx.Create(t.fence.gate.stampOwner(b))
+	labels, known := t.parents[b.ParentID]
+	if b.ParentID == "" {
+		labels, known = nil, true
+	}
+	created, err := t.Tx.Create(t.fence.gate.stampOwner(b, labels, known))
 	if err == nil && created.ID != "" {
 		t.allowed[created.ID] = true
 	}

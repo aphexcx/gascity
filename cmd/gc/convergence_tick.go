@@ -399,6 +399,13 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 // handleConvergenceLifecycle dispatches approve/iterate/stop to the
 // convergence handler bound to the resolved scope's bead store.
 func (cr *CityRuntime) handleConvergenceLifecycle(ctx context.Context, scope *convergenceScope, command, beadID, username string) convergenceReply {
+	// approve/iterate pour the next iteration BEFORE they write the root, so
+	// the root is authorized first: another city's loop gets no child from
+	// this city, and the command says whose loop it is instead of failing
+	// on the root write after the pour.
+	if !mayWriteAutomatically(scope.store, beadID) {
+		return convergenceReply{Error: fmt.Sprintf("convergence loop %s is maintained by another city (cross-city fence); run %s there", beadID, command)}
+	}
 	var (
 		result convergence.HandlerResult
 		err    error
