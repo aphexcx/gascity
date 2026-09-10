@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -2017,7 +2018,9 @@ func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) 
 		// cannot be loaded proves nothing about this city's federation
 		// identity, and an automatic writer that cannot prove it is the
 		// row's one maintainer does not write.
-		if _, statErr := os.Stat(tomlPath); statErr != nil {
+		// Lstat: a broken or looping symlink is a city.toml that EXISTS and
+		// cannot be loaded, not a confirmed absence.
+		if _, statErr := os.Lstat(tomlPath); errors.Is(statErr, fs.ErrNotExist) {
 			return nil, "", autocloseGate{}, autocloseFallback
 		}
 		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — %s could not be loaded, so this city's federation identity cannot be proven: %s\n", beadID, tomlPath, firstErrorLine(err)) //nolint:errcheck // best-effort stderr

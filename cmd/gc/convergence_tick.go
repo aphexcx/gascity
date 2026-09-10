@@ -70,7 +70,10 @@ func (s *convergenceScope) triggerName(prefix string) string {
 // store. Returns nil when no city store is available yet, in which case
 // callers leave the existing scopes untouched.
 func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
-	cityStore := cr.cityBeadStore()
+	// Convergence reconciliation and ticks close and re-create convergence
+	// beads with no agent behind them; on a federated city every scope's
+	// store runs behind the cross-city fence.
+	cityStore := cr.fenceMaintenance(cr.cityBeadStore(), "convergence")
 	if cityStore == nil {
 		return nil
 	}
@@ -83,7 +86,7 @@ func (cr *CityRuntime) buildConvergenceScopes() map[string]*convergenceScope {
 			continue
 		}
 		scopes[rigName] = cr.newConvergenceScope(
-			rigName, store, rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
+			rigName, cr.fenceMaintenance(store, "convergence"), rigStorePaths[rigName], cr.cfg.FormulaLayers.SearchPaths(rigName))
 	}
 	return scopes
 }

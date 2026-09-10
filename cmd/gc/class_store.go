@@ -99,6 +99,19 @@ func (cs *controllerState) workBeadStores() map[string]beads.WorkStore {
 	return toWorkStores(cs.BeadStores())
 }
 
+// fenceMaintenance hands a store to one of the runtime's MAINTENANCE jobs —
+// the sweeps that write beads with no agent behind them (wisp GC, the
+// nudge-mail watchdog, convergence reconciliation, the order-tracking sweep)
+// — behind this city's cross-city fence (autocloseGate): on a federated city
+// only the rows this city is the sole maintainer of are written; a refusal
+// is logged to the runtime's stderr under site. A non-federated city gets
+// the store back unwrapped. The session reconciler is NOT a maintenance job
+// in this sense — it writes on behalf of this city's sessions, including
+// beads another city handed off to them — and keeps its unfenced stores.
+func (cr *CityRuntime) fenceMaintenance(store beads.Store, site string) beads.Store {
+	return autocloseGateFor(cr.cfg).fence(store, cr.stderr, cr.logPrefix+": "+site)
+}
+
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
 // dedicated graph store when [beads.classes.graph] relocates graph, else the
 // work store. Byte-identical to cityBeadStore() at the default bd backend.

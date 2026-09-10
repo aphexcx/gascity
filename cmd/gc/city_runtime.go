@@ -1442,10 +1442,11 @@ func (cr *CityRuntime) tick(
 		phaseStart = time.Now()
 		// The GC's repair, abandoned-root and purge sweeps are automatic
 		// writers of permanent rows; on a federated city they run behind the
-		// cross-city fence (autocloseGate) so only this city's rows are
-		// closed or purged here.
-		graphStore.Store = autocloseGateFor(cr.cfg).fence(graphStore.Store, cr.stderr, cr.logPrefix+": wisp gc")
-		purged, gcErr := cr.wg.runGC(graphStore, cr.mailBeadStore(), time.Now())
+		// cross-city fence so only this city's rows are closed or purged here.
+		graphStore.Store = cr.fenceMaintenance(graphStore.Store, "wisp gc")
+		mailStore := cr.mailBeadStore()
+		mailStore.Store = cr.fenceMaintenance(mailStore.Store, "wisp gc")
+		purged, gcErr := cr.wg.runGC(graphStore, mailStore, time.Now())
 		recordPhase(TraceSiteControllerTickPhase, "wisp_gc", phaseStart, map[string]any{"purged": purged})
 		if gcErr != nil {
 			for _, line := range strings.Split(gcErr.Error(), "\n") {
@@ -1765,6 +1766,11 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
+	// The watchdog closes permanent rows too (a read message created before
+	// messages became wisps is selected across both tiers); on a federated
+	// city it runs behind the cross-city fence.
+	nudgeStore.Store = cr.fenceMaintenance(nudgeStore.Store, "nudge-mail-sweep watchdog")
+	mailStore.Store = cr.fenceMaintenance(mailStore.Store, "nudge-mail-sweep watchdog")
 	// Load nudge state to protect live nudge IDs. A missing state file is not an
 	// error (LoadState returns empty state), so any error here is a real
 	// read/parse failure: fail closed and skip this sweep rather than sweeping
@@ -1802,10 +1808,11 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 		}
 		if store == nil {
 			fresh, openErr := newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
-			if openErr == nil {
-				freshlyOpened = append(freshlyOpened, fresh)
+			if openErr != nil {
+				return nil, openErr
 			}
-			return fresh, openErr
+			freshlyOpened = append(freshlyOpened, fresh)
+			store = fresh
 		}
 		return store, nil
 	})
@@ -1817,6 +1824,12 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// opened at boot, never a second resolution, so nothing here is closed by
 	// closeOpened — the runtime owns that handle for its whole life.
 	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStore())
+	// The sweep closes orphaned tracking rows with no agent behind it; on a
+	// federated city every store it sweeps runs behind the cross-city fence
+	// (after the dedup above, which compares the bare stores).
+	for i := range stores {
+		stores[i] = cr.fenceMaintenance(stores[i], "order-tracking sweep")
+	}
 	closeOpened := func() {
 		for _, s := range freshlyOpened {
 			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort

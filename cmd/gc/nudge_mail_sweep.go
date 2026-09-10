@@ -75,6 +75,9 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 			continue
 		}
 		if err := nq.SweepStale(shadow.BeadID, nudgeMailSweepNudgeCloseReason, now); err != nil {
+			if errors.Is(err, errAutomaticWriteFenced) {
+				continue // another city's row; its own watchdog closes it
+			}
 			beadErrs = append(beadErrs, err)
 			continue
 		}
@@ -98,7 +101,12 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
 		}
 		result.MailClosed += mailClosed
-		beadErrs = append(beadErrs, mailCloseErrs...)
+		for _, err := range mailCloseErrs {
+			if errors.Is(err, errAutomaticWriteFenced) {
+				continue // another city's row; its own watchdog closes it
+			}
+			beadErrs = append(beadErrs, err)
+		}
 	}
 
 	return result, errors.Join(beadErrs...)

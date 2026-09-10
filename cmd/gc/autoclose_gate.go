@@ -218,12 +218,50 @@ func (f *fencedStore) DepRemove(issueID, dependsOnID string) error {
 	return f.Store.DepRemove(issueID, dependsOnID)
 }
 
-// Tx fences the transactional write surface the same way; the transaction
-// itself stays the wrapped store's.
+// Tx authorizes OUTSIDE the transaction, then runs it. A store's Tx can hold
+// a lock for the whole callback (the native dolt store holds its read lock;
+// a reconnecting read inside would wait on the same lock forever), so the
+// rows are read before the transaction opens: the callback runs once
+// against a recorder that only collects the ids it writes (beads.Tx has no
+// reads, so a callback's writes are fixed by what it captured and it runs
+// the same way twice), every id is authorized through the wrapped store's
+// live handle, and only then does the real transaction run the callback
+// again — with no fence reads inside it. A callback error on the recording
+// pass is returned as is; a refused id returns the refusal and the
+// transaction never opens. Create is not fenced on either pass.
 func (f *fencedStore) Tx(commitMsg string, fn func(tx beads.Tx) error) error {
-	return f.Store.Tx(commitMsg, func(tx beads.Tx) error {
-		return fn(&fencedTx{Tx: tx, fence: f})
-	})
+	rec := &recordingTx{}
+	if err := fn(rec); err != nil {
+		return err
+	}
+	for _, id := range rec.ids {
+		if err := f.allow(id); err != nil {
+			return err
+		}
+	}
+	return f.Store.Tx(commitMsg, fn)
+}
+
+// recordingTx is the fence's first pass over a transaction callback: it
+// records the row ids the callback writes and writes nothing.
+type recordingTx struct {
+	ids []string
+}
+
+func (r *recordingTx) Create(b beads.Bead) (beads.Bead, error) { return b, nil }
+func (r *recordingTx) Update(id string, _ beads.UpdateOpts) error {
+	r.ids = append(r.ids, id)
+	return nil
+}
+
+func (r *recordingTx) SetMetadataBatch(id string, _ map[string]string) error {
+	r.ids = append(r.ids, id)
+	return nil
+}
+
+func (r *recordingTx) Close(id string) error {
+	r.ids = append(r.ids, id)
+	return nil
 }
 
 // AtomicTx reports the wrapped store's atomicity, so callers that pick the
@@ -237,30 +275,4 @@ func (f *fencedStore) AtomicTx() bool {
 func (f *fencedStore) Handles() beads.StoreHandles {
 	h := beads.HandlesFor(f.Store)
 	return beads.StoreHandles{Cached: h.Cached, Live: h.Live, Writer: f}
-}
-
-type fencedTx struct {
-	beads.Tx
-	fence *fencedStore
-}
-
-func (t *fencedTx) Update(id string, opts beads.UpdateOpts) error {
-	if err := t.fence.allow(id); err != nil {
-		return err
-	}
-	return t.Tx.Update(id, opts)
-}
-
-func (t *fencedTx) SetMetadataBatch(id string, kvs map[string]string) error {
-	if err := t.fence.allow(id); err != nil {
-		return err
-	}
-	return t.Tx.SetMetadataBatch(id, kvs)
-}
-
-func (t *fencedTx) Close(id string) error {
-	if err := t.fence.allow(id); err != nil {
-		return err
-	}
-	return t.Tx.Close(id)
 }

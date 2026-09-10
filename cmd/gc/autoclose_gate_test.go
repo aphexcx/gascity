@@ -627,3 +627,169 @@ func TestConvoyAutocloseHookVetoesWhenCityConfigIsUnreadable(t *testing.T) {
 		t.Fatalf("stderr = %q, want the veto line", stderr.String())
 	}
 }
+
+// txGuardStore fails any read issued while its transaction is open — the
+// native dolt store holds a lock across the callback, and a reconnecting
+// read inside would wait on it forever.
+type txGuardStore struct {
+	*beads.MemStore
+	inTx          bool
+	txRuns        int
+	readsDuringTx int
+}
+
+func (s *txGuardStore) Tx(msg string, fn func(beads.Tx) error) error {
+	s.inTx = true
+	s.txRuns++
+	defer func() { s.inTx = false }()
+	return s.MemStore.Tx(msg, fn)
+}
+
+func (s *txGuardStore) Get(id string) (beads.Bead, error) {
+	if s.inTx {
+		s.readsDuringTx++
+		return beads.Bead{}, errors.New("read inside an open transaction")
+	}
+	return s.MemStore.Get(id)
+}
+
+func TestAutocloseFenceTxAuthorizesOutsideTheTransaction(t *testing.T) {
+	inner := &txGuardStore{MemStore: beads.NewMemStore()}
+	mine, _ := inner.Create(beads.Bead{Title: "mine", Labels: []string{"owner:citadel"}})
+	foreign, _ := inner.Create(beads.Bead{Title: "theirs", Labels: []string{"owner:jadegate"}})
+	var log bytes.Buffer
+	store := (autocloseGate{identity: "citadel"}).fence(inner, &log, "site")
+
+	err := store.Tx("close mine", func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(mine.ID, map[string]string{"close_reason": "done"}); err != nil {
+			return err
+		}
+		return tx.Close(mine.ID)
+	})
+	if err != nil {
+		t.Fatalf("Tx on my own row = %v", err)
+	}
+	if got, _ := inner.MemStore.Get(mine.ID); got.Status != "closed" || got.Metadata["close_reason"] != "done" {
+		t.Fatalf("my row not written by the transaction: %+v", got)
+	}
+	if inner.readsDuringTx != 0 || inner.txRuns != 1 {
+		t.Fatalf("reads during tx = %d, tx runs = %d; want 0 and 1", inner.readsDuringTx, inner.txRuns)
+	}
+
+	err = store.Tx("close theirs", func(tx beads.Tx) error { return tx.Close(foreign.ID) })
+	if !errors.Is(err, errAutomaticWriteFenced) {
+		t.Fatalf("Tx on a foreign row = %v, want errAutomaticWriteFenced", err)
+	}
+	if inner.txRuns != 1 {
+		t.Fatalf("a refused transaction must never open; tx runs = %d", inner.txRuns)
+	}
+	if got, _ := inner.MemStore.Get(foreign.ID); got.Status != "open" {
+		t.Fatalf("foreign row written: %+v", got)
+	}
+
+	boom := errors.New("callback failed")
+	if err := store.Tx("fails", func(_ beads.Tx) error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("callback error = %v, want it returned as is", err)
+	}
+	if inner.txRuns != 1 {
+		t.Fatalf("a failing callback must not open the transaction; tx runs = %d", inner.txRuns)
+	}
+}
+
+// The nudge-mail watchdog closes permanent read messages and nudge beads
+// with no agent behind it — an automatic writer in every city.
+func TestNudgeMailWatchdogTwoCitiesOnlyOwnerWrites(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	for _, tc := range twoCityCases {
+		t.Run("city="+tc.city, func(t *testing.T) {
+			nudge := nudgeSeed("nudge-old", "nudge-old", now.Add(-time.Hour))
+			nudge.Labels = append(nudge.Labels, "owner:citadel")
+			mail := mailSeed("mail-old", now.Add(-2*time.Hour))
+			mail.Labels = append(mail.Labels, "owner:citadel")
+			inner := beads.NewMemStoreFrom(100, []beads.Bead{nudge, mail}, nil)
+			var log bytes.Buffer
+			fenced := (autocloseGate{identity: tc.city}).fence(inner, &log, "watchdog")
+
+			result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: fenced}, beads.MailStore{Store: fenced}, nil, now, 10*time.Minute, 30*time.Minute, 0)
+			if err != nil {
+				t.Fatalf("sweep: %v (a refused row is a skip, never a sweep error)", err)
+			}
+			want := 0
+			if tc.wantClosed {
+				want = 1
+			}
+			if result.NudgeClosed != want || result.MailClosed != want {
+				t.Fatalf("closed nudge=%d mail=%d, want %d each; log=%q", result.NudgeClosed, result.MailClosed, want, log.String())
+			}
+			for _, id := range []string{"nudge-old", "mail-old"} {
+				if got, _ := inner.Get(id); (got.Status == "closed") != tc.wantClosed {
+					t.Errorf("%s status = %q, want closed=%v", id, got.Status, tc.wantClosed)
+				}
+			}
+			if refused := strings.Contains(log.String(), "watchdog: cross-city-fence refused bead="); refused == tc.wantClosed {
+				t.Errorf("refusal logged = %v, want %v; log=%q", refused, !tc.wantClosed, log.String())
+			}
+		})
+	}
+}
+
+// A city.toml that is a broken symlink exists and cannot be loaded: not a
+// confirmed absence, so the hook entries veto.
+func TestConvoyAutocloseHookVetoesWhenCityTomlIsABrokenSymlink(t *testing.T) {
+	cityPath := writeConvoyTestCityWithFederation(t, "citadel")
+	t.Setenv("GC_STORE_ROOT", cityPath)
+	store, convoyID, childID := seedFederatedConvoyInCity(t, cityPath)
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.Remove(tomlPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cityPath, "missing-target.toml"), tomlPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	doConvoyAutoclose(childID, &stdout, &stderr)
+
+	got, err := store.Get(convoyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("convoy closed under a broken city.toml symlink; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "could not be loaded, so this city's federation identity cannot be proven") {
+		t.Fatalf("stderr = %q, want the veto line", stderr.String())
+	}
+}
+
+// The runtime hands its maintenance jobs fenced stores on a federated city
+// and bare stores otherwise; the convergence scopes are built from them.
+func TestRuntimeMaintenanceStoresAreFenced(t *testing.T) {
+	for _, tc := range twoCityCases {
+		t.Run("city="+tc.city, func(t *testing.T) {
+			inner := beads.NewMemStore()
+			var stderr bytes.Buffer
+			cr := &CityRuntime{
+				cfg:                 &config.City{Federation: config.FederationConfig{Identity: tc.city}},
+				stderr:              &stderr,
+				logPrefix:           "runtime",
+				standaloneCityStore: inner,
+				standaloneRigStores: map[string]beads.Store{"hw": beads.NewMemStore()},
+			}
+			wantFenced := tc.city != ""
+			fenced := cr.fenceMaintenance(inner, "job")
+			if _, isFenced := fenced.(*fencedStore); isFenced != wantFenced {
+				t.Fatalf("fenceMaintenance fenced = %v, want %v", isFenced, wantFenced)
+			}
+			scopes := cr.buildConvergenceScopes()
+			if len(scopes) != 2 {
+				t.Fatalf("scopes = %d, want city + rig", len(scopes))
+			}
+			for name, scope := range scopes {
+				if _, isFenced := scope.store.(*fencedStore); isFenced != wantFenced {
+					t.Errorf("convergence scope %q fenced = %v, want %v", name, isFenced, wantFenced)
+				}
+			}
+		})
+	}
+}
