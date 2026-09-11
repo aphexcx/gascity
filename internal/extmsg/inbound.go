@@ -34,6 +34,14 @@ type InboundResult struct {
 	// conventional lowercase name on its own rather than dragging the struct
 	// through a breaking change for consistency's sake.
 	Delivery *InboundDelivery `json:"delivery,omitempty"`
+	// Duplicate reports that this inbound message was already recorded in the
+	// conversation transcript (same conversation + provider message id) — an
+	// adapter redelivery of a message the pipeline already accepted.
+	// TranscriptEntry carries the original entry. The delivery layer must not
+	// re-notify members for a duplicate: unacked redeliveries used to
+	// re-inject the same message as extra turns into a wedged session
+	// (hq-703om).
+	Duplicate bool
 }
 
 // targetSubject is the event subject for the routed target: the concrete
@@ -107,6 +115,36 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	result.Binding = &binding
 	result.TargetAgentName = binding.AgentName
 	return nil
+}
+
+// emitInboundEvent records the inbound outcome on the event bus: the regular
+// extmsg.inbound event for a newly-transcribed message, or
+// extmsg.inbound_duplicate when the transcript append deduplicated an adapter
+// redelivery (hq-703om). Both inbound entry points share this helper so the
+// duplicate discrimination stays identical across the raw and pre-normalized
+// paths.
+func emitInboundEvent(deps InboundDeps, result *InboundResult, msg ExternalInboundMessage) {
+	if deps.EmitEvent == nil {
+		return
+	}
+	if result.Duplicate {
+		deps.EmitEvent(events.ExtMsgInboundDuplicate, result.targetSubject(), InboundDuplicateEventPayload{
+			Provider:          msg.Conversation.Provider,
+			ConversationID:    msg.Conversation.ConversationID,
+			Actor:             msg.Actor.DisplayName,
+			ProviderMessageID: msg.ProviderMessageID,
+			TargetSession:     result.TargetSessionID,
+			TargetAgent:       result.TargetAgentName,
+		})
+		return
+	}
+	deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
+		Provider:       msg.Conversation.Provider,
+		ConversationID: msg.Conversation.ConversationID,
+		Actor:          msg.Actor.DisplayName,
+		TargetSession:  result.TargetSessionID,
+		TargetAgent:    result.TargetAgentName,
+	})
 }
 
 // emitInboundDropped records that an accepted inbound message resolved to no
@@ -234,7 +272,10 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 		return result, nil
 	}
 
-	// Step 5: Append to transcript.
+	// Step 5: Append to transcript. A dedup hit on the provider message id
+	// means this is an adapter redelivery of an already-accepted message;
+	// mark the result so the caller suppresses the member notification
+	// fan-out instead of injecting the same message again (hq-703om).
 	if result.routed() {
 		caller := Caller{
 			Kind:      CallerAdapter,
@@ -242,7 +283,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 			Provider:  key.Provider,
 			AccountID: key.AccountID,
 		}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, created, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,
@@ -262,21 +303,14 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 			// Hydration pending — transcript entry was not written.
 		} else {
 			result.TranscriptEntry = &entry
+			result.Duplicate = !created
 		}
 	}
 
 	// Step 6: Emit event.
 	// Wake is handled by the caller (HTTP handler calls state.Poke()).
 	// Sessions discover unread entries via gc transcript check --inject.
-	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
-			Provider:       msg.Conversation.Provider,
-			ConversationID: msg.Conversation.ConversationID,
-			Actor:          msg.Actor.DisplayName,
-			TargetSession:  result.TargetSessionID,
-			TargetAgent:    result.TargetAgentName,
-		})
-	}
+	emitInboundEvent(deps, result, *msg)
 
 	return result, nil
 }
@@ -304,10 +338,13 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 		return result, nil
 	}
 
-	// Step 3: Append to transcript.
+	// Step 3: Append to transcript. A dedup hit on the provider message id
+	// means this is an adapter redelivery of an already-accepted message;
+	// mark the result so the caller suppresses the member notification
+	// fan-out instead of injecting the same message again (hq-703om).
 	if result.routed() {
 		caller := Caller{Kind: CallerController, ID: "inbound-normalized"}
-		entry, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
+		entry, created, err := deps.Services.Transcript.Append(ctx, AppendTranscriptInput{
 			Caller:            caller,
 			Conversation:      msg.Conversation,
 			Kind:              TranscriptMessageInbound,
@@ -327,19 +364,12 @@ func HandleInboundNormalized(ctx context.Context, deps InboundDeps, msg External
 			// Hydration pending — transcript entry was not written.
 		} else {
 			result.TranscriptEntry = &entry
+			result.Duplicate = !created
 		}
 	}
 
 	// Step 4: Emit event.
-	if deps.EmitEvent != nil {
-		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{
-			Provider:       msg.Conversation.Provider,
-			ConversationID: msg.Conversation.ConversationID,
-			Actor:          msg.Actor.DisplayName,
-			TargetSession:  result.TargetSessionID,
-			TargetAgent:    result.TargetAgentName,
-		})
-	}
+	emitInboundEvent(deps, result, msg)
 
 	return result, nil
 }

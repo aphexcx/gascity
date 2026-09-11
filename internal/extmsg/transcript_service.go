@@ -26,22 +26,22 @@ func newTranscriptService(store beads.Store, locks *bindingLockPool) *transcript
 	return &transcriptService{store: store, locks: locks}
 }
 
-func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, error) {
+func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, bool, error) {
 	if err := checkContext(ctx); err != nil {
-		return ConversationTranscriptRecord{}, err
+		return ConversationTranscriptRecord{}, false, err
 	}
 	ref, err := validateConversationRef(input.Conversation)
 	if err != nil {
-		return ConversationTranscriptRecord{}, err
+		return ConversationTranscriptRecord{}, false, err
 	}
 	if err := authorizeMutation(input.Caller, ref); err != nil {
-		return ConversationTranscriptRecord{}, err
+		return ConversationTranscriptRecord{}, false, err
 	}
 	kind := TranscriptMessageKind(strings.ToLower(strings.TrimSpace(string(input.Kind))))
 	switch kind {
 	case TranscriptMessageInbound, TranscriptMessageOutbound:
 	default:
-		return ConversationTranscriptRecord{}, fmt.Errorf("%w: invalid transcript kind %q", ErrInvalidInput, input.Kind)
+		return ConversationTranscriptRecord{}, false, fmt.Errorf("%w: invalid transcript kind %q", ErrInvalidInput, input.Kind)
 	}
 	provenance := TranscriptProvenance(strings.ToLower(strings.TrimSpace(string(input.Provenance))))
 	switch provenance {
@@ -49,12 +49,13 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		provenance = TranscriptProvenanceLive
 	case TranscriptProvenanceLive, TranscriptProvenanceHydrated:
 	default:
-		return ConversationTranscriptRecord{}, fmt.Errorf("%w: invalid provenance %q", ErrInvalidInput, input.Provenance)
+		return ConversationTranscriptRecord{}, false, fmt.Errorf("%w: invalid provenance %q", ErrInvalidInput, input.Provenance)
 	}
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
 	var out ConversationTranscriptRecord
+	createdNew := false
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
 		if err != nil {
@@ -133,10 +134,14 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
 			return fmt.Errorf("update transcript state: %w", err)
 		}
+		createdNew = true
 		out, err = decodeTranscriptBead(created)
 		return err
 	})
-	return out, err
+	if err != nil {
+		return out, false, err
+	}
+	return out, createdNew, nil
 }
 
 func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput) ([]ConversationTranscriptRecord, error) {

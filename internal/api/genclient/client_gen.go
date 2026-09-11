@@ -2195,6 +2195,16 @@ type InboundDroppedEventPayload struct {
 	Provider       string  `json:"provider"`
 }
 
+// InboundDuplicateEventPayload defines model for InboundDuplicateEventPayload.
+type InboundDuplicateEventPayload struct {
+	Actor             string  `json:"actor"`
+	ConversationId    string  `json:"conversation_id"`
+	Provider          string  `json:"provider"`
+	ProviderMessageId string  `json:"provider_message_id"`
+	TargetAgent       *string `json:"target_agent,omitempty"`
+	TargetSession     string  `json:"target_session"`
+}
+
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
 	Actor          string  `json:"actor"`
@@ -2219,6 +2229,7 @@ type InboundReceiptStatusState string
 // InboundResult defines model for InboundResult.
 type InboundResult struct {
 	Binding         SessionBindingRecord         `json:"Binding"`
+	Duplicate       bool                         `json:"Duplicate"`
 	GroupRoute      GroupRouteDecision           `json:"GroupRoute"`
 	Message         ExternalInboundMessage       `json:"Message"`
 	TargetAgentName string                       `json:"TargetAgentName"`
@@ -5883,6 +5894,22 @@ type TypedEventStreamEnvelopeExtmsgInboundDropped struct {
 	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExtmsgInboundDuplicate defines model for TypedEventStreamEnvelopeExtmsgInboundDuplicate.
+type TypedEventStreamEnvelopeExtmsgInboundDuplicate struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          InboundDuplicateEventPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
 type TypedEventStreamEnvelopeExtmsgOutbound struct {
 	Actor            string                   `json:"actor"`
@@ -7377,6 +7404,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgInboundDropped struct {
 	Ts               time.Time                  `json:"ts"`
 	Type             string                     `json:"type"`
 	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate defines model for TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate.
+type TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          InboundDuplicateEventPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
@@ -10341,6 +10385,32 @@ func (t *EventPayload) FromInboundDroppedEventPayload(v InboundDroppedEventPaylo
 
 // MergeInboundDroppedEventPayload performs a merge with any union data inside the EventPayload, using the provided InboundDroppedEventPayload
 func (t *EventPayload) MergeInboundDroppedEventPayload(v InboundDroppedEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInboundDuplicateEventPayload returns the union data inside the EventPayload as a InboundDuplicateEventPayload
+func (t EventPayload) AsInboundDuplicateEventPayload() (InboundDuplicateEventPayload, error) {
+	var body InboundDuplicateEventPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInboundDuplicateEventPayload overwrites any union data inside the EventPayload as the provided InboundDuplicateEventPayload
+func (t *EventPayload) FromInboundDuplicateEventPayload(v InboundDuplicateEventPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInboundDuplicateEventPayload performs a merge with any union data inside the EventPayload, using the provided InboundDuplicateEventPayload
+func (t *EventPayload) MergeInboundDuplicateEventPayload(v InboundDuplicateEventPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13862,6 +13932,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgInboundDro
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExtmsgInboundDuplicate returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgInboundDuplicate() (TypedEventStreamEnvelopeExtmsgInboundDuplicate, error) {
+	var body TypedEventStreamEnvelopeExtmsgInboundDuplicate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgInboundDuplicate overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgInboundDuplicate(v TypedEventStreamEnvelopeExtmsgInboundDuplicate) error {
+	v.Type = "extmsg.inbound_duplicate"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgInboundDuplicate performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgInboundDuplicate(v TypedEventStreamEnvelopeExtmsgInboundDuplicate) error {
+	v.Type = "extmsg.inbound_duplicate"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgOutbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgOutbound
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgOutbound() (TypedEventStreamEnvelopeExtmsgOutbound, error) {
 	var body TypedEventStreamEnvelopeExtmsgOutbound
@@ -15542,6 +15640,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.inbound_dropped":
 		return t.AsTypedEventStreamEnvelopeExtmsgInboundDropped()
+	case "extmsg.inbound_duplicate":
+		return t.AsTypedEventStreamEnvelopeExtmsgInboundDuplicate()
 	case "extmsg.outbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
@@ -16611,6 +16711,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDropped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgInboundDropped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDropped(v TypedTaggedEventStreamEnvelopeExtmsgInboundDropped) error {
 	v.Type = "extmsg.inbound_dropped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate() (TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate(v TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate) error {
+	v.Type = "extmsg.inbound_duplicate"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate(v TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate) error {
+	v.Type = "extmsg.inbound_duplicate"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18301,6 +18429,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.inbound_dropped":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInboundDropped()
+	case "extmsg.inbound_duplicate":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate()
 	case "extmsg.outbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
