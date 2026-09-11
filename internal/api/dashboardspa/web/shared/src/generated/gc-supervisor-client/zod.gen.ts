@@ -731,6 +731,15 @@ export const zInboundDroppedEventPayload = z.object({
     provider: z.string()
 });
 
+export const zInboundDuplicateEventPayload = z.object({
+    actor: z.string(),
+    conversation_id: z.string(),
+    provider: z.string(),
+    provider_message_id: z.string(),
+    target_agent: z.string().optional(),
+    target_session: z.string()
+});
+
 export const zInboundEventPayload = z.object({
     actor: z.string(),
     conversation_id: z.string(),
@@ -3133,6 +3142,7 @@ export const zConversationTranscriptRecord = z.object({
 
 export const zInboundResult = z.object({
     Binding: zSessionBindingRecord,
+    Duplicate: z.boolean(),
     GroupRoute: zGroupRouteDecision,
     Message: zExternalInboundMessage,
     TargetAgentName: z.string(),
@@ -3297,6 +3307,7 @@ export const zEventPayload = z.union([
     zExecutionStepStalledPayload,
     zGroupCreatedEventPayload,
     zInboundDroppedEventPayload,
+    zInboundDuplicateEventPayload,
     zInboundEventPayload,
     zMailEventPayload,
     zMoleculeResolvedPayload,
@@ -4050,6 +4061,24 @@ export const zTypedEventStreamEnvelopeExtmsgInboundDropped = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.inbound_dropped'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope extmsg.inbound_duplicate
+ */
+export const zTypedEventStreamEnvelopeExtmsgInboundDuplicate = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zInboundDuplicateEventPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('extmsg.inbound_duplicate'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5101,6 +5130,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeExtmsgGroupCreated.extend({ type: z.literal('extmsg.group_created') }),
     zTypedEventStreamEnvelopeExtmsgInbound.extend({ type: z.literal('extmsg.inbound') }),
     zTypedEventStreamEnvelopeExtmsgInboundDropped.extend({ type: z.literal('extmsg.inbound_dropped') }),
+    zTypedEventStreamEnvelopeExtmsgInboundDuplicate.extend({ type: z.literal('extmsg.inbound_duplicate') }),
     zTypedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
     zTypedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
@@ -5830,6 +5860,25 @@ export const zTypedTaggedEventStreamEnvelopeExtmsgInboundDropped = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.inbound_dropped'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.inbound_duplicate
+ */
+export const zTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zInboundDuplicateEventPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('extmsg.inbound_duplicate'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6937,6 +6986,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeExtmsgGroupCreated.extend({ type: z.literal('extmsg.group_created') }),
     zTypedTaggedEventStreamEnvelopeExtmsgInbound.extend({ type: z.literal('extmsg.inbound') }),
     zTypedTaggedEventStreamEnvelopeExtmsgInboundDropped.extend({ type: z.literal('extmsg.inbound_dropped') }),
+    zTypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate.extend({ type: z.literal('extmsg.inbound_duplicate') }),
     zTypedTaggedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
     zTypedTaggedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
