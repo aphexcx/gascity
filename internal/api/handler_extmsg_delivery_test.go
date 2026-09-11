@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,7 +361,6 @@ func TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes(t *te
 // gets suppressed.
 func TestHandleExtMsgInboundRedeliveryRetriesAfterFailedNotify(t *testing.T) {
 	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
-	srv.inboundReceipts = extmsg.NewInboundReceiptStore()
 	source := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
@@ -454,12 +456,14 @@ func TestHandleExtMsgInboundRedeliveryRetriesAfterFailedNotify(t *testing.T) {
 	}
 }
 
-// TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence is the decision table
-// behind the test above: for a transcript duplicate, whether the fan-out is
-// skipped depends only on what the FIRST fan-out's receipt says, never on the
-// transcript row. Held arms answer with a receipt the adapter can act on;
-// not-held arms let the handler notify again.
-func TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence(t *testing.T) {
+// TestExtmsgClaimInboundFanoutFollowsFirstDeliveryEvidence is the decision
+// table behind the test above: whether the fan-out is skipped depends only on
+// what the message's latest fan-out receipt says, never on the transcript
+// row. Held arms answer with a receipt the adapter can act on; claimed arms
+// hand the handler a receipt id the store already holds as the message's
+// pending fan-out — so the claim itself is what the NEXT request of the same
+// message is judged against.
+func TestExtmsgClaimInboundFanoutFollowsFirstDeliveryEvidence(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	store := extmsg.NewInboundReceiptStore()
@@ -473,11 +477,32 @@ func TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence(t *testing.T) {
 		return []extmsg.InboundDeliveryMember{{SessionID: "s1", Status: st, DeliveredBytes: delivered, ExpectedBytes: 10}}
 	}
 
-	if _, held := srv.extmsgRedeliveryHold(&extmsg.InboundResult{}, msg); held {
-		t.Fatal("a first delivery (not Duplicate) was held")
+	// No evidence in this process: claimed, and the claim is registered as
+	// the message's pending fan-out in the same step.
+	first, _, held := srv.extmsgClaimInboundFanout(&extmsg.InboundResult{}, msg)
+	if held || first == "" {
+		t.Fatalf("a first delivery with no evidence: held=%v receipt=%q, want claimed with a receipt id", held, first)
 	}
-	if _, held := srv.extmsgRedeliveryHold(dup, msg); held {
-		t.Fatal("a duplicate with no delivery evidence in this process was held — after a restart the message must keep at-least-once delivery")
+	if got := store.LatestFor(city, key); got.State != extmsg.InboundReceiptPending || got.ReceiptID != first {
+		t.Fatalf("after the claim the store reports %+v, want pending on %s — the claim must register the fan-out atomically", got, first)
+	}
+	// A duplicate arriving while that claim runs holds on it, whatever the
+	// transcript said about either request.
+	for _, result := range []*extmsg.InboundResult{dup, {}, nil} {
+		_, got, held := srv.extmsgClaimInboundFanout(result, msg)
+		if !held || got.Status != extmsg.InboundDeliveryPending || got.ReceiptID != first {
+			t.Fatalf("second request (result=%+v) while the first claim runs: held=%v receipt=%+v, want held pending on %s", result, held, got, first)
+		}
+	}
+	store.Conclude(city, first, extmsg.FailedInboundDelivery(first, "runtime dead"))
+
+	// A message without a provider id is never held: at-least-once.
+	anon := msg
+	anon.ProviderMessageID = ""
+	for i := 0; i < 2; i++ {
+		if id, _, held := srv.extmsgClaimInboundFanout(dup, anon); held || id == "" {
+			t.Fatalf("message without a provider id (attempt %d): held=%v receipt=%q, want claimed", i, held, id)
+		}
 	}
 
 	for _, tc := range []struct {
@@ -502,18 +527,35 @@ func TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence(t *testing.T) {
 			id := extmsg.NextInboundReceiptID()
 			store.BeginFor(city, id, key)
 			store.Conclude(city, id, tc.prior(id))
-			got, held := srv.extmsgRedeliveryHold(dup, msg)
+			claimed, got, held := srv.extmsgClaimInboundFanout(dup, msg)
 			if held != tc.held {
 				t.Fatalf("held = %v, want %v (got %+v)", held, tc.held, got)
 			}
 			if !held {
+				if claimed == "" {
+					t.Fatal("not held but no receipt id to run the fan-out under")
+				}
+				if latest := store.LatestFor(city, key); latest.State != extmsg.InboundReceiptPending || latest.ReceiptID != claimed {
+					t.Fatalf("after a claim on %s evidence the store reports %+v, want pending on %s", tc.name, latest, claimed)
+				}
 				return
+			}
+			if claimed != "" {
+				t.Fatalf("held, but a receipt id %q was handed out as if the fan-out should run", claimed)
 			}
 			if got.Status != tc.want {
 				t.Fatalf("held receipt status = %q, want %q: %+v", got.Status, tc.want, got)
 			}
 			if tc.want == extmsg.InboundDeliveryPending && got.ReceiptID != id {
 				t.Fatalf("held on receipt %q, want the ORIGINAL %q so the adapter polls the fan-out carrying the message", got.ReceiptID, id)
+			}
+			if tc.want == extmsg.InboundDeliveryNoRoute {
+				if st := store.Lookup(city, got.ReceiptID); st.State != extmsg.InboundReceiptConcluded || st.Delivery == nil || st.Delivery.Status != extmsg.InboundDeliveryNoRoute {
+					t.Fatalf("suppression receipt %s in store = %+v, want the no_route conclusion the response carried", got.ReceiptID, st)
+				}
+				if latest := store.LatestFor(city, key); latest.ReceiptID != id {
+					t.Fatalf("suppression receipt displaced the delivered fan-out as the message's evidence: %+v", latest)
+				}
 			}
 		})
 	}
@@ -522,8 +564,247 @@ func TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence(t *testing.T) {
 	// lands on the fan-out that is actually carrying the message.
 	id := extmsg.NextInboundReceiptID()
 	store.BeginFor(city, id, key)
-	got, held := srv.extmsgRedeliveryHold(dup, msg)
+	_, got, held := srv.extmsgClaimInboundFanout(dup, msg)
 	if !held || got.Status != extmsg.InboundDeliveryPending || got.ReceiptID != id {
 		t.Fatalf("redelivery while the first fan-out runs: held=%v receipt=%+v, want held pending on %s", held, got, id)
 	}
+}
+
+// gatedTranscript freezes the FIRST inbound Append for providerMessageID
+// after its row is written and before it returns to the handler — the exact
+// point between "transcript has the message" and "the fan-out is claimed"
+// that a concurrent request of the same message can slip through. Every
+// other call passes straight to the wrapped service.
+type gatedTranscript struct {
+	extmsg.TranscriptService
+	providerMessageID string
+	mu                sync.Mutex
+	frozen            bool
+	entered           chan struct{} // closed once the gated Append has written its row
+	release           chan struct{} // closed by the test to let it return
+}
+
+func newGatedTranscript(inner extmsg.TranscriptService, providerMessageID string) *gatedTranscript {
+	return &gatedTranscript{
+		TranscriptService: inner,
+		providerMessageID: providerMessageID,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+}
+
+func (g *gatedTranscript) Append(ctx context.Context, input extmsg.AppendTranscriptInput) (extmsg.ConversationTranscriptRecord, bool, error) {
+	rec, created, err := g.TranscriptService.Append(ctx, input)
+	if input.ProviderMessageID != g.providerMessageID {
+		return rec, created, err
+	}
+	g.mu.Lock()
+	first := !g.frozen
+	g.frozen = true
+	g.mu.Unlock()
+	if first {
+		close(g.entered)
+		<-g.release
+	}
+	return rec, created, err
+}
+
+// gatedNudgeProvider is a runtime whose Nudge parks until released, so a
+// fan-out can be held mid-flight while another request of the same message
+// is judged against it. It records the nudge like the Fake once released.
+type gatedNudgeProvider struct {
+	*runtime.Fake
+	entered chan struct{} // receives once per Nudge that arrived
+	release chan struct{}
+}
+
+func (p *gatedNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	p.entered <- struct{}{}
+	<-p.release
+	return p.Fake.Nudge(name, content)
+}
+
+// TestHandleExtMsgInboundConcurrentDeliveriesFanOutOnce is the codex r3
+// MAJOR 1 regression: receipt lookup and registration used to be separate
+// store calls, so a second request of the same message landing between the
+// first's transcript append and its BeginFor read "no evidence" and fanned
+// out too — and the first, not being a transcript duplicate, fanned out
+// regardless. The claim is now one atomic store operation for EVERY request
+// carrying a provider message id, first deliveries included, so exactly one
+// fan-out runs and the other request is answered from its evidence.
+//
+// The first request is frozen deterministically in that window (its row is
+// written, its claim is not yet made) while the duplicate runs to completion;
+// then the frozen request is released and must find the duplicate's claim.
+func TestHandleExtMsgInboundConcurrentDeliveriesFanOutOnce(t *testing.T) {
+	const providerMessageID = "1785354286.000100"
+
+	type fixture struct {
+		fs       *fakeState
+		srv      *Server
+		gate     *gatedTranscript
+		raw      string
+		frozen   chan *httptest.ResponseRecorder
+		decode   func(step string, rec *httptest.ResponseRecorder) extmsg.InboundResult
+		nudges   func() int
+		serveDup func() *httptest.ResponseRecorder
+	}
+	setup := func(t *testing.T) *fixture {
+		t.Helper()
+		fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+		source := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
+		caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+		if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+			Conversation: ref,
+			SessionID:    source.ID,
+			Now:          time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+		gate := newGatedTranscript(services.Transcript, providerMessageID)
+		services.Transcript = gate
+
+		raw, err := json.Marshal(map[string]any{
+			"message": map[string]any{
+				"provider_message_id": providerMessageID,
+				"conversation":        conversationBody(ref),
+				"actor":               map[string]any{"id": "user-1", "display_name": "Afik", "is_bot": false},
+				"text":                "ship it",
+				"received_at":         time.Now().UTC().Format(time.RFC3339),
+			},
+		})
+		if err != nil {
+			t.Fatalf("Marshal(body): %v", err)
+		}
+		f := &fixture{fs: fs, srv: srv, gate: gate, raw: string(raw), frozen: make(chan *httptest.ResponseRecorder, 1)}
+		serve := func() *httptest.ResponseRecorder {
+			req := newPostRequest(cityURL(fs, "/extmsg/inbound"), strings.NewReader(f.raw))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			return rec
+		}
+		f.serveDup = serve
+		f.decode = func(step string, rec *httptest.ResponseRecorder) extmsg.InboundResult {
+			t.Helper()
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d, want 200; body: %s", step, rec.Code, rec.Body.String())
+			}
+			var result extmsg.InboundResult
+			if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+				t.Fatalf("%s: decode: %v", step, err)
+			}
+			if result.Delivery == nil {
+				t.Fatalf("%s: response carries no delivery receipt", step)
+			}
+			return result
+		}
+		f.nudges = func() int {
+			n := 0
+			for _, call := range fs.sp.Calls {
+				if call.Method == "Nudge" {
+					n++
+				}
+			}
+			return n
+		}
+
+		// The first delivery: its transcript row is written, then it is
+		// frozen before it can claim the fan-out.
+		go func() { f.frozen <- serve() }()
+		select {
+		case <-gate.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first delivery never reached the transcript append")
+		}
+		return f
+	}
+	awaitFrozen := func(t *testing.T, f *fixture) extmsg.InboundResult {
+		t.Helper()
+		select {
+		case rec := <-f.frozen:
+			return f.decode("frozen first delivery", rec)
+		case <-time.After(10 * time.Second):
+			t.Fatal("frozen first delivery never returned after release — it fanned out and is waiting on the runtime")
+		}
+		return extmsg.InboundResult{}
+	}
+
+	t.Run("duplicate delivered before the first request claimed", func(t *testing.T) {
+		f := setup(t)
+
+		// The duplicate runs to completion in the window: it is a transcript
+		// duplicate with no receipt evidence, so it claims and delivers.
+		dup := f.decode("duplicate in the window", f.serveDup())
+		if !dup.Duplicate {
+			t.Fatal("second request not marked Duplicate — the first's row was not visible to it, so this is not the race")
+		}
+		if dup.Delivery.Status != extmsg.InboundDeliveryDelivered || dup.Delivery.DeliveredBytes == 0 {
+			t.Fatalf("duplicate in the window: %+v, want delivered — it holds the only claim", dup.Delivery)
+		}
+
+		// The first request wakes up holding a fresh transcript row and NO
+		// claim: the message is already delivered, so it must not fan out.
+		close(f.gate.release)
+		first := awaitFrozen(t, f)
+		if first.Duplicate {
+			t.Fatal("first delivery marked Duplicate — the gate did not freeze the request that wrote the row")
+		}
+		if first.Delivery.Status != extmsg.InboundDeliveryNoRoute {
+			t.Fatalf("first delivery after the duplicate delivered: status = %q, want no_route (suppressed on the duplicate's receipt): %+v",
+				first.Delivery.Status, first.Delivery)
+		}
+		if n := f.nudges(); n != 1 {
+			t.Fatalf("runtime received %d nudges for one message posted twice, want exactly 1", n)
+		}
+		if st := f.srv.inboundReceiptStore().Lookup(f.fs.CityName(), first.Delivery.ReceiptID); st.State != extmsg.InboundReceiptConcluded || st.Delivery == nil || st.Delivery.Status != extmsg.InboundDeliveryNoRoute {
+			t.Fatalf("suppression receipt in store = %+v, want the no_route conclusion the response carried", st)
+		}
+	})
+
+	t.Run("duplicate still fanning out when the first request claims", func(t *testing.T) {
+		f := setup(t)
+		gatedRuntime := &gatedNudgeProvider{Fake: f.fs.sp, entered: make(chan struct{}, 2), release: make(chan struct{})}
+		f.fs.sessionProvider = gatedRuntime
+
+		// The duplicate claims and its fan-out parks inside the runtime.
+		dupDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() { dupDone <- f.serveDup() }()
+		select {
+		case <-gatedRuntime.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("duplicate's fan-out never reached the runtime")
+		}
+
+		// The first request wakes up while that fan-out is running: it must
+		// hold on the duplicate's receipt, not start a second fan-out.
+		close(f.gate.release)
+		first := awaitFrozen(t, f)
+		if first.Delivery.Status != extmsg.InboundDeliveryPending {
+			t.Fatalf("first delivery while the duplicate's fan-out runs: status = %q, want pending (held): %+v", first.Delivery.Status, first.Delivery)
+		}
+		select {
+		case <-gatedRuntime.entered:
+			t.Fatal("a second nudge reached the runtime: both requests fanned out")
+		default:
+		}
+
+		close(gatedRuntime.release)
+		var dup extmsg.InboundResult
+		select {
+		case rec := <-dupDone:
+			dup = f.decode("duplicate", rec)
+		case <-time.After(10 * time.Second):
+			t.Fatal("duplicate never returned after the runtime was released")
+		}
+		if !dup.Duplicate || dup.Delivery.Status != extmsg.InboundDeliveryDelivered {
+			t.Fatalf("duplicate: %+v (Duplicate=%v), want delivered by the only fan-out", dup.Delivery, dup.Duplicate)
+		}
+		if first.Delivery.ReceiptID != dup.Delivery.ReceiptID {
+			t.Fatalf("first delivery held on receipt %q, want the duplicate's %q so its poll lands on the fan-out carrying the message",
+				first.Delivery.ReceiptID, dup.Delivery.ReceiptID)
+		}
+		if n := f.nudges(); n != 1 {
+			t.Fatalf("runtime received %d nudges for one message posted twice, want exactly 1", n)
+		}
+	})
 }

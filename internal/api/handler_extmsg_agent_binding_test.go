@@ -18,6 +18,13 @@ func newExtMsgAgentBindingFixture(t *testing.T) (*fakeState, *Server, *extmsg.Se
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
+	// An isolated receipt store: the default is process-wide, and every
+	// inbound that carries a provider message id now claims its fan-out
+	// against it (extmsgClaimInboundFanout), so a test that posts the same
+	// message id into the same conversation as an earlier test — or its own
+	// earlier repetition under -count=N — would otherwise be answered from
+	// that run's delivered receipt and never fan out.
+	srv.inboundReceipts = extmsg.NewInboundReceiptStore()
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()

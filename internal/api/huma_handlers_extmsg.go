@@ -136,16 +136,19 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		// for why an over-budget fan-out reports pending instead of being
 		// canceled.
 		//
-		// An adapter redelivery of a message already in the transcript (same
-		// conversation + provider message id, result.Duplicate) skips the
-		// fan-out ONLY when the first fan-out's receipt says the members
-		// already hold the message; a first delivery that failed or was
-		// partial is exactly what the adapter is retrying, so it runs again.
-		// The transcript row alone is not evidence — it is written before the
-		// fan-out starts. See extmsgRedeliveryHold (hq-703om).
-		delivery, held := s.extmsgRedeliveryHold(result, message)
+		// The fan-out is CLAIMED per message before it runs: a message the
+		// receipt store already accounts for (a fan-out still running, or one
+		// that delivered) is answered from that evidence and skips the
+		// fan-out; a first delivery, or a redelivery of a message whose
+		// fan-out failed or was partial — exactly what the adapter is
+		// retrying — claims and runs. The transcript row (result.Duplicate)
+		// is not the evidence: it is written before the fan-out starts, and
+		// claim and lookup are one atomic store operation so two requests
+		// carrying the same message cannot both fan out. See
+		// extmsgClaimInboundFanout (hq-703om).
+		receiptID, delivery, held := s.extmsgClaimInboundFanout(result, message)
 		if !held {
-			delivery = s.extmsgNotifyInboundWithReceipt(ctx, message)
+			delivery = s.extmsgNotifyInboundWithReceipt(ctx, message, receiptID)
 		}
 		out := &ExtMsgInboundOutput{}
 		if result != nil {

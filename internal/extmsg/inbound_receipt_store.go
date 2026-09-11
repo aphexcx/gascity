@@ -119,13 +119,24 @@ type InboundReceiptStore struct {
 // recognizing a redelivery: the same (conversation, provider message id) the
 // transcript deduplicates on, normalized the same way. "" when the message
 // carries no provider id — such messages keep at-least-once delivery.
+//
+// The conversation half is the WHOLE identity sameConversationRef compares —
+// scope, provider, account, conversation id, parent conversation id and
+// kind — not just the id triple. A thread and the room it hangs off, or two
+// kinds sharing a conversation id, are different conversations to the
+// transcript, and a receipt keyed on less than that would let one
+// conversation's delivery evidence answer for another's: a redelivery would
+// be suppressed on a delivery that reached a different conversation's
+// members, or repeated on a failure that was not its own (codex r3 MAJOR 2).
 func InboundMessageKey(conv ConversationRef, providerMessageID string) string {
 	id := strings.TrimSpace(providerMessageID)
 	if id == "" {
 		return ""
 	}
 	conv = normalizeConversationRef(conv)
-	return strings.Join([]string{conv.Provider, conv.AccountID, conv.ConversationID, id}, "\x00")
+	return strings.Join([]string{
+		conv.ScopeID, conv.Provider, conv.AccountID, conv.ConversationID, conv.ParentConversationID, string(conv.Kind), id,
+	}, "\x00")
 }
 
 // messageIndexKey scopes a message key to its city: the store is
@@ -182,6 +193,10 @@ func (s *InboundReceiptStore) Begin(city, receiptID string) {
 // message, superseding any earlier fan-out for the same message, so
 // [InboundReceiptStore.LatestFor] answers with THIS fan-out from now on. An
 // empty messageKey indexes nothing.
+//
+// BeginFor registers unconditionally. A fan-out that must not run twice for
+// the same message goes through [InboundReceiptStore.ClaimFor] instead,
+// which decides and registers under one lock.
 func (s *InboundReceiptStore) BeginFor(city, receiptID, messageKey string) {
 	if s == nil || receiptID == "" {
 		return
@@ -189,6 +204,75 @@ func (s *InboundReceiptStore) BeginFor(city, receiptID, messageKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked()
+	s.beginLocked(city, receiptID, messageKey)
+}
+
+// ClaimFor is the atomic claim-or-lookup a fan-out for the inbound message
+// messageKey passes through before it starts. Under ONE lock it reads the
+// evidence the message's latest fan-out left behind and, when that evidence
+// licenses another delivery, begins receiptID for the message exactly as
+// BeginFor would. Two requests carrying the same message — an adapter
+// redelivery racing the first delivery, or two retries after a failure —
+// therefore cannot both start a fan-out: whichever claims second sees the
+// first's pending record and holds on it. LatestFor followed by BeginFor
+// left a window between the two calls in which both requests read "no
+// evidence" and both fanned out (codex r3 MAJOR 1).
+//
+// claimed reports whether receiptID was begun. prior is the evidence the
+// decision was made on — unknown when the store had none — so the caller
+// can answer a refused claim with the receipt that holds the message:
+//
+//   - pending (still running), or concluded pending or delivered: a whole
+//     copy is live or has landed, so another fan-out would duplicate it.
+//     NOT claimed; nothing is recorded for receiptID.
+//   - failed, partial, no_route, unknown: nothing whole reached anyone that
+//     this process can vouch for; the adapter is redelivering because gc
+//     told it a retry is clean (see InboundDelivery). Claimed.
+//
+// An empty messageKey (no provider id) is always claimed and indexes
+// nothing, as Begin: such messages keep at-least-once delivery.
+func (s *InboundReceiptStore) ClaimFor(city, receiptID, messageKey string) (prior InboundReceiptStatus, claimed bool) {
+	prior = InboundReceiptStatus{State: InboundReceiptUnknown}
+	if s == nil || receiptID == "" {
+		// Nothing to record against; the fan-out runs at-least-once, and a
+		// later Conclude still records its outcome.
+		return prior, true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	if messageKey != "" {
+		if id, ok := s.byMessage[messageIndexKey(city, messageKey)]; ok {
+			prior = s.lookupLocked(city, id)
+		}
+		if prior.holdsMessage() {
+			return prior, false
+		}
+	}
+	s.beginLocked(city, receiptID, messageKey)
+	return prior, true
+}
+
+// holdsMessage reports whether the fan-out this status describes still
+// accounts for its message — running, or concluded with a whole copy live
+// (pending) or landed (delivered) — so that another fan-out for the same
+// message would duplicate it. failed, partial and no_route are the outcomes
+// gc told the adapter a redelivery is for; unknown is no evidence at all.
+func (st InboundReceiptStatus) holdsMessage() bool {
+	switch st.State {
+	case InboundReceiptPending:
+		return true
+	case InboundReceiptConcluded:
+		return st.Delivery != nil &&
+			(st.Delivery.Status == InboundDeliveryPending || st.Delivery.Status == InboundDeliveryDelivered)
+	}
+	return false
+}
+
+// beginLocked records a pending fan-out for receiptID, indexed by
+// messageKey when non-empty. Idempotent on receiptID: a known id keeps its
+// original record and its index position.
+func (s *InboundReceiptStore) beginLocked(city, receiptID, messageKey string) {
 	if _, ok := s.entries[receiptID]; ok {
 		return
 	}

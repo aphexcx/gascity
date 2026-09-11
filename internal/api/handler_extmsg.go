@@ -397,24 +397,32 @@ const extmsgInboundReceiptBudget = 15 * time.Second
 // the shutdown WaitGroup) until it returns on its own. That predates this
 // receipt and is not made worse by it — the wait here is bounded regardless —
 // but do not read the background context as a hard kill.
-func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.ExternalInboundMessage) extmsg.InboundDelivery {
+func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.ExternalInboundMessage, receiptID string) extmsg.InboundDelivery {
 	conversation := msg.Conversation.Provider + "/" + msg.Conversation.ConversationID
 	return awaitInboundFanout(ctx, s.inboundReceiptStore(), s.state.CityName(), extmsgInboundReceiptBudget, s.runBackground,
 		func(bgCtx context.Context) ([]extmsg.InboundDeliveryMember, error) {
 			return s.extmsgNotifyInboundMembers(bgCtx, msg)
-		}, conversation, extmsg.InboundMessageKey(msg.Conversation, msg.ProviderMessageID))
+		}, conversation, receiptID)
 }
 
-// extmsgRedeliveryHold decides whether a redelivered inbound — one the
-// transcript already holds under the same conversation + provider message
-// id (result.Duplicate, hq-703om) — may skip the member fan-out, and what
-// receipt to answer with if so. Not held means: run the fan-out again.
+// extmsgClaimInboundFanout claims the member fan-out for an inbound message
+// or, when another fan-out already accounts for the message, returns the
+// receipt to answer with instead (hq-703om). Not held means: run the
+// fan-out under receiptID, which the receipt store now holds as the
+// message's pending fan-out.
 //
 // The transcript row is NOT delivery evidence. It is written before the
 // fan-out starts (extmsg.HandleInboundNormalized appends, then this handler
-// notifies), so a row proves only that gc accepted the message. What proves
-// the members were reached is the receipt the FIRST fan-out left in the
-// receipt store, found by message key; the answer follows that evidence:
+// notifies), so a row proves only that gc accepted the message — and
+// result.Duplicate, which reports that row, is log context here, not the
+// decision. What proves the members were reached is the receipt the
+// message's latest fan-out left in the receipt store, found by message key.
+// The store's ClaimFor reads that evidence and registers this request's
+// fan-out under ONE lock, so two requests carrying the same message — an
+// adapter redelivery racing the first delivery, or two retries after a
+// failure — cannot both fan out: a lookup and a register as separate calls
+// left a window in which both read "no evidence" (codex r3 MAJOR 1). The
+// answer follows the evidence:
 //
 //   - concluded delivered: every member holds a whole copy. Re-notifying
 //     would inject the same message as an extra turn (2-4 per message on
@@ -431,46 +439,63 @@ func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.
 //     the adapter is redelivering precisely because gc told it a retry is
 //     clean (extmsg.InboundDeliveryFailed / InboundDeliveryPartial).
 //     Suppressing here would answer no_route — terminal — and end the
-//     retries with no member ever holding the message. Not held.
+//     retries with no member ever holding the message. Claimed, not held.
 //   - no_route: nobody was bound when the first fan-out ran; membership is
-//     resolved again in case it has since been repaired. Not held.
-//   - unknown: a gc restart took the record, or it aged out of retention.
-//     gc cannot vouch for the first delivery, so the message keeps the
-//     at-least-once behaviour a message without a provider id has. Not
-//     held.
-func (s *Server) extmsgRedeliveryHold(result *extmsg.InboundResult, msg extmsg.ExternalInboundMessage) (extmsg.InboundDelivery, bool) {
-	if result == nil || !result.Duplicate {
-		return extmsg.InboundDelivery{}, false
-	}
+//     resolved again in case it has since been repaired. Claimed.
+//   - unknown: no fan-out for the message in this process — the first
+//     delivery, or a gc restart took the record, or it aged out of
+//     retention. gc cannot vouch for a prior delivery, so the message keeps
+//     the at-least-once behaviour a message without a provider id has.
+//     Claimed.
+func (s *Server) extmsgClaimInboundFanout(result *extmsg.InboundResult, msg extmsg.ExternalInboundMessage) (receiptID string, held extmsg.InboundDelivery, isHeld bool) {
 	store := s.inboundReceiptStore()
 	city := s.state.CityName()
 	conversation := msg.Conversation.Provider + "/" + msg.Conversation.ConversationID
-	prior := store.LatestFor(city, extmsg.InboundMessageKey(msg.Conversation, msg.ProviderMessageID))
+	// What the transcript says this request is, for the log line only: a
+	// first delivery can lose the claim to a concurrent redelivery that
+	// appended second but claimed first.
+	what := "a concurrent delivery"
+	if result != nil && result.Duplicate {
+		what = "a redelivery"
+	}
+	receiptID = extmsg.NextInboundReceiptID()
+	prior, claimed := store.ClaimFor(city, receiptID, extmsg.InboundMessageKey(msg.Conversation, msg.ProviderMessageID))
+	if claimed {
+		if prior.State != extmsg.InboundReceiptUnknown {
+			evidence := string(prior.State)
+			if prior.Delivery != nil {
+				evidence = string(prior.Delivery.Status)
+			}
+			log.Printf("extmsg: inbound %s message id %q is %s of a message whose latest fan-out reports %s — notifying members again (receipt=%s)",
+				conversation, msg.ProviderMessageID, what, evidence, receiptID)
+		}
+		return receiptID, extmsg.InboundDelivery{}, false
+	}
 	switch {
 	case prior.State == extmsg.InboundReceiptPending:
-		log.Printf("extmsg: inbound %s message id %q is a redelivery while its first fan-out is still running — holding on receipt %s",
-			conversation, msg.ProviderMessageID, prior.ReceiptID)
-		return extmsg.PendingInboundDelivery(prior.ReceiptID), true
+		log.Printf("extmsg: inbound %s message id %q is %s while the message's fan-out is still running — holding on receipt %s",
+			conversation, msg.ProviderMessageID, what, prior.ReceiptID)
+		return "", extmsg.PendingInboundDelivery(prior.ReceiptID), true
 	case prior.State == extmsg.InboundReceiptConcluded && prior.Delivery != nil && prior.Delivery.Status == extmsg.InboundDeliveryPending:
-		log.Printf("extmsg: inbound %s message id %q is a redelivery of a message whose delivery is unconcluded (%s) — holding, member notify suppressed",
-			conversation, msg.ProviderMessageID, prior.Delivery)
-		return *prior.Delivery, true
+		log.Printf("extmsg: inbound %s message id %q is %s of a message whose delivery is unconcluded (%s) — holding, member notify suppressed",
+			conversation, msg.ProviderMessageID, what, prior.Delivery)
+		return "", *prior.Delivery, true
 	case prior.State == extmsg.InboundReceiptConcluded && prior.Delivery != nil && prior.Delivery.Status == extmsg.InboundDeliveryDelivered:
-		receiptID := extmsg.NextInboundReceiptID()
+		// receiptID was not begun by the refused claim; it becomes the
+		// suppression receipt.
 		store.Begin(city, receiptID)
 		delivery := extmsg.SummarizeInboundDelivery(receiptID, nil)
 		store.Conclude(city, receiptID, delivery)
-		log.Printf("extmsg: inbound %s message id %q is a redelivery of a message already delivered under receipt %s — member notify suppressed (receipt=%s)",
-			conversation, msg.ProviderMessageID, prior.ReceiptID, receiptID)
-		return delivery, true
+		log.Printf("extmsg: inbound %s message id %q is %s of a message already delivered under receipt %s — member notify suppressed (receipt=%s)",
+			conversation, msg.ProviderMessageID, what, prior.ReceiptID, receiptID)
+		return "", delivery, true
 	}
-	evidence := string(prior.State)
-	if prior.Delivery != nil {
-		evidence = string(prior.Delivery.Status)
-	}
-	log.Printf("extmsg: inbound %s message id %q is a redelivery of an already-transcribed message whose first fan-out reports %s — notifying members again",
-		conversation, msg.ProviderMessageID, evidence)
-	return extmsg.InboundDelivery{}, false
+	// ClaimFor refuses only on the three arms above. Should that contract
+	// drift, fail open to at-least-once rather than answer no_route on
+	// evidence that does not say delivered; Conclude records an unbegun id.
+	log.Printf("extmsg: inbound %s message id %q: claim refused on unexpected evidence %+v — notifying members anyway (receipt=%s)",
+		conversation, msg.ProviderMessageID, prior, receiptID)
+	return receiptID, extmsg.InboundDelivery{}, false
 }
 
 // awaitInboundFanout runs one inbound fan-out under budget and returns the
@@ -485,9 +510,12 @@ func (s *Server) extmsgRedeliveryHold(result *extmsg.InboundResult, msg extmsg.E
 // Split from the Server method so the budget race is testable with a fan-out
 // the test controls; city scopes the record (a lookup through another
 // city's path answers unknown); conversation is log context only;
-// messageKey (extmsg.InboundMessageKey, "" when the message has no provider
-// id) indexes the record so a redelivery of the same message can find this
-// fan-out's outcome — see extmsgRedeliveryHold.
+// receiptID names the record the caller already BEGAN for this fan-out —
+// in production through the store's ClaimFor (see
+// extmsgClaimInboundFanout), which is what keeps a redelivery of the same
+// message from fanning out alongside it. This function does not register
+// the id itself: doing so here, after the caller's lookup, is the window
+// codex r3 MAJOR 1 named.
 func awaitInboundFanout(
 	ctx context.Context,
 	store *extmsg.InboundReceiptStore,
@@ -496,10 +524,8 @@ func awaitInboundFanout(
 	runBackground func(func(context.Context)),
 	fanout func(context.Context) ([]extmsg.InboundDeliveryMember, error),
 	conversation string,
-	messageKey string,
+	receiptID string,
 ) extmsg.InboundDelivery {
-	receiptID := extmsg.NextInboundReceiptID()
-	store.BeginFor(city, receiptID, messageKey)
 	// Buffered so the fan-out goroutine never blocks publishing its result
 	// after the budget has expired and nobody is receiving any more.
 	done := make(chan extmsg.InboundDelivery, 1)

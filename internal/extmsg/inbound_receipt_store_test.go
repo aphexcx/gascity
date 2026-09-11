@@ -1,6 +1,8 @@
 package extmsg
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -207,8 +209,8 @@ func TestInboundReceiptStoreLookupIsCityScoped(t *testing.T) {
 
 // The message index behind BeginFor/LatestFor: the evidence a redelivery of
 // an inbound message is judged against (see the api package's
-// extmsgRedeliveryHold). It follows the LATEST fan-out for the message, is
-// scoped to the city, and never outlives the record it points at.
+// extmsgClaimInboundFanout). It follows the LATEST fan-out for the message,
+// is scoped to the city, and never outlives the record it points at.
 func TestInboundReceiptStoreLatestForFollowsMessageIndex(t *testing.T) {
 	now := time.Date(2026, 9, 11, 8, 24, 0, 0, time.UTC)
 	s := newTestReceiptStore(&now)
@@ -220,8 +222,21 @@ func TestInboundReceiptStoreLatestForFollowsMessageIndex(t *testing.T) {
 	if InboundMessageKey(ref, "  ") != "" {
 		t.Fatal("message without a provider id produced a key — it must keep at-least-once delivery")
 	}
-	shouty := ref
-	shouty.Provider = " Slack "
+	// Parity with the transcript dedup: a ref that sameConversationRef calls
+	// the same conversation — every field perturbed the way
+	// normalizeConversationRef undoes (padding on all six, case on provider
+	// and kind) — must produce the same key, and so must a padded id.
+	shouty := ConversationRef{
+		ScopeID:              " g ",
+		Provider:             " Slack ",
+		AccountID:            "\ta\t",
+		ConversationID:       " C1 ",
+		ParentConversationID: "  ",
+		Kind:                 " ROOM ",
+	}
+	if !sameConversationRef(ref, shouty) {
+		t.Fatal("test premise: the transcript dedup does not normalize the perturbed ref back to ref")
+	}
 	if InboundMessageKey(shouty, " 1785354286.000100 ") != key {
 		t.Fatal("key is not normalized the way the transcript dedup normalizes the conversation")
 	}
@@ -271,5 +286,199 @@ func TestInboundReceiptStoreLatestForFollowsMessageIndex(t *testing.T) {
 	s.mu.Unlock()
 	if leaked {
 		t.Fatal("message index outlived the record it pointed at")
+	}
+}
+
+// The message key carries the WHOLE normalized conversation identity the
+// transcript dedup compares (sameConversationRef), not just the provider /
+// account / conversation id triple: two conversations that differ only in
+// scope, parent conversation or kind are different conversations to the
+// transcript, and their receipts must not stand in for each other (codex
+// r3 MAJOR 2) — a redelivery judged on another conversation's delivery
+// would be suppressed with nobody in its own conversation holding the
+// message, and one judged on another's failure would be duplicated.
+func TestInboundMessageKeyCoversWholeConversationIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 11, 8, 24, 0, 0, time.UTC)
+	s := newTestReceiptStore(&now)
+	const id = "1785354286.000100"
+	base := ConversationRef{ScopeID: "g", Provider: "slack", AccountID: "a", ConversationID: "C1", Kind: ConversationRoom}
+	baseKey := InboundMessageKey(base, id)
+
+	for name, mutate := range map[string]func(*ConversationRef){
+		"scope":               func(r *ConversationRef) { r.ScopeID = "g2" },
+		"provider":            func(r *ConversationRef) { r.Provider = "discord" },
+		"account":             func(r *ConversationRef) { r.AccountID = "a2" },
+		"conversation":        func(r *ConversationRef) { r.ConversationID = "C2" },
+		"parent conversation": func(r *ConversationRef) { r.ParentConversationID = "C0" },
+		"kind":                func(r *ConversationRef) { r.Kind = ConversationThread },
+	} {
+		other := base
+		mutate(&other)
+		if InboundMessageKey(other, id) == baseKey {
+			t.Fatalf("a conversation differing only in %s produced the same message key", name)
+		}
+		if !sameConversationRef(base, base) || sameConversationRef(base, other) {
+			t.Fatalf("test premise: the transcript dedup does not distinguish %s", name)
+		}
+	}
+	// Normalization matches the transcript's for the added fields too.
+	shouty := base
+	shouty.ScopeID, shouty.Kind, shouty.ParentConversationID = " g ", " ROOM ", "  "
+	if InboundMessageKey(shouty, id) != baseKey {
+		t.Fatal("key is not normalized the way the transcript dedup normalizes scope, kind and parent")
+	}
+
+	// The collision itself: the same provider message id delivered to a room
+	// and to a thread hanging off it (or the same id under another kind)
+	// keeps separate receipts.
+	thread := base
+	thread.ParentConversationID, thread.Kind = "C1", ConversationThread
+	threadKey := InboundMessageKey(thread, id)
+	s.BeginFor("c", "ir-1-room", baseKey)
+	s.Conclude("c", "ir-1-room", SummarizeInboundDelivery("ir-1-room", []InboundDeliveryMember{{
+		SessionID: "s1", Status: InboundDeliveryDelivered, DeliveredBytes: 5, ExpectedBytes: 5,
+	}}))
+	if got := s.LatestFor("c", threadKey); got.State != InboundReceiptUnknown {
+		t.Fatalf("the room's delivered receipt answered for the thread: %+v", got)
+	}
+	s.BeginFor("c", "ir-1-thread", threadKey)
+	s.Conclude("c", "ir-1-thread", FailedInboundDelivery("ir-1-thread", "runtime dead"))
+	if got := s.LatestFor("c", baseKey); got.ReceiptID != "ir-1-room" || got.Delivery == nil || got.Delivery.Status != InboundDeliveryDelivered {
+		t.Fatalf("the thread's failed receipt overwrote the room's delivery evidence: %+v", got)
+	}
+	if got := s.LatestFor("c", threadKey); got.ReceiptID != "ir-1-thread" || got.Delivery == nil || got.Delivery.Status != InboundDeliveryFailed {
+		t.Fatalf("thread evidence = %+v, want its own failed receipt", got)
+	}
+	kindOnly := base
+	kindOnly.Kind = ConversationDM
+	if _, claimed := s.ClaimFor("c", "ir-1-dm", InboundMessageKey(kindOnly, id)); !claimed {
+		t.Fatal("a claim for the same id under another kind was refused on the room's delivery")
+	}
+}
+
+// ClaimFor is the atomic claim-or-lookup behind the api package's
+// extmsgClaimInboundFanout: the lookup of a message's latest receipt and the
+// registration of a new fan-out for it happen under one lock, so of any
+// number of requests carrying the same message, exactly one claims while a
+// whole copy is live or landed, and the rest read the claim they lost to
+// (codex r3 MAJOR 1).
+func TestInboundReceiptStoreClaimForIsAtomicPerMessage(t *testing.T) {
+	now := time.Date(2026, 9, 11, 8, 24, 0, 0, time.UTC)
+	s := newTestReceiptStore(&now)
+	ref := ConversationRef{ScopeID: "g", Provider: "slack", AccountID: "a", ConversationID: "C1", Kind: ConversationRoom}
+	key := InboundMessageKey(ref, "1785354286.000100")
+	whole := func(id string) InboundDelivery {
+		return SummarizeInboundDelivery(id, []InboundDeliveryMember{{SessionID: "s1", Status: InboundDeliveryDelivered, DeliveredBytes: 5, ExpectedBytes: 5}})
+	}
+
+	// No evidence: claimed, and registered as the message's pending fan-out
+	// in the same step.
+	prior, claimed := s.ClaimFor("c", "ir-1-1", key)
+	if !claimed || prior.State != InboundReceiptUnknown {
+		t.Fatalf("first claim: claimed=%v prior=%+v, want claimed on unknown", claimed, prior)
+	}
+	if got := s.LatestFor("c", key); got.State != InboundReceiptPending || got.ReceiptID != "ir-1-1" {
+		t.Fatalf("after the first claim: %+v, want pending on ir-1-1", got)
+	}
+	// While it runs, a second claim is refused, reads the running claim, and
+	// records nothing for the refused id.
+	prior, claimed = s.ClaimFor("c", "ir-1-2", key)
+	if claimed || prior.State != InboundReceiptPending || prior.ReceiptID != "ir-1-1" {
+		t.Fatalf("claim during a running fan-out: claimed=%v prior=%+v, want refused with pending ir-1-1", claimed, prior)
+	}
+	if got := s.Lookup("c", "ir-1-2"); got.State != InboundReceiptUnknown {
+		t.Fatalf("refused claim left a record: %+v", got)
+	}
+
+	// The evidence that licenses a retry lets the next claim through, which
+	// then supersedes it as the message's latest fan-out.
+	for i, prior := range []InboundDelivery{
+		FailedInboundDelivery("", "runtime dead"),
+		SummarizeInboundDelivery("", []InboundDeliveryMember{{SessionID: "s1", Status: InboundDeliveryPartial, DeliveredBytes: 2, ExpectedBytes: 5}}),
+		SummarizeInboundDelivery("", nil),
+	} {
+		latest := s.LatestFor("c", key).ReceiptID
+		prior.ReceiptID = latest
+		s.Conclude("c", latest, prior)
+		next := "ir-2-" + string(rune('a'+i))
+		got, claimed := s.ClaimFor("c", next, key)
+		if !claimed || got.State != InboundReceiptConcluded || got.Delivery == nil || got.Delivery.Status != prior.Status {
+			t.Fatalf("claim after %s: claimed=%v prior=%+v, want claimed on that evidence", prior.Status, claimed, got)
+		}
+		if l := s.LatestFor("c", key); l.State != InboundReceiptPending || l.ReceiptID != next {
+			t.Fatalf("after claiming on %s: latest = %+v, want pending on %s", prior.Status, l, next)
+		}
+	}
+
+	// A whole copy live (concluded pending) or landed (delivered) refuses
+	// every further claim.
+	latest := s.LatestFor("c", key).ReceiptID
+	s.Conclude("c", latest, SummarizeInboundDelivery(latest, []InboundDeliveryMember{{SessionID: "s1", Status: InboundDeliveryPending, DeliveredBytes: 5, ExpectedBytes: 5}}))
+	if prior, claimed := s.ClaimFor("c", "ir-3-1", key); claimed || prior.ReceiptID != latest || prior.Delivery == nil || prior.Delivery.Status != InboundDeliveryPending {
+		t.Fatalf("claim on a concluded-pending delivery: claimed=%v prior=%+v, want refused with that delivery", claimed, prior)
+	}
+	s.BeginFor("c", "ir-3-2", key)
+	s.Conclude("c", "ir-3-2", whole("ir-3-2"))
+	for _, id := range []string{"ir-3-3", "ir-3-4"} {
+		if prior, claimed := s.ClaimFor("c", id, key); claimed || prior.ReceiptID != "ir-3-2" || prior.Delivery == nil || prior.Delivery.Status != InboundDeliveryDelivered {
+			t.Fatalf("claim on a delivered message (%s): claimed=%v prior=%+v, want refused with the delivered receipt", id, claimed, prior)
+		}
+		if got := s.Lookup("c", id); got.State != InboundReceiptUnknown {
+			t.Fatalf("refused claim %s left a record: %+v", id, got)
+		}
+	}
+
+	// Scope and degenerate keys: another city has no evidence for the same
+	// key; a message without a provider id is always claimed and never
+	// indexed, so it keeps at-least-once delivery.
+	if _, claimed := s.ClaimFor("other", "ir-4-1", key); !claimed {
+		t.Fatal("another city's claim was refused on this city's evidence")
+	}
+	for _, id := range []string{"ir-5-1", "ir-5-2"} {
+		if prior, claimed := s.ClaimFor("c", id, ""); !claimed || prior.State != InboundReceiptUnknown {
+			t.Fatalf("claim without a message key (%s): claimed=%v prior=%+v, want claimed on unknown", id, claimed, prior)
+		}
+		if got := s.Lookup("c", id); got.State != InboundReceiptPending {
+			t.Fatalf("keyless claim %s not recorded: %+v", id, got)
+		}
+	}
+
+	// The property itself, under contention: many claims for one message
+	// with no evidence, exactly one wins, every loser reads the winner.
+	fresh := InboundMessageKey(ref, "1785354286.000200")
+	var wg sync.WaitGroup
+	winners := make(chan string, 64)
+	losersSaw := make(chan string, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			prior, claimed := s.ClaimFor("c", id, fresh)
+			if claimed {
+				winners <- id
+			} else {
+				losersSaw <- prior.ReceiptID
+			}
+		}("ir-6-" + strconv.Itoa(i))
+	}
+	wg.Wait()
+	close(winners)
+	close(losersSaw)
+	var won []string
+	for id := range winners {
+		won = append(won, id)
+	}
+	if len(won) != 1 {
+		t.Fatalf("%d of 64 concurrent claims for one message succeeded, want exactly 1: %v", len(won), won)
+	}
+	n := 0
+	for saw := range losersSaw {
+		n++
+		if saw != won[0] {
+			t.Fatalf("a refused claim read receipt %q, want the winner %q", saw, won[0])
+		}
+	}
+	if n != 63 {
+		t.Fatalf("%d refused claims, want 63", n)
 	}
 }
