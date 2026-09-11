@@ -134,6 +134,9 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (d
 		}
 		result.reads++
 		if setErr := store.SetMetadata(c.id, beadmeta.RoutedToMetadataKey, route); setErr != nil {
+			if errors.Is(setErr, errAutomaticWriteFenced) {
+				continue // another city's row; its own lane restores it
+			}
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", c.id, route, setErr))
 			continue
 		}
@@ -164,7 +167,7 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 	// rebuilding the same full ListAllSessionBeads scan and unioning it into
 	// itself is pure waste. Interface identity is the right test here — production
 	// stores are pointer-backed CachingStores.
-	if routeStore != nil && routeStore != store {
+	if routeStore != nil && bareStore(routeStore) != bareStore(store) {
 		reads += 2
 		crossIndex, crossErr := buildDetachedOrphanRouteIndex(routeStore)
 		if crossErr != nil {

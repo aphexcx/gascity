@@ -51,20 +51,23 @@ func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 	// (city) cwd/env, so resolve the store that actually owns the bead across
 	// the city and every rig, so rig-store closes autoclose their attached
 	// wisps instead of silently no-op'ing (#3411).
-	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	store, _, gate, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr)
+	switch outcome {
 	case autocloseResolved:
-		doWispAutocloseWith(store, beadID, stdout)
+		doWispAutocloseWith(gate.fence(store, stderr, "gc wisp autoclose"), beadID, stdout)
 		return
 	case autocloseVetoed:
 		return
 	case autocloseFallback:
 	}
 
-	store, err := openStoreAtForCity(storeRoot, cityPath)
+	// See doConvoyAutoclose: the fallback store runs behind the gate the
+	// config gave (the zero gate when there was no city.toml to load).
+	store, err = openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout)
+	doWispAutocloseWith(gate.fence(store, stderr, "gc wisp autoclose"), beadID, stdout)
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and

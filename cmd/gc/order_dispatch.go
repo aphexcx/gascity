@@ -2564,6 +2564,9 @@ func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) 
 	}
 	ids := make([]string, 0, len(runs))
 	for _, run := range runs {
+		if !mayWriteAutomatically(store, run.ID) {
+			continue // another city's row; not this sweep's, and not a slot spent
+		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
 			break
@@ -2787,6 +2790,9 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 				continue
 			}
 		}
+		if !mayWriteAutomatically(store, run.ID) {
+			continue // another city's row; not this sweep's, and not a slot spent
+		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
 			break
@@ -2911,9 +2917,15 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
+			if !mayWriteAutomatically(store, run.ID) {
+				continue // another city's row; its own retention prunes it
+			}
 			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
 			// retention prune uses; it stays raw graph residual.
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errAutomaticWriteFenced) {
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
@@ -2969,7 +2981,13 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
+			if !mayWriteAutomatically(store, run.ID) {
+				continue // another city's row; its own retention prunes it
+			}
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errAutomaticWriteFenced) {
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
@@ -3020,7 +3038,9 @@ func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Ti
 				continue
 			}
 			for _, run := range group[policy.retainLast:] {
-				if orderTrackingClosedReferenceTime(run).Before(cutoff) {
+				// The same ownership filter as the sweep: the confirm gate
+				// counts what this city would actually delete.
+				if orderTrackingClosedReferenceTime(run).Before(cutoff) && mayWriteAutomatically(store, run.ID) {
 					total++
 				}
 			}

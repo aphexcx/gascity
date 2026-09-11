@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -719,6 +720,12 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	warnSkippedConvoyStores(stderr, cmdName, skipped)
+	// The check sweep auto-closes into every store opened here; each is
+	// handed through this city's cross-city fence (autocloseGate).
+	gate := autocloseGateFor(cfg)
+	for i := range stores {
+		stores[i].store = gate.fence(stores[i].store, stderr, cmdName)
+	}
 	return stores, 0
 }
 
@@ -1608,19 +1615,18 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 			}
 		}
 		if allClosed {
-			if err := closeConvoyWithReason(item.store, item.bead.ID, convoyAutocloseReason); err != nil {
+			announce := stdout
+			if jsonOut {
+				announce = io.Discard
+			}
+			wrote, err := autocloseConvoy(item.store, rec, item.bead, announce)
+			if err != nil {
 				fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			rec.Record(events.Event{
-				Type:    events.ConvoyClosed,
-				Actor:   eventActor(),
-				Subject: item.bead.ID,
-			})
-			if !jsonOut {
-				fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", item.bead.ID, item.bead.Title) //nolint:errcheck // best-effort stdout
+			if wrote {
+				closed++
 			}
-			closed++
 		}
 	}
 
@@ -1927,9 +1933,10 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// actually owns the bead — prefix-aware, across the city and every rig —
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
-	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	store, _, gate, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr)
+	switch outcome {
 	case autocloseResolved:
-		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+		doConvoyAutocloseWith(gate.fence(store, stderr, "gc convoy autoclose"), rec, beadID, stdout, stderr)
 		return
 	case autocloseVetoed:
 		return
@@ -1938,13 +1945,14 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 
 	// Fallback: a standalone store reachable only via cwd/BEADS_DIR/
 	// GC_STORE_ROOT (e.g. an external rig checkout with no city.toml), or a
-	// city whose config could not be loaded. Preserve the original
-	// single-store resolution.
-	store, err := openStoreAtForCity(storeRoot, cityPath)
+	// city whose config loaded but could not name the bead's store. Preserve
+	// the original single-store resolution, behind the gate the config gave
+	// (the zero gate when there was no city.toml to load).
+	store, err = openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+	doConvoyAutocloseWith(gate.fence(store, stderr, "gc convoy autoclose"), rec, beadID, stdout, stderr)
 }
 
 // autocloseOutcome is what autocloseOwningStore decided.
@@ -2001,11 +2009,24 @@ func resolveAutocloseOwner(beadID string, cfg *config.City, cityPath, storeRoot 
 // came from (GC_STORE_ROOT / BEADS_DIR / cwd). The store directory lets
 // molecule autoclose derive the matching store-ref label. Skipped candidates
 // and a veto are reported on stderr rather than swallowed.
-func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) (beads.Store, string, autocloseOutcome) {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) (beads.Store, string, autocloseGate, autocloseOutcome) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
-		return nil, "", autocloseFallback
+		// No city.toml at all: a standalone store, not a federated city, so
+		// the fallback runs behind the zero gate. A city.toml that exists but
+		// cannot be loaded proves nothing about this city's federation
+		// identity, and an automatic writer that cannot prove it is the
+		// row's one maintainer does not write.
+		// Lstat: a broken or looping symlink is a city.toml that EXISTS and
+		// cannot be loaded, not a confirmed absence.
+		if _, statErr := os.Lstat(tomlPath); errors.Is(statErr, fs.ErrNotExist) {
+			return nil, "", autocloseGate{}, autocloseFallback
+		}
+		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — %s could not be loaded, so this city's federation identity cannot be proven: %s\n", beadID, tomlPath, firstErrorLine(err)) //nolint:errcheck // best-effort stderr
+		return nil, "", autocloseGate{}, autocloseVetoed
 	}
+	gate := autocloseGateFor(cfg)
 	store, dir, outcome, skipped, err := resolveAutocloseOwner(beadID, cfg, cityPath, storeRoot, func(storeDir string) (beads.Store, error) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
@@ -2016,7 +2037,7 @@ func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) 
 	if outcome == autocloseVetoed {
 		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — cannot prove which store the close came from while a store is unavailable (close attributed to %s)\n", beadID, storeRoot) //nolint:errcheck // best-effort stderr
 	}
-	return store, dir, outcome
+	return store, dir, gate, outcome
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {
@@ -2102,15 +2123,31 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		}
 	}
 
-	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
-		return
-	}
+	_, _ = autocloseConvoy(store, rec, convoy, stdout)
+}
 
+// autocloseConvoy is the one write path of the convoy autoclose — the
+// bead-close event path and the check sweep both end here once "all children
+// are terminal" is established. On a federated city the store is fenced
+// (autocloseGate): a convoy another city maintains is refused at the write
+// with errAutomaticWriteFenced, already logged, and reported here as
+// wrote=false with no error, so a pull-delivered close never makes this
+// city re-close it. Otherwise the convoy is closed with the autoclose
+// reason, the ConvoyClosed event recorded and the announcement printed to
+// stdout; any other close failure is returned for the caller to report or
+// swallow.
+func autocloseConvoy(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) (wrote bool, err error) {
+	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
+		if errors.Is(err, errAutomaticWriteFenced) {
+			return false, nil
+		}
+		return false, err
+	}
 	rec.Record(events.Event{
 		Type:    events.ConvoyClosed,
 		Actor:   eventActor(),
 		Subject: convoy.ID,
 	})
-
 	fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, convoy.Title) //nolint:errcheck // best-effort stdout
+	return true, nil
 }

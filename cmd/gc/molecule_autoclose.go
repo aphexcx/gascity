@@ -76,20 +76,23 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// the city and every rig, and derive the store-ref from that store, so
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
-	switch store, dir, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
+	store, dir, gate, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr)
+	switch outcome {
 	case autocloseResolved:
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
+		doMoleculeAutocloseWith(gate.fence(store, stderr, "gc molecule autoclose"), autocloseStoreRef(dir, cityPath), rec, beadID, stdout)
 		return
 	case autocloseVetoed:
 		return
 	case autocloseFallback:
 	}
 
-	store, err := openStoreAtForCity(storeRoot, cityPath)
+	// See doConvoyAutoclose: the fallback store runs behind the gate the
+	// config gave (the zero gate when there was no city.toml to load).
+	store, err = openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
+	doMoleculeAutocloseWith(gate.fence(store, stderr, "gc molecule autoclose"), autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout)
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -250,8 +253,11 @@ func subtreeTerminalExcludingRoot(store beads.Store, rootID string) (terminal bo
 
 // announceClosedMolecule closes mol with the given close_reason, records a
 // BeadClosed event, and prints the auto-close announcement to stdout. Shared
-// by the step-terminal and source-bead-close triggers. Best-effort: a close
-// failure aborts silently without recording or announcing.
+// by the step-terminal and source-bead-close triggers — the one write path of
+// the molecule autoclose. On a federated city the store is fenced
+// (autocloseGate): a root another city maintains is refused at the write,
+// already logged, and nothing is recorded or announced. Best-effort: any
+// close failure aborts silently without recording or announcing.
 func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Bead, reason string, stdout io.Writer) bool {
 	// Capture the pre-close status before closeMoleculeWithReason transitions
 	// the root to closed — it is the from_status of the resolution record.

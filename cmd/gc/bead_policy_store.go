@@ -120,7 +120,12 @@ type ownerStampingTx struct {
 
 func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
 	parentLabels, seen := tx.created[strings.TrimSpace(b.ParentID)]
-	if !seen {
+	// A child that already names its owner keeps it whatever its parent
+	// carries (OwnerLabelForChild), so the parent is not read for it — and
+	// inside a native transaction that read could wait on the store's own
+	// lock. The cross-city fence stamps the owner before its transaction
+	// opens for exactly this reason.
+	if !seen && !federation.HasOwnerLabel(b.Labels) {
 		parentLabels = tx.store.ownerParentLabels(b.ParentID)
 	}
 	b.Labels = tx.store.ownerLabelsForCreateUnder(b, parentLabels)

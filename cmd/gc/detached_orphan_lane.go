@@ -158,6 +158,20 @@ type detachedOrphanLane struct {
 	interval time.Duration
 	retry    time.Duration
 	poll     time.Duration
+
+	// fence wraps a plan leg's store before the lane writes through it (the
+	// runtime sets it to this city's cross-city fence); nil = bare. Reads —
+	// the candidate re-read, the session route index — stay on the bare leg.
+	fence func(beads.Store) beads.Store
+}
+
+// fenced returns store behind the lane's fence, or store itself when none
+// is armed.
+func (l *detachedOrphanLane) fenced(store beads.Store) beads.Store {
+	if l.fence == nil || store == nil {
+		return store
+	}
+	return l.fence(store)
 }
 
 func newDetachedOrphanLane() *detachedOrphanLane {
@@ -176,7 +190,15 @@ func newDetachedOrphanLane() *detachedOrphanLane {
 // a directly-constructed CityRuntime (every test, every one-shot) needs no
 // wiring.
 func (cr *CityRuntime) detachedOrphanLaneOf() *detachedOrphanLane {
-	cr.detachedOrphanOnce.Do(func() { cr.detachedOrphan = newDetachedOrphanLane() })
+	cr.detachedOrphanOnce.Do(func() {
+		cr.detachedOrphan = newDetachedOrphanLane()
+		// The lane re-stamps gc.routed_to on handoff orphans with no agent
+		// behind it; on a federated city every leg's store is written through
+		// the cross-city fence.
+		cr.detachedOrphan.fence = func(store beads.Store) beads.Store {
+			return autocloseGateFor(cr.serviceConfigSnapshot()).fence(store, cr.stderr, cr.logPrefix+": detached handoff orphan sweep")
+		}
+	})
 	return cr.detachedOrphan
 }
 
@@ -354,7 +376,7 @@ func (l *detachedOrphanLane) deltaPass(plan storeref.ResolvedPlan, sessions bead
 			if !isDetachedHandoffOrphanCandidate(row) {
 				continue
 			}
-			outcome := restoreDetachedOrphanRoute(leg.store, row, resolver)
+			outcome := restoreDetachedOrphanRoute(l.fenced(leg.store), row, resolver)
 			report.legReads += outcome.writes
 			if outcome.err != nil {
 				errs = append(errs, outcome.err)
@@ -390,7 +412,7 @@ func (l *detachedOrphanLane) backstopPassOnPlane(plan storeref.ResolvedPlan, ses
 	var errs []error
 	partial, walkErr := walkPlaneLegs(plan, plane, func(leg planeLeg) error {
 		report.legs++
-		result, err := sweepDetachedHandoffOrphansWithRouteStore(leg.store, sessions)
+		result, err := sweepDetachedHandoffOrphansWithRouteStore(l.fenced(leg.store), sessions)
 		report.candidates += result.candidates
 		report.restored += result.restored
 		report.legReads += result.reads
@@ -428,6 +450,9 @@ func restoreDetachedOrphanRoute(store beads.Store, live beads.Bead, resolver *de
 		return detachedOrphanRestoreOutcome{}
 	}
 	if setErr := store.SetMetadata(live.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
+		if errors.Is(setErr, errAutomaticWriteFenced) {
+			return detachedOrphanRestoreOutcome{} // another city's row; its own lane restores it
+		}
 		return detachedOrphanRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, setErr)}
 	}
 	return detachedOrphanRestoreOutcome{restored: true, writes: 1}

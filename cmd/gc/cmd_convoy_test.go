@@ -1991,6 +1991,14 @@ func convoyProblemHandler(status int, detail string) convoyMatrixHandler {
 // output.
 func writeConvoyTestCity(t *testing.T) string {
 	t.Helper()
+	return writeConvoyTestCityWithFederation(t, "")
+}
+
+// writeConvoyTestCityWithFederation is writeConvoyTestCity with a
+// [federation] identity block when identity is non-empty, so the
+// cross-city fence on the automatic writers can be exercised end to end.
+func writeConvoyTestCityWithFederation(t *testing.T, identity string) string {
+	t.Helper()
 	clearInheritedBeadsEnv(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -2005,6 +2013,9 @@ name = "test-city"
 [[agent]]
 name = "mayor"
 `
+	if identity != "" {
+		cityToml += "\n[federation]\nidentity = \"" + identity + "\"\n"
+	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}

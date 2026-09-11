@@ -740,7 +740,10 @@ func buildDesiredStateWithSessionBeads(
 		// agent onto the canonical identity, so the canonical session the
 		// awake/scale accounting wakes for it can actually surface and claim it
 		// (the agent-side work_query/claim path matches identities by raw string).
-		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// An automatic writer (it repairs work whose legacy owner is gone —
+		// not writing for an executing session): fenced like the unassigned
+		// pass below. The bare stores stay with the rest of the demand build.
+		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, fenceDemandPrepStores(cfg, assignedWorkStores, stderr), sessionBeads, stderr)
 		// Re-home open, unassigned work still routed to a legacy bound form of a
 		// now-unbound pool agent. This is the demand/claim half of the migration:
 		// empty-assignee open work never enters the assigned-work collection above,
@@ -751,6 +754,10 @@ func buildDesiredStateWithSessionBeads(
 		subPhaseStart = time.Now()
 		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		// The three route rewrites below are automatic writers every city's
+		// controller runs on the same shared rows: on a federated city they
+		// write only this city's rows (see fenceDemandPrepStores).
+		unassignedRoutedStores = fenceDemandPrepStores(cfg, unassignedRoutedStores, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -5094,6 +5101,12 @@ func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef s
 // preserved.
 func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
 	if r.writesRemaining <= 0 {
+		deferRouteRepair(bead, needsRouteRepair)
+		return
+	}
+	if store != nil && !mayWriteAutomatically(store, bead.ID) {
+		// Another city's row: its own controller repairs it. Asked before the
+		// budget is spent, so a foreign backlog cannot starve this city's rows.
 		deferRouteRepair(bead, needsRouteRepair)
 		return
 	}

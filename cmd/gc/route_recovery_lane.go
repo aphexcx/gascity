@@ -238,6 +238,10 @@ func (r routeRecoveryReport) outcome() TraceOutcomeCode {
 // which keeps the suspension frame told-not-decided exactly as the census arms
 // do.
 type routeRecoveryLane struct {
+	// fence wraps a plan leg's store before the lane writes through it
+	// (the runtime sets it to this city's cross-city fence); nil = bare.
+	fence func(beads.Store) beads.Store
+
 	mu sync.Mutex
 
 	// passMu admits ONE authoritative scan at a time. The startup scan can run
@@ -269,6 +273,15 @@ type routeRecoveryLane struct {
 	interval time.Duration
 	retry    time.Duration
 	poll     time.Duration
+}
+
+// fenced returns store behind the lane's fence, or store itself when none
+// is set.
+func (l *routeRecoveryLane) fenced(store beads.Store) beads.Store {
+	if l.fence == nil || store == nil {
+		return store
+	}
+	return l.fence(store)
 }
 
 func newRouteRecoveryLane() *routeRecoveryLane {
@@ -608,14 +621,15 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 	resolved := make(map[string]struct{}, len(candidates))
 	partial, walkErr := walkPlaneLegs(plan, runtimePlane, func(leg planeLeg) error {
 		report.legs++
-		rows, reads, err := liveOpenCandidates(leg.store, candidates)
+		store := l.fenced(leg.store)
+		rows, reads, err := liveOpenCandidates(store, candidates)
 		report.legReads += reads
 		if err != nil {
 			return fmt.Errorf("re-reading %d route candidate(s): %w", len(candidates), err)
 		}
 		for _, row := range rows {
 			resolved[row.ID] = struct{}{}
-			outcome := l.restoreRoute(leg.store, row, false)
+			outcome := l.restoreRoute(store, row, false)
 			report.legReads += outcome.writes
 			switch {
 			case outcome.restored:
@@ -694,7 +708,7 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 // residual degrades to the pre-guard behavior rather than a new failure.
 func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "backstop"}
-	store := leg.store
+	store := l.fenced(leg.store)
 	if store == nil {
 		return report
 	}
@@ -864,6 +878,9 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 		writes[beadmeta.RouteQuarantineReasonMetadataKey] = ""
 	}
 	if err := store.SetMetadataBatch(live.ID, writes); err != nil {
+		if errors.Is(err, errAutomaticWriteFenced) {
+			return routeRestoreOutcome{} // another city's row; its own recovery routes it
+		}
 		return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
 	}
 	return routeRestoreOutcome{restored: true, writes: 1}
@@ -922,6 +939,9 @@ func (l *routeRecoveryLane) quarantine(store beads.Store, bead beads.Bead, reaso
 		beadmeta.RouteQuarantineReasonMetadataKey: reason,
 	})
 	if err != nil {
+		if errors.Is(err, errAutomaticWriteFenced) {
+			return false, nil // another city's row; its own recovery marks it
+		}
 		return false, fmt.Errorf("bead %s: marking route-recovery quarantine (%s): %w", bead.ID, reason, err)
 	}
 	return true, nil

@@ -899,7 +899,17 @@ const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retenti
 // swept), while closeErrs holds the per-bead metadata/close failures that do not
 // abort the sweep. Returns the number of beads closed.
 func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
-	candidates, err := readMessagesBefore(store.Store, cutoff, limit)
+	return SweepReadMessagesBeforeWithCandidates(store, cutoff, limit, limit, closeReason)
+}
+
+// SweepReadMessagesBeforeWithCandidates is SweepReadMessagesBefore with the
+// candidate query's cap (candidateLimit; 0 = every candidate) separate from
+// the close budget (limit). A caller whose store may refuse some rows — a
+// federated city's cross-city fence — lists every candidate so refused rows
+// at the front of the list cannot starve the rows behind them, while the
+// number of beads closed still honors limit exactly.
+func SweepReadMessagesBeforeWithCandidates(store beads.MailStore, cutoff time.Time, candidateLimit, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
+	candidates, err := readMessagesBefore(store.Store, cutoff, candidateLimit)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -928,7 +938,16 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 // dry-run twin of the sweep and shares its candidate query and limit semantics so
 // the two stay in lockstep.
 func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
-	candidates, err := readMessagesBefore(store.Store, cutoff, limit)
+	return CountReadMessagesBeforeWithCandidates(store, cutoff, limit, limit, nil)
+}
+
+// CountReadMessagesBeforeWithCandidates is CountReadMessagesBefore with the
+// candidate query's cap separate from the close budget (see
+// SweepReadMessagesBeforeWithCandidates) and an optional eligibility
+// predicate: a caller whose store would refuse some rows counts only the
+// rows the sweep would close.
+func CountReadMessagesBeforeWithCandidates(store beads.MailStore, cutoff time.Time, candidateLimit, limit int, eligible func(beads.Bead) bool) (int, error) {
+	candidates, err := readMessagesBefore(store.Store, cutoff, candidateLimit)
 	if err != nil {
 		return 0, err
 	}
@@ -937,7 +956,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if b.Status != "open" || (eligible != nil && !eligible(b)) {
 			continue
 		}
 		count++
