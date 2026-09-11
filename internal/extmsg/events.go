@@ -40,6 +40,26 @@ type InboundDroppedEventPayload struct {
 // IsEventPayload marks InboundDroppedEventPayload as an events.Payload variant.
 func (InboundDroppedEventPayload) IsEventPayload() {}
 
+// InboundDuplicateEventPayload is emitted on events.ExtMsgInboundDuplicate
+// when an accepted inbound message is a redelivery of one already recorded in
+// the conversation transcript (same conversation + provider message id). The
+// transcript append deduplicated, and the caller suppresses the member
+// notification fan-out so the redelivery cannot re-inject the message as an
+// extra turn (RCA hq-703om). ProviderMessageID is the identity the dedup
+// keyed on; TargetSession/TargetAgent mirror the routing result the original
+// delivery already notified.
+type InboundDuplicateEventPayload struct {
+	Provider          string `json:"provider"`
+	ConversationID    string `json:"conversation_id"`
+	Actor             string `json:"actor"`
+	ProviderMessageID string `json:"provider_message_id"`
+	TargetSession     string `json:"target_session"`
+	TargetAgent       string `json:"target_agent,omitempty"`
+}
+
+// IsEventPayload marks InboundDuplicateEventPayload as an events.Payload variant.
+func (InboundDuplicateEventPayload) IsEventPayload() {}
+
 // OutboundEventPayload is emitted on "extmsg.outbound" events.
 type OutboundEventPayload struct {
 	Provider       string `json:"provider"`
@@ -117,6 +137,7 @@ func init() {
 	events.RegisterPayload(events.ExtMsgAdapterRemoved, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgInbound, InboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgInboundDropped, InboundDroppedEventPayload{})
+	events.RegisterPayload(events.ExtMsgInboundDuplicate, InboundDuplicateEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutbound, OutboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutboundChannelMismatch, OutboundChannelMismatchPayload{})
 }

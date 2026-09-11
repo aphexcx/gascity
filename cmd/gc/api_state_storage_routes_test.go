@@ -49,7 +49,7 @@ func newRoutedControllerStateForTest(t *testing.T, routes *storageRoutes, work b
 
 func appendTestTranscript(t *testing.T, svc *extmsg.Services) extmsg.ConversationTranscriptRecord {
 	t.Helper()
-	rec, err := svc.Transcript.Append(context.Background(), extmsg.AppendTranscriptInput{
+	rec, _, err := svc.Transcript.Append(context.Background(), extmsg.AppendTranscriptInput{
 		Caller: extmsg.Caller{
 			Kind:      extmsg.CallerAdapter,
 			ID:        "adapter-1",

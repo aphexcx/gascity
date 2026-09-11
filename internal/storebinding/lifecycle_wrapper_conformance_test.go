@@ -369,7 +369,7 @@ func extmsgScript(tb storebindingtest.TB, messaging storebinding.MessagingFrontD
 	}); err != nil {
 		tb.Fatalf("EnsureGroup: %v", err)
 	}
-	if _, err := messaging.Transcripts.Append(ctx, extmsg.AppendTranscriptInput{
+	if _, _, err := messaging.Transcripts.Append(ctx, extmsg.AppendTranscriptInput{
 		Caller:            caller,
 		Conversation:      conversation,
 		Kind:              extmsg.TranscriptMessageInbound,

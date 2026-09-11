@@ -675,8 +675,8 @@ type wrappedTranscriptService struct {
 	emitter classEmitter
 }
 
-func (t *wrappedTranscriptService) Append(ctx context.Context, input extmsg.AppendTranscriptInput) (extmsg.ConversationTranscriptRecord, error) {
-	record, err := t.TranscriptService.Append(ctx, input)
+func (t *wrappedTranscriptService) Append(ctx context.Context, input extmsg.AppendTranscriptInput) (extmsg.ConversationTranscriptRecord, bool, error) {
+	record, created, err := t.TranscriptService.Append(ctx, input)
 	t.emitter.observe(ClassEventWrite, "Append", err)
-	return record, err
+	return record, created, err
 }

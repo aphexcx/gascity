@@ -582,7 +582,13 @@ type GroupService interface {
 
 // TranscriptService manages conversation transcripts and memberships.
 type TranscriptService interface {
-	Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, error)
+	// Append records a transcript entry. The returned bool reports whether a
+	// new entry was created: false means an entry with the same conversation
+	// and provider message id already existed — a redelivery — and the
+	// existing record is returned unchanged. Callers that notify or inject on
+	// new messages must treat created=false as already-delivered (hq-703om:
+	// re-notifying on redelivery injected the same message as extra turns).
+	Append(ctx context.Context, input AppendTranscriptInput) (ConversationTranscriptRecord, bool, error)
 	List(ctx context.Context, input ListTranscriptInput) ([]ConversationTranscriptRecord, error)
 	EnsureMembership(ctx context.Context, input EnsureMembershipInput) (ConversationMembershipRecord, error)
 	UpdateMembership(ctx context.Context, input UpdateMembershipInput) (ConversationMembershipRecord, error)

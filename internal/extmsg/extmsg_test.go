@@ -1115,7 +1115,7 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	svc := NewServices(store).Transcript
 	ref := testConversationRef()
 
-	first, err := svc.Append(context.Background(), AppendTranscriptInput{
+	first, firstCreated, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -1127,7 +1127,10 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append(first): %v", err)
 	}
-	dup, err := svc.Append(context.Background(), AppendTranscriptInput{
+	if !firstCreated {
+		t.Fatalf("Append(first) created = false, want true")
+	}
+	dup, dupCreated, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -1142,7 +1145,10 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	if dup.ID != first.ID || dup.Sequence != first.Sequence {
 		t.Fatalf("Append(duplicate) = %#v, want same record as first %#v", dup, first)
 	}
-	second, err := svc.Append(context.Background(), AppendTranscriptInput{
+	if dupCreated {
+		t.Fatalf("Append(duplicate) created = true, want false (dedup hit)")
+	}
+	second, secondCreated, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -1153,6 +1159,9 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Append(second): %v", err)
+	}
+	if !secondCreated {
+		t.Fatalf("Append(second) created = false, want true")
 	}
 	if second.Sequence != first.Sequence+1 {
 		t.Fatalf("second.Sequence = %d, want %d", second.Sequence, first.Sequence+1)
@@ -1183,7 +1192,7 @@ func TestTranscriptServiceListOrderLimitAndCursor(t *testing.T) {
 	const total = 5
 	for i := 0; i < total; i++ {
 		id := fmt.Sprintf("msg-%d", i+1)
-		if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+		if _, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 			Caller:            testAdapterCaller(),
 			Conversation:      ref,
 			Kind:              TranscriptMessageInbound,
@@ -1267,7 +1276,7 @@ func TestTranscriptServiceListOrderCrossBucket(t *testing.T) {
 	const total = 130
 	for i := 0; i < total; i++ {
 		id := fmt.Sprintf("msg-%d", i+1)
-		if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+		if _, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 			Caller:            testAdapterCaller(),
 			Conversation:      ref,
 			Kind:              TranscriptMessageInbound,
@@ -1370,7 +1379,7 @@ func TestTranscriptServiceMembershipBackfillAndAck(t *testing.T) {
 	ref := testConversationRef()
 
 	for i, id := range []string{"msg-1", "msg-2"} {
-		if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+		if _, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 			Caller:            testAdapterCaller(),
 			Conversation:      ref,
 			Kind:              TranscriptMessageInbound,
@@ -1441,7 +1450,7 @@ func TestTranscriptServiceHydrationPendingRejectsLiveAppendAndReplay(t *testing.
 	if _, err := svc.BeginHydration(context.Background(), testAdapterCaller(), ref, nil); err != nil {
 		t.Fatalf("BeginHydration: %v", err)
 	}
-	_, err := svc.Append(context.Background(), AppendTranscriptInput{
+	_, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -1453,7 +1462,7 @@ func TestTranscriptServiceHydrationPendingRejectsLiveAppendAndReplay(t *testing.
 	if !errors.Is(err, ErrHydrationPending) {
 		t.Fatalf("Append(live while pending) error = %v, want ErrHydrationPending", err)
 	}
-	if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+	if _, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -1528,7 +1537,7 @@ func TestTranscriptServiceHydrationFailedStillAllowsBackfill(t *testing.T) {
 	if _, err := svc.BeginHydration(context.Background(), testAdapterCaller(), ref, nil); err != nil {
 		t.Fatalf("BeginHydration: %v", err)
 	}
-	if _, err := svc.Append(context.Background(), AppendTranscriptInput{
+	if _, _, err := svc.Append(context.Background(), AppendTranscriptInput{
 		Caller:            testAdapterCaller(),
 		Conversation:      ref,
 		Kind:              TranscriptMessageInbound,
@@ -3086,7 +3095,7 @@ type flakyTranscriptService struct {
 	err             error
 }
 
-func (f *flakyTranscriptService) Append(context.Context, AppendTranscriptInput) (ConversationTranscriptRecord, error) {
+func (f *flakyTranscriptService) Append(context.Context, AppendTranscriptInput) (ConversationTranscriptRecord, bool, error) {
 	panic("unexpected Append call")
 }
 
