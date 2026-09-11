@@ -135,31 +135,20 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		// can gate on it. See extmsgNotifyInboundWithReceipt for the budget and
 		// for why an over-budget fan-out reports pending instead of being
 		// canceled.
-		var delivery extmsg.InboundDelivery
-		if result != nil && result.Duplicate {
-			// Adapter redelivery of a message already in the transcript
-			// (same conversation + provider message id). The original
-			// delivery already notified members, so re-notifying here would
-			// inject the same message as an extra turn — 2-4 duplicate turns
-			// per message while a session sat wedged behind an auth wall
-			// (hq-703om). Suppress the fan-out; the transcript stays the
-			// source of truth for catch-up.
-			//
-			// The receipt answers no_route on purpose: that status already
-			// means "nobody to notify, a re-post would reach nobody, commit
-			// the dedup claim" — exactly the contract a redelivery needs
-			// (the members were reached by the ORIGINAL delivery). It is
-			// concluded in the receipt store so a later poll of
-			// GET /extmsg/inbound/receipts/{id} agrees with the response.
-			receiptID := extmsg.NextInboundReceiptID()
-			store := s.inboundReceiptStore()
-			store.Begin(s.state.CityName(), receiptID)
-			delivery = extmsg.SummarizeInboundDelivery(receiptID, nil)
-			store.Conclude(s.state.CityName(), receiptID, delivery)
-			log.Printf("extmsg: inbound %s/%s message id %q is a redelivery of an already-transcribed message — member notify suppressed (receipt=%s)",
-				message.Conversation.Provider, message.Conversation.ConversationID, message.ProviderMessageID, receiptID)
-		} else {
-			delivery = s.extmsgNotifyInboundWithReceipt(ctx, message)
+		//
+		// The fan-out is CLAIMED per message before it runs: a message the
+		// receipt store already accounts for (a fan-out still running, or one
+		// that delivered) is answered from that evidence and skips the
+		// fan-out; a first delivery, or a redelivery of a message whose
+		// fan-out failed or was partial — exactly what the adapter is
+		// retrying — claims and runs. The transcript row (result.Duplicate)
+		// is not the evidence: it is written before the fan-out starts, and
+		// claim and lookup are one atomic store operation so two requests
+		// carrying the same message cannot both fan out. See
+		// extmsgClaimInboundFanout (hq-703om).
+		receiptID, delivery, held := s.extmsgClaimInboundFanout(result, message)
+		if !held {
+			delivery = s.extmsgNotifyInboundWithReceipt(ctx, message, receiptID)
 		}
 		out := &ExtMsgInboundOutput{}
 		if result != nil {
