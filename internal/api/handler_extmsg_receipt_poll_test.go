@@ -47,7 +47,7 @@ func TestAwaitInboundFanoutRecordsLateConclusionForPolling(t *testing.T) {
 		}}, nil
 	}
 
-	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1", "")
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending while the fan-out is still running", got.Status)
 	}
@@ -80,7 +80,7 @@ func TestAwaitInboundFanoutRecordsLateFailureForPolling(t *testing.T) {
 		return nil, errors.New("membership lookup: store unavailable")
 	}
 
-	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1", "")
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending", got.Status)
 	}
@@ -99,7 +99,7 @@ func TestAwaitInboundFanoutRecordsInBudgetConclusion(t *testing.T) {
 	fanout := func(context.Context) ([]extmsg.InboundDeliveryMember, error) {
 		return nil, nil
 	}
-	got := awaitInboundFanout(context.Background(), store, "c", time.Second, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", time.Second, runInline, fanout, "slack/C1", "")
 	if got.Status != extmsg.InboundDeliveryNoRoute {
 		t.Fatalf("response status = %q, want no_route for an empty membership", got.Status)
 	}
@@ -152,7 +152,7 @@ func TestAwaitInboundFanoutRecordsLateConclusionAfterCallerHangsUp(t *testing.T)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got := awaitInboundFanout(ctx, store, "c", time.Minute, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(ctx, store, "c", time.Minute, runInline, fanout, "slack/C1", "")
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending when the caller is gone", got.Status)
 	}

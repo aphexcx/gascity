@@ -204,3 +204,72 @@ func TestInboundReceiptStoreLookupIsCityScoped(t *testing.T) {
 		t.Fatalf("own city's lookup after conclusion: state = %q, want concluded", got.State)
 	}
 }
+
+// The message index behind BeginFor/LatestFor: the evidence a redelivery of
+// an inbound message is judged against (see the api package's
+// extmsgRedeliveryHold). It follows the LATEST fan-out for the message, is
+// scoped to the city, and never outlives the record it points at.
+func TestInboundReceiptStoreLatestForFollowsMessageIndex(t *testing.T) {
+	now := time.Date(2026, 9, 11, 8, 24, 0, 0, time.UTC)
+	s := newTestReceiptStore(&now)
+	ref := ConversationRef{ScopeID: "g", Provider: "slack", AccountID: "a", ConversationID: "C1", Kind: ConversationRoom}
+	key := InboundMessageKey(ref, "1785354286.000100")
+	if key == "" {
+		t.Fatal("message with a provider id produced no key")
+	}
+	if InboundMessageKey(ref, "  ") != "" {
+		t.Fatal("message without a provider id produced a key — it must keep at-least-once delivery")
+	}
+	shouty := ref
+	shouty.Provider = " Slack "
+	if InboundMessageKey(shouty, " 1785354286.000100 ") != key {
+		t.Fatal("key is not normalized the way the transcript dedup normalizes the conversation")
+	}
+
+	if got := s.LatestFor("c", key); got.State != InboundReceiptUnknown {
+		t.Fatalf("before any fan-out: %+v, want unknown", got)
+	}
+	s.BeginFor("c", "ir-1-1", key)
+	if got := s.LatestFor("c", key); got.State != InboundReceiptPending || got.ReceiptID != "ir-1-1" {
+		t.Fatalf("after BeginFor: %+v, want pending on ir-1-1", got)
+	}
+	if got := s.LatestFor("other", key); got.State != InboundReceiptUnknown {
+		t.Fatalf("another city's lookup: %+v, want unknown", got)
+	}
+	s.Conclude("c", "ir-1-1", FailedInboundDelivery("ir-1-1", "runtime dead"))
+	if got := s.LatestFor("c", key); got.State != InboundReceiptConcluded || got.Delivery == nil || got.Delivery.Status != InboundDeliveryFailed {
+		t.Fatalf("after a failed conclusion: %+v, want concluded failed", got)
+	}
+
+	// A later fan-out for the same message supersedes the first.
+	s.BeginFor("c", "ir-1-2", key)
+	if got := s.LatestFor("c", key); got.State != InboundReceiptPending || got.ReceiptID != "ir-1-2" {
+		t.Fatalf("after a second BeginFor: %+v, want pending on ir-1-2", got)
+	}
+
+	// Retention drops the superseded record without disturbing the index,
+	// which now belongs to ir-1-2.
+	now = now.Add(inboundReceiptRetention + time.Second)
+	s.Conclude("c", "ir-1-2", SummarizeInboundDelivery("ir-1-2", []InboundDeliveryMember{{
+		SessionID: "s1", Status: InboundDeliveryDelivered, DeliveredBytes: 5, ExpectedBytes: 5,
+	}}))
+	if got := s.Lookup("c", "ir-1-1"); got.State != InboundReceiptUnknown {
+		t.Fatalf("superseded record survived retention: %+v", got)
+	}
+	if got := s.LatestFor("c", key); got.ReceiptID != "ir-1-2" || got.Delivery == nil || got.Delivery.Status != InboundDeliveryDelivered {
+		t.Fatalf("after the superseded record aged out: %+v, want ir-1-2 delivered", got)
+	}
+
+	// Once the latest record ages out too, the message is unknown again and
+	// the index entry is gone with it.
+	now = now.Add(inboundReceiptRetention + time.Second)
+	if got := s.LatestFor("c", key); got.State != InboundReceiptUnknown {
+		t.Fatalf("after the latest record aged out: %+v, want unknown", got)
+	}
+	s.mu.Lock()
+	_, leaked := s.byMessage[messageIndexKey("c", key)]
+	s.mu.Unlock()
+	if leaked {
+		t.Fatal("message index outlived the record it pointed at")
+	}
+}

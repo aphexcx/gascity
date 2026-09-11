@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -340,5 +342,188 @@ func TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes(t *te
 	}
 	if got.DeliveredBytes != got.ExpectedBytes || got.ExpectedBytes == 0 {
 		t.Fatalf("aggregate bytes = %d/%d, want equal and non-zero", got.DeliveredBytes, got.ExpectedBytes)
+	}
+}
+
+// TestHandleExtMsgInboundRedeliveryRetriesAfterFailedNotify pins the retry
+// contract across an adapter redelivery. The transcript row is written BEFORE
+// the member fan-out, so when the fan-out fails the row already exists and
+// the next delivery of the same provider message id is a transcript
+// duplicate. gc answered "failed" — the status that tells the adapter a
+// retry is clean — so the adapter redelivers. Suppressing the fan-out on the
+// transcript dedup alone (#15 as merged) answered that retry with no_route,
+// which is terminal: the adapter stopped, and no member ever held the
+// message. The redelivery after the runtime recovers must notify and report
+// delivered; only a redelivery after THAT is the hq-703om duplicate turn and
+// gets suppressed.
+func TestHandleExtMsgInboundRedeliveryRetriesAfterFailedNotify(t *testing.T) {
+	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+	srv.inboundReceipts = extmsg.NewInboundReceiptStore()
+	source := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{
+		Conversation: ref,
+		SessionID:    source.ID,
+		Now:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	body := map[string]any{
+		"message": map[string]any{
+			"provider_message_id": "1785354286.000100",
+			"conversation":        conversationBody(ref),
+			"actor":               map[string]any{"id": "user-1", "display_name": "Afik", "is_bot": false},
+			"text":                "ship it",
+			"received_at":         time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	post := func(step string) extmsg.InboundResult {
+		t.Helper()
+		rec := postExtMsg(t, fs, srv, "/extmsg/inbound", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body: %s", step, rec.Code, rec.Body.String())
+		}
+		var result extmsg.InboundResult
+		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+			t.Fatalf("%s: decode: %v", step, err)
+		}
+		if result.Delivery == nil {
+			t.Fatalf("%s: response carries no delivery receipt", step)
+		}
+		return result
+	}
+	nudges := func() int {
+		n := 0
+		for _, call := range fs.sp.Calls {
+			if call.Method == "Nudge" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// 1. First delivery: the runtime is dead, so the fan-out fails AFTER the
+	// transcript row is written. gc tells the adapter a retry is clean.
+	fs.sessionProvider = runtime.NewFailFake()
+	first := post("first delivery")
+	if first.Duplicate {
+		t.Fatal("first delivery marked Duplicate")
+	}
+	if first.Delivery.Status != extmsg.InboundDeliveryFailed {
+		t.Fatalf("first delivery status = %q, want failed against a dead runtime: %+v", first.Delivery.Status, first.Delivery)
+	}
+	if n := nudges(); n != 0 {
+		t.Fatalf("live runtime received %d nudges during the failed delivery", n)
+	}
+
+	// 2. The runtime recovers and the adapter redelivers the same message id.
+	// It is a transcript duplicate, but no member ever received it: the
+	// fan-out must run again and land.
+	fs.sessionProvider = nil
+	second := post("redelivery after failure")
+	if !second.Duplicate {
+		t.Fatal("redelivery not marked Duplicate — the transcript dedup did not fire, so this test is not exercising the suppression path")
+	}
+	if second.Delivery.Status != extmsg.InboundDeliveryDelivered {
+		t.Fatalf("redelivery after a failed fan-out: status = %q, want delivered — the retry gc invited was suppressed: %+v",
+			second.Delivery.Status, second.Delivery)
+	}
+	if second.Delivery.DeliveredBytes == 0 || second.Delivery.DeliveredBytes != second.Delivery.ExpectedBytes {
+		t.Fatalf("redelivery bytes = %d/%d, want a whole non-empty copy", second.Delivery.DeliveredBytes, second.Delivery.ExpectedBytes)
+	}
+	if n := nudges(); n != 1 {
+		t.Fatalf("runtime received %d nudges after the redelivery, want exactly 1", n)
+	}
+
+	// 3. A further redelivery of a message the member now holds is the
+	// hq-703om case: suppressed, answered no_route (commit the claim), and
+	// no extra turn reaches the runtime.
+	third := post("redelivery after delivery")
+	if !third.Duplicate {
+		t.Fatal("second redelivery not marked Duplicate")
+	}
+	if third.Delivery.Status != extmsg.InboundDeliveryNoRoute {
+		t.Fatalf("redelivery of a delivered message: status = %q, want no_route (suppressed): %+v", third.Delivery.Status, third.Delivery)
+	}
+	if n := nudges(); n != 1 {
+		t.Fatalf("redelivery of a delivered message re-nudged the runtime (%d nudges, want 1)", n)
+	}
+	if st := srv.inboundReceiptStore().Lookup(fs.CityName(), third.Delivery.ReceiptID); st.State != extmsg.InboundReceiptConcluded || st.Delivery == nil || st.Delivery.Status != extmsg.InboundDeliveryNoRoute {
+		t.Fatalf("suppression receipt in store = %+v, want the same no_route conclusion the response carried", st)
+	}
+}
+
+// TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence is the decision table
+// behind the test above: for a transcript duplicate, whether the fan-out is
+// skipped depends only on what the FIRST fan-out's receipt says, never on the
+// transcript row. Held arms answer with a receipt the adapter can act on;
+// not-held arms let the handler notify again.
+func TestExtmsgRedeliveryHoldFollowsFirstDeliveryEvidence(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	store := extmsg.NewInboundReceiptStore()
+	srv.inboundReceipts = store
+	city := fs.CityName()
+	ref := extmsg.ConversationRef{ScopeID: "guild-1", Provider: "slack", AccountID: "acct-1", ConversationID: "C1", Kind: extmsg.ConversationRoom}
+	msg := extmsg.ExternalInboundMessage{Conversation: ref, ProviderMessageID: "1785354286.000100", Text: "ship it"}
+	key := extmsg.InboundMessageKey(ref, msg.ProviderMessageID)
+	dup := &extmsg.InboundResult{Duplicate: true}
+	member := func(st extmsg.InboundDeliveryStatus, delivered int) []extmsg.InboundDeliveryMember {
+		return []extmsg.InboundDeliveryMember{{SessionID: "s1", Status: st, DeliveredBytes: delivered, ExpectedBytes: 10}}
+	}
+
+	if _, held := srv.extmsgRedeliveryHold(&extmsg.InboundResult{}, msg); held {
+		t.Fatal("a first delivery (not Duplicate) was held")
+	}
+	if _, held := srv.extmsgRedeliveryHold(dup, msg); held {
+		t.Fatal("a duplicate with no delivery evidence in this process was held — after a restart the message must keep at-least-once delivery")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		prior func(id string) extmsg.InboundDelivery
+		held  bool
+		want  extmsg.InboundDeliveryStatus
+	}{
+		{"failed", func(id string) extmsg.InboundDelivery { return extmsg.FailedInboundDelivery(id, "runtime dead") }, false, ""},
+		{"partial", func(id string) extmsg.InboundDelivery {
+			return extmsg.SummarizeInboundDelivery(id, member(extmsg.InboundDeliveryPartial, 4))
+		}, false, ""},
+		{"no_route", func(id string) extmsg.InboundDelivery { return extmsg.SummarizeInboundDelivery(id, nil) }, false, ""},
+		{"concluded pending", func(id string) extmsg.InboundDelivery {
+			return extmsg.SummarizeInboundDelivery(id, member(extmsg.InboundDeliveryPending, 10))
+		}, true, extmsg.InboundDeliveryPending},
+		{"delivered", func(id string) extmsg.InboundDelivery {
+			return extmsg.SummarizeInboundDelivery(id, member(extmsg.InboundDeliveryDelivered, 10))
+		}, true, extmsg.InboundDeliveryNoRoute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := extmsg.NextInboundReceiptID()
+			store.BeginFor(city, id, key)
+			store.Conclude(city, id, tc.prior(id))
+			got, held := srv.extmsgRedeliveryHold(dup, msg)
+			if held != tc.held {
+				t.Fatalf("held = %v, want %v (got %+v)", held, tc.held, got)
+			}
+			if !held {
+				return
+			}
+			if got.Status != tc.want {
+				t.Fatalf("held receipt status = %q, want %q: %+v", got.Status, tc.want, got)
+			}
+			if tc.want == extmsg.InboundDeliveryPending && got.ReceiptID != id {
+				t.Fatalf("held on receipt %q, want the ORIGINAL %q so the adapter polls the fan-out carrying the message", got.ReceiptID, id)
+			}
+		})
+	}
+
+	// Still running: held on the original receipt, so the adapter's poll
+	// lands on the fan-out that is actually carrying the message.
+	id := extmsg.NextInboundReceiptID()
+	store.BeginFor(city, id, key)
+	got, held := srv.extmsgRedeliveryHold(dup, msg)
+	if !held || got.Status != extmsg.InboundDeliveryPending || got.ReceiptID != id {
+		t.Fatalf("redelivery while the first fan-out runs: held=%v receipt=%+v, want held pending on %s", held, got, id)
 	}
 }
