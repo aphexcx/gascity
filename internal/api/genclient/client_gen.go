@@ -5896,17 +5896,18 @@ type TypedEventStreamEnvelopeExtmsgInboundDropped struct {
 
 // TypedEventStreamEnvelopeExtmsgInboundDuplicate defines model for TypedEventStreamEnvelopeExtmsgInboundDuplicate.
 type TypedEventStreamEnvelopeExtmsgInboundDuplicate struct {
-	Actor     string                       `json:"actor"`
-	Message   *string                      `json:"message,omitempty"`
-	Payload   InboundDuplicateEventPayload `json:"payload"`
-	RunId     *string                      `json:"run_id,omitempty"`
-	Seq       int64                        `json:"seq"`
-	SessionId *string                      `json:"session_id,omitempty"`
-	StepId    *string                      `json:"step_id,omitempty"`
-	Subject   *string                      `json:"subject,omitempty"`
-	Ts        time.Time                    `json:"ts"`
-	Type      string                       `json:"type"`
-	Workflow  *WorkflowEventProjection     `json:"workflow,omitempty"`
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          InboundDuplicateEventPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
@@ -7407,18 +7408,19 @@ type TypedTaggedEventStreamEnvelopeExtmsgInboundDropped struct {
 
 // TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate defines model for TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate.
 type TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate struct {
-	Actor     string                       `json:"actor"`
-	City      string                       `json:"city"`
-	Message   *string                      `json:"message,omitempty"`
-	Payload   InboundDuplicateEventPayload `json:"payload"`
-	RunId     *string                      `json:"run_id,omitempty"`
-	Seq       int64                        `json:"seq"`
-	SessionId *string                      `json:"session_id,omitempty"`
-	StepId    *string                      `json:"step_id,omitempty"`
-	Subject   *string                      `json:"subject,omitempty"`
-	Ts        time.Time                    `json:"ts"`
-	Type      string                       `json:"type"`
-	Workflow  *WorkflowEventProjection     `json:"workflow,omitempty"`
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          InboundDuplicateEventPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
