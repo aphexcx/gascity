@@ -17,6 +17,14 @@ import (
 // server's task group.
 func runInline(run func(context.Context)) { go run(context.Background()) }
 
+// beginTestReceipt begins a fresh receipt in store for city "c" the way the
+// handler's claim does before it hands the id to awaitInboundFanout.
+func beginTestReceipt(store *extmsg.InboundReceiptStore) string {
+	id := extmsg.NextInboundReceiptID()
+	store.Begin("c", id)
+	return id
+}
+
 func waitForReceiptState(t *testing.T, store *extmsg.InboundReceiptStore, id string, want extmsg.InboundReceiptState) extmsg.InboundReceiptStatus {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -47,7 +55,7 @@ func TestAwaitInboundFanoutRecordsLateConclusionForPolling(t *testing.T) {
 		}}, nil
 	}
 
-	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1", beginTestReceipt(store))
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending while the fan-out is still running", got.Status)
 	}
@@ -80,7 +88,7 @@ func TestAwaitInboundFanoutRecordsLateFailureForPolling(t *testing.T) {
 		return nil, errors.New("membership lookup: store unavailable")
 	}
 
-	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", 20*time.Millisecond, runInline, fanout, "slack/C1", beginTestReceipt(store))
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending", got.Status)
 	}
@@ -99,7 +107,7 @@ func TestAwaitInboundFanoutRecordsInBudgetConclusion(t *testing.T) {
 	fanout := func(context.Context) ([]extmsg.InboundDeliveryMember, error) {
 		return nil, nil
 	}
-	got := awaitInboundFanout(context.Background(), store, "c", time.Second, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(context.Background(), store, "c", time.Second, runInline, fanout, "slack/C1", beginTestReceipt(store))
 	if got.Status != extmsg.InboundDeliveryNoRoute {
 		t.Fatalf("response status = %q, want no_route for an empty membership", got.Status)
 	}
@@ -152,7 +160,7 @@ func TestAwaitInboundFanoutRecordsLateConclusionAfterCallerHangsUp(t *testing.T)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got := awaitInboundFanout(ctx, store, "c", time.Minute, runInline, fanout, "slack/C1")
+	got := awaitInboundFanout(ctx, store, "c", time.Minute, runInline, fanout, "slack/C1", beginTestReceipt(store))
 	if got.Status != extmsg.InboundDeliveryPending {
 		t.Fatalf("response status = %q, want pending when the caller is gone", got.Status)
 	}
