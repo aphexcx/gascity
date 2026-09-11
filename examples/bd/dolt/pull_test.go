@@ -131,29 +131,7 @@ func TestPullReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 // with the fake dolt already installed in binDir.
 func runPull(t *testing.T, binDir string, env []string, args ...string) (string, error) {
 	t.Helper()
-	root := repoRoot(t)
-	script := filepath.Join(root, pullScript)
-	port, cleanup := startReachableTCPListener(t)
-	defer cleanup()
-
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	_ = writeSyncFakeBeadsBD(t, cityPath)
-
-	cmd := exec.Command("sh", append([]string{script}, args...)...)
-	cmd.Env = append(append(filteredEnv("PATH"),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		fmt.Sprintf("GC_DOLT_PORT=%d", port),
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	), env...)
-	out, err := cmd.CombinedOutput()
+	out, err := packScriptCmd(t, pullScript, binDir, filteredEnv("PATH"), env, args...).CombinedOutput()
 	return string(out), err
 }
 
