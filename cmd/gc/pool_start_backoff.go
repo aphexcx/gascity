@@ -902,7 +902,10 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 		return
 	}
 	defer p.retry.end(beadID)
-	current, err := store.Get(beadID)
+	// LIVE: a cache-served row can still say "parked, unmailed" after another
+	// process lifted the park — the notice would then announce a park the
+	// operator already unparked.
+	current, err := liveWorkBead(store, beadID)
 	if err != nil {
 		p.logf("session reconciler: re-reading parked work bead %s before its mail: %v\n", beadID, err)
 		return
@@ -983,25 +986,53 @@ func (p *workStartFailurePolicy) retryUnmailedParks(workBeads []beads.Bead, stor
 	if p == nil || len(workBeads) != len(storeRefs) {
 		return
 	}
-	type owedPark struct{ id, ref string }
 	var owed []owedPark
 	for i, wb := range workBeads {
-		state := readWorkStartFailureState(wb.Metadata)
-		if !state.Parked() || !state.ParkMailedAt.IsZero() {
+		if !parkStillOwesMail(wb) {
 			continue
 		}
 		owed = append(owed, owedPark{id: wb.ID, ref: storeRefs[i]})
 	}
-	if len(owed) == 0 {
+	p.retryOwedParks(owed)
+}
+
+// owedPark is one unmailed park handed to the background retry: the bead,
+// and where it lives — the store it was FOUND in when the finder had it in
+// hand (the sweep), else the demand side's store ref, resolved the way a
+// trigger's is. A relocated class store's row is mailed from that store,
+// never from a retained migration copy the ref would resolve to.
+type owedPark struct {
+	id, ref string
+	store   beads.Store
+}
+
+func parkStillOwesMail(b beads.Bead) bool {
+	state := readWorkStartFailureState(b.Metadata)
+	return state.Parked() && state.ParkMailedAt.IsZero()
+}
+
+func (p *workStartFailurePolicy) retryOwedParks(owed []owedPark) {
+	if p == nil || len(owed) == 0 {
 		return
 	}
 	p.sweeps.Add(1)
 	go func() {
 		defer p.sweeps.Done()
 		for _, o := range owed {
-			store, current, ok := p.storeForTriggerBead(o.id, o.ref)
-			if !ok {
-				continue
+			store, current := o.store, beads.Bead{}
+			if store != nil {
+				live, err := liveWorkBead(store, o.id)
+				if err != nil {
+					p.logf("session reconciler: park-mail retry: re-reading %s in its store: %v\n", o.id, err)
+					continue
+				}
+				current = live
+			} else {
+				var ok bool
+				store, current, ok = p.storeForTriggerBead(o.id, o.ref)
+				if !ok {
+					continue
+				}
 			}
 			template := ""
 			if p.templateOf != nil {
@@ -1024,24 +1055,27 @@ func (p *workStartFailurePolicy) sweepUnmailedParks(now time.Time) {
 	if p == nil || !p.retry.sweepDue(now) {
 		return
 	}
-	var owedBeads []beads.Bead
-	var owedRefs []string
+	var owed []owedPark
 	collect := func(store beads.Store, ref string) {
 		if store == nil {
 			return
 		}
-		rows, err := store.List(beads.ListQuery{AllowScan: true})
+		// Both tiers: an ephemeral (wisp-tier) work bead parks like any
+		// other, and a relocated class store has no policy wrapper widening
+		// the default tier for it.
+		rows, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.FederatedReadTier})
 		if err != nil {
 			p.logf("session reconciler: park-mail sweep: listing store %q: %v (parks there are retried next sweep)\n", ref, err)
 			return
 		}
 		for _, row := range rows {
-			state := readWorkStartFailureState(row.Metadata)
-			if !state.Parked() || !state.ParkMailedAt.IsZero() {
+			if !parkStillOwesMail(row) {
 				continue
 			}
-			owedBeads = append(owedBeads, row)
-			owedRefs = append(owedRefs, ref)
+			// The store the park was found in rides with it: a class store's
+			// active row is mailed from the class store, not from a retained
+			// copy a ref would resolve to.
+			owed = append(owed, owedPark{id: row.ID, ref: ref, store: store})
 		}
 	}
 	collect(p.workStore, "city")
@@ -1057,9 +1091,9 @@ func (p *workStartFailurePolicy) sweepUnmailedParks(now time.Time) {
 		collect(p.rigStores[name], "rig:"+name)
 	}
 	for _, store := range p.extraStores {
-		collect(store, "")
+		collect(store, "class")
 	}
-	p.retryUnmailedParks(owedBeads, owedRefs)
+	p.retryOwedParks(owed)
 }
 
 // awaitParkMailRetries blocks until every retry sweep retryUnmailedParks has

@@ -272,9 +272,13 @@ write is lifted; it reads the row live too, so a cache that still serves a
 clean row cannot answer "nothing to reopen" over a parked backing. The one
 park mail is owed whether or not the bead is still demand: besides the
 demand-side retries, the controller sweeps every store it knows for parked
-beads whose mail has not landed (at most once per retry interval), so a
+beads whose mail has not landed (both tiers, at most once per retry
+interval; a park is mailed from the store it was found in, so a relocated
+class store's active row is never mistaken for a retained copy), so a
 bead whose agent was suspended, or that gained a dependency, still gets
-its mail. A failure that lands on an already parked bead (a start in
+its mail; the re-read before any send is live. The start-time gate runs
+before the named-session circuit breaker records an attempt: a deferred
+start makes none and spends none. A failure that lands on an already parked bead (a start in
 flight when the park was written) is recorded as the last failure and
 does not count toward the next attempt. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`

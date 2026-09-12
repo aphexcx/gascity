@@ -2846,6 +2846,40 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				// The bead this start would run for is read NOW, not at planning
+				// — and BEFORE the named-session circuit breaker records an
+				// attempt: a deferred start makes no attempt, and must not spend
+				// one (a holder whose work is deferred would otherwise trip its
+				// breaker with zero provider calls).
+				// a bead parked or backed off since the plan (its own start
+				// failed elsewhere, a queued seat outlived its bead's park, a
+				// holder's clear-bind did not land) is not started for — the
+				// demand gate's verdict is re-proven on the row at start time,
+				// and a success can never lift a park it was not planned past.
+				if deferred, reason := startOpts.workStartFailure.startDeferred(workTriggerForStart(candidate.info), clk.Now()); deferred {
+					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					// A kept session queued for this start (start-pending, no
+					// pending-create claim) is put back to asleep: the start is
+					// abandoned, so its durable request goes with its lease —
+					// otherwise the queued state would pin the deferred trigger
+					// (startInFlightInfo) and the next build could never bind
+					// the holder to other work, deferring it forever. A fresh
+					// seat keeps its claim and expires as a never-started create.
+					if !candidate.info.PendingCreateClaim && pendingCreateQueuedOrCreatingState(candidate.info.MetadataState) {
+						if err := sessFront.ApplyPatch(candidate.info.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateAsleep)}); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: %s: releasing the deferred start's queued state: %v\n", candidate.name(), err) //nolint:errcheck
+						}
+					}
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					fmt.Fprintf(stderr, "session reconciler: %s: not started: its work bead %s is %s\n", candidate.name(), strings.TrimSpace(candidate.info.TriggerBeadID), reason) //nolint:errcheck
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "work_deferred", time.Time{}, time.Time{}, nil)
+					continue
+				}
 				if cbEnabled {
 					identity := namedSessionIdentityInfo(candidate.info)
 					if identity != "" {
@@ -2896,36 +2930,6 @@ func executePlannedStartsTraced(
 							continue
 						}
 					}
-				}
-				// The bead this start would run for is read NOW, not at planning:
-				// a bead parked or backed off since the plan (its own start
-				// failed elsewhere, a queued seat outlived its bead's park, a
-				// holder's clear-bind did not land) is not started for — the
-				// demand gate's verdict is re-proven on the row at start time,
-				// and a success can never lift a park it was not planned past.
-				if deferred, reason := startOpts.workStartFailure.startDeferred(workTriggerForStart(candidate.info), clk.Now()); deferred {
-					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
-					// A kept session queued for this start (start-pending, no
-					// pending-create claim) is put back to asleep: the start is
-					// abandoned, so its durable request goes with its lease —
-					// otherwise the queued state would pin the deferred trigger
-					// (startInFlightInfo) and the next build could never bind
-					// the holder to other work, deferring it forever. A fresh
-					// seat keeps its claim and expires as a never-started create.
-					if !candidate.info.PendingCreateClaim && pendingCreateQueuedOrCreatingState(candidate.info.MetadataState) {
-						if err := sessFront.ApplyPatch(candidate.info.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateAsleep)}); err != nil {
-							fmt.Fprintf(stderr, "session reconciler: %s: releasing the deferred start's queued state: %v\n", candidate.name(), err) //nolint:errcheck
-						}
-					}
-					if release != nil {
-						release()
-					}
-					if done != nil {
-						done()
-					}
-					fmt.Fprintf(stderr, "session reconciler: %s: not started: its work bead %s is %s\n", candidate.name(), strings.TrimSpace(candidate.info.TriggerBeadID), reason) //nolint:errcheck
-					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "work_deferred", time.Time{}, time.Time{}, nil)
-					continue
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
