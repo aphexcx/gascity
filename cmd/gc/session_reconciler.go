@@ -2757,6 +2757,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// gate: the heal above may already have moved a fresh creating
 		// session on, and a kept session carries no claim.
 		if alive && (shouldRollbackPendingCreateInfo(infoByID[id]) || pendingCreateQueuedOrCreatingState(string(stateBeforeHeal))) {
+			// The start is not confirmed, and the fact must stay durable: a
+			// fresh create keeps its claim, but a kept session's only gate
+			// back into this branch is its pre-heal start-pending/creating
+			// state — which the heal above may have moved on this tick. Put
+			// it back whenever this branch leaves the start unconfirmed (a
+			// start still inside its in-flight lease, or a recovery that
+			// failed), so the next tick — or the async commit's own failure
+			// path, which clears only the lease — still finds it uncommitted
+			// and recovers (clear, then confirm) rather than leaving a
+			// confirmed-looking session behind a stale record.
+			keepUncommittedState := func() {
+				if infoByID[id].PendingCreateClaim || !pendingCreateQueuedOrCreatingState(string(stateBeforeHeal)) || strings.TrimSpace(healBatch["state"]) == "" {
+					return
+				}
+				restore := sessionpkg.MetadataPatch{"state": string(stateBeforeHeal)}
+				if err := sessFront.ApplyPatch(id, restore); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: %s: keeping the uncommitted start's state %q for the next tick's recovery: %v\n", name, stateBeforeHeal, err) //nolint:errcheck
+					return
+				}
+				tick.apply(id, restore)
+			}
 			switch stateBeforeHeal {
 			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
 				inFlight := infoByID[id]
@@ -2765,6 +2786,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
 					}
+					keepUncommittedState()
 					continue
 				}
 			}
@@ -2788,19 +2810,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 			tick.apply(id, commitBatch)
-			// The start is still not confirmed, and the fact must stay durable:
-			// a fresh create keeps its claim, but a kept session's only gate
-			// back into this branch is its pre-heal start-pending/creating
-			// state — which the heal above moved on this tick. Put it back, so
-			// the next tick recovers again (clear, then confirm) rather than
-			// leaving a confirmed-looking session behind a stale record.
-			if !ok && !infoByID[id].PendingCreateClaim && pendingCreateQueuedOrCreatingState(string(stateBeforeHeal)) && strings.TrimSpace(healBatch["state"]) != "" {
-				restore := sessionpkg.MetadataPatch{"state": string(stateBeforeHeal)}
-				if err := sessFront.ApplyPatch(id, restore); err != nil {
-					fmt.Fprintf(stderr, "session reconciler: %s: keeping the uncommitted start's state %q for the next tick's recovery: %v\n", name, stateBeforeHeal, err) //nolint:errcheck
-				} else {
-					tick.apply(id, restore)
-				}
+			if !ok {
+				keepUncommittedState()
 			}
 		}
 

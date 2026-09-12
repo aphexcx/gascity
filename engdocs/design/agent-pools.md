@@ -250,16 +250,23 @@ elsewhere; a reopened holder is reopened with the same clear — so a
 `mode = "always"` holder restarting for no work is charged to nothing and
 lifts no park), and a bind that did not land leaves the previous trigger,
 which the start then runs for and is charged to. The gate is re-proven on
-the row at START time (`startDeferred`, before the provider is called): a
-bead parked or backed off since the plan — another seat's failure parked
-it, a queued seat outlived it, a holder's clear-bind did not land — is not
-started for (outcome `work_deferred`, nothing charged), so a success can
-never lift a park it was not planned past. A kept session's uncommitted
-resume stays durable as its start-pending/creating state (put back when a
-tick's recovery fails) until a clear lands. Every record read is live (a
+the row at START time (`startDeferred`, before the provider is called),
+read live and deferred too when the row cannot be read: a bead parked or
+backed off since the plan — another seat's failure parked it, a queued seat
+outlived it, a holder's clear-bind did not land — is not started for
+(outcome `work_deferred`, nothing charged; a kept session queued for that
+start goes back to asleep so the next build can bind it to other work,
+while a fresh seat keeps its claim and expires as never started), so a
+success can never lift a park it was not planned past. A kept session's
+uncommitted resume stays durable as its start-pending/creating state (put
+back whenever a tick leaves it unconfirmed: the start still inside its
+in-flight lease, or a recovery that failed) until a clear lands. Every record read is live (a
 caching store's backing), fenced or not; the `--reassign` unpark is fenced
-where the store fences and clears the whole record family whenever any of
-it was read, so a park written between its read and its write is lifted. A park written before
+through the same policy-aware seam (`beads.ResolveConditionalWriter`,
+following the CLI's policy wrapper; `require` refuses rather than write
+unfenced), re-reads a moved row live, and clears the whole record family
+whenever any of it was read, so a park written between its read and its
+write is lifted. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`
 together. Under `beads.conditional_writes = "require"` a fenced write the
 store refuses at write time is not retried unfenced. A trigger whose named

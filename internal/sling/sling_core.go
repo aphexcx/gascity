@@ -1876,16 +1876,26 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 	// the clear), and reopenForReassignUpdate clears the whole record family
 	// whenever any of it was read, so even an unfenced store lifts a park
 	// that landed on a bead already carrying failures.
+	// The writer is the designed seam, not a bare interface probe: it follows
+	// a wrapper's declared resolution target (the CLI's policy wrapper) to the
+	// store that holds the writer and honors beads.conditional_writes —
+	// off/unset takes the plain path, require refuses rather than write
+	// unfenced. The same seam writeWorkRecord fences the record with.
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return "", err
+	}
 	for attempt := 0; ; attempt++ {
-		writer, fenced := beads.ConditionalWriterFor(store)
-		if fenced {
+		if writer != nil {
 			err := writer.UpdateIfMatch(beadID, b.Revision, update)
 			if err == nil {
 				break
 			}
 			var precondition *beads.PreconditionFailedError
 			if errors.As(err, &precondition) && attempt < 2 {
-				current, readErr := store.Get(beadID)
+				// The row moved: re-read it LIVE (a caching store's backing —
+				// the mover wrote there) and recompute.
+				current, readErr := liveBeadForReassign(store, beadID)
 				if readErr != nil {
 					return "", readErr
 				}
@@ -1899,6 +1909,10 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 			if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
 				return "", err
 			}
+			if beads.ConditionalWritesRequired(store) {
+				return "", fmt.Errorf("beads.conditional_writes=require: the fenced reopen of %s was refused as unsupported at write time (%w); the bead is not reopened unfenced", beadID, err)
+			}
+			writer = nil
 		}
 		if err := store.Update(beadID, update); err != nil {
 			return "", err
@@ -1920,6 +1934,31 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 		}
 	}
 	return strings.Join(changed, ", "), nil
+}
+
+// liveBeadForReassign reads the bead's current row: a caching store found
+// through the wrappers' declared resolution targets is read at its backing
+// (the row a concurrent writer moved), any other store as it answers Get.
+func liveBeadForReassign(store beads.Store, beadID string) (beads.Bead, error) {
+	inner := store
+	for depth := 0; depth < 8 && inner != nil; depth++ {
+		if caching, ok := inner.(*beads.CachingStore); ok {
+			if backing := caching.Backing(); backing != nil {
+				return backing.Get(beadID)
+			}
+			break
+		}
+		target, ok := inner.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			break
+		}
+		next := target.ConditionalWritesResolveTarget()
+		if next == nil || next == inner {
+			break
+		}
+		inner = next
+	}
+	return store.Get(beadID)
 }
 
 // reopenForReassignUpdate is the write --reassign owes the bead: the assignee

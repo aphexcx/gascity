@@ -712,9 +712,9 @@ func workTriggerForStart(info sessionpkg.Info) workTrigger {
 
 // startDeferred re-proves the demand gate on the work bead a start is about
 // to run for, read live at start time: parked, or inside its backoff, means
-// the start is not made (the row is not "not found": a bead in no store, or
-// a store that fails to answer, is not deferred — the start is charged or
-// cleared as the record says once it can be read). The planning gate ran on
+// the start is not made; so does a record that cannot be read (a store that
+// fails to answer is not the bead's absence). A bead in no store is not
+// deferred. The planning gate ran on
 // a snapshot; between the plan and the start the bead's own record can move
 // (another seat's failure parked it, a queued seat outlived it, a holder's
 // clear-bind did not land), and a start made past a park would, on success,
@@ -723,11 +723,27 @@ func (p *workStartFailurePolicy) startDeferred(trigger workTrigger, now time.Tim
 	if p == nil || strings.TrimSpace(trigger.BeadID) == "" {
 		return false, ""
 	}
-	_, bead, ok, _ := p.findTriggerBead(trigger.BeadID, trigger.StoreRef)
+	store, bead, ok, err := p.findTriggerBead(trigger.BeadID, trigger.StoreRef)
+	if err != nil {
+		// A store that fails to answer is not the bead's absence: a start
+		// made past an unreadable record could, on success, clear a park
+		// the record holds. Deferred until it can be read (nothing charged).
+		return true, "unreadable (" + err.Error() + ")"
+	}
 	if !ok {
 		return false, ""
 	}
-	deferred, reason, _ := workStartDeferral(bead.Metadata, now)
+	// The row the verdict is read from is LIVE (a caching store's backing):
+	// the plan read a snapshot, and a park written since — by another
+	// seat's failure through the live write path — is invisible to a cache.
+	live, err := liveWorkBead(store, bead.ID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, ""
+		}
+		return true, "unreadable (" + err.Error() + ")"
+	}
+	deferred, reason, _ := workStartDeferral(live.Metadata, now)
 	return deferred, reason
 }
 

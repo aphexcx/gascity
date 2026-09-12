@@ -183,6 +183,22 @@ func TestStartIsNotMadeForABeadParkedSinceItWasPlanned(t *testing.T) {
 				if !strings.Contains(h.env.stderr.String(), "outcome=work_deferred") || !strings.Contains(h.env.stderr.String(), "is "+tc.want) {
 					t.Fatalf("%s: the deferral is said with its reason %q:\n%s", shape.name, tc.want, h.env.stderr.String())
 				}
+				// Round 13: the abandoned start's durable state goes with its
+				// lease — a kept holder queued for it is back to asleep (so the
+				// pin lifts and the next build can bind it to other work); a
+				// fresh seat keeps its claim and expires as never started.
+				row, _ := h.env.store.Get(sb.ID)
+				after := sessionInfosFromBeads([]beads.Bead{row})[0]
+				switch shape.name {
+				case "sky-held":
+					if session.State(strings.TrimSpace(after.MetadataState)) != session.StateAsleep || startInFlightInfo(after) {
+						t.Fatalf("%s: a deferred queued holder must be released to asleep (unpinned), got state=%q", shape.name, after.MetadataState)
+					}
+				case "sky-seat":
+					if !after.PendingCreateClaim || !startInFlightInfo(after) {
+						t.Fatalf("%s: a deferred fresh seat keeps its claim, got %+v", shape.name, after)
+					}
+				}
 			}
 			state := readWorkStartFailureState(h.reload().Metadata)
 			if tc.name == "parked" && (!state.Parked() || state.ParkFailures != 5) {
@@ -199,8 +215,8 @@ func TestStartIsNotMadeForABeadParkedSinceItWasPlanned(t *testing.T) {
 }
 
 // TestWorkStartFailurePolicyStartDeferred: the start-time gate's answers —
-// a nil policy, no trigger, a bead in no store, and a store that fails to
-// answer never defer; a park and a live backoff do; an elapsed backoff does
+// a nil policy, no trigger and a bead in no store never defer; a park, a
+// live backoff and a record that cannot be read do; an elapsed backoff does
 // not.
 func TestWorkStartFailurePolicyStartDeferred(t *testing.T) {
 	now := time.Date(2026, 9, 12, 3, 0, 0, 0, time.UTC)
@@ -228,7 +244,7 @@ func TestWorkStartFailurePolicyStartDeferred(t *testing.T) {
 		t.Fatal("backoff elapsed: not deferred")
 	}
 	failing := &workStartFailurePolicy{workStore: round10ErrStore{Store: beads.NewMemStore(), err: errors.New("down")}, limitFor: func(string) int { return 5 }}
-	if d, _ := failing.startDeferred(workTrigger{BeadID: parked.ID, StoreRef: "city"}, now); d {
-		t.Fatal("a store that fails to answer does not defer (the record is settled once it can be read)")
+	if d, reason := failing.startDeferred(workTrigger{BeadID: parked.ID, StoreRef: "city"}, now); !d || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "down") {
+		t.Fatalf("a store that fails to answer DEFERS (round 13): deferred=%v reason=%q", d, reason)
 	}
 }

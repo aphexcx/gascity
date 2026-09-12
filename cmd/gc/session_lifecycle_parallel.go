@@ -2905,6 +2905,18 @@ func executePlannedStartsTraced(
 				// and a success can never lift a park it was not planned past.
 				if deferred, reason := startOpts.workStartFailure.startDeferred(workTriggerForStart(candidate.info), clk.Now()); deferred {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					// A kept session queued for this start (start-pending, no
+					// pending-create claim) is put back to asleep: the start is
+					// abandoned, so its durable request goes with its lease —
+					// otherwise the queued state would pin the deferred trigger
+					// (startInFlightInfo) and the next build could never bind
+					// the holder to other work, deferring it forever. A fresh
+					// seat keeps its claim and expires as a never-started create.
+					if !candidate.info.PendingCreateClaim && pendingCreateQueuedOrCreatingState(candidate.info.MetadataState) {
+						if err := sessFront.ApplyPatch(candidate.info.ID, sessionpkg.MetadataPatch{"state": string(sessionpkg.StateAsleep)}); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: %s: releasing the deferred start's queued state: %v\n", candidate.name(), err) //nolint:errcheck
+						}
+					}
 					if release != nil {
 						release()
 					}
