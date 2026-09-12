@@ -1217,7 +1217,7 @@ export type ExternalActor = {
 };
 
 export type ExternalAttachment = {
-    mime_type: string;
+    mime_type?: string;
     provider_id: string;
     url: string;
 };
