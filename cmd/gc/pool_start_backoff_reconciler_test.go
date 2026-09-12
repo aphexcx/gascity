@@ -322,11 +322,13 @@ func TestPoolStartBackoffParkMailRetriedUntilItLands(t *testing.T) {
 	}
 	work := h.reload()
 	h.policy.retryUnmailedParks([]beads.Bead{work}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 0 {
 		t.Fatal("a still-failing mail route delivers nothing")
 	}
 	h.mailErr = nil
 	h.policy.retryUnmailedParks([]beads.Bead{work}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("retry delivered %d mails, want 1", len(h.mails))
 	}
@@ -335,6 +337,7 @@ func TestPoolStartBackoffParkMailRetriedUntilItLands(t *testing.T) {
 		t.Fatal("a landed mail is stamped")
 	}
 	h.policy.retryUnmailedParks([]beads.Bead{work}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("a stamped park is not re-sent, mails=%d", len(h.mails))
 	}

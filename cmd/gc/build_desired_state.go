@@ -970,12 +970,15 @@ func buildDesiredStateWithSessionBeads(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-		poolWorkBeads = excludeStartDeferredWork(poolWorkBeads, beaconTime, trace)
+		// The store refs ride along index-aligned so the resume and
+		// wake-known-identity seats record the store their bead was counted
+		// in (pool_desired_state.go: WorkStoreRef → gc.trigger_bead_store_ref).
+		poolWorkBeads, poolWorkStoreRefs := filterAssignedWorkBeadsForPoolDemandAligned(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkStoreRefs = excludeStartDeferredWorkAligned(poolWorkBeads, poolWorkStoreRefs, beaconTime, trace)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
+		poolDesiredStates := ComputePoolDesiredStatesWithDemandTraced(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1052,50 +1055,27 @@ func buildDesiredStateWithSessionBeads(
 	// release/orphan sweeps and the park-mail retry.
 	namedDemandWork, namedDemandRefs := excludeStartDeferredWorkAligned(assignedWorkBeads, assignedWorkStoreRefs, beaconTime, trace)
 	for identity, spec := range namedSpecs {
-		assignedWorkBeads, assignedWorkStoreRefs := namedDemandWork, namedDemandRefs
-		for i, wb := range assignedWorkBeads {
-			// in_progress work is always actionable; open work is direct named
-			// demand only when it passed the store's readiness/deps gate. Without
-			// the readiness check, an open assigned bead that entered the snapshot
-			// via the open-routed orphan-release pass (no deps gate) would keep an
-			// on-demand named session awake forever even while blocked.
-			ref := ""
-			if i < len(assignedWorkStoreRefs) {
-				ref = assignedWorkStoreRefs[i]
-			}
-			switch wb.Status {
-			case "in_progress":
-			case "open":
-				if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
-					continue
-				}
-			default:
-				continue
-			}
-			assignee := strings.TrimSpace(wb.Assignee)
-			if assignee != identity {
-				continue
-			}
-			// ga-i1d0tr Candidate B: a bare-template Assignee used to be
-			// distrusted for templates supporting expanded per-instance
-			// identities (a multi-slot pool or namepool coexisting with this
-			// named session), because pool's wake-known-identity tier had no
-			// awareness of cfg.NamedSessions and could independently wake a
-			// competing pool worker for the same bare identity. That read-side
-			// ambiguity is now resolved structurally at the source
-			// (isConfiguredNamedSessionIdentity, pool_desired_state.go): pool
-			// can no longer generate wake-known-identity demand for a
-			// configured named session's own bare identity, so this bare match
-			// is trustworthy unconditionally — no per-template-shape guard
-			// needed here anymore (ga-p0u752).
-			if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, assignedWorkStoreRefs, i) {
-				continue
-			}
-			fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, assignee, wb.Status) //nolint:errcheck
-			namedWorkReady[identity] = true
-			namedDirectWork[identity] = SessionRequest{Template: namedSessionBackingTemplate(spec), Tier: "resume", WorkBeadID: wb.ID, WorkBeadTitle: wb.Title, WorkStoreRef: ref}
-			break
+		// ga-i1d0tr Candidate B: a bare-template Assignee used to be
+		// distrusted for templates supporting expanded per-instance
+		// identities (a multi-slot pool or namepool coexisting with this
+		// named session), because pool's wake-known-identity tier had no
+		// awareness of cfg.NamedSessions and could independently wake a
+		// competing pool worker for the same bare identity. That read-side
+		// ambiguity is now resolved structurally at the source
+		// (isConfiguredNamedSessionIdentity, pool_desired_state.go): pool
+		// can no longer generate wake-known-identity demand for a
+		// configured named session's own bare identity, so this bare match
+		// is trustworthy unconditionally — no per-template-shape guard
+		// needed here anymore (ga-p0u752).
+		request, wb, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, func(assignee string) bool {
+			return assignee == identity
+		})
+		if !ok {
+			continue
 		}
+		fmt.Fprintf(stderr, "namedWorkReady: %s matched by bead %s (assignee=%s status=%s)\n", identity, wb.ID, strings.TrimSpace(wb.Assignee), wb.Status) //nolint:errcheck
+		namedWorkReady[identity] = true
+		namedDirectWork[identity] = request
 	}
 	if len(assignedWorkBeads) > 0 {
 		fmt.Fprintf(stderr, "namedWorkReady: %d assigned beads, %d named specs, ready=%v\n", len(assignedWorkBeads), len(namedSpecs), namedWorkReady) //nolint:errcheck
@@ -1169,11 +1149,19 @@ func buildDesiredStateWithSessionBeads(
 			// trigger, the way a pool seat does (poolTriggerMetadata /
 			// bindPoolSessionTriggerBead): a start that then fails charges the
 			// WORK bead (pool_start_backoff.go) instead of vanishing. Direct
-			// demand (a bead assigned to the identity) first, else the routed
-			// row that woke it through NamedSessionRoutedDemand. A holder
-			// created fresh for routed demand has no bead to bind to yet; the
-			// next tick binds it.
-			if request, ok := namedSessionWakeRequest(spec, namedDirectWork[identity], namedRoutedDemand[identity], scaleCheckDemandByTemplate); ok {
+			// demand first — a bead assigned to the identity, or to the
+			// holder's own session bead id or runtime session name, the same
+			// three identities the awake pass wakes it for
+			// (sessionAssigneeMatches) — else the routed row that woke it
+			// through NamedSessionRoutedDemand. A holder created fresh for
+			// routed demand has no bead to bind to yet; the next tick binds it.
+			direct := namedDirectWork[identity]
+			if strings.TrimSpace(direct.WorkBeadID) == "" {
+				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedHolderAssigneeMatcher(canonicalInfo)); ok {
+					direct = request
+				}
+			}
+			if request, ok := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate); ok {
 				if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
 					fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %s: %v (continuing; a failed start is not charged to it)\n", identity, request.WorkBeadID, err) //nolint:errcheck
 				} else {
@@ -5623,6 +5611,65 @@ func formatMaxSessions(a *config.Agent) string {
 		return "unlimited"
 	}
 	return strconv.Itoa(*m)
+}
+
+// namedDirectWorkRequest is the first actionable assigned-work row a named
+// session is woken for by assignment: in_progress work always, open work
+// only when it passed the store's readiness/deps gate (an open assigned bead
+// that entered the snapshot via the open-routed orphan-release pass, with no
+// deps gate, must not keep an on-demand named session awake while blocked),
+// whose assignee the matcher accepts and whose store the agent can reach.
+// The returned request carries the row's store ref so the holder's trigger
+// names the store the bead was counted in.
+func namedDirectWorkRequest(
+	cityPath string,
+	cfg *config.City,
+	spec namedSessionSpec,
+	work []beads.Bead,
+	storeRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	matches func(assignee string) bool,
+) (SessionRequest, beads.Bead, bool) {
+	for i, wb := range work {
+		ref := ""
+		if i < len(storeRefs) {
+			ref = storeRefs[i]
+		}
+		switch wb.Status {
+		case "in_progress":
+		case "open":
+			if !readyAssigned[storeScopedBeadKey{StoreRef: ref, ID: wb.ID}] {
+				continue
+			}
+		default:
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || !matches(assignee) {
+			continue
+		}
+		if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, storeRefs, i) {
+			continue
+		}
+		return SessionRequest{Template: namedSessionBackingTemplate(spec), Tier: "resume", WorkBeadID: wb.ID, WorkBeadTitle: wb.Title, WorkStoreRef: ref}, wb, true
+	}
+	return SessionRequest{}, beads.Bead{}, false
+}
+
+// namedHolderAssigneeMatcher accepts the two concrete identities a retained
+// named holder is also woken for besides its configured identity: its
+// session bead id and its runtime session name (sessionAssigneeMatches in the
+// awake pass). Work assigned to either is the holder's, and a start that
+// fails for it must be charged to it.
+func namedHolderAssigneeMatcher(holder session.Info) func(assignee string) bool {
+	id := strings.TrimSpace(holder.ID)
+	sessionName := strings.TrimSpace(holder.SessionNameMetadata)
+	return func(assignee string) bool {
+		if assignee == "" {
+			return false
+		}
+		return (id != "" && assignee == id) || (sessionName != "" && assignee == sessionName)
+	}
 }
 
 // namedSessionWakeRequest is the work a retained named holder is woken for:

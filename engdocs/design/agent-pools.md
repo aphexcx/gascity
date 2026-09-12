@@ -203,7 +203,7 @@ a supervisor restart and a handoff:
 | `gc.start_backoff_until` | no start is planned before this time: 10s after the first failure, doubling per failure, capped at 5m |
 | `gc.parked_at` / `gc.park_reason` / `gc.park_failures` | the park: written when the count reaches the agent's `max_start_failures` (default 5, `0` = never park) |
 | `gc.park_id` | the park's random identity: names its mail (`[park <id>]` in the subject), fences the delivered stamp, lets a retry recognize a mail that landed before a restart could stamp it |
-| `gc.park_mailed_at` | the one park mail landed (an unlanded mail is retried; a landed one is found by its tag — open or archived, the receipt is the message bead itself — and never sent twice; only a landed mail the read-mail retention purge has already deleted can be sent once more) |
+| `gc.park_mailed_at` | the one park mail landed (an unlanded mail is retried by a background sweep the tick hands off and never waits on; a landed one is found by its tag — open or archived, the receipt is the message bead itself — and never sent twice; only a landed mail the read-mail retention purge has already deleted can be sent once more) |
 
 Both demand tiers honour the record: an in_progress bead assigned to the
 pool identity (the wake-known-identity tier) and an open unassigned routed

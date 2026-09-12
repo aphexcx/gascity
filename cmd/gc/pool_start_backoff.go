@@ -331,6 +331,10 @@ type workStartFailurePolicy struct {
 	// limitFor returns the agent's effective max_start_failures for a session
 	// template; nil means the default.
 	limitFor func(template string) int
+	// sweeps counts the park-mail retry sweeps this policy handed to the
+	// background (retryUnmailedParks); awaitParkMailRetries waits on it —
+	// tests only, the tick never waits for a mail.
+	sweeps sync.WaitGroup
 	// notify sends the park mail; it returns an error when the mail did not
 	// land, in which case the park stays unmailed and is retried each tick.
 	notify func(parkedWorkNotice) error
@@ -828,25 +832,57 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 // trigger bead's is, so a ref the snapshot spells differently still finds
 // the row. Called for both the assigned-work and the open-routed snapshots:
 // an open unassigned routed bead can park before any session claims it.
+//
+// The owed rows are picked off the snapshot here; the sends run on ONE
+// background sweep, off the tick: a landed mail nudges the mayor and waits
+// for the nudge to be delivered (sendMailNotifyWithWorker, up to 30s of idle
+// wait each), and ten parks owed after a messaging outage would otherwise
+// hold the whole tick — every unrelated session reconcile behind them — for
+// minutes. The per-bead single-flight slot and the 5-minute throttle in
+// mailPark keep a sweep still running when the next tick's sweep starts from
+// sending twice; the park's own first send (recordStartFailure) is the same
+// mailPark under the same slot.
 func (p *workStartFailurePolicy) retryUnmailedParks(workBeads []beads.Bead, storeRefs []string) {
 	if p == nil || len(workBeads) != len(storeRefs) {
 		return
 	}
+	type owedPark struct{ id, ref string }
+	var owed []owedPark
 	for i, wb := range workBeads {
 		state := readWorkStartFailureState(wb.Metadata)
 		if !state.Parked() || !state.ParkMailedAt.IsZero() {
 			continue
 		}
-		store, current, ok := p.storeForTriggerBead(wb.ID, storeRefs[i])
-		if !ok {
-			continue
-		}
-		template := ""
-		if p.templateOf != nil {
-			template = p.templateOf(current)
-		}
-		p.mailPark(store, current.ID, template, false)
+		owed = append(owed, owedPark{id: wb.ID, ref: storeRefs[i]})
 	}
+	if len(owed) == 0 {
+		return
+	}
+	p.sweeps.Add(1)
+	go func() {
+		defer p.sweeps.Done()
+		for _, o := range owed {
+			store, current, ok := p.storeForTriggerBead(o.id, o.ref)
+			if !ok {
+				continue
+			}
+			template := ""
+			if p.templateOf != nil {
+				template = p.templateOf(current)
+			}
+			p.mailPark(store, current.ID, template, false)
+		}
+	}()
+}
+
+// awaitParkMailRetries blocks until every retry sweep retryUnmailedParks has
+// handed to the background is done. Tests only: the tick never waits for a
+// mail to land.
+func (p *workStartFailurePolicy) awaitParkMailRetries() {
+	if p == nil {
+		return
+	}
+	p.sweeps.Wait()
 }
 
 // excludeStartDeferredWork drops the assigned-work rows the pool must not plan

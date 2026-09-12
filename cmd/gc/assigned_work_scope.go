@@ -129,11 +129,29 @@ func filterAssignedWorkBeadsForPoolDemand(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) []beads.Bead {
+	filtered, _ := filterAssignedWorkBeadsForPoolDemandAligned(cfg, cityPath, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	return filtered
+}
+
+// filterAssignedWorkBeadsForPoolDemandAligned is
+// filterAssignedWorkBeadsForPoolDemand keeping the surviving beads' store
+// refs index-aligned, so the resume and wake-known-identity requests the pool
+// builds from them can name the store each bead was counted in: a migrated
+// bead's ACTIVE copy lives in its class store while a retained copy still
+// sits in the work store, and a session bound to the id alone would charge
+// (or skip) the retained copy when its start fails (pool_start_backoff.go).
+func filterAssignedWorkBeadsForPoolDemandAligned(
+	cfg *config.City,
+	cityPath string,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+) ([]beads.Bead, []string) {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
@@ -153,6 +171,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredRefs := make([]string, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
@@ -173,9 +192,14 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 		if assignedWorkIndexReachableFromAgent(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i) {
 			filtered = append(filtered, wb)
+			ref := ""
+			if i < len(assignedWorkStoreRefs) {
+				ref = assignedWorkStoreRefs[i]
+			}
+			filteredRefs = append(filteredRefs, ref)
 		}
 	}
-	return filtered
+	return filtered, filteredRefs
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment

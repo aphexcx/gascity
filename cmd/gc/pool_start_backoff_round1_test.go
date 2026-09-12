@@ -235,6 +235,7 @@ func TestPoolStartBackoffRetryReReadsBeforeSending(t *testing.T) {
 	// The tick now processes its stale row.
 	h.policy.retry = nil // no throttle: the re-read alone must stop the send
 	h.policy.retryUnmailedParks([]beads.Bead{stale}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("a stale snapshot sent a second park mail: %d", len(h.mails))
 	}
@@ -243,6 +244,7 @@ func TestPoolStartBackoffRetryReReadsBeforeSending(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.policy.retryUnmailedParks([]beads.Bead{stale}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("a lifted park was mailed: %d", len(h.mails))
 	}
@@ -445,6 +447,7 @@ func TestPoolStartBackoffLateFirstSendStandsDownAfterARetryLanded(t *testing.T) 
 	}
 	h.mailErr = nil
 	h.policy.retryUnmailedParks([]beads.Bead{h.reload()}, []string{"city"}) // the tick's retry lands first
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("retry delivered %d", len(h.mails))
 	}
@@ -494,6 +497,7 @@ func TestPoolStartBackoffStampAcknowledgesOnlyItsOwnPark(t *testing.T) {
 	// P2 is still owed its mail: the retry sends for P2 and stamps P2.
 	h.policy.retry = nil
 	h.policy.retryUnmailedParks([]beads.Bead{h.reload()}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	got = readWorkStartFailureState(h.reload().Metadata)
 	if len(h.mails) != 2 || h.mails[1].ParkID != "p2-fresh" || got.ParkMailedAt.IsZero() {
 		t.Fatalf("P2 must get its own mail and stamp: mails=%+v state=%+v", h.mails, got)
@@ -525,6 +529,7 @@ func TestPoolStartBackoffLandedMailFoundAfterRestartIsNotResent(t *testing.T) {
 		return false, nil
 	}
 	h.policy.retryUnmailedParks([]beads.Bead{h.reload()}, []string{"city"})
+	h.policy.awaitParkMailRetries()
 	if len(h.mails) != 1 {
 		t.Fatalf("a landed mail was sent again after the restart: %d", len(h.mails))
 	}

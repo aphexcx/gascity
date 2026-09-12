@@ -2605,7 +2605,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	// Per-work-bead failed-start record (pool_start_backoff.go): charged on
 	// the failed-create rollback arm, cleared on a confirmed start; a park
-	// whose mail has not landed is re-sent here.
+	// whose mail has not landed is handed to a background re-send here — the
+	// tick never waits on a mail or its nudge.
 	workStartFailure := cr.workStartFailurePolicy(store, sessStore, rigStores)
 	workStartFailure.retryUnmailedParks(result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 	workStartFailure.retryUnmailedParks(result.ParkedUnmailedWorkBeads, result.ParkedUnmailedWorkStoreRefs)

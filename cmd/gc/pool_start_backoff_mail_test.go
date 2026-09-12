@@ -188,6 +188,7 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 
 	policy := cr.workStartFailurePolicy(store, store, nil)
 	policy.retryUnmailedParks([]beads.Bead{reload()}, []string{"city"})
+	policy.awaitParkMailRetries()
 	open, err := mp.All("mayor")
 	if err != nil {
 		t.Fatal(err)
@@ -213,6 +214,7 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 	cr.parkMailRetry = nil // the restart: no in-memory throttle survives it
 	policy = cr.workStartFailurePolicy(store, store, nil)
 	policy.retryUnmailedParks([]beads.Bead{reload()}, []string{"city"})
+	policy.awaitParkMailRetries()
 
 	all, err := archived.AllIncludingArchived("mayor")
 	if err != nil {
