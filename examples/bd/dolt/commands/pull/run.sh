@@ -224,7 +224,8 @@ abort_cli_merge() {
 # mode the on-disk merge is aborted).
 #
 # SQL mode pulls again inside the transaction (the failed autocommit pull
-# rolled its merge back); CLI mode already holds the merge in the working
+# rolled its merge back) — behind the same server-side gate and bound as the
+# first pull (gp-f2yq); CLI mode already holds the merge in the working
 # set. Either way the statements are the same: report every conflicted
 # table and every conflicted `issues` row with its differing columns; give
 # each benign row the remote's row_lock and updated_at and clear its
@@ -244,7 +245,11 @@ resolve_benign_conflicts() {
   p="$CONFLICT_PREDICATE"
   sql="SET @@autocommit = 0; SET @@session.group_concat_max_len = 1048576;"
   if [ "$server_running" = true ]; then
-    sql="$sql CALL DOLT_PULL('$remote_name', 'main');"
+    # gp-f2yq: the retried pull is a server-side DOLT_PULL like the first one.
+    # Its CALL carries the same ownership-checked first argument (this
+    # session still holds this run's lock, or the procedure never runs) and
+    # the batch runs behind the same gate, below.
+    sql="$sql CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main');"
   fi
   # Report rows put the count BEFORE the table name and fold a row's id and
   # differing columns into one field, so a table name with a comma, a quote
@@ -262,7 +267,49 @@ resolve_benign_conflicts() {
   sql="$sql CALL DOLT_COMMIT('-m', 'gc dolt pull: merge $remote_name/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>');"
   sql="$sql COMMIT;"
   resolve_rc=0
-  out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
+  if [ "$server_running" = true ]; then
+    # ONE server-side remote operation per database at a time holds for the
+    # retried pull too (gp-f2yq). The batch's first statement after USE is
+    # the gate (remote_op_gate_sql): this database's lock, this run's lock
+    # and the session's own connection id in one statement, or the batch
+    # stops there before anything runs; --use-db attributes the session; the
+    # pull bound applies to the whole batch. A bound that expires KILLs the
+    # session the gate printed about itself and proves it gone (its
+    # uncommitted transaction goes with it); a refused or lost gate skips,
+    # exactly as the first pull does.
+    resolve_out_tmp=$(mktemp) || {
+      echo "  $name: ERROR: cannot create temp file for the resolving session id" >&2
+      return 1
+    }
+    resolve_err_tmp=$(mktemp) || {
+      rm -f "$resolve_out_tmp"
+      echo "  $name: ERROR: cannot create temp file for the resolving session diagnostics" >&2
+      return 1
+    }
+    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); $sql" "$pull_timeout" "$name" \
+      >"$resolve_out_tmp" 2>"$resolve_err_tmp" || resolve_rc=$?
+    resolve_session_id=$(remote_op_session_id "$resolve_out_tmp")
+    out=$(cat "$resolve_out_tmp" "$resolve_err_tmp")
+    rm -f "$resolve_out_tmp"
+    # The bound's verdict outranks anything the client printed.
+    if bound_expired "$resolve_rc"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: pull timed out after ${pull_timeout}s while resolving conflicts (GC_DOLT_PULL_TIMEOUT_SECS; client exit $resolve_rc) — the resolving transaction was not confirmed" >&2
+      kill_remote_op_session pull "$name" "$resolve_session_id" || true
+      return 1
+    elif remote_op_gate_refused "$resolve_err_tmp"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: pull already in flight — the server refused the conflict-resolving pull (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
+      return 1
+    elif remote_op_gate_lost "$resolve_err_tmp"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: conflict-resolving pull not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped" >&2
+      return 1
+    fi
+    rm -f "$resolve_err_tmp"
+  else
+    out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
+  fi
   rows=$(printf '%s\n' "$out" | grep '^row,' | sed 's/^row,//; s/^"//; s/"$//; s/""/"/g' || true)
   row_count=$(printf '%s\n' "$rows" | grep -c '.' || true)
   if [ "$resolve_rc" -eq 0 ]; then

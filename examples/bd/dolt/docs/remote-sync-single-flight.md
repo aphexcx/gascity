@@ -61,3 +61,13 @@ guard need one manual `KILL <Id>` each. Bounds: `GC_DOLT_SYNC_FETCH_TIMEOUT_SECS
 120); each must be a positive integer, an all-zero value is rejected. Nothing
 here changes the patrol order, the fast-forward classification, the push path,
 or the CLI fallback (which has no server session to guard).
+
+`gc dolt pull`'s conflict-resolving retry (the one transaction that gives a
+conflicted bd `issues` row differing from the remote only in `row_lock` and
+`updated_at` the remote's values — see the pull script's header) is a second
+server-side `DOLT_PULL`, and it holds to the same rule: the batch runs behind
+the same gate (this database's lock, this run's lock and the session's own id
+in one statement before anything runs), the CALL's first argument re-proves
+ownership, the pull bound covers the whole batch, and a bound that expires
+KILLs that session — its uncommitted transaction goes with it — and proves it
+gone; a refused or lost gate skips the retry like the first pull.
