@@ -36,6 +36,10 @@ func writePullFakeDoltMultiRemote(t *testing.T, dir string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\nalpha,file:///data/remotes/alpha\ninternal,file:///data/remotes/internal\npublic,https://public.example.invalid/repo\n'
     ;;
@@ -148,7 +152,7 @@ func TestPullSQLMultipleRemotesOverrideSelectsFileRemote(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('internal', 'main')"
+	want := "= CONNECTION_ID(), 'internal', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')"
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the overridden 'internal' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -247,7 +251,7 @@ func TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds(t *testing.T
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('public', 'main')"
+	want := "= CONNECTION_ID(), 'public', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')"
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the overridden 'public' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -469,6 +473,10 @@ func writePullFakeDoltSoleRemote(t *testing.T, dir string, url string) string {
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    exit 0
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\norigin,` + url + `\n'
     ;;
@@ -582,7 +590,7 @@ func TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('origin', 'main')"
+	want := "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')"
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
@@ -629,7 +637,7 @@ func TestPullSQLSoleFileRemoteProceedsWithoutOverride(t *testing.T) {
 	}
 
 	log := readLog(t, doltLog)
-	want := "CALL DOLT_PULL('origin', 'main')"
+	want := "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')"
 	if !strings.Contains(log, want) {
 		t.Fatalf("expected pull from the sole 'origin' remote.\nwant %q\nlog:\n%s\noutput:\n%s", want, log, out)
 	}
