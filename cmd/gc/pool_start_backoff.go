@@ -204,7 +204,8 @@ func workStartDeferral(meta map[string]string, now time.Time) (deferred bool, re
 // at the limit (limit > 0) it parks: the count folds into gc.park_failures,
 // gc.start_failures and gc.start_backoff_until clear, gc.park_mailed_at clears
 // so the mail is owed. A bead that is already parked keeps its park (and its
-// mail stamp): a further failure is recorded but is not a second park.
+// mail stamp): a further failure is recorded as the last failure, is not a
+// second park, and does not count toward the next attempt.
 func workStartFailurePatch(state workStartFailureState, now time.Time, failure string, limit int) (map[string]string, bool) {
 	failures := state.Failures + 1
 	stamp := now.UTC().Format(time.RFC3339)
@@ -213,7 +214,12 @@ func workStartFailurePatch(state workStartFailureState, now time.Time, failure s
 		beadmeta.StartFailureMetadataKey:  failure,
 	}
 	if state.Parked() {
-		patch[beadmeta.StartFailuresMetadataKey] = strconv.Itoa(failures)
+		// The park holds the count that earned it (gc.park_failures); a
+		// failure that lands on a parked bead (a start already in flight
+		// when the park was written) is recorded as the last failure only —
+		// the counter stays cleared, so the unpark that unsets the three park
+		// keys starts the next attempt's count from zero, as documented.
+		patch[beadmeta.StartFailuresMetadataKey] = ""
 		patch[beadmeta.StartBackoffUntilMetadataKey] = ""
 		return patch, false
 	}
@@ -398,6 +404,23 @@ type parkMailRetryState struct {
 	mu       sync.Mutex
 	last     map[string]time.Time
 	inFlight map[string]bool
+	// sweptAt is when the demand-independent park sweep last listed the
+	// stores (sweepUnmailedParks); bounded by parkMailRetryEvery.
+	sweptAt time.Time
+}
+
+// sweepDue reports whether the store sweep may run at now, and claims it.
+func (r *parkMailRetryState) sweepDue(now time.Time) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.sweptAt.IsZero() && now.Before(r.sweptAt.Add(parkMailRetryEvery)) {
+		return false
+	}
+	r.sweptAt = now
+	return true
 }
 
 // begin claims the single-flight slot for a bead; false when another send is
@@ -987,6 +1010,56 @@ func (p *workStartFailurePolicy) retryUnmailedParks(workBeads []beads.Bead, stor
 			p.mailPark(store, current.ID, template, false)
 		}
 	}()
+}
+
+// sweepUnmailedParks is the delivery obligation's own discovery, independent
+// of demand: every parked bead whose mail has not landed, in every store the
+// policy knows (the work store, the rig stores, the relocated class stores),
+// is handed to retryUnmailedParks — a bead that stopped being demand (its
+// agent suspended, a dependency added, a claim elsewhere) still owes its one
+// mail. The stores are listed at most every parkMailRetryEvery (the retry
+// state's clock; no retry state, as in tests, sweeps on every call); a store
+// that fails to list is said and skipped for this sweep.
+func (p *workStartFailurePolicy) sweepUnmailedParks(now time.Time) {
+	if p == nil || !p.retry.sweepDue(now) {
+		return
+	}
+	var owedBeads []beads.Bead
+	var owedRefs []string
+	collect := func(store beads.Store, ref string) {
+		if store == nil {
+			return
+		}
+		rows, err := store.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			p.logf("session reconciler: park-mail sweep: listing store %q: %v (parks there are retried next sweep)\n", ref, err)
+			return
+		}
+		for _, row := range rows {
+			state := readWorkStartFailureState(row.Metadata)
+			if !state.Parked() || !state.ParkMailedAt.IsZero() {
+				continue
+			}
+			owedBeads = append(owedBeads, row)
+			owedRefs = append(owedRefs, ref)
+		}
+	}
+	collect(p.workStore, "city")
+	names := make([]string, 0, len(p.rigStores))
+	for name := range p.rigStores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if p.rigStores[name] == p.workStore {
+			continue
+		}
+		collect(p.rigStores[name], "rig:"+name)
+	}
+	for _, store := range p.extraStores {
+		collect(store, "")
+	}
+	p.retryUnmailedParks(owedBeads, owedRefs)
 }
 
 // awaitParkMailRetries blocks until every retry sweep retryUnmailedParks has

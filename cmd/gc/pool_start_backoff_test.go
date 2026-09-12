@@ -185,6 +185,9 @@ func TestWorkStartFailurePatchAlreadyParkedStaysParkedWithoutASecondPark(t *test
 	if state.Failure != "boom again" || !state.FailedAt.Equal(later) {
 		t.Fatalf("the last-failure record still updates: %+v", state)
 	}
+	if state.Failures != 0 || meta[beadmeta.StartFailuresMetadataKey] != "" {
+		t.Fatalf("a failure on a parked bead does not count toward the next attempt (the three-key unpark starts from zero): %+v", state)
+	}
 }
 
 func TestWorkStartFailureClearPatchTouchesOnlySetKeys(t *testing.T) {

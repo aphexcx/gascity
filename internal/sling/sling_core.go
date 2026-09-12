@@ -1818,7 +1818,11 @@ func reopenForReassign(beadID string, deps SlingDeps) (string, error) {
 // failure or a SourceWorkflowStores listing/read failure.
 func locateBeadForReassign(beadID string, deps SlingDeps) (beads.Store, beads.Bead, bool, error) {
 	if deps.Store != nil {
-		b, err := deps.Store.Get(beadID)
+		// Read LIVE (a caching store's backing): a cache-served clean row
+		// would say there is nothing to reopen and return before any write
+		// — no fence, no live re-read — while the backing holds a park the
+		// pool wrote since the cache primed.
+		b, err := liveBeadForReassign(deps.Store, beadID)
 		if err == nil {
 			return deps.Store, b, true, nil
 		}
@@ -1843,7 +1847,7 @@ func locateBeadForReassign(beadID string, deps SlingDeps) (beads.Store, beads.Be
 		if info.Store == nil {
 			continue
 		}
-		b, err := info.Store.Get(beadID)
+		b, err := liveBeadForReassign(info.Store, beadID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -1914,7 +1918,7 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 			}
 			writer = nil
 		}
-		if err := store.Update(beadID, update); err != nil {
+		if err := plainUpdateForReassign(store, beadID, update); err != nil {
 			return "", err
 		}
 		break
@@ -1936,27 +1940,68 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 	return strings.Join(changed, ", "), nil
 }
 
+// plainUpdateForReassign is the unfenced write. A caching store's Update
+// skips the backing call when its CACHED row already carries every field of
+// the update — and here the cached row is exactly the clean row that hid
+// the park (the row was read live at the backing): the write then goes to
+// the backing directly; otherwise through the cache, whose row refreshes.
+func plainUpdateForReassign(store beads.Store, beadID string, update beads.UpdateOpts) error {
+	if caching := cachingStoreForReassign(store); caching != nil {
+		if cached, err := caching.Get(beadID); err == nil && updateCarriedBy(cached, update) {
+			if backing := caching.Backing(); backing != nil {
+				return backing.Update(beadID, update)
+			}
+		}
+	}
+	return store.Update(beadID, update)
+}
+
+// updateCarriedBy reports whether row already holds every field the update
+// sets — the comparison a caching store's idempotence guard makes.
+func updateCarriedBy(row beads.Bead, update beads.UpdateOpts) bool {
+	if update.Assignee != nil && row.Assignee != *update.Assignee {
+		return false
+	}
+	if update.Status != nil && row.Status != *update.Status {
+		return false
+	}
+	for k, v := range update.Metadata {
+		if row.Metadata[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// cachingStoreForReassign is the caching store behind a store, found through
+// the wrappers' declared resolution targets; nil when there is none.
+func cachingStoreForReassign(store beads.Store) *beads.CachingStore {
+	inner := store
+	for depth := 0; depth < 8 && inner != nil; depth++ {
+		if caching, ok := inner.(*beads.CachingStore); ok {
+			return caching
+		}
+		target, ok := inner.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			return nil
+		}
+		next := target.ConditionalWritesResolveTarget()
+		if next == nil || next == inner {
+			return nil
+		}
+		inner = next
+	}
+	return nil
+}
+
 // liveBeadForReassign reads the bead's current row: a caching store found
 // through the wrappers' declared resolution targets is read at its backing
 // (the row a concurrent writer moved), any other store as it answers Get.
 func liveBeadForReassign(store beads.Store, beadID string) (beads.Bead, error) {
-	inner := store
-	for depth := 0; depth < 8 && inner != nil; depth++ {
-		if caching, ok := inner.(*beads.CachingStore); ok {
-			if backing := caching.Backing(); backing != nil {
-				return backing.Get(beadID)
-			}
-			break
+	if caching := cachingStoreForReassign(store); caching != nil {
+		if backing := caching.Backing(); backing != nil {
+			return backing.Get(beadID)
 		}
-		target, ok := inner.(beads.ConditionalWritesResolveTargeter)
-		if !ok {
-			break
-		}
-		next := target.ConditionalWritesResolveTarget()
-		if next == nil || next == inner {
-			break
-		}
-		inner = next
 	}
 	return store.Get(beadID)
 }

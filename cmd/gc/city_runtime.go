@@ -2610,6 +2610,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	workStartFailure := cr.workStartFailurePolicy(store, sessStore, rigStores)
 	workStartFailure.retryUnmailedParks(result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 	workStartFailure.retryUnmailedParks(result.ParkedUnmailedWorkBeads, result.ParkedUnmailedWorkStoreRefs)
+	workStartFailure.sweepUnmailedParks(time.Now())
 	reconcileStartOptions := []startExecutionOption{
 		withWorkStartFailurePolicy(workStartFailure),
 		withAsyncStartExecution(),

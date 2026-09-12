@@ -257,16 +257,26 @@ outlived it, a holder's clear-bind did not land — is not started for
 (outcome `work_deferred`, nothing charged; a kept session queued for that
 start goes back to asleep so the next build can bind it to other work,
 while a fresh seat keeps its claim and expires as never started), so a
-success can never lift a park it was not planned past. A kept session's
-uncommitted resume stays durable as its start-pending/creating state (put
-back whenever a tick leaves it unconfirmed: the start still inside its
-in-flight lease, or a recovery that failed) until a clear lands. Every record read is live (a
+success can never lift a park it was not planned past. An uncommitted
+start stays durable as its start-pending/creating state: the heal never
+moves a live start-pending/creating session on — only the commit that
+clears the record first confirms it (the start path, or the next tick's
+recovery) — so a kept session's resume whose clear failed is recovered
+however many ticks, restarts or in-flight deferrals come between. Every record read is live (a
 caching store's backing), fenced or not; the `--reassign` unpark is fenced
 through the same policy-aware seam (`beads.ResolveConditionalWriter`,
 following the CLI's policy wrapper; `require` refuses rather than write
 unfenced), re-reads a moved row live, and clears the whole record family
 whenever any of it was read, so a park written between its read and its
-write is lifted. A park written before
+write is lifted; it reads the row live too, so a cache that still serves a
+clean row cannot answer "nothing to reopen" over a parked backing. The one
+park mail is owed whether or not the bead is still demand: besides the
+demand-side retries, the controller sweeps every store it knows for parked
+beads whose mail has not landed (at most once per retry interval), so a
+bead whose agent was suspended, or that gained a dependency, still gets
+its mail. A failure that lands on an already parked bead (a start in
+flight when the park was written) is recorded as the last failure and
+does not count toward the next attempt. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`
 together. Under `beads.conditional_writes = "require"` a fenced write the
 store refuses at write time is not retried unfenced. A trigger whose named

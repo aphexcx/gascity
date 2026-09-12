@@ -971,6 +971,18 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	return false
 }
 
+// liveUncommittedStartInfo reports an UNDESIRED session's start that ran —
+// the runtime is alive — but never committed: no pending-create claim, no
+// in-flight lease, and a start-pending/creating state the heal leaves alone
+// (healStatePatchWithRollbackInfo). It is not a leased pending create to
+// keep open: nothing will start it again, and it drains like a live orphan.
+func liveUncommittedStartInfo(i sessionpkg.Info, alive bool, clk clock.Clock, startupTimeout time.Duration) bool {
+	if !alive || i.PendingCreateClaim || !pendingCreateQueuedOrCreatingState(i.MetadataState) {
+		return false
+	}
+	return !pendingCreateStartInFlightInfo(i, clk, startupTimeout)
+}
+
 // pendingCreateStartInFlightInfo reports whether a pending-create start is still
 // within its in-flight lease window.
 func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
@@ -1955,7 +1967,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						"degraded":       preserveErr != nil,
 					})
 				}
-			case pendingCreateSessionStillLeasedInfo(infoPostHeal, cfg, clk):
+			case pendingCreateSessionStillLeasedInfo(infoPostHeal, cfg, clk) && !liveUncommittedStartInfo(infoPostHeal, providerAlive, clk, startupTimeout):
 				template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 				if template == "" {
 					template = infoPostHeal.Template
@@ -1969,6 +1981,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			default:
+				if liveUncommittedStartInfo(infoPostHeal, providerAlive, clk, startupTimeout) {
+					// An undesired session whose start RAN (its runtime is alive)
+					// but never committed — no claim, no in-flight lease, still
+					// start-pending/creating because the heal leaves an
+					// uncommitted start to its commit. Nothing will start it
+					// again, so it drains like any live orphan below — but a
+					// runtime that came up is a lane that starts, and the
+					// failed-start record its work bead still carries is stale:
+					// the same clear a confirmation makes runs first, and a clear
+					// that fails keeps the session open one more tick rather than
+					// drain past it.
+					template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
+					if template == "" {
+						template = infoPostHeal.Template
+					}
+					if !reconcileOpts.workStartFailure.recordStartSuccess(workTriggerFromInfo(infoPostHeal), template) {
+						fmt.Fprintf(stderr, "session reconciler: %s: clearing the failed-start record of work bead %s before draining the uncommitted orphan: not settled this tick\n", name, strings.TrimSpace(infoPostHeal.TriggerBeadID)) //nolint:errcheck
+						continue
+					}
+				}
 				if dops != nil {
 					if acked, _ := dops.isDrainAcked(name); acked {
 						// gc-hz0nu: every drain-acked decision below depends on the
@@ -2753,31 +2785,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// it start-pending/creating (its commit failed: the metadata batch, or
 		// the clear of its work bead's failed-start record, which runs before
 		// that batch) — is confirmed here, on the one path that clears the
-		// record first (recoverRunningPendingCreate). The pre-heal state is the
-		// gate: the heal above may already have moved a fresh creating
-		// session on, and a kept session carries no claim.
+		// record first (recoverRunningPendingCreate). The heal leaves that
+		// state alone, so the pre-heal state is the state; a kept session
+		// carries no claim, its state is its gate.
 		if alive && (shouldRollbackPendingCreateInfo(infoByID[id]) || pendingCreateQueuedOrCreatingState(string(stateBeforeHeal))) {
-			// The start is not confirmed, and the fact must stay durable: a
-			// fresh create keeps its claim, but a kept session's only gate
-			// back into this branch is its pre-heal start-pending/creating
-			// state — which the heal above may have moved on this tick. Put
-			// it back whenever this branch leaves the start unconfirmed (a
-			// start still inside its in-flight lease, or a recovery that
-			// failed), so the next tick — or the async commit's own failure
-			// path, which clears only the lease — still finds it uncommitted
-			// and recovers (clear, then confirm) rather than leaving a
-			// confirmed-looking session behind a stale record.
-			keepUncommittedState := func() {
-				if infoByID[id].PendingCreateClaim || !pendingCreateQueuedOrCreatingState(string(stateBeforeHeal)) || strings.TrimSpace(healBatch["state"]) == "" {
-					return
-				}
-				restore := sessionpkg.MetadataPatch{"state": string(stateBeforeHeal)}
-				if err := sessFront.ApplyPatch(id, restore); err != nil {
-					fmt.Fprintf(stderr, "session reconciler: %s: keeping the uncommitted start's state %q for the next tick's recovery: %v\n", name, stateBeforeHeal, err) //nolint:errcheck
-					return
-				}
-				tick.apply(id, restore)
-			}
+			// The start is not confirmed, and the fact is durable: a fresh create
+			// keeps its claim, a kept session keeps its start-pending/creating
+			// state — the heal (healStatePatchWithRollbackInfo) never moves a
+			// live uncommitted start on; only the commit that clears the work
+			// bead's record first does (recoverRunningPendingCreate below).
 			switch stateBeforeHeal {
 			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
 				inFlight := infoByID[id]
@@ -2786,7 +2802,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
 					}
-					keepUncommittedState()
 					continue
 				}
 			}
@@ -2810,9 +2825,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 			tick.apply(id, commitBatch)
-			if !ok {
-				keepUncommittedState()
-			}
 		}
 
 		// driftRestartedInPlace tracks whether the alive-restart branch ran
