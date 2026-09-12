@@ -98,6 +98,32 @@ type storageRoutes struct {
 
 // storeFor returns the store serving a class and whether these routes relocate
 // it at all. A nil receiver relocates nothing.
+// relocatedStores lists every distinct store a class binding relocated to:
+// the stores a bead can live in besides the work store and the rig stores.
+func (r *storageRoutes) relocatedStores() []beads.Store {
+	if r == nil {
+		return nil
+	}
+	var out []beads.Store
+	for _, class := range coordclass.Classes() {
+		store, ok := r.stores[class]
+		if !ok || store == nil {
+			continue
+		}
+		dup := false
+		for _, seen := range out {
+			if seen == store {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, store)
+		}
+	}
+	return out
+}
+
 func (r *storageRoutes) storeFor(class coordclass.Class) (beads.Store, bool) {
 	if r == nil {
 		return nil, false

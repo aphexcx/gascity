@@ -4077,7 +4077,7 @@ func TestReopenForReassign_RigStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := reopenForReassign(bead.ID, deps); err != nil {
+	if _, err := reopenForReassign(bead.ID, deps); err != nil {
 		t.Fatalf("reopenForReassign: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
@@ -4109,7 +4109,7 @@ func TestReopenForReassign_PrimaryStoreReadError(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	err = reopenForReassign(bead.ID, deps)
+	_, err = reopenForReassign(bead.ID, deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want primary read failure")
 	}
@@ -4145,7 +4145,7 @@ func TestReopenForReassign_SourceStoreReadError(t *testing.T) {
 			}, nil
 		},
 	}
-	err := reopenForReassign("gc-123", deps)
+	_, err := reopenForReassign("gc-123", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-store read failure")
 	}
@@ -4171,7 +4171,7 @@ func TestReopenForReassign_SourceStoreListError(t *testing.T) {
 			return nil, fmt.Errorf("stores unavailable")
 		},
 	}
-	err := reopenForReassign("gc-456", deps)
+	_, err := reopenForReassign("gc-456", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-workflow store listing failure")
 	}
@@ -4202,7 +4202,7 @@ func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := reopenForReassign(bead.ID, deps); err != nil {
+	if _, err := reopenForReassign(bead.ID, deps); err != nil {
 		t.Fatalf("reopenForReassign: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)

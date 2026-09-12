@@ -185,6 +185,67 @@ New agents immediately enter the work loop: if you find work on your
 hook, you run it — check hook, claim work, execute, repeat. The prompt
 template tells them what to do. No framework intelligence needed.
 
+## Failed starts: backoff, then park
+
+A routed bead whose sessions cannot start is not capacity demand forever.
+Every start the pool plans for a bead that then fails in `provider_error`
+(a failing `pre_start` included) is charged to the **work bead**, not the
+session bead: the session bead is rolled back and closed `failed-create`
+and the next tick would create a fresh one with zeroed counters, which is
+how one bead once spawned ~160 sessions in 23 minutes (papercut
+pc_b969af2a45eb). The record lives in the bead's metadata, so it survives
+a supervisor restart and a handoff:
+
+| key | meaning |
+|---|---|
+| `gc.start_failures` | consecutive failed starts since the last success |
+| `gc.start_failed_at` / `gc.start_failure` | when, and the last stderr line |
+| `gc.start_backoff_until` | no start is planned before this time: 10s after the first failure, doubling per failure, capped at 5m |
+| `gc.parked_at` / `gc.park_reason` / `gc.park_failures` | the park: written when the count reaches the agent's `max_start_failures` (default 5, `0` = never park) |
+| `gc.park_id` | the park's random identity: names its mail (`[park <id>]` in the subject), fences the delivered stamp, lets a retry recognize a mail that landed before a restart could stamp it |
+| `gc.park_mailed_at` | the one park mail landed (an unlanded mail is retried; a landed one is found by its tag — open or archived, the receipt is the message bead itself — and never sent twice; only a landed mail the read-mail retention purge has already deleted can be sent once more) |
+
+Both demand tiers honour the record: an in_progress bead assigned to the
+pool identity (the wake-known-identity tier) and an open unassigned routed
+bead (the scale_check tier) are skipped while backed off or parked, so the
+pool plans no start for them. A custom `scale_check` stays authoritative:
+if its query counts routed rows, exclude parked ones (`gc.parked_at` set)
+unless you want a seat spawned for them; the seats it spawns are tied to the
+routed rows the default probe can see, so their failed starts are charged. A **parked** bead keeps its status, assignee
+and `gc.routed_to` — no other pool claims it — and exactly one mail goes to
+`mayor` naming the bead, the agent, the count, the last stderr line and the
+unpark verbs. `gc bd show` prints the park keys under METADATA; the
+reconciler says `PARKED work bead <id>` on stderr and records a
+`reconciler.pool.start_deferred` trace decision for every skipped row.
+
+The controller's cached demand snapshot expires at the earliest backoff
+deadline it held a row back to: a deadline passes with no bead or session
+write to fingerprint, so a 10s backoff never lasts the cache's backstop age.
+A retained on-demand named holder woken for work — a bead assigned to it, or
+a routed row of its backing template (`NamedSessionRoutedDemand`) — carries
+that bead as its trigger (only `gc.trigger_bead_id` / store ref; its pack,
+workspace and work dir are its own), so a failed start charges that bead the
+way a pool seat's would. A bead still carrying an agent's legacy bound
+identity (`rig/old.worker` after a bound→unbound migration) is routed to that
+agent, not "elsewhere".
+
+A confirmed start (`creation_complete`) clears the whole record. The unpark
+is a designed surface, never a hand edit:
+
+```
+gc sling --reassign <agent> <bead>     # re-dispatch: clears the record and the park before routing
+gc bd update <bead> --unset-metadata gc.park_reason --unset-metadata gc.parked_at --unset-metadata gc.park_failures
+                                        # hold in place: lifts the park; the count restarts from zero
+```
+
+Implementation: `cmd/gc/pool_start_backoff.go` (record, gate, mail),
+`commitStartFailure` / `commitStartResultTraced` in
+`cmd/gc/session_lifecycle_parallel.go` (where the start result is known),
+`excludeStartDeferredWork` and `defaultScaleCheckCountsAndDemand` in
+`cmd/gc/build_desired_state.go` (the gate), `reopenForReassign` in
+`internal/sling` (the unpark). A transient failure — one `pre_start` lost a
+lock, the next attempt succeeded — costs one 10s backoff and nothing else.
+
 ## Downscaling (full design — implement later)
 
 Three agent lifecycle states:

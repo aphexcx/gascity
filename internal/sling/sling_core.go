@@ -116,12 +116,6 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
-	// Pre-flight idempotency check.
-	if shouldCheckBeadState(opts) {
-		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
-			return result, nil
-		}
-	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
 			return result, fmt.Errorf("%w", err)
@@ -129,15 +123,37 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	}
 
 	// Reassign: make the bead claimable by the target pool/agent before
-	// routing — clear any existing assignee and reopen it if a prior actor
-	// left it in_progress. Without this, a bead claimed by `bd update --claim`
-	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
-	// claim filter even after sling sets gc.routed_to: clearing the assignee
-	// alone is not enough because IsReadyCandidate requires status=open. See
+	// routing — clear any existing assignee, reopen it if a prior actor
+	// left it in_progress, and lift the pool's failed-start park. Without
+	// this, a bead claimed by `bd update --claim` (status=in_progress,
+	// assignee=<actor>) stays invisible to the pool's claim filter even after
+	// sling sets gc.routed_to: clearing the assignee alone is not enough
+	// because IsReadyCandidate requires status=open. See
 	// gastownhall/gascity#1007 (assignee) and #3231 (status).
+	//
+	// It runs after the route-store guard (a refused cross-store route leaves
+	// the bead untouched) and BEFORE the idempotency check: a bead already
+	// routed to the target is idempotent as a ROUTE, but the operator is
+	// re-dispatching a bead the target's own pool holds (in_progress under
+	// the pool identity) or parked after its session starts kept failing —
+	// the re-dispatch is the designed unpark, and it must land whether or
+	// not the route write is then skipped. The idempotent short-circuit still
+	// stands afterwards, so an attached formula is never re-attached by the
+	// unpark.
 	if shouldReopenForReassign(opts) {
-		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
+		reopened, err := reopenForReassign(opts.BeadOrFormula, deps)
+		if err != nil {
 			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
+		}
+		if reopened != "" {
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("reassign: %s reopened for %s (%s)", opts.BeadOrFormula, a.QualifiedName(), reopened))
+		}
+	}
+
+	// Pre-flight idempotency check.
+	if shouldCheckBeadState(opts) {
+		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
+			return result, nil
 		}
 	}
 
@@ -1784,29 +1800,44 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 // from every store. Errors on a real primary-store read failure, a store-Update
 // failure, or a SourceWorkflowStores listing/read failure. See
 // SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
-func reopenForReassign(beadID string, deps SlingDeps) error {
+// reopenForReassign returns what it changed, as a short human phrase for the
+// operator ("" when the bead was already open, unassigned and unparked).
+func reopenForReassign(beadID string, deps SlingDeps) (string, error) {
+	store, b, found, err := locateBeadForReassign(beadID, deps)
+	if err != nil || !found {
+		return "", err
+	}
+	return reopenForReassignInStore(store, beadID, b)
+}
+
+// locateBeadForReassign finds the bead --reassign acts on: the city primary
+// store (deps.Store) first; if the bead is not there, the source-workflow
+// stores (deps.SourceWorkflowStores), so rig-prefixed beads — whose record
+// lives in a rig store, not deps.Store — are still found. Not found in any
+// store is (nil, zero, false, nil). Errors on a real primary-store read
+// failure or a SourceWorkflowStores listing/read failure.
+func locateBeadForReassign(beadID string, deps SlingDeps) (beads.Store, beads.Bead, bool, error) {
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return reopenForReassignInStore(deps.Store, beadID, b)
+			return deps.Store, b, true, nil
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
+			return nil, beads.Bead{}, false, fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
 		}
 		// ErrNotFound: the record is not in the city primary store. For
 		// rig-prefixed beads it lives in a rig store, so fall through to the
 		// source-workflow sweep below.
 	}
-	// Sweep the source-workflow stores and reopen the bead in whichever one
-	// holds it. Mirrors the multi-store pattern in sourceWorkflowRootByID,
-	// which likewise consults the workflow stores when deps.Store lacks (or
-	// omits) the bead.
+	// Sweep the source-workflow stores. Mirrors the multi-store pattern in
+	// sourceWorkflowRootByID, which likewise consults the workflow stores when
+	// deps.Store lacks (or omits) the bead.
 	if deps.SourceWorkflowStores == nil {
-		return nil
+		return nil, beads.Bead{}, false, nil
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
+		return nil, beads.Bead{}, false, fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
 	}
 	for _, info := range stores {
 		if info.Store == nil {
@@ -1817,21 +1848,52 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+			return nil, beads.Bead{}, false, fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return reopenForReassignInStore(info.Store, beadID, b)
+		return info.Store, b, true, nil
 	}
-	return nil
+	return nil, beads.Bead{}, false, nil
 }
 
-// reopenForReassignInStore clears b's assignee and resets an in_progress
-// status back to open in a single update, returning nil without writing when
-// the bead is already open and unassigned so no spurious store write occurs.
+// reopenForReassignInStore clears b's assignee, resets an in_progress
+// status back to open, and clears the pool's failed-start record and park
+// (beadmeta.WorkStartFailureMetadataKeys — the re-dispatch is the designed
+// unpark) in a single update, returning nil without writing when the bead is
+// already open, unassigned and unparked so no spurious store write occurs.
 // The status reset is what makes a bead that an order or human previously
 // claimed (status=in_progress) claimable again — IsReadyCandidate requires
 // status=open, so clearing the assignee alone leaves it routed-but-unclaimable
 // (gastownhall/gascity#3231).
-func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) error {
+func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (string, error) {
+	update := reopenForReassignUpdate(b)
+	if update.Assignee == nil && update.Status == nil && len(update.Metadata) == 0 {
+		return "", nil
+	}
+	if err := store.Update(beadID, update); err != nil {
+		return "", err
+	}
+	var changed []string
+	if update.Assignee != nil {
+		changed = append(changed, "assignee "+strings.TrimSpace(b.Assignee)+" cleared")
+	}
+	if update.Status != nil {
+		changed = append(changed, "in_progress reset to open")
+	}
+	if len(update.Metadata) > 0 {
+		if strings.TrimSpace(b.Metadata[beadmeta.ParkedAtMetadataKey]) != "" {
+			changed = append(changed, "park lifted")
+		} else {
+			changed = append(changed, "failed-start record cleared")
+		}
+	}
+	return strings.Join(changed, ", "), nil
+}
+
+// reopenForReassignUpdate is the write --reassign owes the bead: the assignee
+// clear, the in_progress→open reset, and the failed-start record/park clears.
+// Every field is nil/empty when the bead is already open, unassigned and
+// unparked.
+func reopenForReassignUpdate(b beads.Bead) beads.UpdateOpts {
 	var update beads.UpdateOpts
 	if strings.TrimSpace(b.Assignee) != "" {
 		empty := ""
@@ -1841,8 +1903,14 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 		open := "open"
 		update.Status = &open
 	}
-	if update.Assignee == nil && update.Status == nil {
-		return nil
+	for _, key := range beadmeta.WorkStartFailureMetadataKeys {
+		if strings.TrimSpace(b.Metadata[key]) == "" {
+			continue
+		}
+		if update.Metadata == nil {
+			update.Metadata = make(map[string]string)
+		}
+		update.Metadata[key] = ""
 	}
-	return store.Update(beadID, update)
+	return update
 }
