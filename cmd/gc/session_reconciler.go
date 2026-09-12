@@ -971,6 +971,28 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	return false
 }
 
+// orphanRuntimeAlive is the liveness the undesired branch's uncommitted-start
+// clear reads: not "the wrapper is running" (providerAlive measures the
+// container alone) but the agent process alive inside it, probed with the
+// template's process-name hints — a start whose agent died during startup
+// and left its tmux wrapper behind is a zombie, not a lane that starts, and
+// clears no record. Without hints the probe answers as the wrapper does.
+func orphanRuntimeAlive(cfg *config.City, sp runtime.Provider, name string, info sessionpkg.Info, providerAlive bool) bool {
+	if !providerAlive {
+		return false
+	}
+	var processNames []string
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
+		processNames = agentCfg.ProcessNames
+	}
+	_, alive := observeRuntimeProviderLiveness(sp, name, processNames)
+	return alive
+}
+
 // liveUncommittedStartInfo reports an UNDESIRED session's start that ran —
 // the runtime is alive — but never committed: no pending-create claim, no
 // in-flight lease, and a start-pending/creating state the heal leaves alone
@@ -1967,7 +1989,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						"degraded":       preserveErr != nil,
 					})
 				}
-			case pendingCreateSessionStillLeasedInfo(infoPostHeal, cfg, clk) && !liveUncommittedStartInfo(infoPostHeal, providerAlive, clk, startupTimeout):
+			case pendingCreateSessionStillLeasedInfo(infoPostHeal, cfg, clk) && !liveUncommittedStartInfo(infoPostHeal, orphanRuntimeAlive(cfg, sp, name, infoPostHeal, providerAlive), clk, startupTimeout):
 				template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 				if template == "" {
 					template = infoPostHeal.Template
@@ -1981,7 +2003,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			default:
-				if liveUncommittedStartInfo(infoPostHeal, providerAlive, clk, startupTimeout) {
+				if liveUncommittedStartInfo(infoPostHeal, orphanRuntimeAlive(cfg, sp, name, infoPostHeal, providerAlive), clk, startupTimeout) {
 					// An undesired session whose start RAN (its runtime is alive)
 					// but never committed — no claim, no in-flight lease, still
 					// start-pending/creating because the heal leaves an

@@ -1062,6 +1062,7 @@ func buildDesiredStateWithSessionBeads(
 	// session awake for it. The full snapshot stays in the result for the
 	// release/orphan sweeps and the park-mail retry.
 	namedDemandWork, namedDemandRefs := excludeStartDeferredWorkAligned(assignedWorkBeads, assignedWorkStoreRefs, deferralNow, trace)
+	namedOwnedClaimRefs := assignedWorkClaimRefs(cityPath, cfg, store)
 	for identity, spec := range namedSpecs {
 		// ga-i1d0tr Candidate B: a bare-template Assignee used to be
 		// distrusted for templates supporting expanded per-instance
@@ -1077,7 +1078,7 @@ func buildDesiredStateWithSessionBeads(
 		// needed here anymore (ga-p0u752).
 		request, wb, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, func(assignee string) bool {
 			return assignee == identity
-		})
+		}, nil) // the WAKE decision stays rig-scoped; only a retained holder's own claim (below) reaches through the claim refs
 		if !ok {
 			continue
 		}
@@ -1165,7 +1166,7 @@ func buildDesiredStateWithSessionBeads(
 			// routed demand has no bead to bind to yet; the next tick binds it.
 			direct := namedDirectWork[identity]
 			if strings.TrimSpace(direct.WorkBeadID) == "" {
-				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedHolderAssigneeMatcher(canonicalInfo)); ok {
+				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedHolderAssigneeMatcher(canonicalInfo), namedOwnedClaimRefs); ok {
 					direct = request
 				}
 			}
@@ -5684,7 +5685,17 @@ func namedDirectWorkRequest(
 	storeRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
 	matches func(assignee string) bool,
+	claimRefs []string,
 ) (SessionRequest, beads.Bead, bool) {
+	// A claim the holder itself HOLDS can live on the leading work arm or in
+	// a relocated class binding whatever the agent's rig scope — the same
+	// refs the wake path accepts for an owned claim (assignedWorkClaimRefs,
+	// filterAssignedWorkBeadsForSessionWake) — so the trigger the holder is
+	// charged for is the bead it is woken for, never nothing.
+	ownedRef := make(map[string]bool, len(claimRefs))
+	for _, ref := range claimRefs {
+		ownedRef[strings.TrimSpace(ref)] = true
+	}
 	for i, wb := range work {
 		ref := ""
 		if i < len(storeRefs) {
@@ -5703,7 +5714,7 @@ func namedDirectWorkRequest(
 		if assignee == "" || !matches(assignee) {
 			continue
 		}
-		if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, storeRefs, i) {
+		if !assignedWorkIndexReachableFromAgent(cityPath, cfg, spec.Agent, storeRefs, i) && !ownedRef[strings.TrimSpace(ref)] {
 			continue
 		}
 		return SessionRequest{Template: namedSessionBackingTemplate(spec), Tier: "resume", WorkBeadID: wb.ID, WorkBeadTitle: wb.Title, WorkStoreRef: ref}, wb, true

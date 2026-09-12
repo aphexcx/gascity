@@ -472,13 +472,20 @@ func (r *parkMailRetryState) mark(beadID string, now time.Time) {
 	r.last[beadID] = now
 }
 
+// forget drops every throttle entry for a bead (its keys are
+// "<bead>@<park identity>": two copies of one bead owing different parks
+// throttle separately, so one copy's failed stamp never silences the other).
 func (r *parkMailRetryState) forget(beadID string) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.last, beadID)
+	for key := range r.last {
+		if key == beadID || strings.HasPrefix(key, beadID+"@") {
+			delete(r.last, key)
+		}
+	}
 }
 
 func (p *workStartFailurePolicy) limit(template string) int {
@@ -895,13 +902,6 @@ func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, templat
 // landed mail before a restart that lost its stamp.
 func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template string, first bool) {
 	now := time.Now()
-	if !first && !p.retry.due(beadID, now) {
-		return
-	}
-	if !p.retry.begin(beadID) {
-		return
-	}
-	defer p.retry.end(beadID)
 	// LIVE: a cache-served row can still say "parked, unmailed" after another
 	// process lifted the park — the notice would then announce a park the
 	// operator already unparked.
@@ -914,8 +914,20 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 	if !state.Parked() || !state.ParkMailedAt.IsZero() {
 		return
 	}
+	// The throttle and the single-flight slot are per PARK (bead + park
+	// identity), not per bead id: a retained copy and the active copy of a
+	// migrated bead owe different parks, and one copy's failed stamp must not
+	// silence the other's mail.
+	key := beadID + "@" + state.parkIdentity(beadID)
+	if !first && !p.retry.due(key, now) {
+		return
+	}
+	if !p.retry.begin(key) {
+		return
+	}
+	defer p.retry.end(key)
 	title := current.Title
-	p.retry.mark(beadID, now)
+	p.retry.mark(key, now)
 	notice := parkedWorkNotice{
 		BeadID:   beadID,
 		Title:    title,

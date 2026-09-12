@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,22 +60,50 @@ func TestBuildDesiredStateDeferralGateReadsTheWallClock(t *testing.T) {
 	}
 }
 
-// TestControlDispatcherFallbackIgnoresDeferredWork: the dispatcher demand
-// fallback is fed the same undeferred rows as the probes — a parked or
-// backed-off routed bead restores no seat (a seat restored from it would
-// carry no trigger, so nothing would charge or gate it).
+// TestControlDispatcherFallbackIgnoresDeferredWork: through the production
+// builder, an open routed task of the deterministic control dispatcher is
+// demand (count 1) while unparked and none once parked — the fallback that
+// restores dispatcher demand is fed the same undeferred rows as the probes,
+// so a parked task restores no triggerless seat.
 func TestControlDispatcherFallbackIgnoresDeferredWork(t *testing.T) {
-	now := time.Date(2026, 9, 12, 6, 0, 0, 0, time.UTC)
-	rows := []beads.Bead{
-		{ID: "w-parked", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gc/dispatcher", beadmeta.ParkedAtMetadataKey: now.Format(time.RFC3339)}},
-		{ID: "w-backoff", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gc/dispatcher", beadmeta.StartBackoffUntilMetadataKey: now.Add(time.Minute).Format(time.RFC3339)}},
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			StartCommand:      "gc convoy control --serve",
+			WorkQuery:         "printf ''",
+			MaxActiveSessions: intPtr(1),
+			MaxStartFailures:  intPtr(1),
+		}},
 	}
-	if kept := excludeStartDeferredWork(rows, now, nil); len(kept) != 0 {
-		t.Fatalf("both rows are deferred: %v", kept)
+	if !config.IsDeterministicControlDispatcher(&cfg.Agents[0]) {
+		t.Fatal("fixture: not a deterministic control dispatcher")
 	}
-	cfg := &config.City{Workspace: config.Workspace{Name: "gc"}, Agents: []config.Agent{{Name: "dispatcher", Provider: "gc", MaxActiveSessions: intPtr(1)}}}
-	if demand := openControlDispatcherDemand(cfg, excludeStartDeferredWork(rows, now, nil)); len(demand) != 0 {
-		t.Fatalf("deferred rows restore no dispatcher demand: %v", demand)
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{Title: "control task", Type: "task", Status: "open", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: config.ControlDispatcherAgentName}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		var stderr bytes.Buffer
+		res := buildDesiredStateWithSessionBeads("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, nil, newSessionBeadSnapshot(nil), nil, &stderr)
+		total := 0
+		for template, n := range res.ScaleCheckCounts {
+			if strings.Contains(template, config.ControlDispatcherAgentName) {
+				total += n
+			}
+		}
+		return total
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("control: an open routed dispatcher task is demand, count = %d", got)
+	}
+	if err := store.SetMetadataBatch(work.ID, map[string]string{beadmeta.ParkedAtMetadataKey: time.Now().UTC().Format(time.RFC3339), beadmeta.ParkReasonMetadataKey: "boom", beadmeta.ParkFailuresMetadataKey: "1", beadmeta.ParkIDMetadataKey: "cafe", beadmeta.ParkMailedAtMetadataKey: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(); got != 0 {
+		t.Fatalf("a parked dispatcher task restores no demand, count = %d", got)
 	}
 }
 
