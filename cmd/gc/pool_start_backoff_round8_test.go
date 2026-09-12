@@ -131,7 +131,9 @@ func TestBuildDesiredState_AlwaysHolderDropsTheTriggerOfParkedWork(t *testing.T)
 	}
 	// Live work: the holder is bound to it.
 	res := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
-	desiredFor(res)
+	if live := desiredFor(res); live.TriggerBeadID != work.ID {
+		t.Fatalf("control: the build's verdict rides on the retained holder's params too (workTriggerForStart), got %q", live.TriggerBeadID)
+	}
 	if id, _ := trigger(); id != work.ID {
 		t.Fatalf("control: the holder woken for live work must carry it as its trigger, got %q", id)
 	}
@@ -157,9 +159,6 @@ func TestBuildDesiredState_AlwaysHolderDropsTheTriggerOfParkedWork(t *testing.T)
 	}
 	if id, ref := trigger(); id != "" || ref != "" {
 		t.Fatalf("the build must CLEAR the retained holder's trigger once its work is parked, got %q/%q\nstderr:\n%s", id, ref, stderr.String())
-	}
-	if res.ConfirmedStartWork != nil {
-		t.Fatalf("an asleep holder confirms nothing: %+v", res.ConfirmedStartWork)
 	}
 }
 
@@ -225,132 +224,6 @@ func TestNamedSessionReopenTriggerMetadataClearsTheClosedBeadsTrigger(t *testing
 	if row.Metadata[beadmeta.TriggerBeadIDMetadataKey] != "" || row.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] != "" {
 		t.Fatalf("the reopened holder must not inherit the closed bead's trigger: %v", row.Metadata)
 	}
-}
-
-func round8SessionBead(id, state, trigger string, confirmed, pending bool) beads.Bead {
-	meta := map[string]string{
-		"template":                        "rig/claude",
-		"session_name":                    "s-" + id,
-		"state":                           state,
-		beadmeta.TriggerBeadIDMetadataKey: trigger,
-	}
-	if confirmed {
-		meta["creation_complete_at"] = "2026-09-12T02:00:00Z"
-	}
-	if pending {
-		meta["pending_create_claim"] = "true"
-	}
-	return beads.Bead{ID: id, Title: id, Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel}, Metadata: meta}
-}
-
-// TestConfirmedStartWorkRecordsNeedARunningConfirmedSession: only an
-// assigned row that still carries a record, bound to a session that is
-// active, confirmed and past its pending-create claim, is reported — never a
-// clean row, a session still starting, or an asleep holder (whose failed
-// wakes are what the resume arm charges).
-func TestConfirmedStartWorkRecordsNeedARunningConfirmedSession(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{poolAgent("claude", "rig", intPtr(3), 0)}}
-	work := []beads.Bead{
-		workBead("w-lost", "rig/claude", "rig/claude", "in_progress", 5),
-		workBead("w-clean", "rig/claude", "rig/claude", "in_progress", 5),
-		workBead("w-asleep", "rig/claude", "rig/claude", "in_progress", 5),
-		workBead("w-pending", "rig/claude", "rig/claude", "in_progress", 5),
-		workBead("w-unconfirmed", "rig/claude", "rig/claude", "in_progress", 5),
-		workBead("w-parked", "rig/claude", "rig/claude", "in_progress", 5),
-	}
-	for i := range work {
-		if work[i].ID == "w-clean" {
-			continue
-		}
-		work[i].Metadata[beadmeta.StartFailuresMetadataKey] = "4"
-	}
-	work[5].Metadata[beadmeta.ParkedAtMetadataKey] = "2026-09-12T01:00:00Z"
-	sessions := sessionInfosFromBeads([]beads.Bead{
-		round8SessionBead("s1", string(session.StateActive), "w-lost", true, false),
-		round8SessionBead("s2", string(session.StateActive), "w-clean", true, false),
-		round8SessionBead("s3", string(session.StateAsleep), "w-asleep", true, false),
-		round8SessionBead("s4", string(session.StateActive), "w-pending", true, true),
-		round8SessionBead("s5", string(session.StateActive), "w-unconfirmed", false, false),
-		round8SessionBead("s6", string(session.StateActive), "w-parked", true, false),
-	})
-	got := confirmedStartWorkRecords(cfg, work, []string{"rig", "rig", "rig", "rig", "rig", "rig"}, sessions)
-	ids := []string{}
-	for _, e := range got {
-		ids = append(ids, e.Bead.ID)
-		if e.StoreRef != "rig" || strings.TrimSpace(e.Template) == "" {
-			t.Fatalf("entry must carry the row's store ref and the session's template: %+v", e)
-		}
-	}
-	if strings.Join(ids, ",") != "w-lost,w-parked" {
-		t.Fatalf("confirmed-start rows = %v, want [w-lost w-parked] (a running confirmed session bound to a row with a record or park)", ids)
-	}
-	// A store ref the session names must agree with the row's.
-	other := sessionInfosFromBeads([]beads.Bead{round8SessionBead("s7", string(session.StateActive), "w-lost", true, false)})
-	other[0].TriggerBeadStoreRef = "rig:elsewhere"
-	if got := confirmedStartWorkRecords(cfg, work[:1], []string{"rig"}, other); len(got) != 0 {
-		t.Fatalf("a session bound to the same id in another store proves nothing: %+v", got)
-	}
-	other[0].TriggerBeadStoreRef = "rig:rig"
-	if got := confirmedStartWorkRecords(cfg, work[:1], []string{"rig"}, other); len(got) != 1 {
-		t.Fatalf("rig and rig:rig are one store: %+v", got)
-	}
-}
-
-// TestClearConfirmedStartRecordsClearsALostReset: the tick's sweep clears the
-// record (the same route-checked, fenced write as recordStartSuccess) and
-// leaves a bead re-routed to another template alone; a second sweep writes
-// nothing.
-func TestClearConfirmedStartRecordsClearsALostReset(t *testing.T) {
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}, {Name: "other", MaxActiveSessions: intPtr(1)}}}
-	store := beads.NewMemStore()
-	four := map[string]string{beadmeta.StartFailuresMetadataKey: "4", beadmeta.StartFailedAtMetadataKey: "2026-09-12T02:00:00Z", beadmeta.StartFailureMetadataKey: "boom", beadmeta.StartBackoffUntilMetadataKey: "2026-09-12T02:01:20Z"}
-	lost, err := store.Create(beads.Bead{Title: "lost reset", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rerouted, err := store.Create(beads.Bead{Title: "re-routed", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "other"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{lost.ID, rerouted.ID} {
-		if err := store.SetMetadataBatch(id, four); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var stderr bytes.Buffer
-	policy := &workStartFailurePolicy{
-		workStore:         store,
-		templateOf:        func(b beads.Bead) string { return poolTemplateForWorkBead(cfg, b) },
-		canonicalTemplate: func(template string) string { return normalizeAgentTemplateIdentity(cfg, template) },
-		limitFor:          func(string) int { return 5 },
-		stderr:            &stderr,
-	}
-	lost, _ = store.Get(lost.ID)
-	rerouted, _ = store.Get(rerouted.ID)
-	policy.clearConfirmedStartRecords([]confirmedStartWork{{Bead: lost, StoreRef: "city", Template: "worker"}, {Bead: rerouted, StoreRef: "city", Template: "worker"}})
-	row, err := store.Get(lost.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(workStartFailureClearPatch(row.Metadata)) != 0 {
-		t.Fatalf("the sweep must clear the lost reset: %v\nstderr:\n%s", row.Metadata, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "start-failure record cleared") {
-		t.Fatalf("the clear is logged:\n%s", stderr.String())
-	}
-	row, _ = store.Get(rerouted.ID)
-	if readWorkStartFailureState(row.Metadata).Failures != 4 {
-		t.Fatalf("a bead since routed to another template is left alone: %v", row.Metadata)
-	}
-	stderr.Reset()
-	lost, _ = store.Get(lost.ID)
-	policy.clearConfirmedStartRecords([]confirmedStartWork{{Bead: lost, StoreRef: "city", Template: "worker"}})
-	if stderr.Len() != 0 {
-		t.Fatalf("a bead with no record writes and logs nothing:\n%s", stderr.String())
-	}
-	// A nil policy (no store wiring) is a no-op.
-	var none *workStartFailurePolicy
-	none.clearConfirmedStartRecords([]confirmedStartWork{{Bead: lost}})
 }
 
 // TestPoolStartBackoffUnfencedResetLandsBehindAStaleCache: the caching

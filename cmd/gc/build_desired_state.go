@@ -97,12 +97,6 @@ type DesiredStateResult struct {
 	// carries (pool_start_backoff.go).
 	ParkedUnmailedWorkBeads     []beads.Bead
 	ParkedUnmailedWorkStoreRefs []string
-	// ConfirmedStartWork are the assigned rows still carrying a failed-start
-	// record (or park) while an open session bound to them is running and
-	// confirmed (creation_complete, no pending-create claim): the record is
-	// stale — the reset the confirmed start owed did not land — and the tick
-	// clears it (workStartFailurePolicy.clearConfirmedStartRecords).
-	ConfirmedStartWork []confirmedStartWork
 	// StartDeferredUntil is the earliest backoff deadline among the routed
 	// rows either demand tier held back (pool_start_backoff.go), zero when
 	// none: the moment this result's demand can change with no bead or session
@@ -218,63 +212,6 @@ func parkedUnmailedWorkStoreRefs(parks []unmailedParkedWork) []string {
 		out = append(out, p.StoreRef)
 	}
 	return out
-}
-
-// confirmedStartWork is an assigned row with a stale failed-start record: the
-// session bound to it (gc.trigger_bead_id) is open, running and confirmed.
-type confirmedStartWork struct {
-	Bead     beads.Bead
-	StoreRef string
-	// Template is the bound session's template, for the record's route check.
-	Template string
-}
-
-// confirmedStartWorkRecords pairs every assigned row that still carries a
-// record or park with a confirmed RUNNING session whose trigger names it. A
-// session with a pending-create claim is still starting; one that is not
-// active (asleep, quarantined) may be the very session whose failed wakes
-// are being charged on the kept-session resume arm, and its earlier
-// confirmation says nothing about them — only a running session proves the
-// record stale. Store refs must agree when both name one.
-func confirmedStartWorkRecords(cfg *config.City, work []beads.Bead, storeRefs []string, sessions []session.Info) []confirmedStartWork {
-	var out []confirmedStartWork
-	for i, wb := range work {
-		if len(workStartFailureClearPatch(wb.Metadata)) == 0 {
-			continue
-		}
-		ref := ""
-		if i < len(storeRefs) {
-			ref = storeRefs[i]
-		}
-		for _, s := range sessions {
-			if !sessionStartConfirmedAndRunning(s) || strings.TrimSpace(s.TriggerBeadID) != wb.ID {
-				continue
-			}
-			if sr := strings.TrimSpace(s.TriggerBeadStoreRef); sr != "" && strings.TrimSpace(ref) != "" && workStoreRefKey(sr) != workStoreRefKey(ref) {
-				continue
-			}
-			out = append(out, confirmedStartWork{Bead: wb, StoreRef: ref, Template: normalizedSessionTemplateInfo(s, cfg)})
-			break
-		}
-	}
-	return out
-}
-
-// sessionStartConfirmedAndRunning: the session's start confirmed
-// (creation_complete_at stamped, the pending-create claim cleared) and the
-// session is running now.
-func sessionStartConfirmedAndRunning(s session.Info) bool {
-	return s.State == session.StateActive && !s.PendingCreateClaim && strings.TrimSpace(s.CreationCompleteAt) != ""
-}
-
-// workStoreRefKey folds the spellings of one work-store ref ("" / "city" /
-// "city:…" for the work store, "NAME" / "rig:NAME" for a rig) to one key.
-func workStoreRefKey(ref string) string {
-	ref = strings.TrimSpace(ref)
-	if ref == "" || ref == "city" || strings.HasPrefix(ref, "city:") {
-		return ""
-	}
-	return strings.TrimPrefix(ref, "rig:")
 }
 
 type scaleCheckDemand struct {
@@ -1231,6 +1168,11 @@ func buildDesiredStateWithSessionBeads(
 			// and a start it makes for no work must not be charged to that
 			// bead, nor lift its park on success.
 			request, _ := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate)
+			// The build's verdict rides on the params too: the start prepared
+			// for this holder is charged to THIS request (workTriggerForStart),
+			// never to what the bead says if the bind below fails transiently.
+			tp.TriggerBeadID = request.WorkBeadID
+			tp.TriggerBeadStoreRef = request.WorkStoreRef
 			if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
 				fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (continuing; a failed start is not charged to it)\n", identity, request.WorkBeadID, err) //nolint:errcheck
 			} else {
@@ -1278,7 +1220,6 @@ func buildDesiredStateWithSessionBeads(
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ParkedUnmailedWorkBeads:            parkedUnmailedWorkBeads(parkedUnmailedWork),
 		ParkedUnmailedWorkStoreRefs:        parkedUnmailedWorkStoreRefs(parkedUnmailedWork),
-		ConfirmedStartWork:                 confirmedStartWorkRecords(cfg, assignedWorkBeads, assignedWorkStoreRefs, allOpenSessionInfos),
 		StartDeferredUntil:                 earlierDeadline(startDeferredUntil, earliestStartDeferralDeadline(assignedWorkBeads, beaconTime)),
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,

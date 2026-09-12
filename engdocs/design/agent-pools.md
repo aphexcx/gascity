@@ -232,20 +232,24 @@ binds it. A bead still carrying an agent's legacy bound
 identity (`rig/old.worker` after a bound→unbound migration) is routed to that
 agent, not "elsewhere".
 
-A confirmed start (`creation_complete`) clears the whole record. A reset the
-confirming commit could not land (the controller died between the session's
-confirmation batch and the work-store write, or that write failed) is derived
-again on every tick from the session row itself: a running, confirmed session
-bound to a bead that still carries a record clears it
-(`clearConfirmedStartRecords`), and only a running session counts — an asleep
-holder's failed wakes are charged on the resume arm, and its old confirmation
-says nothing about them. A named holder's trigger follows its wake request
+A confirmed start (`creation_complete`) clears the whole record. The batch
+that confirms the start also stamps the session bead with the work bead the
+start ran for (`gc.start_reset_owed_bead_id` / `gc.start_reset_owed_store_ref`),
+lifted once the clear lands; a clear the confirming commit could not land (the
+controller died between that batch and the work-store write, or the write
+failed) is settled from the marker on a later tick (`settleOwedStartResets`,
+before the tick closes any session). The marker names the bead the START ran
+for, so a holder whose trigger was re-pointed to other work since never has
+that work's record cleared. A named holder's trigger follows its wake request
 every tick and is cleared when there is none (its bead parked, backed off,
 closed or assigned elsewhere; a reopened holder is reopened with the same
-clear), so a `mode = "always"` holder restarting for no work is charged to
-nothing and lifts no park. A park written before `gc.park_id` existed is
-identified by the bead id and `gc.parked_at` together. The unpark is a
-designed surface, never a hand edit:
+clear), and the start planned for it is charged to the build's request even
+when the bind onto the bead fails, so a `mode = "always"` holder restarting
+for no work is charged to nothing and lifts no park. A park written before
+`gc.park_id` existed is identified by the bead id and `gc.parked_at`
+together. Under `beads.conditional_writes = "require"` a fenced write the
+store refuses at write time is not retried unfenced. The unpark is a designed
+surface, never a hand edit:
 
 ```
 gc sling --reassign <agent> <bead>     # re-dispatch: clears the record and the park before routing

@@ -2173,6 +2173,16 @@ func commitStartResultTraced(
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
 	}
+	// The start ran for a work bead: the batch that confirms it also records
+	// the clear its confirmation owes that bead's failed-start record —
+	// settled right below, or by a later tick's settleOwedStartResets if this
+	// controller dies first or the work store refuses the clear.
+	owedReset := result.prepared.workStartFailure != nil && result.prepared.workTrigger.BeadID != ""
+	if owedReset {
+		for k, v := range owedStartResetMarker(result.prepared.workTrigger) {
+			metadata[k] = v
+		}
+	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2199,8 +2209,14 @@ func commitStartResultTraced(
 	// failure paths above report the start as failed and retry (ga-kmoj9c).
 	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
 	// The start confirmed (creation_complete landed in the batch above): the
-	// trigger work bead's failed-start record, if any, is stale.
-	result.prepared.workStartFailure.recordStartSuccess(result.prepared.workTrigger, tp.TemplateName)
+	// work bead's failed-start record, if any, is stale. The marker the batch
+	// stamped is lifted once the clear landed; otherwise it stays for
+	// settleOwedStartResets.
+	if owedReset && result.prepared.workStartFailure.recordStartSuccess(result.prepared.workTrigger, tp.TemplateName) {
+		if err := sessFront.ApplyPatch(info.ID, clearedOwedStartResetMarker()); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: %s: lifting the owed start-reset marker: %v (settled again next tick)\n", name, err) //nolint:errcheck
+		}
+	}
 	rec.Record(events.Event{
 		Type:      events.SessionWoke,
 		Actor:     "gc",
@@ -2424,6 +2440,15 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+	// The same owed-reset marker as the ordinary commit path (commitStartResult):
+	// the recovered start ran for the session's trigger work bead.
+	recoveredTrigger := workTriggerFromInfo(info)
+	owedReset := workStartFailure != nil && recoveredTrigger.BeadID != ""
+	if owedReset {
+		for k, v := range owedStartResetMarker(recoveredTrigger) {
+			metadata[k] = v
+		}
+	}
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, metadata); err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -2447,8 +2472,18 @@ func recoverRunningPendingCreate(
 	}
 	// The runtime had started and creation_complete just landed: the same
 	// confirmed start as the ordinary commit path, so the trigger work bead's
-	// failed-start record is cleared here too.
-	workStartFailure.recordStartSuccess(workTriggerFromInfo(info), tp.TemplateName)
+	// failed-start record is cleared here too, and the marker lifted (in the
+	// store and in the returned fold) once the clear landed.
+	if owedReset && workStartFailure.recordStartSuccess(recoveredTrigger, tp.TemplateName) {
+		cleared := clearedOwedStartResetMarker()
+		if err := sessionFrontDoor(store).ApplyPatch(info.ID, cleared); err != nil {
+			workStartFailure.logf("session reconciler: %s: lifting the owed start-reset marker: %v (settled again next tick)\n", tp.SessionName, err)
+		} else {
+			for k, v := range cleared {
+				metadata[k] = v
+			}
+		}
+	}
 	return true, metadata
 }
 
@@ -2881,7 +2916,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				item.workStartFailure = startOpts.workStartFailure
-				item.workTrigger = workTriggerFromInfo(item.candidate.info)
+				item.workTrigger = workTriggerForStart(item.candidate.tp, item.candidate.info)
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {

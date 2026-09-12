@@ -1810,13 +1810,29 @@ func reopenForReassign(beadID string, deps SlingDeps) (string, error) {
 	return reopenForReassignInStore(store, beadID, b)
 }
 
-// locateBeadForReassign finds the bead --reassign acts on: the city primary
-// store (deps.Store) first; if the bead is not there, the source-workflow
+// locateBeadForReassign finds the bead --reassign acts on: the graph class
+// store when it is a store of its own (the active copy of a migrated graph
+// bead), then the city primary
+// store (deps.Store); if the bead is not there, the source-workflow
 // stores (deps.SourceWorkflowStores), so rig-prefixed beads — whose record
 // lives in a rig store, not deps.Store — are still found. Not found in any
 // store is (nil, zero, false, nil). Errors on a real primary-store read
 // failure or a SourceWorkflowStores listing/read failure.
 func locateBeadForReassign(beadID string, deps SlingDeps) (beads.Store, beads.Bead, bool, error) {
+	// The graph class store first when it is its own store: a graph
+	// (workflow/v2) bead migrated into a class binding keeps a retained copy
+	// in the primary store, and the ACTIVE copy — the one the pool's
+	// failed-start record and park live on — is the class store's. Reopening
+	// the retained row would report success and leave the active bead parked.
+	if graph := deps.graphStore(); graph != nil && graph != deps.Store {
+		b, err := graph.Get(beadID)
+		if err == nil {
+			return graph, b, true, nil
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return nil, beads.Bead{}, false, fmt.Errorf("reading %s from the graph store to reopen for reassign: %w", beadID, err)
+		}
+	}
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {

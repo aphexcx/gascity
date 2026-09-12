@@ -355,6 +355,19 @@ type workStartFailurePolicy struct {
 	// and tests inject a bare capability probe to drive the fenced arms on a
 	// store that carries no mode.
 	resolveWriter func(beads.Store) (beads.ConditionalWriter, error)
+	// requireFenced reports whether a store is stamped beads.conditional_writes
+	// = "require" (nil = beads.ConditionalWritesRequired); a fenced write the
+	// store refuses as unsupported at write time then fails closed instead of
+	// taking the plain path. Tests inject it on a store that carries no mode.
+	requireFenced func(beads.Store) bool
+}
+
+// fencedWritesRequired resolves requireFenced.
+func (p *workStartFailurePolicy) fencedWritesRequired(store beads.Store) bool {
+	if p != nil && p.requireFenced != nil {
+		return p.requireFenced(store)
+	}
+	return beads.ConditionalWritesRequired(store)
 }
 
 // conditionalWriter resolves the writer writeWorkRecord fences on.
@@ -465,21 +478,44 @@ func (p *workStartFailurePolicy) logf(format string, args ...any) {
 // the wake tier records none); when the ref does not answer, every store is
 // probed by id, the work store first, so a re-homed bead is still found.
 func (p *workStartFailurePolicy) storeForTriggerBead(id, ref string) (beads.Store, beads.Bead, bool) {
+	store, b, ok, err := p.findTriggerBead(id, ref)
+	if err != nil {
+		p.logf("session reconciler: work bead %s could not be read (%v); this start is not accounted for on it\n", strings.TrimSpace(id), err)
+	}
+	return store, b, ok
+}
+
+// findTriggerBead is storeForTriggerBead's lookup: found, or not found
+// together with every read error (other than not-found) the probes met — a
+// transient store failure is not the bead's absence, and a caller that
+// would otherwise drop a charge or a reset in silence says so, or retries.
+func (p *workStartFailurePolicy) findTriggerBead(id, ref string) (beads.Store, beads.Bead, bool, error) {
 	id = strings.TrimSpace(id)
 	if p == nil || id == "" {
-		return nil, beads.Bead{}, false
+		return nil, beads.Bead{}, false, nil
+	}
+	var errs []error
+	probe := func(store beads.Store) (beads.Bead, bool) {
+		b, err := store.Get(id)
+		if err == nil {
+			return b, true
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, err)
+		}
+		return beads.Bead{}, false
 	}
 	if store := p.storeByRef(ref); store != nil {
-		if b, err := store.Get(id); err == nil {
-			return store, b, true
+		if b, ok := probe(store); ok {
+			return store, b, true, nil
 		}
 	}
 	for _, store := range p.orderedStores() {
-		if b, err := store.Get(id); err == nil {
-			return store, b, true
+		if b, ok := probe(store); ok {
+			return store, b, true, nil
 		}
 	}
-	return nil, beads.Bead{}, false
+	return nil, beads.Bead{}, false, errors.Join(errs...)
 }
 
 func (p *workStartFailurePolicy) storeByRef(ref string) beads.Store {
@@ -597,8 +633,15 @@ func (p *workStartFailurePolicy) writeWorkRecord(store beads.Store, id string, c
 				lastErr = err
 				continue
 			}
-			// The writer cannot fence: this store is unfenced from here on, and
-			// THIS read takes the plain path below like any other.
+			// The writer cannot fence after all (the capability probe passed at
+			// resolve time; the backend refused the fence now). Under
+			// beads.conditional_writes = "require" that is a refusal, never a
+			// fall-back: the record is not written. Otherwise this store is
+			// unfenced from here on, and THIS read takes the plain path below
+			// like any other.
+			if p.fencedWritesRequired(store) {
+				return beads.Bead{}, nil, fmt.Errorf("beads.conditional_writes=require: the fenced write of work bead %s was refused as unsupported at write time (%w); the record is not written unfenced", id, err)
+			}
 			fenced = false
 		}
 		again, err := liveWorkBead(store, id)
@@ -644,6 +687,64 @@ type workTrigger struct {
 
 func workTriggerFromInfo(info sessionpkg.Info) workTrigger {
 	return workTrigger{BeadID: strings.TrimSpace(info.TriggerBeadID), StoreRef: strings.TrimSpace(info.TriggerBeadStoreRef)}
+}
+
+// workTriggerForStart is the work bead a planned start is charged to. A
+// configured named holder's trigger is the BUILD's verdict for this tick
+// (TemplateParams.TriggerBeadID / TriggerBeadStoreRef: its wake request, or
+// nothing), not its bead's metadata: the bind of that verdict onto the bead
+// (bindNamedSessionWakeTrigger) can fail transiently, and a start prepared
+// off the bead would then be charged to — or, succeeding, unpark — the bead
+// of an earlier wake. A pool seat's trigger is its bead's:
+// bindPoolSessionTriggerBead persisted it before the seat was planned.
+func workTriggerForStart(tp TemplateParams, info sessionpkg.Info) workTrigger {
+	if strings.TrimSpace(tp.ConfiguredNamedIdentity) != "" {
+		return workTrigger{BeadID: strings.TrimSpace(tp.TriggerBeadID), StoreRef: strings.TrimSpace(tp.TriggerBeadStoreRef)}
+	}
+	return workTriggerFromInfo(info)
+}
+
+// owedStartResetMarker is what the batch confirming a start stamps on the
+// session bead: the work bead the start ran for, whose failed-start record
+// the confirmation owes a clear (beadmeta.StartResetOwedBeadIDMetadataKey /
+// StartResetOwedStoreRefMetadataKey). clearedOwedStartResetMarker lifts it.
+func owedStartResetMarker(trigger workTrigger) map[string]string {
+	return map[string]string{
+		beadmeta.StartResetOwedBeadIDMetadataKey:   strings.TrimSpace(trigger.BeadID),
+		beadmeta.StartResetOwedStoreRefMetadataKey: strings.TrimSpace(trigger.StoreRef),
+	}
+}
+
+func clearedOwedStartResetMarker() map[string]string {
+	return map[string]string{
+		beadmeta.StartResetOwedBeadIDMetadataKey:   "",
+		beadmeta.StartResetOwedStoreRefMetadataKey: "",
+	}
+}
+
+// owedStartReset is a session bead's confirmed start whose work-record clear
+// has not landed: the marker still on the bead names the work.
+type owedStartReset struct {
+	SessionID string
+	Trigger   workTrigger
+	Template  string
+}
+
+// owedStartResets lists the open sessions still carrying the marker.
+func owedStartResets(cfg *config.City, sessions []sessionpkg.Info) []owedStartReset {
+	var out []owedStartReset
+	for _, s := range sessions {
+		id := strings.TrimSpace(s.StartResetOwedBeadID)
+		if id == "" || strings.TrimSpace(s.ID) == "" {
+			continue
+		}
+		out = append(out, owedStartReset{
+			SessionID: s.ID,
+			Trigger:   workTrigger{BeadID: id, StoreRef: strings.TrimSpace(s.StartResetOwedStoreRef)},
+			Template:  normalizedSessionTemplateInfo(s, cfg),
+		})
+	}
+	return out
 }
 
 // recordStartFailure charges one failed start to the trigger work bead the
@@ -705,17 +806,25 @@ func (p *workStartFailurePolicy) recordStartFailure(trigger workTrigger, templat
 	}
 }
 
-// recordStartSuccess clears the record on the session's trigger work bead once
-// its start confirmed (creation_complete): a lane that starts is not backed
+// recordStartSuccess clears the record on the work bead a start ran for once
+// that start confirmed (creation_complete): a lane that starts is not backed
 // off, and a stale park a successful start proves wrong is lifted with it.
-// Writes nothing when the bead carries no record.
-func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, template string) {
+// Writes nothing when the bead carries no record. Reports whether the reset
+// is SETTLED — the clear landed, or there was nothing to clear (no record,
+// no such bead, a bead since routed to another template) — as opposed to
+// still owed: a read or write that failed, to be retried from the marker
+// the confirming batch left on the session bead (settleOwedStartResets).
+func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, template string) bool {
 	if p == nil {
-		return
+		return true
 	}
-	store, first, ok := p.storeForTriggerBead(trigger.BeadID, trigger.StoreRef)
+	store, first, ok, lookupErr := p.findTriggerBead(trigger.BeadID, trigger.StoreRef)
 	if !ok {
-		return
+		if lookupErr != nil {
+			p.logf("session reconciler: work bead %s could not be read (%v); its start-failure record is cleared when it can be\n", strings.TrimSpace(trigger.BeadID), lookupErr)
+			return false
+		}
+		return true
 	}
 	skip := ""
 	bead, patch, err := p.writeWorkRecord(store, first.ID, func(current beads.Bead) map[string]string {
@@ -733,35 +842,44 @@ func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, templat
 	})
 	if err != nil {
 		p.logf("session reconciler: clearing start failures on work bead %s: %v\n", first.ID, err)
-		return
+		return false
 	}
 	if skip != "" {
 		p.logf("session reconciler: start of %s for work bead %s confirmed; record left alone: the bead is now routed to %s\n", template, first.ID, skip)
-		return
+		return true
 	}
 	if len(patch) == 0 {
-		return
+		return true
 	}
 	p.retry.forget(bead.ID)
 	p.logf("session reconciler: work bead %s started; start-failure record cleared\n", bead.ID)
+	return true
 }
 
-// clearConfirmedStartRecords clears the record of every work bead a tick
-// found with a confirmed, RUNNING session bound to it
-// (DesiredStateResult.ConfirmedStartWork). The reset a confirmed start owes at
-// commit time (recordStartSuccess) can be lost — the controller dies between
-// the session's confirmation batch and the work-store write, or that write
-// fails — and once pending_create_claim is clear no recovery path revisits
-// it; one more failure after the healthy session exits would then park the
-// bead on a count it never earned. The session row is the durable fact, so
-// the clear is derived from it every tick until it lands (recordStartSuccess
-// writes nothing for a bead with no record).
-func (p *workStartFailurePolicy) clearConfirmedStartRecords(entries []confirmedStartWork) {
-	if p == nil {
+// settleOwedStartResets clears the record each owed reset names and lifts
+// the marker once the clear landed; a marker whose clear fails again stays
+// for the next tick. The reset a confirmed start owes (recordStartSuccess
+// right after the confirmation batch) can be lost — the controller dies
+// between the two writes, or the work-store write fails — and once
+// pending_create_claim is clear no recovery path revisits it; one more
+// failure after the healthy session exits would then park the bead on a
+// count it never earned. The marker is written IN the confirmation batch, so
+// it is the durable fact the clear is derived from; and it names the bead
+// the START ran for, so a trigger re-pointed since (a retained holder
+// rebound to other work without a restart) is never the bead cleared. The
+// tick runs this before its session closes, so a session whose runtime has
+// exited is settled before its bead is closed.
+func (p *workStartFailurePolicy) settleOwedStartResets(owed []owedStartReset, sessStore beads.Store) {
+	if p == nil || len(owed) == 0 || sessStore == nil {
 		return
 	}
-	for _, entry := range entries {
-		p.recordStartSuccess(workTrigger{BeadID: entry.Bead.ID, StoreRef: entry.StoreRef}, entry.Template)
+	for _, o := range owed {
+		if !p.recordStartSuccess(o.Trigger, o.Template) {
+			continue
+		}
+		if err := sessionFrontDoor(sessStore).ApplyPatch(o.SessionID, clearedOwedStartResetMarker()); err != nil {
+			p.logf("session reconciler: session %s: lifting the owed start-reset marker for work bead %s: %v (settled again next tick)\n", o.SessionID, o.Trigger.BeadID, err)
+		}
 	}
 }
 

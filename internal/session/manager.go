@@ -208,8 +208,13 @@ type Info struct {
 	// Additive, internal-only (absent from the HTTP wire).
 	TriggerBeadID       string // gc.trigger_bead_id (raw)
 	TriggerBeadStoreRef string // gc.trigger_bead_store_ref (raw)
-	BrainParentSID      string // gc.brain_parent_sid (raw)
-	Pack                string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
+	// StartResetOwedBeadID / StartResetOwedStoreRef name the work bead whose
+	// failed-start record this session's confirmed start owes a clear
+	// (gc.start_reset_owed_bead_id / _store_ref, raw); empty once it landed.
+	StartResetOwedBeadID   string
+	StartResetOwedStoreRef string
+	BrainParentSID         string // gc.brain_parent_sid (raw)
+	Pack                   string // gc.pack (raw); resolveTemplateForSessionBead threads it into GC_PACKER_PACK
 	// PackWorkspace is the RAW gc.pack_workspace metadata (beadmeta.PackWorkspaceMetadataKey),
 	// the pack workspace slug bindPoolSessionTriggerBead stamps alongside gc.pack.
 	// The pool-trigger binding diff compares it (trimmed) against the request's
