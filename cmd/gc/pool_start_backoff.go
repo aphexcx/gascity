@@ -312,6 +312,10 @@ type workStartFailurePolicy struct {
 	// live in (storageRoutes.relocatedStores); probed by id after the work and
 	// rig stores.
 	extraStores []beads.Store
+	// classStoreByRef resolves a "class:<token>" trigger store ref to the
+	// relocated class store it names (storageRoutes.storeForClassRef); nil, or
+	// a nil answer, falls back to the work store.
+	classStoreByRef func(ref string) beads.Store
 	// templateOf returns the pool template a work bead is routed to now; nil
 	// skips the re-route check. A failure of a session started for template T
 	// is charged only while the bead is still routed to T — a bead
@@ -338,6 +342,28 @@ type workStartFailurePolicy struct {
 	// retry throttles the re-send of an unlanded park mail (nil = every tick).
 	retry  *parkMailRetryState
 	stderr io.Writer
+	// resolveWriter yields the conditional writer the record write fences on
+	// (nil writer = unfenced, the plain re-read path); nil uses the designed
+	// seam, beads.ResolveConditionalWriter — which follows a wrapper's declared
+	// resolution target and honors the city's beads.conditional_writes mode —
+	// and tests inject a bare capability probe to drive the fenced arms on a
+	// store that carries no mode.
+	resolveWriter func(beads.Store) (beads.ConditionalWriter, error)
+}
+
+// conditionalWriter resolves the writer writeWorkRecord fences on.
+func (p *workStartFailurePolicy) conditionalWriter(store beads.Store) (beads.ConditionalWriter, error) {
+	if p != nil && p.resolveWriter != nil {
+		return p.resolveWriter(store)
+	}
+	writer, diag, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return nil, err
+	}
+	if diag != nil {
+		p.logf("session reconciler: work-record writes on this store are unfenced: %v\n", diag)
+	}
+	return writer, nil
 }
 
 // parkMailRetryEvery bounds how often an unlanded park mail is re-sent per
@@ -453,7 +479,18 @@ func (p *workStartFailurePolicy) storeForTriggerBead(id, ref string) (beads.Stor
 func (p *workStartFailurePolicy) storeByRef(ref string) beads.Store {
 	ref = strings.TrimSpace(ref)
 	switch {
-	case ref == "", ref == "city", strings.HasPrefix(ref, "city:"), storeref.IsClassRef(ref):
+	case ref == "", ref == "city", strings.HasPrefix(ref, "city:"):
+		return p.workStore
+	case storeref.IsClassRef(ref):
+		// A relocated class binding: the ACTIVE copy lives in the class
+		// store; a migration retains the original row in the work store, and
+		// charging that retained copy (or skipping it as "routed elsewhere")
+		// would leave the active bead eligible and spawning.
+		if p.classStoreByRef != nil {
+			if store := p.classStoreByRef(ref); store != nil {
+				return store
+			}
+		}
 		return p.workStore
 	}
 	name := strings.TrimSpace(strings.TrimPrefix(ref, "rig:"))
@@ -506,10 +543,29 @@ const workRecordWriteAttempts = 3
 // documented. compute returns the patch; an empty patch writes nothing. The
 // returned bead is the row the patch was computed from.
 func (p *workStartFailurePolicy) writeWorkRecord(store beads.Store, id string, compute func(beads.Bead) map[string]string) (beads.Bead, map[string]string, error) {
-	writer, fenced := beads.ConditionalWriterFor(store)
+	// The designed seam, not a bare interface probe: it follows a wrapper's
+	// declared resolution target (the controller's beadPolicyStore, the typed
+	// class wrappers) to the store that holds the writer, and honors the
+	// city's beads.conditional_writes mode — off/unset takes the plain path,
+	// require refuses (no write) rather than write unfenced.
+	writer, err := p.conditionalWriter(store)
+	if err != nil {
+		return beads.Bead{}, nil, err
+	}
+	fenced := writer != nil
+	// An unfenced read must be LIVE: a cache-served row is the same row twice,
+	// and a re-read that cannot see a concurrent reassign or clear fences
+	// nothing (liveWorkBead bypasses a caching store; a plain store answers
+	// as it does for Get).
+	read := func() (beads.Bead, error) {
+		if fenced {
+			return store.Get(id)
+		}
+		return liveWorkBead(store, id)
+	}
 	var lastErr error
 	for attempt := 0; attempt < workRecordWriteAttempts; attempt++ {
-		bead, err := store.Get(id)
+		bead, err := read()
 		if err != nil {
 			return beads.Bead{}, nil, err
 		}
@@ -539,7 +595,7 @@ func (p *workStartFailurePolicy) writeWorkRecord(store beads.Store, id string, c
 			// THIS read takes the plain path below like any other.
 			fenced = false
 		}
-		again, err := store.Get(id)
+		again, err := liveWorkBead(store, id)
 		if err != nil {
 			return beads.Bead{}, nil, err
 		}
@@ -689,11 +745,13 @@ func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, templat
 // (throttled by parkMailRetryEvery; the park's own first attempt is never
 // throttled). Every send — the park's own and a retry — first re-reads the
 // row under the single-flight slot and stands down if the park is already
-// stamped or lifted, whichever of the two paths got there first; the stamp
-// itself lands only on the park it acknowledges (same gc.parked_at), so a
-// delivery for an older park can never mark a newer one mailed. A stamp that
-// fails to persist after a landed mail is the one documented way a park can
-// mail twice.
+// stamped or lifted, whichever of the two paths got there first; before any
+// send it looks the park's tag ([park <gc.park_id>]) up in the mayor's mail,
+// open or archived, and a mail that already landed (a restart lost the stamp)
+// is stamped, never sent again; the stamp itself is fenced on the park's
+// identity, so a delivery for an older park can never mark a newer one
+// mailed. The one window left is the read-mail retention purge deleting a
+// landed mail before a restart that lost its stamp.
 func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template string, first bool) {
 	now := time.Now()
 	if !first && !p.retry.due(beadID, now) {
@@ -871,9 +929,10 @@ func (cr *CityRuntime) workStartFailurePolicy(workStore, sessStore beads.Store, 
 	deps := cr.parkMailDeps()
 	cfg := deps.cfg
 	return &workStartFailurePolicy{
-		workStore:   workStore,
-		rigStores:   rigStores,
-		extraStores: cr.storageRoutes.relocatedStores(),
+		workStore:       workStore,
+		rigStores:       rigStores,
+		extraStores:     cr.storageRoutes.relocatedStores(),
+		classStoreByRef: cr.storageRoutes.storeForClassRef,
 		templateOf: func(b beads.Bead) string {
 			return poolTemplateForWorkBead(cfg, b)
 		},
@@ -1023,4 +1082,31 @@ func earliestStartDeferralDeadline(workBeads []beads.Bead, now time.Time) time.T
 		}
 	}
 	return earliest
+}
+
+// liveWorkBead reads the row the store holds NOW. A caching store is read
+// through its backing — a cache-served row is the same row twice, and an
+// unfenced re-read that cannot see a concurrent reassign or clear fences
+// nothing; wrappers are followed through their declared resolution target
+// (the controller's beadPolicyStore, the typed class wrappers) to find it.
+// Any other store answers as it does for Get.
+func liveWorkBead(store beads.Store, id string) (beads.Bead, error) {
+	inner := store
+	for depth := 0; depth < 8; depth++ {
+		target, ok := inner.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			break
+		}
+		next := target.ConditionalWritesResolveTarget()
+		if next == nil || next == inner {
+			break
+		}
+		inner = next
+	}
+	if caching, ok := inner.(*beads.CachingStore); ok {
+		if backing := caching.Backing(); backing != nil {
+			return backing.Get(id)
+		}
+	}
+	return store.Get(id)
 }

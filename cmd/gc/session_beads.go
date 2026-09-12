@@ -1793,7 +1793,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
-			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, nil, stderr); ok {
+			if reopened, _, ok := reopenClosedConfiguredNamedSessionBead(cityPath, store, cfg, cityName, tp.ConfiguredNamedIdentity, sn, state, now, namedSessionTriggerMetadata(tp), stderr); ok {
 				b = reopened
 				exists = true
 				state = syncSessionCachedState(sn, b, exists, sp)
@@ -1871,6 +1871,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				meta[namedSessionMetadataKey] = boolMetadata(true)
 				meta[namedSessionIdentityMetadata] = tp.ConfiguredNamedIdentity
 				meta[namedSessionModeMetadata] = tp.ConfiguredNamedMode
+				for k, v := range namedSessionTriggerMetadata(tp) {
+					meta[k] = v
+				}
 			}
 			// Store the qualified template name so the API can derive the
 			// rig from it (e.g., "tower-of-hanoi/polecat" not just "polecat").

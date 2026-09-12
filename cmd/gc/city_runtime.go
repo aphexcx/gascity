@@ -181,6 +181,10 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// demandNow is the demand snapshot's clock (nil = time.Now): the cache's
+	// age and its backoff-deadline expiry are judged against it, so a test
+	// can move time instead of sleeping.
+	demandNow func() time.Time
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -3614,7 +3618,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		mergeNamedSessionDemand(result.PoolDesiredCounts, result.NamedSessionDemand, cr.cfg)
 		result.WorkSet = make(map[string]bool)
 		cr.demandSnapshot = &runtimeDemandSnapshot{
-			createdAt:              time.Now(),
+			createdAt:              cr.demandClockNow(),
 			sessionFingerprint:     sessionFingerprint,
 			readyDemandFingerprint: readyDemandFingerprint,
 			deferredUntil:          result.StartDeferredUntil,
@@ -3649,14 +3653,23 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	// A backed-off routed bead re-enters demand when its deadline passes with
 	// no write anywhere: neither fingerprint moves, so the deadline itself
 	// expires the snapshot (else a 10s backoff would last the backstop age).
-	if until := cr.demandSnapshot.deferredUntil; !until.IsZero() && !time.Now().Before(until) {
+	now := cr.demandClockNow()
+	if until := cr.demandSnapshot.deferredUntil; !until.IsZero() && !now.Before(until) {
 		return true
 	}
 	maxAge := cr.demandSnapshotPatrolMaxAge()
 	if maxAge <= 0 {
 		return true
 	}
-	return time.Since(cr.demandSnapshot.createdAt) >= maxAge
+	return now.Sub(cr.demandSnapshot.createdAt) >= maxAge
+}
+
+// demandClockNow is the demand snapshot's clock (demandNow, else time.Now).
+func (cr *CityRuntime) demandClockNow() time.Time {
+	if cr != nil && cr.demandNow != nil {
+		return cr.demandNow()
+	}
+	return time.Now()
 }
 
 // demandSnapshotPatrolMaxAge reports how long a cached demand snapshot may be

@@ -113,6 +113,7 @@ func TestPoolStartBackoffFencedWriteYieldsToAConcurrentReset(t *testing.T) {
 	}
 	racing := &resetOnFirstGetStore{Store: h.env.store, id: h.work.ID}
 	h.policy.workStore = racing
+	h.policy.resolveWriter = probeConditionalWriter
 	h.policy.recordStartFailure(workTrigger{BeadID: h.work.ID, StoreRef: "city"}, backoffHarnessTemplate, errPreStartFailure, h.env.clk.Now().Add(time.Minute))
 	state := readWorkStartFailureState(h.reload().Metadata)
 	if state.Failures != 1 {

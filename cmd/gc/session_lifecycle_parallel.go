@@ -1701,8 +1701,11 @@ func commitAsyncStartResultWithContext(
 			// failed: that is one failed start from the WORK bead's side, and
 			// the record lives on the work bead, not on the session row this
 			// commit could not see (pool_start_backoff.go). A stale prepared
-			// command (cleanupRuntime) is a config change, not a lane failure.
-			if result.err != nil && !cleanupRuntime {
+			// command (cleanupRuntime) is a config change, not a lane failure,
+			// and a provider rate-limit screen is the provider's, not the
+			// lane's — the ordinary path quarantines the session for it and
+			// charges no work bead either.
+			if result.err != nil && !cleanupRuntime && !result.rateLimitScreen {
 				result.prepared.workStartFailure.recordStartFailure(result.prepared.workTrigger, template, result.err, time.Now().UTC())
 			}
 		}

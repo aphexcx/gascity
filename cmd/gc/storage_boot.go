@@ -62,6 +62,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // storageSupportedTopologyStatement is the one sentence describing what this
@@ -853,4 +854,34 @@ func storageClassOrder() []config.StorageClass {
 	classes := make([]config.StorageClass, 0, len(infraMigrationClasses)+1)
 	classes = append(classes, config.StorageClassWork)
 	return append(classes, infraMigrationClasses...)
+}
+
+// storeForClassRef resolves a "class:<token>" store ref — the ref a demand
+// probe records for a bead it counted in a relocated class binding
+// (storeref.ClassRef of the classes that binding serves) — to that binding's
+// store. Nil when these routes relocate nothing or the token names no
+// binding here (the caller falls back to the work store).
+func (r *storageRoutes) storeForClassRef(ref string) beads.Store {
+	if r == nil || !storeref.IsClassRef(ref) {
+		return nil
+	}
+	byStore := make(map[beads.Store][]coordclass.Class)
+	var order []beads.Store
+	for _, class := range coordclass.Classes() {
+		store, ok := r.stores[class]
+		if !ok || store == nil {
+			continue
+		}
+		if _, seen := byStore[store]; !seen {
+			order = append(order, store)
+		}
+		byStore[store] = append(byStore[store], class)
+	}
+	want := strings.TrimSpace(ref)
+	for _, store := range order {
+		if string(storeref.ClassRef(byStore[store])) == want {
+			return store
+		}
+	}
+	return nil
 }

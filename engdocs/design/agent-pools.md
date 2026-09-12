@@ -225,7 +225,10 @@ A retained on-demand named holder woken for work — a bead assigned to it, or
 a routed row of its backing template (`NamedSessionRoutedDemand`) — carries
 that bead as its trigger (only `gc.trigger_bead_id` / store ref; its pack,
 workspace and work dir are its own), so a failed start charges that bead the
-way a pool seat's would. A bead still carrying an agent's legacy bound
+way a pool seat's would; a holder created (or reopened) fresh for direct
+demand carries the trigger from its first start. A holder created fresh for
+routed-only demand has no bead to bind to on its first tick; the next tick
+binds it. A bead still carrying an agent's legacy bound
 identity (`rig/old.worker` after a bound→unbound migration) is routed to that
 agent, not "elsewhere".
 

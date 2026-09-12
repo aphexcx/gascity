@@ -31,6 +31,7 @@ func TestPoolStartBackoffUnsupportedConditionalWriteTakesTheReReadPath(t *testin
 	}
 	racing := &unsupportedCASStore{resetOnFirstGetStore: resetOnFirstGetStore{Store: h.env.store, id: h.work.ID}}
 	h.policy.workStore = racing
+	h.policy.resolveWriter = probeConditionalWriter
 	h.policy.recordStartFailure(workTrigger{BeadID: h.work.ID, StoreRef: "city"}, backoffHarnessTemplate, errPreStartFailure, h.env.clk.Now().Add(time.Minute))
 	state := readWorkStartFailureState(h.reload().Metadata)
 	if state.Failures != 1 {
@@ -120,13 +121,15 @@ func TestPoolStartBackoffLegacyBoundRouteIsNotAReroute(t *testing.T) {
 // (a 10s backoff must not last five minutes).
 func TestCityRuntimeDemandSnapshotRefreshesWhenABackoffExpires(t *testing.T) {
 	buildCalls := 0
-	deadline := time.Now().Add(150 * time.Millisecond)
+	now := time.Date(2026, 9, 12, 1, 0, 0, 0, time.UTC)
+	deadline := now.Add(10 * time.Second)
 	cr := &CityRuntime{
-		cityName: "test-city",
-		cityPath: t.TempDir(),
-		cfg:      &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		cs:       &controllerState{eventProv: events.NewFake()},
-		stderr:   io.Discard,
+		cityName:  "test-city",
+		cityPath:  t.TempDir(),
+		cfg:       &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cs:        &controllerState{eventProv: events.NewFake()},
+		stderr:    io.Discard,
+		demandNow: func() time.Time { return now },
 	}
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 		buildCalls++
@@ -134,11 +137,12 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenABackoffExpires(t *testing.T) {
 	}
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{})
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	now = deadline.Add(-time.Second)
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if buildCalls != 1 {
 		t.Fatalf("before the deadline the snapshot is reused: builds=%d, want 1", buildCalls)
 	}
-	time.Sleep(time.Until(deadline) + 20*time.Millisecond)
+	now = deadline
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 	if buildCalls != 2 {
 		t.Fatalf("at the backoff deadline the snapshot must be rebuilt: builds=%d, want 2", buildCalls)

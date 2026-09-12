@@ -1146,6 +1146,18 @@ func buildDesiredStateWithSessionBeads(
 		tp.Env["GC_ALIAS"] = identity
 		tp.Env["GC_AGENT"] = identity
 		tp.Env["GC_SESSION_ORIGIN"] = "named"
+		// A holder with no bead yet is created (or its closed bead reopened)
+		// for the direct demand that woke it: the trigger rides on the
+		// TemplateParams so the bead carries it from its first start
+		// (syncSessionBeads), and a start that fails is charged to it — else
+		// a failing pre_start closes the fresh bead every tick, the next
+		// build finds no open holder, and nothing is ever counted.
+		if !hasCanonical {
+			if request, ok := namedDirectWork[identity]; ok {
+				tp.TriggerBeadID = request.WorkBeadID
+				tp.TriggerBeadStoreRef = request.WorkStoreRef
+			}
+		}
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName
@@ -5660,4 +5672,19 @@ func bindNamedSessionWakeTrigger(bp *agentBuildParams, info session.Info, reques
 		return info.ApplyPatch(patch), nil
 	}
 	return sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
+}
+
+// namedSessionTriggerMetadata is the trigger a named holder is created or
+// reopened with (TemplateParams.TriggerBeadID / TriggerBeadStoreRef); nil
+// when the holder is not woken for a bead.
+func namedSessionTriggerMetadata(tp TemplateParams) map[string]string {
+	id := strings.TrimSpace(tp.TriggerBeadID)
+	if id == "" {
+		return nil
+	}
+	meta := map[string]string{beadmeta.TriggerBeadIDMetadataKey: id}
+	if ref := strings.TrimSpace(tp.TriggerBeadStoreRef); ref != "" {
+		meta[beadmeta.TriggerBeadStoreRefMetadataKey] = ref
+	}
+	return meta
 }
