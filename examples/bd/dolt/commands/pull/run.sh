@@ -20,12 +20,32 @@
 # store exactly as it was and the pull fails with the rows listed for manual
 # resolution. See resolve_benign_conflicts.
 #
-# Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
+# Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD,
+#   GC_DOLT_PULL_TIMEOUT_SECS (default: 120) — wall-clock bound for the
+#   SQL-mode DOLT_PULL; increase for a slow link or a large first pull.
+#
+# One server-side pull per database at a time (gp-f2yq): a CALL DOLT_PULL
+# runs inside the sql-server (it fetches first) and outlives a client the
+# bound killed, so before issuing one the script asks the server whether a
+# DOLT_PULL / DOLT_FETCH is already in flight on the server (skipped when
+# one is), and when the bound expires it KILLs the server-side session the
+# pull printed about itself and proves it gone from the processlist. The pull
+# statement also takes the server's session lock for the database (GET_LOCK,
+# timeout 0) in the same batch, so two runners that both read "nothing in
+# flight" cannot both pull. See the "Server-side remote operations" helpers
+# in assets/scripts/runtime.sh.
 set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
+# This run's lock nonce (see runtime.sh, "Server-side single-flight gate"):
+# one random value per script run, computed here and not at source time; no
+# random bytes = no run (before any database is touched).
+REMOTE_OP_RUN_NONCE=$(remote_op_new_run_nonce) || {
+  echo "gc dolt pull: no run nonce — refusing to run (see the line above)" >&2
+  exit 2
+}
 
 db_filter=""
 data_dir="$DOLT_DATA_DIR"
@@ -47,6 +67,9 @@ while [ $# -gt 0 ]; do
       echo "  cities, e.g. bd's defer wake) takes the remote's values and the pull"
       echo "  completes. Any other conflict leaves the database exactly as it was,"
       echo "  prints the conflicted rows, and fails the pull for manual resolution."
+      echo ""
+      echo "Environment:"
+      echo "  GC_DOLT_PULL_TIMEOUT_SECS  SQL-mode pull bound (default 120)"
       exit 0
       ;;
     *) echo "gc dolt pull: unknown flag: $1" >&2; exit 1 ;;
@@ -59,6 +82,26 @@ case "$(printf '%s' "$db_filter" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | t
   exit 1
   ;;
 esac
+
+# Wall-clock bound for the SQL-mode DOLT_PULL (seconds). Defaults to 120s (the
+# prior fixed ceiling). Validated the way the sync bounds are: an empty /
+# non-numeric / all-zero value is rejected before any database is touched —
+# GNU `timeout 0` disables the timeout, i.e. an unbounded pull, the exact
+# anti-hang outcome this bound exists to prevent.
+pull_timeout="${GC_DOLT_PULL_TIMEOUT_SECS-120}"
+case "$pull_timeout" in
+  ''|*[!0-9]*) pull_timeout_valid=false ;;
+  *[1-9]*)     pull_timeout_valid=true ;;
+  *)           pull_timeout_valid=false ;;
+esac
+if [ "$pull_timeout_valid" != true ]; then
+  printf 'gc dolt pull: invalid GC_DOLT_PULL_TIMEOUT_SECS=%s (must be a positive integer)\n' \
+    "$pull_timeout" >&2
+  exit 2
+fi
+# Canonical decimal: leading zeros dropped (validated non-zero, so never empty)
+# so the value prints and compares as the integer it is.
+pull_timeout=$(printf '%s' "$pull_timeout" | sed 's/^0*//')
 
 is_running() {
   managed_runtime_tcp_reachable "$GC_DOLT_PORT"
@@ -82,12 +125,12 @@ valid_remote_name() {
   esac
 }
 
+# dolt_sql QUERY [TIMEOUT_SECS] [USE_DB] — run a SQL query against the live
+# server under a wall-clock bound (dolt_sql_csv, runtime.sh); 120s by default,
+# sized for metadata queries. The pull passes its own bound and its database
+# (--use-db, so the server attributes the session in its processlist).
 dolt_sql() {
-  query="$1"
-  host="${GC_DOLT_HOST:-127.0.0.1}"
-  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded 120 dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql --result-format csv -q "$query"
+  dolt_sql_csv "${2:-120}" "${3:-}" "$1"
 }
 
 # --- Conflict resolution -----------------------------------------------------
@@ -181,7 +224,8 @@ abort_cli_merge() {
 # mode the on-disk merge is aborted).
 #
 # SQL mode pulls again inside the transaction (the failed autocommit pull
-# rolled its merge back); CLI mode already holds the merge in the working
+# rolled its merge back) — behind the same server-side gate and bound as the
+# first pull (gp-f2yq); CLI mode already holds the merge in the working
 # set. Either way the statements are the same: report every conflicted
 # table and every conflicted `issues` row with its differing columns; give
 # each benign row the remote's row_lock and updated_at and clear its
@@ -201,7 +245,11 @@ resolve_benign_conflicts() {
   p="$CONFLICT_PREDICATE"
   sql="SET @@autocommit = 0; SET @@session.group_concat_max_len = 1048576;"
   if [ "$server_running" = true ]; then
-    sql="$sql CALL DOLT_PULL('$remote_name', 'main');"
+    # gp-f2yq: the retried pull is a server-side DOLT_PULL like the first one.
+    # Its CALL carries the same ownership-checked first argument (this
+    # session still holds this run's lock, or the procedure never runs) and
+    # the batch runs behind the same gate, below.
+    sql="$sql CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main');"
   fi
   # Report rows put the count BEFORE the table name and fold a row's id and
   # differing columns into one field, so a table name with a comma, a quote
@@ -219,7 +267,49 @@ resolve_benign_conflicts() {
   sql="$sql CALL DOLT_COMMIT('-m', 'gc dolt pull: merge $remote_name/main (row_lock/updated_at-only conflicts in issues resolved to the remote)', '--author', 'gc dolt pull <gc-dolt-pull@gascity.local>');"
   sql="$sql COMMIT;"
   resolve_rc=0
-  out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
+  if [ "$server_running" = true ]; then
+    # ONE server-side remote operation per database at a time holds for the
+    # retried pull too (gp-f2yq). The batch's first statement after USE is
+    # the gate (remote_op_gate_sql): this database's lock, this run's lock
+    # and the session's own connection id in one statement, or the batch
+    # stops there before anything runs; --use-db attributes the session; the
+    # pull bound applies to the whole batch. A bound that expires KILLs the
+    # session the gate printed about itself and proves it gone (its
+    # uncommitted transaction goes with it); a refused or lost gate skips,
+    # exactly as the first pull does.
+    resolve_out_tmp=$(mktemp) || {
+      echo "  $name: ERROR: cannot create temp file for the resolving session id" >&2
+      return 1
+    }
+    resolve_err_tmp=$(mktemp) || {
+      rm -f "$resolve_out_tmp"
+      echo "  $name: ERROR: cannot create temp file for the resolving session diagnostics" >&2
+      return 1
+    }
+    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); $sql" "$pull_timeout" "$name" \
+      >"$resolve_out_tmp" 2>"$resolve_err_tmp" || resolve_rc=$?
+    resolve_session_id=$(remote_op_session_id "$resolve_out_tmp")
+    out=$(cat "$resolve_out_tmp" "$resolve_err_tmp")
+    rm -f "$resolve_out_tmp"
+    # The bound's verdict outranks anything the client printed.
+    if bound_expired "$resolve_rc"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: pull timed out after ${pull_timeout}s while resolving conflicts (GC_DOLT_PULL_TIMEOUT_SECS; client exit $resolve_rc) — the resolving transaction was not confirmed" >&2
+      kill_remote_op_session pull "$name" "$resolve_session_id" || true
+      return 1
+    elif remote_op_gate_refused "$resolve_err_tmp"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: pull already in flight — the server refused the conflict-resolving pull (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
+      return 1
+    elif remote_op_gate_lost "$resolve_err_tmp"; then
+      rm -f "$resolve_err_tmp"
+      echo "  $name: conflict-resolving pull not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped" >&2
+      return 1
+    fi
+    rm -f "$resolve_err_tmp"
+  else
+    out=$(run_db_sql "$name" "$dir" "$sql" 2>&1) || resolve_rc=$?
+  fi
   rows=$(printf '%s\n' "$out" | grep '^row,' | sed 's/^row,//; s/^"//; s/"$//; s/""/"/g' || true)
   row_count=$(printf '%s\n' "$rows" | grep -c '.' || true)
   if [ "$resolve_rc" -eq 0 ]; then
@@ -287,20 +377,81 @@ pull_database_sql() {
     return 1
   fi
 
-  pull_out=""
-  if pull_out=$(dolt_sql "USE \`$name\`; CALL DOLT_PULL('$remote_name', 'main')" 2>&1); then
+  pull_err_tmp=$(mktemp) || {
+    echo "  $name: ERROR: cannot create temp file for pull diagnostics" >&2
+    return 1
+  }
+  # gp-f2yq: ONE server-side remote operation per database at a time. A CALL
+  # DOLT_PULL runs inside the sql-server and outlives a client the bound
+  # killed, so ask the server first and skip when a pull or fetch is already
+  # in flight for this database. Fail closed: a processlist query that fails,
+  # or answers with anything but a processlist, skips too.
+  inflight_rc=0
+  inflight=$(remote_op_sessions "$name" 120 "$pull_err_tmp") || inflight_rc=$?
+  if [ "$inflight_rc" -ne 0 ]; then
+    echo "  $name: ERROR: processlist query failed (exit $inflight_rc) — skipped" >&2
+    remote_op_replay_stderr "$name" "$pull_err_tmp"
+    rm -f "$pull_err_tmp"
+    return 1
+  fi
+  inflight_oldest=$(printf '%s\n' "$inflight" | remote_op_sessions_oldest)
+  if [ -n "$inflight_oldest" ]; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull already in flight for ${inflight_oldest#* }s (session ${inflight_oldest%% *}) — skipped" >&2
+    return 1
+  fi
+  pull_out_tmp=$(mktemp) || {
+    echo "  $name: ERROR: cannot create temp file for the pull session id" >&2
+    rm -f "$pull_err_tmp"
+    return 1
+  }
+  pull_rc=0
+  # The server-side gate (remote_op_gate_sql) is the batch's first statement
+  # after USE: the session takes this database's lock and this run's lock and
+  # prints its OWN connection id in that same statement, or the batch stops
+  # here, before the CALL. The id and the locks are one statement, so the id
+  # the KILL targets when the bound expires is the lock holder by construction
+  # (a separate id statement before the gate could record a session that a
+  # pooled-client reconnect left lockless while the reconnected one pulled on
+  # — the mayor's gate r1); --use-db attributes the session to this database.
+  # The CALL's own first argument re-proves that THIS session still holds the
+  # run lock (remote_op_owned_arg), so a reconnected client never pulls on a
+  # lockless session.
+  dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main')" "$pull_timeout" "$name" \
+    >"$pull_out_tmp" 2>"$pull_err_tmp" || pull_rc=$?
+  pull_session_id=$(remote_op_session_id "$pull_out_tmp")
+  rm -f "$pull_out_tmp"
+  if [ "$pull_rc" -eq 0 ]; then
+    rm -f "$pull_err_tmp"
     echo "  $name: pulled from $remote_url"
     return 0
   fi
-
-  # A failed autocommit pull with conflicts rolled its merge back and wrote
-  # nothing; retry it inside the resolving transaction.
-  if printf '%s\n' "$pull_out" | grep -qi 'conflict'; then
+  # The bound's verdict outranks anything the client printed.
+  if bound_expired "$pull_rc"; then
+    echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS; client exit $pull_rc)" >&2
+    # The client is dead (124: the bound; 137: the bound's SIGKILL escalation);
+    # the server-side pull is not. End it and prove it ended (the outcome is
+    # reported on its own line).
+    kill_remote_op_session pull "$name" "$pull_session_id" || true
+  elif remote_op_gate_refused "$pull_err_tmp"; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull already in flight — the server refused a second one (session lock $(remote_op_lock_name "$name") held) — skipped" >&2
+    return 1
+  elif remote_op_gate_lost "$pull_err_tmp"; then
+    rm -f "$pull_err_tmp"
+    echo "  $name: pull not sent — this session lost the run lock between the gate and the CALL (client reconnected) — skipped" >&2
+    return 1
+  elif grep -qi 'conflict' "$pull_err_tmp"; then
+    # A failed autocommit pull with conflicts rolled its merge back and wrote
+    # nothing; retry it inside the resolving transaction (gp-c04p).
+    rm -f "$pull_err_tmp"
     resolve_benign_conflicts "$name" "$data_dir/$name" "$remote_name" "$remote_url"
     return $?
+  else
+    echo "  $name: ERROR: pull failed (exit $pull_rc)" >&2
   fi
-
-  echo "  $name: ERROR: pull failed" >&2
+  remote_op_replay_stderr "$name" "$pull_err_tmp"
+  rm -f "$pull_err_tmp"
   return 1
 }
 

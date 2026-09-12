@@ -15,6 +15,11 @@ import (
 // remote inside one transaction; anything else fails closed. These tests
 // drive the script against a fake dolt that scripts each answer; the real
 // two-clone behavior is pinned in pull_conflicts_real_dolt_test.go.
+//
+// The retried pull in SQL mode is a second server-side DOLT_PULL, so it runs
+// behind the single-flight gate, bound and KILL of gp-f2yq (pull_test.go);
+// the fake answers the processlist pre-check (idle), the KILL batch and the
+// run-lock holder query the way the gp-f2yq fakes do.
 
 const (
 	fakePullConflictError = "error on line 1 for query CALL DOLT_PULL('origin', 'main'): Error 1105 (HY000): Merge conflict detected, @autocommit transaction rolled back. @autocommit must be disabled so that merge conflicts can be resolved using the dolt_conflicts and dolt_schema_conflicts tables before manually committing the transaction."
@@ -32,7 +37,10 @@ const (
 // (the issues table has no row_lock column), "plainfail" (a non-conflict
 // pull error), "schemaonly" (a schema conflict and no row conflict),
 // "countfail" (the conflict-count query fails), "notmerging" (the CLI pull
-// failed without leaving a merge). CLI mode is scripted too: `dolt pull`
+// failed without leaving a merge), "retrytimeout" (the resolving session's
+// bound expires after the gate printed its id: the client exits 124),
+// "retryrefused" (the server refuses the resolving session's gate: another
+// session holds the database's lock). CLI mode is scripted too: `dolt pull`
 // fails with dolt's conflict text, dolt_merge_status says a merge is in
 // progress, and the conflict count query reports one conflicted table.
 func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
@@ -55,6 +63,16 @@ func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 		session = "printf '%s\\n' 'k,n,t' 'conflict,1,issues' 'conflict,1,\"a,b\"' 'conflict,1,nothing to commit' 'k,n' 'schema,0' 'k,detail' 'row,\"hw-2: status,updated_at,row_lock,closed_at\"' 'k,n,t' 'remaining,1,issues' 'remaining,1,\"a,b\"' 'remaining,1,nothing to commit' 'error on line 1 for query CALL DOLT_COMMIT(...): Error 1105 (HY000): error: the table(s) issues, a,b, nothing to commit are in conflict'; exit 1"
 	case "schemaonly":
 		session = "printf '%s' " + shellQuote(fakePullSchemaSession) + "; exit 1"
+	case "retrytimeout":
+		session = "exit 124"
+	case "retryrefused":
+		session = "printf '%s\\n' 'error on line 1 for query SELECT IF(GET_LOCK(...)) AS id: Error 3141 (HY000): Invalid JSON text in argument 1 to function json_extract: \"gc-remote-op-lock-held\"' >&2; exit 1"
+	}
+	// The resolving session's batch starts with the gp-f2yq gate, which
+	// prints the session's own id when it took the locks (the KILL operand
+	// when the bound expires); a refused gate prints no id.
+	if mode != "retryrefused" {
+		session = "printf 'id\\n71\\n'; " + session
 	}
 	// CLI mode reads the merge state before the pull (no merge) and after the
 	// failed pull (a merge): the fake answers false first, true after, through
@@ -79,9 +97,19 @@ func writePullConflictFakeDolt(t *testing.T, dir, mode string) string {
 	if mode == "plainfail" {
 		pullFailure = "printf '%s\\n' 'error on line 1 for query CALL DOLT_PULL: dial tcp 127.0.0.1:1: connect: connection refused' >&2; exit 1"
 	}
+	killedPrefix := filepath.Join(dir, "killed-") // KILL marks only the addressed session
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> "` + logPath + `"
 case "$*" in
+  *"information_schema.processlist"*)
+    printf 'Id,Time,db\n'
+    ;;
+  *"KILL "*)
+    k=$(printf '%s' "$*" | sed -n 's/.*KILL \([0-9][0-9]*\).*/\1/p'); : > "` + killedPrefix + `${k}"
+    ;;
+  *"COALESCE(IS_USED_LOCK("*)
+    printf 'holder\n0\n'
+    ;;
   *"SELECT name, url FROM dolt_remotes"*)
     printf 'name,url\norigin,file:///hub\n'
     ;;
@@ -121,6 +149,14 @@ exit 0
 // database directory carries a remotes.json).
 func runPullConflictScript(t *testing.T, mode string, sqlMode bool) (string, string, int) {
 	t.Helper()
+	out, log, _, code := runPullConflictScriptBounded(t, mode, sqlMode)
+	return out, log, code
+}
+
+// runPullConflictScriptBounded is runPullConflictScript returning the
+// recording gtimeout's log too: the bound every dolt call ran under.
+func runPullConflictScriptBounded(t *testing.T, mode string, sqlMode bool) (out, log, tlog string, code int) {
+	t.Helper()
 	root := repoRoot(t)
 	script := filepath.Join(root, pullScript)
 
@@ -141,6 +177,7 @@ func runPullConflictScript(t *testing.T, mode string, sqlMode bool) (string, str
 	}
 	binDir := t.TempDir()
 	doltLog := writePullConflictFakeDolt(t, binDir, mode)
+	tlogPath := writeRecordingGtimeout(t, binDir)
 	writeSyncFakeBeadsBD(t, cityPath)
 
 	cmd := exec.Command("sh", script, "--db", "app")
@@ -156,21 +193,24 @@ func runPullConflictScript(t *testing.T, mode string, sqlMode bool) (string, str
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 	)
-	out, err := cmd.CombinedOutput()
-	code := 0
+	outBytes, err := cmd.CombinedOutput()
 	if err != nil {
 		exitErr := &exec.ExitError{}
 		ok := errors.As(err, &exitErr)
 		if !ok {
-			t.Fatalf("run pull: %v\n%s", err, out)
+			t.Fatalf("run pull: %v\n%s", err, outBytes)
 		}
 		code = exitErr.ExitCode()
 	}
-	log, err := os.ReadFile(doltLog)
+	logBytes, err := os.ReadFile(doltLog)
 	if err != nil {
 		t.Fatalf("read fake dolt log: %v", err)
 	}
-	return string(out), string(log), code
+	tlogBytes, err := os.ReadFile(tlogPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read fake gtimeout log: %v", err)
+	}
+	return string(outBytes), string(logBytes), string(tlogBytes), code
 }
 
 // resolvingSession returns the one dolt invocation that carried the
@@ -187,7 +227,7 @@ func resolvingSession(log string) string {
 func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 	for _, sqlMode := range []bool{true, false} {
 		t.Run(fmt.Sprintf("sql=%v", sqlMode), func(t *testing.T) {
-			out, log, code := runPullConflictScript(t, "benign", sqlMode)
+			out, log, tlog, code := runPullConflictScriptBounded(t, "benign", sqlMode)
 			if code != 0 {
 				t.Fatalf("exit = %d, want 0\n%s\nlog:\n%s", code, out, log)
 			}
@@ -198,8 +238,21 @@ func TestPullResolvesRowLockOnlyConflictInsideOneTransaction(t *testing.T) {
 			if session == "" {
 				t.Fatalf("no resolving session issued\nlog:\n%s", log)
 			}
-			if strings.Contains(session, "CALL DOLT_PULL('origin', 'main')") != sqlMode {
-				t.Fatalf("SQL mode retries the pull inside the transaction, CLI mode holds the merge already; sqlMode=%v session:\n%s", sqlMode, session)
+			// SQL mode retries the pull inside the transaction — a second
+			// server-side DOLT_PULL, so it runs behind the same gate as the
+			// first (gp-f2yq): the locks and the session's id in one statement
+			// before anything runs, the CALL's first argument re-proving
+			// ownership of this run's lock, --use-db, the pull bound over the
+			// whole batch. CLI mode holds the merge already and issues no pull
+			// and no gate.
+			if sqlMode {
+				assertGateBeforeCall(t, session, "app", "CALL DOLT_PULL(")
+				if !strings.Contains(session, "--use-db app") {
+					t.Fatalf("the resolving session must run with --use-db app so the server attributes it.\nsession: %s", session)
+				}
+				assertBounded(t, tlog, "120", "SET @@autocommit = 0;")
+			} else if strings.Contains(session, "CALL DOLT_PULL(") || strings.Contains(session, "GET_LOCK(") {
+				t.Fatalf("CLI mode holds the merge already: no pull and no server gate in the resolving session.\nsession: %s", session)
 			}
 			// The predicate is what makes the class narrow: every column but
 			// row_lock and updated_at must be equal, both sides modified, and
@@ -338,11 +391,73 @@ func TestPullNonConflictFailureIsUnchanged(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, out)
 	}
-	if !strings.Contains(out, "app: ERROR: pull failed\n") {
+	if !strings.Contains(out, "app: ERROR: pull failed (exit 1)\n") {
 		t.Fatalf("output missing the plain failure line:\n%s", out)
 	}
-	if resolvingSession(log) != "" || strings.Contains(log, "information_schema") {
+	// The single-flight pre-check reads information_schema.processlist on
+	// every SQL-mode pull; resolution starts with the schema read.
+	if resolvingSession(log) != "" || strings.Contains(log, "information_schema.columns") {
 		t.Fatalf("a non-conflict failure must not start resolution\nlog:\n%s", log)
+	}
+}
+
+// TestPullResolvingPullTimeoutKillsItsServerSideSession: the retried pull is
+// bounded like the first, and a bound that expires KILLs the session the
+// gate printed about itself — the guarded KILL batch, after the resolving
+// session, naming that id — and proves it gone. Nothing is reported as
+// pulled, resolved or in need of manual resolution.
+func TestPullResolvingPullTimeoutKillsItsServerSideSession(t *testing.T) {
+	out, log, tlog, code := runPullConflictScriptBounded(t, "retrytimeout", true)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	}
+	for _, want := range []string{
+		"app: pull timed out after 120s while resolving conflicts (GC_DOLT_PULL_TIMEOUT_SECS; client exit 124)",
+		"app: server-side pull killed (session 71 no longer in flight)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"pulled from", "resolved", "need manual resolution", "nothing was written"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("a timed-out resolving session must not report %q:\n%s", forbidden, out)
+		}
+	}
+	session := resolvingSession(log)
+	if session == "" {
+		t.Fatalf("no resolving session issued\nlog:\n%s", log)
+	}
+	sessionAt := strings.Index(log, session)
+	killAt := guardedKillAt(t, log, "71")
+	if killAt < 0 || killAt < sessionAt {
+		t.Fatalf("the session the gate printed about itself must be KILLed (guarded by this run's lock) after the bound expires.\nlog:\n%s", log)
+	}
+	assertBounded(t, tlog, "120", "SET @@autocommit = 0;")
+}
+
+// TestPullResolvingPullGateRefusedSkips: another session holds the
+// database's lock when the retried pull is sent — the server refuses the
+// gate before anything runs; the pull is skipped like a first pull would be,
+// nothing is killed, nothing is reported as resolved or unresolved.
+func TestPullResolvingPullGateRefusedSkips(t *testing.T) {
+	out, log, code := runPullConflictScript(t, "retryrefused", true)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "app: pull already in flight — the server refused the conflict-resolving pull (session lock gc_remote_op:app held) — skipped") {
+		t.Fatalf("output missing the refusal line:\n%s", out)
+	}
+	for _, forbidden := range []string{"pulled from", "resolved", "need manual resolution", "nothing was written", "killed"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("a refused resolving session must not report %q:\n%s", forbidden, out)
+		}
+	}
+	if resolvingSession(log) == "" {
+		t.Fatalf("the resolving batch must have been sent (the server refused it)\nlog:\n%s", log)
+	}
+	if strings.Contains(log, "KILL ") {
+		t.Fatalf("a refused gate leaves nothing to kill\nlog:\n%s", log)
 	}
 }
 
