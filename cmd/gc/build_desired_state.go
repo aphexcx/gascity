@@ -1166,7 +1166,7 @@ func buildDesiredStateWithSessionBeads(
 			// routed demand has no bead to bind to yet; the next tick binds it.
 			direct := namedDirectWork[identity]
 			if strings.TrimSpace(direct.WorkBeadID) == "" {
-				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedHolderAssigneeMatcher(canonicalInfo), namedOwnedClaimRefs); ok {
+				if request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, namedDemandWork, namedDemandRefs, readyAssigned, namedHolderAssigneeMatcher(identity, canonicalInfo), namedOwnedClaimRefs); ok {
 					direct = request
 				}
 			}
@@ -5722,19 +5722,17 @@ func namedDirectWorkRequest(
 	return SessionRequest{}, beads.Bead{}, false
 }
 
-// namedHolderAssigneeMatcher accepts the two concrete identities a retained
-// named holder is also woken for besides its configured identity: its
-// session bead id and its runtime session name (sessionAssigneeMatches in the
-// awake pass). Work assigned to either is the holder's, and a start that
-// fails for it must be charged to it.
-func namedHolderAssigneeMatcher(holder session.Info) func(assignee string) bool {
+// namedHolderAssigneeMatcher accepts all three identities the awake pass
+// recognizes for a retained holder, including configured-name claims reached
+// through the holder's claim-store refs.
+func namedHolderAssigneeMatcher(identity string, holder session.Info) func(assignee string) bool {
 	id := strings.TrimSpace(holder.ID)
 	sessionName := strings.TrimSpace(holder.SessionNameMetadata)
 	return func(assignee string) bool {
 		if assignee == "" {
 			return false
 		}
-		return (id != "" && assignee == id) || (sessionName != "" && assignee == sessionName)
+		return assignee == identity || (id != "" && assignee == id) || (sessionName != "" && assignee == sessionName)
 	}
 }
 

@@ -2843,10 +2843,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
 			ok, commitBatch := recoverRunningPendingCreate(infoByID[id], tp, cfg, store, clk, trace, reconcileOpts.workStartFailure)
+			tick.apply(id, commitBatch)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
+				// Preserve the live uncommitted start until recovery succeeds;
+				// lifecycle timers must not stop it and erase its recovery state.
+				continue
 			}
-			tick.apply(id, commitBatch)
 		}
 
 		// driftRestartedInPlace tracks whether the alive-restart branch ran

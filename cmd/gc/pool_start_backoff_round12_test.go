@@ -24,6 +24,13 @@ func TestKeptSessionRecoveryRetriesAfterRepeatedFailure(t *testing.T) {
 		t.Fatalf("starts = %d, want 2\nstderr:\n%s", starts, h.env.stderr.String())
 	}
 	h.env.clk.Time = h.env.clk.Time.Add(time.Minute)
+	h.env.cfg.Agents[0].MaxSessionAge = "1s"
+	age := newMaxSessionAgeTracker()
+	age.setConfig("sky-kept", time.Second, 0)
+	open, unassigned := "open", ""
+	if err := h.env.store.Update(h.work.ID, beads.UpdateOpts{Status: &open, Assignee: &unassigned}); err != nil {
+		t.Fatal(err)
+	}
 	const name = "sky-kept"
 	kept, err := h.env.store.Create(beads.Bead{
 		Title:  backoffHarnessTemplate,
@@ -54,6 +61,7 @@ func TestKeptSessionRecoveryRetriesAfterRepeatedFailure(t *testing.T) {
 		}
 	}
 	refuse()
+	h.env.startOptions = append(h.env.startOptions, withMaxSessionAgeTracker(age))
 	h.env.reconcileWithPoolDesired([]beads.Bead{kept}, map[string]int{backoffHarnessTemplate: 1})
 	if !h.env.sp.IsRunning(name) {
 		t.Fatalf("the kept session must have resumed\nstderr:\n%s", h.env.stderr.String())
@@ -65,10 +73,17 @@ func TestKeptSessionRecoveryRetriesAfterRepeatedFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A retained resume still carries the previous start's expired age anchor.
+	oldAnchor := h.env.clk.Now().Add(-time.Hour).Format(time.RFC3339)
+	if err := h.env.store.SetMetadataBatch(kept.ID, map[string]string{"creation_complete_at": oldAnchor}); err != nil {
+		t.Fatal(err)
+	}
+	row, _ = h.env.store.Get(kept.ID)
 	// Tick 2: the store is STILL down. Recovery runs and fails; the bead
 	// must still say the start is uncommitted afterwards.
 	h.installPolicy()
 	refuse()
+	h.env.startOptions = append(h.env.startOptions, withMaxSessionAgeTracker(age))
 	h.env.desiredState = desired
 	h.env.clk.Time = h.env.clk.Time.Add(time.Second)
 	h.env.reconcileWithPoolDesired([]beads.Bead{row}, map[string]int{backoffHarnessTemplate: 1})
@@ -77,7 +92,7 @@ func TestKeptSessionRecoveryRetriesAfterRepeatedFailure(t *testing.T) {
 	}
 	row, _ = h.env.store.Get(kept.ID)
 	info = sessionInfosFromBeads([]beads.Bead{row})[0]
-	if !pendingCreateQueuedOrCreatingState(info.MetadataState) || strings.TrimSpace(info.CreationCompleteAt) != "" {
+	if !pendingCreateQueuedOrCreatingState(info.MetadataState) || info.CreationCompleteAt != oldAnchor || !h.env.sp.IsRunning(name) {
 		t.Fatalf("tick 2: the uncommitted start must stay durable as the bead's state, got state=%q creation_complete=%q\nstderr:\n%s", info.MetadataState, info.CreationCompleteAt, h.env.stderr.String())
 	}
 	if !strings.Contains(h.env.stderr.String(), "metadata repair incomplete") {
@@ -85,6 +100,7 @@ func TestKeptSessionRecoveryRetriesAfterRepeatedFailure(t *testing.T) {
 	}
 	// Tick 3: the store is back. Recovery clears, then confirms.
 	h.installPolicy()
+	h.env.startOptions = append(h.env.startOptions, withMaxSessionAgeTracker(age))
 	h.env.desiredState = desired
 	h.env.clk.Time = h.env.clk.Time.Add(time.Second)
 	h.env.reconcileWithPoolDesired([]beads.Bead{row}, map[string]int{backoffHarnessTemplate: 1})

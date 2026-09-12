@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -73,18 +74,38 @@ func TestNamedHolderKeepsTheTriggerOfItsOwnCityStoreClaim(t *testing.T) {
 		t.Fatalf("fixture: the holder's agent is rig-scoped to riga, got %q", ref)
 	}
 	identity := cfg.NamedSessions[0].QualifiedName()
-	spec, ok := findNamedSessionSpec(cfg, "test-city", identity)
-	if !ok {
-		t.Fatalf("no named spec for %s", identity)
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{Title: "owned city-store claim", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: identity}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	work := []beads.Bead{{ID: "gc-1", Title: "owned city-store claim", Status: "in_progress", Assignee: identity, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "riga/worker"}}}
-	matches := func(assignee string) bool { return assignee == identity }
-	if _, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, work, []string{""}, nil, matches, nil); ok {
-		t.Fatal("control: without the claim refs a rig-scoped holder's city-store claim is unreachable")
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &identity}); err != nil {
+		t.Fatal(err)
 	}
-	request, _, ok := namedDirectWorkRequest(cityPath, cfg, spec, work, []string{""}, nil, matches, []string{""})
-	if !ok || request.WorkBeadID != "gc-1" || request.WorkStoreRef != "" {
-		t.Fatalf("an owned claim on a claim ref is the holder's trigger: ok=%v request=%+v", ok, request)
+	holder, err := store.Create(beads.Bead{
+		Title: "retained rig holder", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template": identity, "agent_name": identity, "alias": identity,
+			"session_name": "riga-holder", "state": string(session.StateAsleep),
+			session.NamedSessionMetadataKey: "true", session.NamedSessionIdentityMetadata: identity, session.NamedSessionModeMetadata: "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	res := buildDesiredState("test-city", cityPath, time.Now(), cfg, runtime.NewFake(), store, &stderr)
+	tp, ok := res.State["riga-holder"]
+	if !ok || tp.TriggerBeadID != work.ID || tp.TriggerBeadStoreRef != "" {
+		t.Fatalf("configured-name city-store claim must bind through the production builder: params=%+v present=%v\nstderr: %s", tp, ok, stderr.String())
+	}
+	row, err := store.Get(holder.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Metadata[beadmeta.TriggerBeadIDMetadataKey] != work.ID {
+		t.Fatalf("holder's persisted trigger = %q, want %s", row.Metadata[beadmeta.TriggerBeadIDMetadataKey], work.ID)
 	}
 }
 

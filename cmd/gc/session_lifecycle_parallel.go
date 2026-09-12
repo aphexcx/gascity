@@ -1484,7 +1484,7 @@ func runPreparedStartCandidate(
 	finished := time.Now()
 	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
 	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
-	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+	if err != nil && rollbackPending && !rateLimitScreen && liveSessionMatchesPendingCreate(item, sp) {
 		return startResult{
 			prepared:        item,
 			err:             nil,
@@ -1517,7 +1517,7 @@ func runPreparedStartCandidate(
 		switch {
 		case runningErr != nil || !runtimeObservationLive(obs):
 			outcome = TraceOutcomeProviderError
-		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
+		case rollbackPending && !rateLimitScreen && liveSessionMatchesPendingCreate(item, sp):
 			outcome = TraceOutcomeSessionExistsConverged
 			err = nil
 			rollbackPending = false
@@ -1718,7 +1718,7 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
-	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
+	if refreshed.err != nil && refreshed.rollbackPending && liveSessionMatchesPendingCreate(refreshed.prepared, sp) {
 		refreshed.err = nil
 		refreshed.outcome = TraceOutcomeSessionExistsConverged
 		refreshed.rollbackPending = false
@@ -2520,6 +2520,17 @@ func pendingCreateResidueFold(info sessionpkg.Info) map[string]string {
 // deleted in WI-6 R4).
 func shouldRollbackPendingCreateInfo(i sessionpkg.Info) bool {
 	return i.PendingCreateClaim
+}
+
+// liveSessionMatchesPendingCreate requires the agent process to be alive before
+// an identified runtime can turn a failed start into a successful convergence.
+// Identity alone remains sufficient for deciding which stale runtime to stop.
+func liveSessionMatchesPendingCreate(item preparedStart, sp runtime.Provider) bool {
+	if sp == nil || !runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
+		return false
+	}
+	running, alive := observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+	return running && alive
 }
 
 // runningSessionMatchesPendingCreateInfo is the form the start-execution decision

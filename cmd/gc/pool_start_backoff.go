@@ -1249,24 +1249,23 @@ func (d parkMailDeps) findParkedWorkMail(workStore, sessStore beads.Store) func(
 		if workStore == nil || sessStore == nil {
 			return false, errors.New("no store to read mail from")
 		}
-		to, err := resolveMailRecipientIdentityCached(d.cityPath, d.cfg, sessStore, parkedWorkMailRecipient, nil)
-		if err != nil {
-			return false, fmt.Errorf("resolving recipient %q: %w", parkedWorkMailRecipient, err)
-		}
 		mp := newCityMailProvider(d.routes, workStore, d.cfg, d.cityPath, d.rec)
+		// The unique park tag survives a change of the mayor's mailbox.
+		// An empty recipient scans every retained message, including archives.
 		var all []mail.Message
+		var err error
 		if lister, ok := mp.(mail.ArchivedLister); ok {
-			all, err = lister.AllIncludingArchived(to)
+			all, err = lister.AllIncludingArchived("")
 		} else {
 			fmt.Fprintf(d.stderr, "session reconciler: the mail provider keeps no record of archived mail; a park mail archived before its stamp persisted may be sent once more after a restart\n") //nolint:errcheck
-			all, err = mp.All(to)
+			all, err = mp.All("")
 		}
 		if err != nil {
 			return false, err
 		}
 		tag := n.Tag()
 		for _, m := range all {
-			if strings.Contains(m.Subject, tag) {
+			if m.From == controllerMailIdentity && strings.Contains(m.Subject, tag) {
 				return true, nil
 			}
 		}

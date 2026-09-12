@@ -144,6 +144,7 @@ func TestSendParkedWorkMailWithoutAMayorIsAnError(t *testing.T) {
 // the park and sends nothing: one park, one mail, whatever the mayor did with
 // it. This drives the real mailer, the real lookup and the real retry.
 func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
 	cr := &CityRuntime{
@@ -151,14 +152,25 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 		cityName: "test-city",
 		cfg: &config.City{
 			Workspace:     config.Workspace{Name: "test-city"},
-			Agents:        []config.Agent{{Name: "mayor", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}, {Name: "worker", MaxActiveSessions: intPtr(2)}},
-			NamedSessions: []config.NamedSession{{Name: "mayor", Template: "mayor"}},
+			Rigs:          []config.Rig{{Name: "riga", Path: "riga"}, {Name: "rigb", Path: "rigb"}},
+			Agents:        []config.Agent{{Name: "mayor", Dir: "riga", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}, {Name: "worker", MaxActiveSessions: intPtr(2)}},
+			NamedSessions: []config.NamedSession{{Name: "mayor", Template: "mayor", Dir: "riga"}},
 		},
 		sp:            runtime.NewFake(),
 		rec:           events.Discard,
 		stderr:        &stderr,
 		storageRoutes: messagingSplitRoutes(store),
 	}
+	makeMayor := func(identity string) beads.Bead {
+		row, err := store.Create(beads.Bead{Title: identity, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"template": identity, "alias": identity, "agent_name": identity, "session_name": strings.ReplaceAll(identity, "/", "-"), "state": "asleep", "configured_named_session": "true", "configured_named_identity": identity,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	oldMayor := makeMayor("riga/mayor")
 	work, err := store.Create(beads.Bead{
 		Title: "routed work the pool parked",
 		Type:  "task",
@@ -189,7 +201,7 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 	policy := cr.workStartFailurePolicy(store, store, nil)
 	policy.retryUnmailedParks([]beads.Bead{reload()}, []string{"city"})
 	policy.awaitParkMailRetries()
-	open, err := mp.All("mayor")
+	open, err := mp.All("riga/mayor")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,16 +219,22 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 	if err := mp.Archive(open[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if still, err := mp.All("mayor"); err != nil || len(still) != 0 {
+	if still, err := mp.All("riga/mayor"); err != nil || len(still) != 0 {
 		t.Fatalf("All after Archive = %d, err=%v; want no open mail", len(still), err)
 	}
 
+	if err := store.Close(oldMayor.ID); err != nil {
+		t.Fatal(err)
+	}
+	makeMayor("rigb/mayor")
+	cr.cfg.Agents[0].Dir = "rigb"
+	cr.cfg.NamedSessions[0].Dir = "rigb"
 	cr.parkMailRetry = nil // the restart: no in-memory throttle survives it
 	policy = cr.workStartFailurePolicy(store, store, nil)
 	policy.retryUnmailedParks([]beads.Bead{reload()}, []string{"city"})
 	policy.awaitParkMailRetries()
 
-	all, err := archived.AllIncludingArchived("mayor")
+	all, err := archived.AllIncludingArchived("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,5 +249,49 @@ func TestPoolStartBackoffArchivedParkMailIsNotResentAfterARestart(t *testing.T) 
 	}
 	if !strings.Contains(stderr.String(), "already landed; stamping without a second send") {
 		t.Fatalf("stderr must say the mail was found:\n%s", stderr.String())
+	}
+}
+
+// A diagnostic containing the park tag is not the controller's delivery receipt.
+func TestParkMailReceiptRequiresControllerSender(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath: t.TempDir(), cityName: "test-city",
+		cfg: &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}, {Name: "worker", MaxActiveSessions: intPtr(1)}}, NamedSessions: []config.NamedSession{{Name: "mayor", Template: "mayor"}}},
+		sp:  runtime.NewFake(), rec: events.Discard, stderr: &stderr, storageRoutes: messagingSplitRoutes(store),
+	}
+	work, err := store.Create(beads.Bead{Title: "parked work", Type: "task", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: "worker", beadmeta.ParkedAtMetadataKey: "2026-09-11T03:04:00Z", beadmeta.ParkFailuresMetadataKey: "5", beadmeta.ParkIDMetadataKey: "controller-receipt", beadmeta.ParkReasonMetadataKey: "pre_start failed",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp := newMailProviderWithSessionStore(store, store)
+	if _, err := mp.Send("worker", "mayor", "Investigating [park controller-receipt]", "A diagnostic, not the park alert"); err != nil {
+		t.Fatal(err)
+	}
+	policy := cr.workStartFailurePolicy(store, store, nil)
+	policy.retryUnmailedParks([]beads.Bead{work}, []string{"city"})
+	policy.awaitParkMailRetries()
+	all, err := mp.All("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerMails := 0
+	for _, m := range all {
+		if m.From == controllerMailIdentity {
+			controllerMails++
+		}
+	}
+	if controllerMails != 1 {
+		t.Fatalf("diagnostic must not suppress the controller alert: got %d controller messages\nstderr: %s", controllerMails, stderr.String())
+	}
+	row, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readWorkStartFailureState(row.Metadata).ParkMailedAt.IsZero() {
+		t.Fatal("controller delivery must be stamped")
 	}
 }
