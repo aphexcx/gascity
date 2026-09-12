@@ -232,8 +232,20 @@ binds it. A bead still carrying an agent's legacy bound
 identity (`rig/old.worker` after a bound→unbound migration) is routed to that
 agent, not "elsewhere".
 
-A confirmed start (`creation_complete`) clears the whole record. The unpark
-is a designed surface, never a hand edit:
+A confirmed start (`creation_complete`) clears the whole record. A reset the
+confirming commit could not land (the controller died between the session's
+confirmation batch and the work-store write, or that write failed) is derived
+again on every tick from the session row itself: a running, confirmed session
+bound to a bead that still carries a record clears it
+(`clearConfirmedStartRecords`), and only a running session counts — an asleep
+holder's failed wakes are charged on the resume arm, and its old confirmation
+says nothing about them. A named holder's trigger follows its wake request
+every tick and is cleared when there is none (its bead parked, backed off,
+closed or assigned elsewhere; a reopened holder is reopened with the same
+clear), so a `mode = "always"` holder restarting for no work is charged to
+nothing and lifts no park. A park written before `gc.park_id` existed is
+identified by the bead id and `gc.parked_at` together. The unpark is a
+designed surface, never a hand edit:
 
 ```
 gc sling --reassign <agent> <bead>     # re-dispatch: clears the record and the park before routing

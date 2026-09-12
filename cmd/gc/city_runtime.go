@@ -2610,6 +2610,12 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	workStartFailure := cr.workStartFailurePolicy(store, sessStore, rigStores)
 	workStartFailure.retryUnmailedParks(result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 	workStartFailure.retryUnmailedParks(result.ParkedUnmailedWorkBeads, result.ParkedUnmailedWorkStoreRefs)
+	// A record still on a bead whose bound session is running and confirmed
+	// is a reset that did not land (the controller died between the
+	// session's confirmation batch and the work-store write, or that write
+	// failed): the session row is the durable fact, so the clear is derived
+	// from it here until it lands.
+	workStartFailure.clearConfirmedStartRecords(result.ConfirmedStartWork)
 	reconcileStartOptions := []startExecutionOption{
 		withWorkStartFailurePolicy(workStartFailure),
 		withAsyncStartExecution(),

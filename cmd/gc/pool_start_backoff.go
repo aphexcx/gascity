@@ -144,16 +144,18 @@ func readWorkStartFailureState(meta map[string]string) workStartFailureState {
 }
 
 // parkIdentity is what a delivery must match to acknowledge a park: the
-// random gc.park_id, or — for a park written before that key existed — its
-// gc.parked_at.
-func (s workStartFailureState) parkIdentity() string {
+// random gc.park_id, or — for a park written before that key existed — the
+// bead's id and its gc.parked_at together: two legacy parks stamped in the
+// same second on different beads must not share a mail receipt, or one
+// bead's landed mail would stamp the other's park mailed without a send.
+func (s workStartFailureState) parkIdentity(beadID string) string {
 	if s.ParkID != "" {
 		return s.ParkID
 	}
 	if s.ParkedAt.IsZero() {
 		return ""
 	}
-	return s.ParkedAt.UTC().Format(time.RFC3339)
+	return strings.TrimSpace(beadID) + "@" + s.ParkedAt.UTC().Format(time.RFC3339)
 }
 
 // newParkID mints a park's random identity (8 bytes, hex). A failed read of
@@ -607,7 +609,7 @@ func (p *workStartFailurePolicy) writeWorkRecord(store beads.Store, id string, c
 			lastErr = fmt.Errorf("work bead %s changed between read and write (no conditional write on this store)", id)
 			continue
 		}
-		return bead, patch, store.SetMetadataBatch(id, patch)
+		return bead, patch, writeLiveWorkRecord(store, id, patch)
 	}
 	return beads.Bead{}, nil, fmt.Errorf("after %d attempts: %w", workRecordWriteAttempts, lastErr)
 }
@@ -744,6 +746,25 @@ func (p *workStartFailurePolicy) recordStartSuccess(trigger workTrigger, templat
 	p.logf("session reconciler: work bead %s started; start-failure record cleared\n", bead.ID)
 }
 
+// clearConfirmedStartRecords clears the record of every work bead a tick
+// found with a confirmed, RUNNING session bound to it
+// (DesiredStateResult.ConfirmedStartWork). The reset a confirmed start owes at
+// commit time (recordStartSuccess) can be lost — the controller dies between
+// the session's confirmation batch and the work-store write, or that write
+// fails — and once pending_create_claim is clear no recovery path revisits
+// it; one more failure after the healthy session exits would then park the
+// bead on a count it never earned. The session row is the durable fact, so
+// the clear is derived from it every tick until it lands (recordStartSuccess
+// writes nothing for a bead with no record).
+func (p *workStartFailurePolicy) clearConfirmedStartRecords(entries []confirmedStartWork) {
+	if p == nil {
+		return
+	}
+	for _, entry := range entries {
+		p.recordStartSuccess(workTrigger{BeadID: entry.Bead.ID, StoreRef: entry.StoreRef}, entry.Template)
+	}
+}
+
 // mailPark sends the one park mail and stamps gc.park_mailed_at when it lands.
 // An unlanded mail leaves the stamp empty so retryUnmailedParks sends it again
 // (throttled by parkMailRetryEvery; the park's own first attempt is never
@@ -783,7 +804,7 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 		Failures: state.ParkFailures,
 		Reason:   state.ParkReason,
 		ParkedAt: state.ParkedAt,
-		ParkID:   state.parkIdentity(),
+		ParkID:   state.parkIdentity(beadID),
 	}
 	if p.notify == nil {
 		p.logf("session reconciler: no mail route configured; park of %s not mailed\n", beadID)
@@ -810,7 +831,7 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 	}
 	parkID := notice.ParkID
 	_, stamped, err := p.writeWorkRecord(store, beadID, func(row beads.Bead) map[string]string {
-		if readWorkStartFailureState(row.Metadata).parkIdentity() != parkID {
+		if readWorkStartFailureState(row.Metadata).parkIdentity(beadID) != parkID {
 			return nil // a different park (or none) by now: this delivery does not acknowledge it
 		}
 		return map[string]string{beadmeta.ParkMailedAtMetadataKey: now.UTC().Format(time.RFC3339)}
@@ -1127,6 +1148,17 @@ func earliestStartDeferralDeadline(workBeads []beads.Bead, now time.Time) time.T
 // (the controller's beadPolicyStore, the typed class wrappers) to find it.
 // Any other store answers as it does for Get.
 func liveWorkBead(store beads.Store, id string) (beads.Bead, error) {
+	if caching := cachingWorkStore(store); caching != nil {
+		return caching.Backing().Get(id)
+	}
+	return store.Get(id)
+}
+
+// cachingWorkStore is the caching store behind a work store, found through
+// the wrappers' declared resolution targets (the controller's
+// beadPolicyStore, the typed class wrappers); nil when the store is not
+// cached or the cache has no backing.
+func cachingWorkStore(store beads.Store) *beads.CachingStore {
 	inner := store
 	for depth := 0; depth < 8; depth++ {
 		target, ok := inner.(beads.ConditionalWritesResolveTargeter)
@@ -1139,10 +1171,39 @@ func liveWorkBead(store beads.Store, id string) (beads.Bead, error) {
 		}
 		inner = next
 	}
-	if caching, ok := inner.(*beads.CachingStore); ok {
-		if backing := caching.Backing(); backing != nil {
-			return backing.Get(id)
+	if caching, ok := inner.(*beads.CachingStore); ok && caching.Backing() != nil {
+		return caching
+	}
+	return nil
+}
+
+// writeLiveWorkRecord lands an unfenced patch on the row the live reads saw.
+// A caching store's SetMetadataBatch skips the backing write when its CACHED
+// row already carries every value in the patch (its idempotence guard) —
+// true of a stale cached row, not of the backing row the patch was computed
+// from, so a clear a confirmed start owes would never reach the backing
+// while the controller logged it cleared. When the cached row would swallow
+// the patch the backing is written directly (a no-op write when the two rows
+// agree); otherwise the write goes through the cache, whose row refreshes
+// with it.
+func writeLiveWorkRecord(store beads.Store, id string, patch map[string]string) error {
+	caching := cachingWorkStore(store)
+	if caching == nil {
+		return store.SetMetadataBatch(id, patch)
+	}
+	if cached, err := caching.Get(id); err == nil && metadataCarries(cached.Metadata, patch) {
+		return caching.Backing().SetMetadataBatch(id, patch)
+	}
+	return caching.SetMetadataBatch(id, patch)
+}
+
+// metadataCarries reports whether meta already holds every value in patch —
+// the comparison the caching store's idempotence guard makes.
+func metadataCarries(meta, patch map[string]string) bool {
+	for k, v := range patch {
+		if meta[k] != v {
+			return false
 		}
 	}
-	return store.Get(id)
+	return true
 }
