@@ -3396,6 +3396,9 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
+		// The targeted dispatcher reconcile starts sessions too: every start
+		// it makes is charged, gated, cleared and parked like the main tick's.
+		withWorkStartFailurePolicy(cr.workStartFailurePolicy(cr.cityBeadStore(), sessionsStore.Store, cr.rigBeadStores())),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

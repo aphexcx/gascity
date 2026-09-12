@@ -276,7 +276,12 @@ beads whose mail has not landed (both tiers, at most once per retry
 interval; a park is mailed from the store it was found in, so a relocated
 class store's active row is never mistaken for a retained copy), so a
 bead whose agent was suspended, or that gained a dependency, still gets
-its mail; the re-read before any send is live. The start-time gate runs
+its mail (a closed bead is not swept: its park, and its mail, are moot);
+the listings and the sends run off the tick; the re-read before any send
+is live, and a delivery never stamps a park lifted meanwhile. The gate the
+demand build applies reads the wall clock, not the beacon time the
+supervisor captured at start, so a backoff expires. The targeted
+dispatcher reconcile carries the same record policy as the main tick. The start-time gate runs
 before the named-session circuit breaker records an attempt: a deferred
 start makes none and spends none. A failure that lands on an already parked bead (a start in
 flight when the park was written) is recorded as the last failure and

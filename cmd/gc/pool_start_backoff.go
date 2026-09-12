@@ -950,8 +950,12 @@ func (p *workStartFailurePolicy) mailPark(store beads.Store, beadID, template st
 	}
 	parkID := notice.ParkID
 	_, stamped, err := p.writeWorkRecord(store, beadID, func(row beads.Bead) map[string]string {
-		if readWorkStartFailureState(row.Metadata).parkIdentity(beadID) != parkID {
-			return nil // a different park (or none) by now: this delivery does not acknowledge it
+		state := readWorkStartFailureState(row.Metadata)
+		// Lifted meanwhile (the three-key unpark leaves gc.park_id behind, so
+		// the identity alone would still match), or a different park by now:
+		// this delivery does not acknowledge it.
+		if !state.Parked() || state.parkIdentity(beadID) != parkID {
+			return nil
 		}
 		return map[string]string{beadmeta.ParkMailedAtMetadataKey: now.UTC().Format(time.RFC3339)}
 	})
@@ -1055,6 +1059,20 @@ func (p *workStartFailurePolicy) sweepUnmailedParks(now time.Time) {
 	if p == nil || !p.retry.sweepDue(now) {
 		return
 	}
+	// Off the tick: the listings (a stalled uncached store answers at its
+	// read timeout) and the sends both run on the background sweep; the tick
+	// only decides the sweep is due.
+	p.sweeps.Add(1)
+	go func() {
+		defer p.sweeps.Done()
+		p.retryOwedParks(p.collectUnmailedParks())
+	}()
+}
+
+// collectUnmailedParks lists every store the policy knows for parked beads
+// whose mail has not landed. A closed bead is not listed: its park is moot
+// (nothing will start it), and so is its mail.
+func (p *workStartFailurePolicy) collectUnmailedParks() []owedPark {
 	var owed []owedPark
 	collect := func(store beads.Store, ref string) {
 		if store == nil {
@@ -1093,7 +1111,7 @@ func (p *workStartFailurePolicy) sweepUnmailedParks(now time.Time) {
 	for _, store := range p.extraStores {
 		collect(store, "class")
 	}
-	p.retryOwedParks(owed)
+	return owed
 }
 
 // awaitParkMailRetries blocks until every retry sweep retryUnmailedParks has

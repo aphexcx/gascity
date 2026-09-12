@@ -315,6 +315,10 @@ func TestPoolStartBackoffProductionDemandPlansNoStartForParkedWork(t *testing.T)
 		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
 	}
 	now := time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC)
+	// The gate reads the wall clock (round 16); pin it to this test's now.
+	prevNow := workStartDeferralNow
+	workStartDeferralNow = func() time.Time { return now }
+	defer func() { workStartDeferralNow = prevNow }()
 	build := func(store beads.Store) (*sessionBeadSnapshot, DesiredStateResult, string) {
 		snapshot := newSessionBeadSnapshot(nil)
 		var stderr bytes.Buffer

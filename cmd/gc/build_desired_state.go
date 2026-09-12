@@ -458,6 +458,11 @@ func buildDesiredStateWithSessionBeads(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	// The failed-start record's deadlines are wall-clock: the gate that
+	// excludes a backed-off or parked bead from demand reads the clock NOW,
+	// never beaconTime — the supervisor captures that once at start, and a
+	// backoff compared against it would never expire.
+	deferralNow := workStartDeferralNow()
 	bp.sessionBeads = sessionBeads
 
 	// Pre-compute suspended rig paths (config + runtime state).
@@ -857,7 +862,10 @@ func buildDesiredStateWithSessionBeads(
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
 		demandReadyCache := newReadyDemandCache()
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
+		// A parked or backed-off routed bead is no demand for the dispatcher
+		// fallback either: a seat restored from it would carry no trigger, so
+		// nothing would charge or gate it.
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, excludeStartDeferredWork(unassignedRoutedBeads, deferralNow, nil))
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -867,7 +875,7 @@ func buildDesiredStateWithSessionBeads(
 			"pools": len(pendingPools),
 		})
 		if len(customProbeTargets) > 0 {
-			_, customProbeDemand, _, probeErrs := defaultScaleCheckCountsAndDemand(cfg, beaconTime, customProbeTargets, demandReadyCache)
+			_, customProbeDemand, _, probeErrs := defaultScaleCheckCountsAndDemand(cfg, deferralNow, customProbeTargets, demandReadyCache)
 			for _, err := range probeErrs {
 				fmt.Fprintf(stderr, "buildDesiredState: custom scale_check row probe: %v (seats may start without a trigger bead; parked rows may miss a mail retry this tick)\n", err) //nolint:errcheck
 			}
@@ -886,7 +894,7 @@ func buildDesiredStateWithSessionBeads(
 		}
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, beaconTime, defaultScaleTargets, demandReadyCache)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, deferralNow, defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -974,7 +982,7 @@ func buildDesiredStateWithSessionBeads(
 		// wake-known-identity seats record the store their bead was counted
 		// in (pool_desired_state.go: WorkStoreRef → gc.trigger_bead_store_ref).
 		poolWorkBeads, poolWorkStoreRefs := filterAssignedWorkBeadsForPoolDemandAligned(cfg, cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-		poolWorkBeads, poolWorkStoreRefs = excludeStartDeferredWorkAligned(poolWorkBeads, poolWorkStoreRefs, beaconTime, trace)
+		poolWorkBeads, poolWorkStoreRefs = excludeStartDeferredWorkAligned(poolWorkBeads, poolWorkStoreRefs, deferralNow, trace)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
@@ -1053,7 +1061,7 @@ func buildDesiredStateWithSessionBeads(
 	// demand too: a backed-off or parked bead must not keep an on-demand named
 	// session awake for it. The full snapshot stays in the result for the
 	// release/orphan sweeps and the park-mail retry.
-	namedDemandWork, namedDemandRefs := excludeStartDeferredWorkAligned(assignedWorkBeads, assignedWorkStoreRefs, beaconTime, trace)
+	namedDemandWork, namedDemandRefs := excludeStartDeferredWorkAligned(assignedWorkBeads, assignedWorkStoreRefs, deferralNow, trace)
 	for identity, spec := range namedSpecs {
 		// ga-i1d0tr Candidate B: a bare-template Assignee used to be
 		// distrusted for templates supporting expanded per-instance
@@ -1236,7 +1244,7 @@ func buildDesiredStateWithSessionBeads(
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		ParkedUnmailedWorkBeads:            parkedUnmailedWorkBeads(parkedUnmailedWork),
 		ParkedUnmailedWorkStoreRefs:        parkedUnmailedWorkStoreRefs(parkedUnmailedWork),
-		StartDeferredUntil:                 earlierDeadline(startDeferredUntil, earliestStartDeferralDeadline(assignedWorkBeads, beaconTime)),
+		StartDeferredUntil:                 earlierDeadline(startDeferredUntil, earliestStartDeferralDeadline(assignedWorkBeads, deferralNow)),
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -5773,6 +5781,10 @@ func bindNamedSessionWakeTrigger(bp *agentBuildParams, info session.Info, reques
 	}
 	return sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
 }
+
+// workStartDeferralNow is the clock the demand build's failed-start gate
+// reads (wall clock; a test pins it).
+var workStartDeferralNow = time.Now
 
 // startInFlightInfo reports whether a session start is in flight for the
 // holder: a fresh create under its pending-create claim, or a session whose
