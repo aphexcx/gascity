@@ -309,7 +309,7 @@ func TestPreassignHookContinuationGroupPinsSiblingsToSessionID(t *testing.T) {
 				},
 			}
 
-			assigned, err := preassignHookContinuationGroup(claimed, opts, ops, ".", io.Discard)
+			assigned, err := preassignHookContinuationGroup(claimed, opts, ops, ".")
 			if err != nil {
 				t.Fatalf("preassignHookContinuationGroup() error = %v", err)
 			}
