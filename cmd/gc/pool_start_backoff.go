@@ -695,18 +695,18 @@ func workTriggerFromInfo(info sessionpkg.Info) workTrigger {
 	return workTrigger{BeadID: strings.TrimSpace(info.TriggerBeadID), StoreRef: strings.TrimSpace(info.TriggerBeadStoreRef)}
 }
 
-// workTriggerForStart is the work bead a planned start is charged to. A
-// configured named holder's trigger is the BUILD's verdict for this tick
-// (TemplateParams.TriggerBeadID / TriggerBeadStoreRef: its wake request, or
-// nothing), not its bead's metadata: the bind of that verdict onto the bead
-// (bindNamedSessionWakeTrigger) can fail transiently, and a start prepared
-// off the bead would then be charged to — or, succeeding, unpark — the bead
-// of an earlier wake. A pool seat's trigger is its bead's:
-// bindPoolSessionTriggerBead persisted it before the seat was planned.
-func workTriggerForStart(tp TemplateParams, info sessionpkg.Info) workTrigger {
-	if strings.TrimSpace(tp.ConfiguredNamedIdentity) != "" {
-		return workTrigger{BeadID: strings.TrimSpace(tp.TriggerBeadID), StoreRef: strings.TrimSpace(tp.TriggerBeadStoreRef)}
-	}
+// workTriggerForStart is the work bead a planned start is charged to: the
+// trigger the session bead carries when the start is prepared — the same
+// row the start's trigger env is read from (sessionTriggerBeadEnv) and the
+// row recoverRunningPendingCreate reads to clear before it confirms — so
+// the bead the start RUNS for, the bead a failure charges and the bead a
+// confirmation clears are one operand. The build writes that trigger before
+// any start (bindNamedSessionWakeTrigger / bindPoolSessionTriggerBead) and
+// leaves it alone while a start is in flight; a bind that did not land
+// leaves the previous trigger, and the start then runs for and is charged to
+// that. TemplateParams.TriggerBeadID mirrors the same value for the create
+// and reopen paths (namedSessionTriggerMetadata) and is not read here.
+func workTriggerForStart(info sessionpkg.Info) workTrigger {
 	return workTriggerFromInfo(info)
 }
 

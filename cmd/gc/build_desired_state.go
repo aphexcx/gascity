@@ -1177,17 +1177,22 @@ func buildDesiredStateWithSessionBeads(
 				// of demand, and a start it makes for no work must not be
 				// charged to that bead, nor lift its park on success.
 				request, _ := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate)
-				// The build's verdict rides on the params too: the start
-				// prepared for this holder is charged to THIS request
-				// (workTriggerForStart), never to what the bead says if the
-				// bind below fails transiently.
-				tp.TriggerBeadID = request.WorkBeadID
-				tp.TriggerBeadStoreRef = request.WorkStoreRef
 				if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
-					fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (continuing; the start is charged to the request)\n", identity, request.WorkBeadID, err) //nolint:errcheck
+					// The bind did not land: the bead still carries its previous
+					// trigger, and THAT is what a start prepared this tick runs
+					// for (the trigger env is read off the persisted bead) and is
+					// charged to (workTriggerFromInfo at prepare). The params say
+					// the same, so nothing disagrees; the request binds on a
+					// later tick.
+					fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (the holder keeps trigger %q until the bind lands; a start meanwhile runs for and is charged to that)\n", identity, request.WorkBeadID, err, strings.TrimSpace(canonicalInfo.TriggerBeadID)) //nolint:errcheck
 				} else {
 					canonicalInfo = bound
 				}
+				// The params mirror the PERSISTED trigger — the operand the
+				// start's env, its failure charge and its pre-confirmation
+				// clear all read — never a request the bead does not carry.
+				tp.TriggerBeadID = strings.TrimSpace(canonicalInfo.TriggerBeadID)
+				tp.TriggerBeadStoreRef = strings.TrimSpace(canonicalInfo.TriggerBeadStoreRef)
 			}
 			if sn := strings.TrimSpace(canonicalInfo.SessionNameMetadata); sn != "" {
 				tp.SessionName = sn
@@ -3327,6 +3332,14 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // build with no store folds locally without a write.
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, error) {
 	if info.ID == "" {
+		return info, nil
+	}
+	// A seat whose start is in flight keeps the trigger that start ran for
+	// (the same pin as a named holder's, startInFlightInfo): the failure
+	// charge and the clear recoverRunningPendingCreate makes before it
+	// confirms name that bead. A seat that claimed other work meanwhile is
+	// re-pointed by the tick after its start commits.
+	if startInFlightInfo(info) {
 		return info, nil
 	}
 	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)

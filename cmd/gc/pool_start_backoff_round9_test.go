@@ -10,33 +10,16 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The round-9 owed-reset marker (gc.start_reset_owed_*) and its sweep were
 // REMOVED in round 10: the clear now runs before the confirming batch on the
-// one commit path (pool_start_backoff_round10_test.go).
+// one commit path (pool_start_backoff_round10_test.go); round 11 made the
+// persisted trigger the one operand a named start is charged to
+// (pool_start_backoff_round11_test.go), so the round-9 build's-verdict test
+// is gone too.
 
 // The cases codex round 9 found missing or wrong (evidence 07-codex-r9.md).
-
-// TestWorkTriggerForStartUsesTheBuildsVerdictForNamedHolders: a configured
-// named holder's start is charged to the trigger on its TemplateParams (the
-// build's wake request for this tick, or nothing), never to what its bead
-// says — the bind onto the bead can fail transiently. A pool seat's trigger
-// is its bead's.
-func TestWorkTriggerForStartUsesTheBuildsVerdictForNamedHolders(t *testing.T) {
-	info := session.Info{ID: "s-1", TriggerBeadID: "gp-old", TriggerBeadStoreRef: "city"}
-	named := TemplateParams{ConfiguredNamedIdentity: "test-city/solo", TriggerBeadID: "gp-new", TriggerBeadStoreRef: "rig:a"}
-	if got := workTriggerForStart(named, info); got != (workTrigger{BeadID: "gp-new", StoreRef: "rig:a"}) {
-		t.Fatalf("named holder: want the build's verdict, got %+v", got)
-	}
-	if got := workTriggerForStart(TemplateParams{ConfiguredNamedIdentity: "test-city/solo"}, info); got != (workTrigger{}) {
-		t.Fatalf("named holder woken for nothing: charged to nothing, got %+v", got)
-	}
-	if got := workTriggerForStart(TemplateParams{TemplateName: "worker"}, info); got != (workTrigger{BeadID: "gp-old", StoreRef: "city"}) {
-		t.Fatalf("pool seat: its bead's trigger, got %+v", got)
-	}
-}
 
 // round9FailingWriter is a conditional writer whose fenced update fails with
 // an ordinary (non-precondition) error: the work store is down for writes.

@@ -186,9 +186,8 @@ func TestRecoverRunningPendingCreate_KeepsTheClaimWhenTheClearFails(t *testing.T
 
 // TestRefreshConfiguredNamedStartCandidateCarriesTheTrigger: the refresh
 // resolves the holder's template afresh and REPLACES its params; the
-// build's verdict on what the start is for (TriggerBeadID / store ref) is
-// not a template property and rides through, so the prepared start is
-// charged to it (workTriggerForStart) like any other named start.
+// trigger the build put on them (a mirror of the bead's persisted trigger)
+// is not a template property and rides through.
 func TestRefreshConfiguredNamedStartCandidateCarriesTheTrigger(t *testing.T) {
 	resetSkillCatalogCache()
 	cityPath := t.TempDir()
@@ -247,9 +246,6 @@ func TestRefreshConfiguredNamedStartCandidateCarriesTheTrigger(t *testing.T) {
 	}
 	if refreshed.tp.TriggerBeadID != "gp-work" || refreshed.tp.TriggerBeadStoreRef != "rig:a" {
 		t.Fatalf("the refreshed params must carry the build's trigger, got %q/%q", refreshed.tp.TriggerBeadID, refreshed.tp.TriggerBeadStoreRef)
-	}
-	if got := workTriggerForStart(refreshed.tp, refreshed.info); got != (workTrigger{BeadID: "gp-work", StoreRef: "rig:a"}) {
-		t.Fatalf("the prepared named start is charged to the build's verdict, got %+v", got)
 	}
 }
 

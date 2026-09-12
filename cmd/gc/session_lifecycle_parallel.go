@@ -932,9 +932,9 @@ func refreshConfiguredNamedStartCandidate(
 		return candidate
 	}
 	// The refreshed params are the holder's template resolved afresh; the
-	// build's verdict on what this start is FOR (TriggerBeadID / store ref,
-	// workTriggerForStart) rides through unchanged — it is not a template
-	// property, and dropping it here would leave every named start uncharged.
+	// trigger the build put on them (TriggerBeadID / store ref, a mirror of
+	// the bead's persisted trigger) rides through unchanged — it is not a
+	// template property.
 	refreshed.TriggerBeadID = candidate.tp.TriggerBeadID
 	refreshed.TriggerBeadStoreRef = candidate.tp.TriggerBeadStoreRef
 	candidate.tp = refreshed
@@ -2911,7 +2911,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				item.workStartFailure = startOpts.workStartFailure
-				item.workTrigger = workTriggerForStart(item.candidate.tp, item.candidate.info)
+				item.workTrigger = workTriggerForStart(item.candidate.info)
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {

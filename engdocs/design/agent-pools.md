@@ -238,18 +238,19 @@ before the batch that stamps `creation_complete`, and a clear that fails (a
 work-store read or write error; a bead that is gone or since re-routed
 counts as settled) fails the commit like a failed metadata batch — the
 runtime keeps running, the session stays pending-create, and the next tick's
-pending-create recovery clears again before it confirms. The bead a start
-ran for is its session's trigger, pinned while the start is in flight: a
-named holder's trigger follows its wake request only between starts (cleared
-when there is none — its bead parked, backed off, closed or assigned
-elsewhere; a reopened holder is reopened with the same clear), and the start
-planned for it is charged to the build's request even when the bind onto the
-bead fails, so a `mode = "always"` holder restarting for no work is charged
-to nothing and lifts no park. The one window left is a controller death
-between a KEPT session's runtime resuming and the clear write (a fresh
-session's pending-create recovery closes the same window): the pre-resume
-count stays until the next confirmed start clears it. Every record read is
-live (a caching store's backing), fenced or not. A park written before
+pending-create recovery clears again before it confirms — for a fresh
+create under its pending-create claim and for a KEPT session whose resume
+left it start-pending/creating alike (the pre-heal state is the gate). The
+bead a start ran for is its session's trigger — the one operand its trigger
+env, its failure charge and its pre-confirmation clear all read — pinned
+while the start is in flight, for named holders and pool seats alike: a
+trigger follows its wake request only between starts (a named holder's is
+cleared when there is none — its bead parked, backed off, closed or assigned
+elsewhere; a reopened holder is reopened with the same clear — so a
+`mode = "always"` holder restarting for no work is charged to nothing and
+lifts no park), and a bind that did not land leaves the previous trigger,
+which the start then runs for and is charged to. Every record read is live
+(a caching store's backing), fenced or not. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`
 together. Under `beads.conditional_writes = "require"` a fenced write the
 store refuses at write time is not retried unfenced. A trigger whose named

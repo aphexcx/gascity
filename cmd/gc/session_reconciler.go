@@ -2748,10 +2748,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if alive && productiveLongEnoughInfo(infoByID[id], clk) {
 			tick.set(id, clearChurn(infoByID[id], sessFront))
 		}
-		if alive && shouldRollbackPendingCreateInfo(infoByID[id]) {
+		// A live runtime whose start has not COMMITTED — a fresh create still
+		// under its pending-create claim, or a kept session whose resume left
+		// it start-pending/creating (its commit failed: the metadata batch, or
+		// the clear of its work bead's failed-start record, which runs before
+		// that batch) — is confirmed here, on the one path that clears the
+		// record first (recoverRunningPendingCreate). The pre-heal state is the
+		// gate: the heal above may already have moved a fresh creating
+		// session on, and a kept session carries no claim.
+		if alive && (shouldRollbackPendingCreateInfo(infoByID[id]) || pendingCreateQueuedOrCreatingState(string(stateBeforeHeal))) {
 			switch stateBeforeHeal {
 			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
-				if pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
+				inFlight := infoByID[id]
+				inFlight.MetadataState = string(stateBeforeHeal)
+				if pendingCreateStartInFlightInfo(inFlight, clk, startupTimeout) {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryInFlight, TraceOutcomeDeferred, tp.TemplateName, name, nil)
 					}
