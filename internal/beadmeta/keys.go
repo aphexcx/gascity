@@ -208,24 +208,16 @@ const (
 	StartFailedAtMetadataKey     = "gc.start_failed_at"
 	StartFailureMetadataKey      = "gc.start_failure"
 	StartFailuresMetadataKey     = "gc.start_failures"
-	// StartResetOwedBeadIDMetadataKey and StartResetOwedStoreRefMetadataKey
-	// are stamped on a SESSION bead in the very batch that confirms its start
-	// (cmd/gc/session_lifecycle_parallel.go): the work bead that start ran
-	// for, whose failed-start record the confirmation owes a clear. Cleared
-	// once that clear lands; a marker a later tick still finds is settled
-	// then (cmd/gc/pool_start_backoff.go settleOwedStartResets).
-	StartResetOwedBeadIDMetadataKey   = "gc.start_reset_owed_bead_id"
-	StartResetOwedStoreRefMetadataKey = "gc.start_reset_owed_store_ref"
-	StderrMetadataKey                 = "gc.stderr"
-	StdoutMetadataKey                 = "gc.stdout"
-	StepIDMetadataKey                 = "gc.step_id"
-	StepRefMetadataKey                = "gc.step_ref"
-	StepTimeoutMetadataKey            = "gc.step_timeout"
-	SyntheticKindMetadataKey          = "gc.synthetic_kind"
-	SyntheticMetadataKey              = "gc.synthetic"
-	TemplateMetadataKey               = "gc.template"
-	TerminalMetadataKey               = "gc.terminal"
-	TriggerBeadIDMetadataKey          = "gc.trigger_bead_id"
+	StderrMetadataKey            = "gc.stderr"
+	StdoutMetadataKey            = "gc.stdout"
+	StepIDMetadataKey            = "gc.step_id"
+	StepRefMetadataKey           = "gc.step_ref"
+	StepTimeoutMetadataKey       = "gc.step_timeout"
+	SyntheticKindMetadataKey     = "gc.synthetic_kind"
+	SyntheticMetadataKey         = "gc.synthetic"
+	TemplateMetadataKey          = "gc.template"
+	TerminalMetadataKey          = "gc.terminal"
+	TriggerBeadIDMetadataKey     = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
@@ -472,8 +464,6 @@ var KnownMetadataKeys = []string{
 	StartFailedAtMetadataKey,
 	StartFailureMetadataKey,
 	StartFailuresMetadataKey,
-	StartResetOwedBeadIDMetadataKey,
-	StartResetOwedStoreRefMetadataKey,
 	StderrMetadataKey,
 	StdoutMetadataKey,
 	StepIDMetadataKey,

@@ -232,24 +232,32 @@ binds it. A bead still carrying an agent's legacy bound
 identity (`rig/old.worker` after a bound→unbound migration) is routed to that
 agent, not "elsewhere".
 
-A confirmed start (`creation_complete`) clears the whole record. The batch
-that confirms the start also stamps the session bead with the work bead the
-start ran for (`gc.start_reset_owed_bead_id` / `gc.start_reset_owed_store_ref`),
-lifted once the clear lands; a clear the confirming commit could not land (the
-controller died between that batch and the work-store write, or the write
-failed) is settled from the marker on a later tick (`settleOwedStartResets`,
-before the tick closes any session). The marker names the bead the START ran
-for, so a holder whose trigger was re-pointed to other work since never has
-that work's record cleared. A named holder's trigger follows its wake request
-every tick and is cleared when there is none (its bead parked, backed off,
-closed or assigned elsewhere; a reopened holder is reopened with the same
-clear), and the start planned for it is charged to the build's request even
-when the bind onto the bead fails, so a `mode = "always"` holder restarting
-for no work is charged to nothing and lifts no park. A park written before
+A confirmed start clears the whole record, and the clear comes FIRST: on
+the one commit path the record of the bead the start ran for is cleared
+before the batch that stamps `creation_complete`, and a clear that fails (a
+work-store read or write error; a bead that is gone or since re-routed
+counts as settled) fails the commit like a failed metadata batch — the
+runtime keeps running, the session stays pending-create, and the next tick's
+pending-create recovery clears again before it confirms. The bead a start
+ran for is its session's trigger, pinned while the start is in flight: a
+named holder's trigger follows its wake request only between starts (cleared
+when there is none — its bead parked, backed off, closed or assigned
+elsewhere; a reopened holder is reopened with the same clear), and the start
+planned for it is charged to the build's request even when the bind onto the
+bead fails, so a `mode = "always"` holder restarting for no work is charged
+to nothing and lifts no park. The one window left is a controller death
+between a KEPT session's runtime resuming and the clear write (a fresh
+session's pending-create recovery closes the same window): the pre-resume
+count stays until the next confirmed start clears it. Every record read is
+live (a caching store's backing), fenced or not. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`
 together. Under `beads.conditional_writes = "require"` a fenced write the
-store refuses at write time is not retried unfenced. The unpark is a designed
-surface, never a hand edit:
+store refuses at write time is not retried unfenced. A trigger whose named
+store fails to answer is an error, never absence — a migration's retained
+copy is not charged in the active copy's place. The unpark is a designed
+surface, never a hand edit (for a graph bead migrated into its class
+binding, `gc sling --reassign` acts on the primary store's copy like every
+sling route does; lift the park on the class store's copy in place):
 
 ```
 gc sling --reassign <agent> <bead>     # re-dispatch: clears the record and the park before routing
@@ -264,6 +272,9 @@ Implementation: `cmd/gc/pool_start_backoff.go` (record, gate, mail),
 `cmd/gc/build_desired_state.go` (the gate), `reopenForReassign` in
 `internal/sling` (the unpark). A transient failure — one `pre_start` lost a
 lock, the next attempt succeeded — costs one 10s backoff and nothing else.
+A convoy re-dispatched as a batch skips children already routed to the
+target (the batch's pre-existing idempotence check) and lifts no park on
+them: unpark a parked child by its own id.
 
 ## Downscaling (full design — implement later)
 

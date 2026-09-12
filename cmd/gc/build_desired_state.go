@@ -1161,22 +1161,33 @@ func buildDesiredStateWithSessionBeads(
 					direct = request
 				}
 			}
-			// No wake request means the trigger the holder still carries names
-			// a bead it no longer serves — parked or backed off (gated out of
-			// the demand above), closed, or assigned elsewhere — and the bind
-			// CLEARS it: a mode=always holder restarts regardless of demand,
-			// and a start it makes for no work must not be charged to that
-			// bead, nor lift its park on success.
-			request, _ := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate)
-			// The build's verdict rides on the params too: the start prepared
-			// for this holder is charged to THIS request (workTriggerForStart),
-			// never to what the bead says if the bind below fails transiently.
-			tp.TriggerBeadID = request.WorkBeadID
-			tp.TriggerBeadStoreRef = request.WorkStoreRef
-			if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (continuing; a failed start is not charged to it)\n", identity, request.WorkBeadID, err) //nolint:errcheck
+			if startInFlightInfo(canonicalInfo) {
+				// A start is in flight for this holder: its trigger is the
+				// operand that start ran for — the failure charge, and the clear
+				// recoverRunningPendingCreate makes before it confirms — and is
+				// not moved until the start commits or rolls back. The params
+				// carry the same bead so nothing prepared meanwhile disagrees.
+				tp.TriggerBeadID = strings.TrimSpace(canonicalInfo.TriggerBeadID)
+				tp.TriggerBeadStoreRef = strings.TrimSpace(canonicalInfo.TriggerBeadStoreRef)
 			} else {
-				canonicalInfo = bound
+				// No wake request means the trigger the holder still carries
+				// names a bead it no longer serves — parked or backed off (gated
+				// out of the demand above), closed, or assigned elsewhere — and
+				// the bind CLEARS it: a mode=always holder restarts regardless
+				// of demand, and a start it makes for no work must not be
+				// charged to that bead, nor lift its park on success.
+				request, _ := namedSessionWakeRequest(spec, direct, namedRoutedDemand[identity], scaleCheckDemandByTemplate)
+				// The build's verdict rides on the params too: the start
+				// prepared for this holder is charged to THIS request
+				// (workTriggerForStart), never to what the bead says if the
+				// bind below fails transiently.
+				tp.TriggerBeadID = request.WorkBeadID
+				tp.TriggerBeadStoreRef = request.WorkStoreRef
+				if bound, err := bindNamedSessionWakeTrigger(bp, canonicalInfo, request); err != nil {
+					fmt.Fprintf(stderr, "buildDesiredState: named session %q trigger bead %q: %v (continuing; the start is charged to the request)\n", identity, request.WorkBeadID, err) //nolint:errcheck
+				} else {
+					canonicalInfo = bound
+				}
 			}
 			if sn := strings.TrimSpace(canonicalInfo.SessionNameMetadata); sn != "" {
 				tp.SessionName = sn
@@ -5735,6 +5746,13 @@ func bindNamedSessionWakeTrigger(bp *agentBuildParams, info session.Info, reques
 		return info.ApplyPatch(patch), nil
 	}
 	return sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
+}
+
+// startInFlightInfo reports whether a session start is in flight for the
+// holder: a fresh create under its pending-create claim, or a session whose
+// state says it is being started. Its trigger is pinned meanwhile.
+func startInFlightInfo(info session.Info) bool {
+	return info.PendingCreateClaim || info.State == session.StateCreating || info.State == session.StateStartPending
 }
 
 // namedSessionReopenTriggerMetadata is the trigger a CLOSED named holder is
