@@ -1869,8 +1869,41 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) (s
 	if update.Assignee == nil && update.Status == nil && len(update.Metadata) == 0 {
 		return "", nil
 	}
-	if err := store.Update(beadID, update); err != nil {
-		return "", err
+	// The pool charges failed starts to this bead concurrently (a fifth
+	// failure parks it between this read and this write). The write is
+	// fenced on the row read where the store can fence (a moved row is
+	// re-read and the update recomputed, so a park written meanwhile is in
+	// the clear), and reopenForReassignUpdate clears the whole record family
+	// whenever any of it was read, so even an unfenced store lifts a park
+	// that landed on a bead already carrying failures.
+	for attempt := 0; ; attempt++ {
+		writer, fenced := beads.ConditionalWriterFor(store)
+		if fenced {
+			err := writer.UpdateIfMatch(beadID, b.Revision, update)
+			if err == nil {
+				break
+			}
+			var precondition *beads.PreconditionFailedError
+			if errors.As(err, &precondition) && attempt < 2 {
+				current, readErr := store.Get(beadID)
+				if readErr != nil {
+					return "", readErr
+				}
+				b = current
+				update = reopenForReassignUpdate(b)
+				if update.Assignee == nil && update.Status == nil && len(update.Metadata) == 0 {
+					return "", nil
+				}
+				continue
+			}
+			if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+				return "", err
+			}
+		}
+		if err := store.Update(beadID, update); err != nil {
+			return "", err
+		}
+		break
 	}
 	var changed []string
 	if update.Assignee != nil {
@@ -1903,14 +1936,18 @@ func reopenForReassignUpdate(b beads.Bead) beads.UpdateOpts {
 		open := "open"
 		update.Status = &open
 	}
+	// Any of the record present clears ALL of it: the family moves together
+	// (a park is written onto a count), and a park written after this read
+	// must not survive a write that names only the keys read.
 	for _, key := range beadmeta.WorkStartFailureMetadataKeys {
 		if strings.TrimSpace(b.Metadata[key]) == "" {
 			continue
 		}
-		if update.Metadata == nil {
-			update.Metadata = make(map[string]string)
+		update.Metadata = make(map[string]string, len(beadmeta.WorkStartFailureMetadataKeys))
+		for _, k := range beadmeta.WorkStartFailureMetadataKeys {
+			update.Metadata[k] = ""
 		}
-		update.Metadata[key] = ""
+		break
 	}
 	return update
 }

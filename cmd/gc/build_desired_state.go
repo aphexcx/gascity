@@ -1931,10 +1931,23 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	seen := make(map[string]bool, len(existing.WorkBeadIDs))
+	for _, id := range existing.WorkBeadIDs {
+		seen[strings.TrimSpace(id)] = true
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
 		}
+		// One bead is one seat's trigger, whichever probes reported it: a
+		// custom scale_check row probe and the cold default probe can both
+		// answer the same routed bead, and two seats for one bead would race
+		// its pre_start with no backoff between them and charge it twice.
+		// The count still stands; the extra seat is triggerless.
+		if seen[strings.TrimSpace(id)] {
+			continue
+		}
+		seen[strings.TrimSpace(id)] = true
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]

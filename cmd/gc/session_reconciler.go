@@ -2788,6 +2788,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
 			tick.apply(id, commitBatch)
+			// The start is still not confirmed, and the fact must stay durable:
+			// a fresh create keeps its claim, but a kept session's only gate
+			// back into this branch is its pre-heal start-pending/creating
+			// state — which the heal above moved on this tick. Put it back, so
+			// the next tick recovers again (clear, then confirm) rather than
+			// leaving a confirmed-looking session behind a stale record.
+			if !ok && !infoByID[id].PendingCreateClaim && pendingCreateQueuedOrCreatingState(string(stateBeforeHeal)) && strings.TrimSpace(healBatch["state"]) != "" {
+				restore := sessionpkg.MetadataPatch{"state": string(stateBeforeHeal)}
+				if err := sessFront.ApplyPatch(id, restore); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: %s: keeping the uncommitted start's state %q for the next tick's recovery: %v\n", name, stateBeforeHeal, err) //nolint:errcheck
+				} else {
+					tick.apply(id, restore)
+				}
+			}
 		}
 
 		// driftRestartedInPlace tracks whether the alive-restart branch ran

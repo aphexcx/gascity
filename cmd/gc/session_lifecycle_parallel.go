@@ -2430,10 +2430,10 @@ func recoverRunningPendingCreate(
 		ConfirmState: confirmPendingStart(info.MetadataState) ||
 			sessionpkg.State(strings.TrimSpace(info.MetadataState)) == sessionpkg.StateAwake,
 		ClearSleepReason: info.SleepReason != "",
-		// recoverRunningPendingCreate's caller (session_reconciler.go)
-		// already gates entry on shouldRollbackPendingCreateInfo(info), so
-		// at this point the claim is guaranteed to be set — hard-code the
-		// clear rather than re-evaluating the same predicate.
+		// recoverRunningPendingCreate's caller (session_reconciler.go) gates
+		// entry on the pending-create claim OR a pre-heal start-pending /
+		// creating state (a kept session's uncommitted resume carries no
+		// claim): the clear is unconditional — a no-op when there is none.
 		ClearPendingCreateClaim: true,
 		// Recovering an already-awake runtime must not reset the in-flight
 		// awake interval, so key the fresh epoch on a genuine dormant/creating
@@ -2896,6 +2896,24 @@ func executePlannedStartsTraced(
 							continue
 						}
 					}
+				}
+				// The bead this start would run for is read NOW, not at planning:
+				// a bead parked or backed off since the plan (its own start
+				// failed elsewhere, a queued seat outlived its bead's park, a
+				// holder's clear-bind did not land) is not started for — the
+				// demand gate's verdict is re-proven on the row at start time,
+				// and a success can never lift a park it was not planned past.
+				if deferred, reason := startOpts.workStartFailure.startDeferred(workTriggerForStart(candidate.info), clk.Now()); deferred {
+					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+					if release != nil {
+						release()
+					}
+					if done != nil {
+						done()
+					}
+					fmt.Fprintf(stderr, "session reconciler: %s: not started: its work bead %s is %s\n", candidate.name(), strings.TrimSpace(candidate.info.TriggerBeadID), reason) //nolint:errcheck
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "work_deferred", time.Time{}, time.Time{}, nil)
+					continue
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {

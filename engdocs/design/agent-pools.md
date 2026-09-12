@@ -249,8 +249,17 @@ cleared when there is none — its bead parked, backed off, closed or assigned
 elsewhere; a reopened holder is reopened with the same clear — so a
 `mode = "always"` holder restarting for no work is charged to nothing and
 lifts no park), and a bind that did not land leaves the previous trigger,
-which the start then runs for and is charged to. Every record read is live
-(a caching store's backing), fenced or not. A park written before
+which the start then runs for and is charged to. The gate is re-proven on
+the row at START time (`startDeferred`, before the provider is called): a
+bead parked or backed off since the plan — another seat's failure parked
+it, a queued seat outlived it, a holder's clear-bind did not land — is not
+started for (outcome `work_deferred`, nothing charged), so a success can
+never lift a park it was not planned past. A kept session's uncommitted
+resume stays durable as its start-pending/creating state (put back when a
+tick's recovery fails) until a clear lands. Every record read is live (a
+caching store's backing), fenced or not; the `--reassign` unpark is fenced
+where the store fences and clears the whole record family whenever any of
+it was read, so a park written between its read and its write is lifted. A park written before
 `gc.park_id` existed is identified by the bead id and `gc.parked_at`
 together. Under `beads.conditional_writes = "require"` a fenced write the
 store refuses at write time is not retried unfenced. A trigger whose named

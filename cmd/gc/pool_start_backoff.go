@@ -710,6 +710,27 @@ func workTriggerForStart(info sessionpkg.Info) workTrigger {
 	return workTriggerFromInfo(info)
 }
 
+// startDeferred re-proves the demand gate on the work bead a start is about
+// to run for, read live at start time: parked, or inside its backoff, means
+// the start is not made (the row is not "not found": a bead in no store, or
+// a store that fails to answer, is not deferred — the start is charged or
+// cleared as the record says once it can be read). The planning gate ran on
+// a snapshot; between the plan and the start the bead's own record can move
+// (another seat's failure parked it, a queued seat outlived it, a holder's
+// clear-bind did not land), and a start made past a park would, on success,
+// lift a park it was never planned past.
+func (p *workStartFailurePolicy) startDeferred(trigger workTrigger, now time.Time) (bool, string) {
+	if p == nil || strings.TrimSpace(trigger.BeadID) == "" {
+		return false, ""
+	}
+	_, bead, ok, _ := p.findTriggerBead(trigger.BeadID, trigger.StoreRef)
+	if !ok {
+		return false, ""
+	}
+	deferred, reason, _ := workStartDeferral(bead.Metadata, now)
+	return deferred, reason
+}
+
 // recordStartFailure charges one failed start to the trigger work bead the
 // start was prepared for: the record advances, the next start backs off, and
 // at the limit the bead is parked and the park mailed. Called on every
