@@ -116,12 +116,6 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
-	// Pre-flight idempotency check.
-	if shouldCheckBeadState(opts) {
-		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
-			return result, nil
-		}
-	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
 			return result, fmt.Errorf("%w", err)
@@ -134,10 +128,19 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
 	// claim filter even after sling sets gc.routed_to: clearing the assignee
 	// alone is not enough because IsReadyCandidate requires status=open. See
-	// gastownhall/gascity#1007 (assignee) and #3231 (status).
+	// gastownhall/gascity#1007 (assignee) and #3231 (status). It runs BEFORE the
+	// idempotency short-circuit: a bead already routed to this target (the
+	// re-dispatch of a parked bead to its own pool) must still be released.
 	if shouldReopenForReassign(opts) {
 		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
 			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
+		}
+	}
+
+	// Pre-flight idempotency check.
+	if shouldCheckBeadState(opts) {
+		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
+			return result, nil
 		}
 	}
 
@@ -1920,6 +1923,21 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
 
+		// The same release the single-bead path performs, per child and BEFORE
+		// its idempotency check: a parked child already routed to this target
+		// must be released by --reassign, not skipped (pool_start_backoff.go C6).
+		if shouldReopenForReassign(opts) {
+			if err := reopenForReassign(child.ID, deps); err != nil {
+				err = fmt.Errorf("reopening %s for reassign: %w", child.ID, err)
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				failed++
+				continue
+			}
+		}
+
 		if !opts.Force {
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
@@ -2130,8 +2148,35 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 		open := "open"
 		update.Status = &open
 	}
-	if update.Assignee == nil && update.Status == nil {
+	// A re-dispatch is the hand act that releases a pool park and its
+	// start-failure count (cmd/gc/pool_start_backoff.go): clear every park and
+	// counter key the bead carries in the same update, so the target pool
+	// starts it with a clean count. Nothing in the reconciler clears these.
+	for _, key := range ParkReleaseMetadataKeys {
+		if strings.TrimSpace(b.Metadata[key]) == "" {
+			continue
+		}
+		if update.Metadata == nil {
+			update.Metadata = make(map[string]string)
+		}
+		update.Metadata[key] = ""
+	}
+	if update.Assignee == nil && update.Status == nil && len(update.Metadata) == 0 {
 		return nil
 	}
 	return store.Update(beadID, update)
+}
+
+// ParkReleaseMetadataKeys are the pool start-failure park and counter keys a
+// --reassign clears before routing (the same set `gc bd update
+// --unset-metadata` releases in place).
+var ParkReleaseMetadataKeys = []string{
+	beadmeta.ParkedAtMetadataKey,
+	beadmeta.ParkReasonMetadataKey,
+	beadmeta.ParkFailuresMetadataKey,
+	beadmeta.ParkMailFailedMetadataKey,
+	beadmeta.StartFailuresMetadataKey,
+	beadmeta.StartFailedAtMetadataKey,
+	beadmeta.StartFailureMetadataKey,
+	beadmeta.StartBackoffUntilMetadataKey,
 }
