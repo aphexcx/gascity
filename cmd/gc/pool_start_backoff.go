@@ -150,9 +150,12 @@ func earliestRecheck(a, b time.Time) time.Time {
 	return a
 }
 
-// poolDemandAssignedWork is the assigned-tier INPUT of every pool demand
-// computation: the template-scoped assigned-work filter, then the gate
-// (pinned by TestPoolDemandInputsGoThroughStartDeferral).
+// poolDemandAssignedWork is the assigned tier's one input builder: owned is
+// the assigned work the pool's sessions hold (the raw pool-demand projection,
+// what a session OWNS, unfiltered so a session minted for a parked or
+// backed-off bead stays owned by it and is never reused for other work);
+// demand is owned minus the rows the start gate holds back, the only slice a
+// ComputePoolDesiredStates call may take (codex r3 finding 4).
 func poolDemandAssignedWork(
 	cfg *config.City,
 	cityPath string,
@@ -161,9 +164,9 @@ func poolDemandAssignedWork(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 	pass *workStartDeferralPass,
-) []beads.Bead {
-	rows := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
-	return pass.filter(rows)
+) (owned, demand []beads.Bead) {
+	owned = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	return owned, pass.filter(owned)
 }
 
 // workStartFailurePolicy is what the commit paths need to charge or clear the
@@ -289,10 +292,14 @@ func (p *workStartFailurePolicy) workBead(id, ref string, stderr io.Writer) (bea
 		hitStore, hit = candidate, b
 	}
 	switch {
-	case hits == 1:
+	case hits == 1 && lastErr == nil:
 		return hitStore, hit, true
 	case hits > 1:
 		p.logMissOnce(stderr, id, fmt.Sprintf("id found in %d stores with no store ref on the start request; ambiguous", hits))
+	case hits == 1:
+		// One hit and one store that could not be read: uniqueness was never
+		// established, so the hit is not charged (codex r3 finding 2).
+		p.logMissOnce(stderr, id, fmt.Sprintf("partial read with no store ref (one hit, one store unreadable): %v", lastErr))
 	case lastErr != nil:
 		p.logMissOnce(stderr, id, fmt.Sprintf("read with no store ref: %v", lastErr))
 	default:
@@ -301,11 +308,22 @@ func (p *workStartFailurePolicy) workBead(id, ref string, stderr io.Writer) (bea
 	return nil, beads.Bead{}, false
 }
 
+// unconditionalWorkBeadWriteLogged gates the one-per-process line that says
+// the charge and reset writes on this build run unconditionally (the store
+// offers no revision-conditioned write).
+var unconditionalWorkBeadWriteLogged sync.Once
+
 // updateWorkBead writes patch through a revision-conditioned write when the
 // store offers one (a write since the read is a conflict, never overwritten).
-func updateWorkBead(store beads.Store, b beads.Bead, patch map[string]string) (conflict bool, err error) {
-	writer, ok := beads.ConditionalWriterFor(store)
+// The store is resolved through the wrappers gc puts around it (the policy
+// wrapper embeds beads.Store, which promotes no optional capability, and
+// declares a resolve target instead), so the production store reaches the backend's UpdateIfMatch (codex r3
+// finding 1). A store with no conditional write at all writes unconditionally
+// and says so once per process.
+func updateWorkBead(store beads.Store, b beads.Bead, patch map[string]string, stderr io.Writer) (conflict bool, err error) {
+	writer, ok := workBeadConditionalWriter(store)
 	if !ok {
+		logUnconditionalWorkBeadWrite(stderr, b.ID, "no conditional writer resolves from the store")
 		return false, store.Update(b.ID, beads.UpdateOpts{Metadata: patch})
 	}
 	err = writer.UpdateIfMatch(b.ID, b.Revision, beads.UpdateOpts{Metadata: patch})
@@ -316,9 +334,38 @@ func updateWorkBead(store beads.Store, b beads.Bead, patch map[string]string) (c
 	case errors.As(err, &precondition):
 		return true, err
 	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+		logUnconditionalWorkBeadWrite(stderr, b.ID, err.Error())
 		return false, store.Update(b.ID, beads.UpdateOpts{Metadata: patch})
 	}
 	return false, err
+}
+
+// workBeadConditionalWriter resolves the store's conditional writer through
+// the wrappers gc puts around it: the policy wrapper embeds the Store
+// interface, which promotes no optional capability, so it declares a resolve
+// target instead; follow it (bounded, cycle-safe).
+func workBeadConditionalWriter(store beads.Store) (beads.ConditionalWriter, bool) {
+	for depth := 0; store != nil && depth < 8; depth++ {
+		if writer, ok := beads.ConditionalWriterFor(store); ok {
+			return writer, true
+		}
+		target, ok := store.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			return nil, false
+		}
+		next := target.ConditionalWritesResolveTarget()
+		if next == nil || next == store {
+			return nil, false
+		}
+		store = next
+	}
+	return nil, false
+}
+
+func logUnconditionalWorkBeadWrite(stderr io.Writer, beadID, detail string) {
+	unconditionalWorkBeadWriteLogged.Do(func() {
+		fmt.Fprintf(stderr, "session reconciler: start-failure writes on work beads run UNCONDITIONALLY on this store (first on %s): %s; a concurrent --reassign reset can be overwritten\n", beadID, detail) //nolint:errcheck // best-effort stderr
+	})
 }
 
 // ceilSecond rounds up to the next whole second (RFC3339 drops the fraction).
@@ -391,7 +438,7 @@ func recordWorkStartFailure(result startResult, clk clock.Clock, stderr io.Write
 			patch[beadmeta.StartFailuresMetadataKey] = ""
 			patch[beadmeta.StartBackoffUntilMetadataKey] = ""
 		}
-		conflict, err := updateWorkBead(store, b, patch)
+		conflict, err := updateWorkBead(store, b, patch, stderr)
 		if conflict {
 			continue
 		}
@@ -473,28 +520,41 @@ func recordWorkStartSuccessFor(p *workStartFailurePolicy, id, ref string, stderr
 		return
 	}
 	defer p.lock()()
-	store, b, ok := p.workBead(id, ref, stderr)
-	if !ok {
-		return
-	}
-	patch := map[string]string{}
-	for _, key := range []string{
-		beadmeta.StartFailuresMetadataKey,
-		beadmeta.StartFailedAtMetadataKey,
-		beadmeta.StartFailureMetadataKey,
-		beadmeta.StartBackoffUntilMetadataKey,
-	} {
-		if strings.TrimSpace(b.Metadata[key]) != "" {
-			patch[key] = ""
+	// One re-read on a revision conflict (an unrelated edit landed between
+	// the read and the write), the charge's own two-attempt shape; a second
+	// conflict logs and leaves the row (codex r3 finding 6).
+	for attempt := 0; attempt < 2; attempt++ {
+		store, b, ok := p.workBead(id, ref, stderr)
+		if !ok {
+			return
 		}
-	}
-	if len(patch) == 0 {
+		patch := map[string]string{}
+		for _, key := range []string{
+			beadmeta.StartFailuresMetadataKey,
+			beadmeta.StartFailedAtMetadataKey,
+			beadmeta.StartFailureMetadataKey,
+			beadmeta.StartBackoffUntilMetadataKey,
+		} {
+			if strings.TrimSpace(b.Metadata[key]) != "" {
+				patch[key] = ""
+			}
+		}
+		if len(patch) == 0 {
+			return
+		}
+		if p.testBeforeWrite != nil {
+			p.testBeforeWrite()
+		}
+		conflict, err := updateWorkBead(store, b, patch, stderr)
+		switch {
+		case conflict && attempt == 0:
+			continue
+		case conflict:
+			fmt.Fprintf(stderr, "session reconciler: start-failure reset on work bead %s skipped: row changed twice since the read\n", b.ID) //nolint:errcheck // best-effort stderr
+		case err != nil:
+			fmt.Fprintf(stderr, "session reconciler: clearing start failures on work bead %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+		}
 		return
-	}
-	if conflict, err := updateWorkBead(store, b, patch); conflict {
-		fmt.Fprintf(stderr, "session reconciler: start-failure reset on work bead %s skipped: row changed since the read\n", b.ID) //nolint:errcheck // best-effort stderr
-	} else if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing start failures on work bead %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
 	}
 }
 

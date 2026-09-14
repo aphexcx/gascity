@@ -2613,7 +2613,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		openInfos := sessionBeads.OpenInfos()
 		poolDecisionTime := time.Now()
 		tickDeferral := newWorkStartDeferralPass(poolDecisionTime, trace)
-		poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
+		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
@@ -3500,7 +3500,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	poolDecisionTime := time.Now()
 	dispatcherDeferral := newWorkStartDeferralPass(poolDecisionTime, nil)
-	poolWorkBeads := poolDemandAssignedWork(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
+	_, poolWorkBeads := poolDemandAssignedWork(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
@@ -3777,7 +3777,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		}
 		poolDecisionTime := time.Now()
 		snapshotDeferral := newWorkStartDeferralPass(poolDecisionTime, trace)
-		poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
+		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
