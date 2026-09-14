@@ -879,7 +879,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -935,7 +935,7 @@ func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -979,7 +979,7 @@ func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *t
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -4410,7 +4410,7 @@ func TestRealizePoolDesiredSessionsLiveRetryPreservesLauncherWorkDir(t *testing.
 			bp.sessionBeads = snapshot
 
 			retry := workBead("fi-new", "worker", reusable.ID, "in_progress", 1)
-			states := ComputePoolDesiredStates(cfg, []beads.Bead{retry}, snapshot.OpenInfos(), nil)
+			states := ComputePoolDesiredStates(cfg, []beads.Bead{retry}, nil, snapshot.OpenInfos(), nil)
 			if len(states) != 1 || len(states[0].Requests) != 1 {
 				t.Fatalf("retry desired state = %#v, want one request", states)
 			}
@@ -6811,7 +6811,7 @@ func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesN
 			if err != nil {
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = map[string]int{}
 			}
@@ -8350,7 +8350,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
+		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 		snapshot,
 		result.PoolScaleCheckPartialTemplates,
 	)
@@ -12836,7 +12836,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -12877,7 +12877,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -12909,7 +12909,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -12946,7 +12946,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -13018,7 +13018,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), partialResult.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, nil, snapshot.OpenInfos(), partialResult.ScaleCheckCounts)),
 			snapshot,
 			partialResult.PoolScaleCheckPartialTemplates,
 		)

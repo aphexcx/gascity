@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -1142,6 +1143,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		MaxSessionAge:          "5h",
 		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
+		MaxStartFailures:       intPtr(3),
 		AssignedWorkDeferLimit: intPtr(4),
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,
@@ -1216,6 +1218,45 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		if cv.Field(i).IsZero() {
 			t.Fatalf("agentConfigFromAgent did not populate field %q", fname)
 		}
+	}
+}
+
+func TestAgentConfigFromAgentMaxStartFailuresRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		want *int
+	}{
+		{name: "unset"},
+		{name: "never park", want: intPtr(0)},
+		{name: "custom threshold", want: intPtr(3)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			src := config.Agent{}
+			if tt.want != nil {
+				src.MaxStartFailures = intPtr(*tt.want)
+			}
+			cfg := agentConfigFromAgent(src)
+			if got, want := isZeroAgentConfig(cfg), tt.want == nil; got != want {
+				t.Fatalf("isZeroAgentConfig = %v, want %v", got, want)
+			}
+			// The migration output must retain its value when the source changes.
+			if src.MaxStartFailures != nil {
+				*src.MaxStartFailures = 99
+			}
+			data, err := marshalAgentFile(cfg)
+			if err != nil {
+				t.Fatalf("marshalAgentFile: %v", err)
+			}
+			var got config.Agent
+			if _, err := toml.Decode(string(data), &got); err != nil {
+				t.Fatalf("decode agent.toml: %v", err)
+			}
+			if !reflect.DeepEqual(got.MaxStartFailures, tt.want) {
+				t.Fatalf("MaxStartFailures did not survive migration: want %v, got TOML:\n%s", tt.want, data)
+			}
+		})
 	}
 }
 
