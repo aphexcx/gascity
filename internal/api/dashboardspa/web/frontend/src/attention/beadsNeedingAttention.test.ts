@@ -196,6 +196,31 @@ describe('stalled in-progress detection (gp-6xd)', () => {
     );
   });
 
+  // A closed session decodes to the empty state ("closed beads have no runtime
+  // state", internal/session/info_codec.go), which must not render as the
+  // dangling "stalled 3h — session ".
+  it('names an ended session rather than emitting a dangling empty state', () => {
+    const rows = select({
+      beads: [inProgress()],
+      sessions: [session({ state: '' })],
+    });
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reason: 'stalled',
+        summary: expect.stringContaining('session ended'),
+      }),
+    );
+    expect(rows[0]?.summary).not.toMatch(/session\s*$/);
+  });
+
+  // `state` is free-form with no enum upstream, and the sibling reader
+  // (shared/src/agents/needsYou.ts) matches it case-insensitively — a differently
+  // cased spelling must not paint a healthy worker stalled.
+  it('treats a live state as live regardless of case', () => {
+    const rows = select({ beads: [inProgress()], sessions: [session({ state: 'Active' })] });
+    expect(rows).toEqual([]);
+  });
+
   it('marks an in-progress bead as stalled when activity is older than an hour', () => {
     const rows = select({
       beads: [inProgress()],

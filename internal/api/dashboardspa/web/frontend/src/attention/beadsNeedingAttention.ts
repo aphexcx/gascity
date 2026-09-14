@@ -50,6 +50,14 @@ const LIVE_SESSION_STATES: ReadonlySet<string> = new Set([
   'draining',
 ]);
 
+// The supervisor `state` field is free-form with no enum upstream, so the
+// sibling reader (shared/src/agents/needsYou.ts) matches it case-insensitively.
+// Normalize the same way here, or an `Active` spelling reads as not-live and
+// paints a healthy worker stalled.
+function isLiveSession(state: string): boolean {
+  return LIVE_SESSION_STATES.has(state.trim().toLowerCase());
+}
+
 // The gc metadata markers a worker (or the mayor) stamps on a bead that is
 // parked on a human checkpoint. `gc.waiting_on` names the human directly; the
 // hold/gate text often carries the name in a parenthetical ("founder design
@@ -74,8 +82,12 @@ const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([
   [HOLD_EXTERNAL_LABEL, 'external'],
 ]);
 
-// Where a live worker's activity shows up: the session's own last_active, and
-// the lease heartbeat the worker stamps onto the bead.
+// Where a live worker's activity shows up. In practice that is the session's
+// own last_active: `gc.last_heartbeat_at` was retired as "a write nothing
+// reads" (cmd/gc/cmd_bd.go rewriteBdHeartbeatArgs, dip-wdt5aq) when gc bd
+// heartbeat was pointed at bd's native lease heartbeat instead, so nothing in
+// the fleet stamps this key today. It stays a legacy fallback for beads still
+// carrying it — not a live second signal.
 const HEARTBEAT_META_KEY = 'gc.last_heartbeat_at';
 const SESSION_ID_META_KEY = 'gc.session_id';
 
@@ -270,8 +282,12 @@ function stalledDetail(
   if (session === undefined) {
     return `no live session for ${assignee}`;
   }
-  if (!LIVE_SESSION_STATES.has(session.state)) {
-    return `session ${session.state}`;
+  const state = session.state.trim();
+  if (!isLiveSession(state)) {
+    // A closed session decodes to the empty state — "closed beads have no
+    // runtime state" (internal/session/info_codec.go) — so name that case
+    // instead of rendering the dangling "stalled 3h — session ".
+    return state.length === 0 ? 'session ended' : `session ${state}`;
   }
   const activityMs = lastActivityElapsedMs(bead, session, nowMs);
   if (activityMs !== null && activityMs >= STALLED_INACTIVITY_MS) {
@@ -301,11 +317,12 @@ function resolveSession(
           session.id === assignee)),
   );
   if (candidates.length === 0) return undefined;
-  return candidates.find((session) => LIVE_SESSION_STATES.has(session.state)) ?? candidates[0];
+  return candidates.find((session) => isLiveSession(session.state)) ?? candidates[0];
 }
 
-// Freshest sign of life: session last_active vs the lease heartbeat the worker
-// stamps on the bead. Null when neither is known — unknown is not stale.
+// Freshest sign of life: session last_active vs the legacy bead heartbeat (see
+// HEARTBEAT_META_KEY — nothing writes it today). Null when neither is known —
+// unknown is not stale, so the retired key simply drops out of the Math.min.
 function lastActivityElapsedMs(
   bead: Bead,
   session: BeadAttentionSession | undefined,
