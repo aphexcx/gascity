@@ -87,6 +87,11 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 		if id != "" && sessionID != id {
 			continue
 		}
+		// Shared infrastructure can inherit a client's session identity without
+		// belonging to that session. Never offer it to orphan cleanup.
+		if isInfrastructureProcess(root, pid) {
+			continue
+		}
 		rootProcess, err := isRootWithSessionID(root, pid, sessionID)
 		if err != nil {
 			scanErr = errors.Join(scanErr, fmt.Errorf("checking root for pid %d: %w", pid, err))
@@ -169,19 +174,18 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureParent(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
 }
 
-func isInfrastructureParent(root string, pid int) bool {
+func isInfrastructureProcess(root string, pid int) bool {
 	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "comm"))
 	if err != nil {
 		return false
 	}
-	command := strings.ToLower(strings.TrimSpace(string(data)))
-	return strings.Contains(command, "tmux")
+	return isInfrastructureCommand(string(data))
 }
 
 func readParentPID(path string) (int, bool, error) {

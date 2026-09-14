@@ -285,6 +285,7 @@ type realExecutor struct{}
 
 func (realExecutor) execute(args []string) (string, error) {
 	cmd := exec.Command("tmux", args...)
+	cmd.Env = tmuxClientEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -297,6 +298,7 @@ func (realExecutor) execute(args []string) (string, error) {
 
 func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd.Env = tmuxClientEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -305,6 +307,27 @@ func (realExecutor) executeCtx(ctx context.Context, args []string) (string, erro
 		return "", wrapError(err, stderr.String(), args)
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// tmuxClientEnv keeps session identity out of the client process environment.
+// When no server exists, tmux forks it from this client; inherited identity
+// would make that shared server look like an orphan of the caller's session.
+// Pane identity is still supplied explicitly by new-session's -e flags.
+// Scrubbing every invocation also covers a server disappearing between the
+// liveness probe and new-session, without a separate bootstrap race.
+func tmuxClientEnv(environ []string) []string {
+	env := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GC_SESSION_ID", "GC_SESSION_NAME", "GC_INSTANCE_TOKEN",
+			"GC_AGENT", "GC_ALIAS", "GC_TEMPLATE", "GC_SESSION_ORIGIN",
+			"GC_RUNTIME_EPOCH", "GC_CONTINUATION_EPOCH":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 // Tmux wraps tmux operations.
