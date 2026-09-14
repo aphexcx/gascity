@@ -43,7 +43,7 @@ func TestPoolStartBackoff_ConditionalWriteResolvesThroughThePolicyWrapper(t *tes
 	if err := h.store.Update(h.work.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.StartFailuresMetadataKey: "4"}}); err != nil {
 		t.Fatal(err)
 	}
-	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	item.attachWorkStartPolicy(h.policy)
 	resets := 0
 	h.policy.testBeforeWrite = func() {
@@ -100,7 +100,7 @@ func (s erroringBeadStore) Get(string) (beads.Bead, error) { return beads.Bead{}
 // TestPoolStartBackoff_PartialReadWithNoStoreRefIsNotCharged is A2 (codex r3
 // finding 2): with no store ref on the start request, one hit plus one store
 // that could not be read never established uniqueness, so nothing is charged
-// and nothing is reset; the partial read is logged once.
+// and nothing is reset; the missing ref is logged once.
 func TestPoolStartBackoff_PartialReadWithNoStoreRefIsNotCharged(t *testing.T) {
 	city := beads.NewMemStore()
 	work, err := city.Create(beads.Bead{Title: "city", Type: "task", Metadata: map[string]string{beadmeta.StartFailuresMetadataKey: "2"}})
@@ -124,8 +124,8 @@ func TestPoolStartBackoff_PartialReadWithNoStoreRefIsNotCharged(t *testing.T) {
 	if got.Metadata[beadmeta.StartFailuresMetadataKey] != "2" || got.Metadata[beadmeta.ParkedAtMetadataKey] != "" {
 		t.Fatalf("the one hit of a partial read was charged or reset: %v", got.Metadata)
 	}
-	if n := strings.Count(stderr.String(), "partial read"); n != 1 {
-		t.Fatalf("partial-read lines = %d, want exactly 1:\n%s", n, stderr.String())
+	if n := strings.Count(stderr.String(), "no store ref"); n != 1 {
+		t.Fatalf("missing-ref lines = %d, want exactly 1:\n%s", n, stderr.String())
 	}
 	// With the store ref on the request the read is direct and the charge lands.
 	direct := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
@@ -162,7 +162,7 @@ func TestPoolStartBackoff_ResetRetriesOnceOnAConflict(t *testing.T) {
 		}
 	}
 	var stderr bytes.Buffer
-	recordWorkStartSuccessFor(h.policy, h.work.ID, "", &stderr)
+	recordWorkStartSuccessFor(h.policy, h.work.ID, "city", &stderr)
 	if got := h.meta(beadmeta.StartFailuresMetadataKey); got != "" {
 		t.Fatalf("gc.start_failures = %q after a confirmed start with one conflict, want cleared (the reset gave up on its first conflict)\nstderr:\n%s", got, stderr.String())
 	}
@@ -179,7 +179,7 @@ func TestPoolStartBackoff_ResetRetriesOnceOnAConflict(t *testing.T) {
 		}
 	}
 	stderr.Reset()
-	recordWorkStartSuccessFor(h.policy, h.work.ID, "", &stderr)
+	recordWorkStartSuccessFor(h.policy, h.work.ID, "city", &stderr)
 	if got := h.meta(beadmeta.StartFailuresMetadataKey); got != "4" {
 		t.Fatalf("gc.start_failures = %q after two conflicts, want 4 (left for the next confirmed start)", got)
 	}
@@ -316,8 +316,8 @@ func TestPoolStartBackoff_SurvivingSessionForParkedBeadIsNeitherReusedNorWoken(t
 		ds := buildDesiredStateWithSessionBeads("gc", cityPath, clk.Now(), cfg, sp, store, nil, snap, nil, &stderr)
 		openInfos := snap.OpenInfos()
 		pass := newWorkStartDeferralPass(clk.Now(), nil)
-		_, poolWorkBeads := poolDemandAssignedWork(cfg, cityPath, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, pass)
-		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, openInfos, ds.ScaleCheckCounts, nil, pass.deferred, nil))
+		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, pass)
+		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, openInfos, ds.ScaleCheckCounts, nil, pass.deferred, nil))
 		if _, deferred := pass.deferred[work.ID]; !deferred {
 			t.Fatalf("tick %d: the parked bead was not deferred by the gate (assigned rows %d)", tick, len(ds.AssignedWorkBeads))
 		}

@@ -117,15 +117,16 @@ func (h *poolStartBackoffHarness) pendingSessionBead() beads.Bead {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "template:helper"},
 		Metadata: map[string]string{
-			"session_name":                    "sky",
-			"session_name_explicit":           "true",
-			"pending_create_claim":            "true",
-			"template":                        "helper",
-			"state":                           "creating",
-			"generation":                      "1",
-			"continuation_epoch":              "1",
-			"instance_token":                  fmt.Sprintf("token-%d", h.sessions),
-			beadmeta.TriggerBeadIDMetadataKey: h.work.ID,
+			"session_name":                          "sky",
+			"session_name_explicit":                 "true",
+			"pending_create_claim":                  "true",
+			"template":                              "helper",
+			"state":                                 "creating",
+			"generation":                            "1",
+			"continuation_epoch":                    "1",
+			"instance_token":                        fmt.Sprintf("token-%d", h.sessions),
+			beadmeta.TriggerBeadIDMetadataKey:       h.work.ID,
+			beadmeta.TriggerBeadStoreRefMetadataKey: "city",
 		},
 	})
 	if err != nil {
@@ -288,7 +289,7 @@ func TestPoolStartBackoff_ParksAfterMaxFailuresWithOneMailAndNoStart(t *testing.
 	// ZERO starts: neither demand tier lists the parked bead.
 	work = h.workBead()
 	pass := newWorkStartDeferralPass(h.clk.Now().Add(24*time.Hour), nil)
-	if _, rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
+	if _, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
 		t.Fatalf("assigned tier listed a parked bead: %+v", rows)
 	}
 	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
@@ -397,7 +398,7 @@ func TestPoolStartBackoff_DeadlineJudgedByTheClock(t *testing.T) {
 			t.Fatalf("%s: reason=%q until=%v, want start_backoff until %v", tc.name, reason, gotUntil, until)
 		}
 		pass := newWorkStartDeferralPass(tc.now, nil)
-		_, rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass)
+		_, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass)
 		counts, _, _, _ := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
 		if tc.want && (len(rows) != 0 || counts["helper"] != 0) {
 			t.Fatalf("%s: tiers served a backed-off bead: rows=%d count=%d", tc.name, len(rows), counts["helper"])
@@ -484,7 +485,7 @@ func TestPoolStartBackoff_StartupDeathIsNotASuccess(t *testing.T) {
 	if got := h.meta(beadmeta.StartFailuresMetadataKey); got != "2" {
 		t.Fatalf("gc.start_failures = %q after a startup death, want 2", got)
 	}
-	prepared := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	prepared := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	prepared.attachWorkStartPolicy(h.policy)
 	var stderr bytes.Buffer
 	recordWorkStartFailure(startResult{prepared: prepared, err: errPreStart, outcome: TraceOutcomeProviderError, rateLimitScreen: true}, h.clk, &stderr, nil)
@@ -545,20 +546,24 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 				continue
 			}
 			gated := map[string]bool{}
+			gatedRefs := map[string]string{}
 			owned := map[string]bool{}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				assign, ok := n.(*ast.AssignStmt)
-				if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
+				if !ok || len(assign.Lhs) != 3 || len(assign.Rhs) != 1 {
 					return true
 				}
 				if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && calleeName(call) == "poolDemandAssignedWork" {
-					// (owned, demand): the first is what a session OWNS (the
-					// unfiltered projection), the second the gated demand rows.
+					// (owned, demand, refs): the first is what a session OWNS,
+					// the second and third are the aligned gated demand pair.
 					if id, ok := assign.Lhs[0].(*ast.Ident); ok {
 						owned[id.Name] = true
 					}
 					if id, ok := assign.Lhs[1].(*ast.Ident); ok {
 						gated[id.Name] = true
+						if ref, ok := assign.Lhs[2].(*ast.Ident); ok && ref.Name != "_" {
+							gatedRefs[id.Name] = ref.Name
+						}
 					}
 				}
 				return true
@@ -575,6 +580,10 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 					id, ok := call.Args[1].(*ast.Ident)
 					if !ok || !gated[id.Name] {
 						t.Errorf("%s: %s is fed %s, not a poolDemandAssignedWork result", site, name, exprString(fset, call.Args[1]))
+					}
+					ref, refOK := call.Args[2].(*ast.Ident)
+					if !ok || !refOK || gatedRefs[id.Name] == "" || ref.Name != gatedRefs[id.Name] {
+						t.Errorf("%s: %s must pass the aligned refs from the same poolDemandAssignedWork result beside its rows", site, name)
 					}
 					// Production computes through the deferring entry so the
 					// in-flight tier sees the deferred ids of the same pass.
@@ -671,7 +680,7 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 		// nothing; every release clears all eight keys; the batch releases a
 		// child only after its checks; the reset retries once.
 		{"pool_start_backoff.go", "writer, ok := ownerBackfillConditionalWriter(store)"},
-		{"pool_start_backoff.go", "case hits == 1 && lastErr == nil:"},
+		{"pool_start_backoff.go", "p.logMissOnce(stderr, id, \"no store ref on the start request\")"},
 		{"../../internal/sling/sling_core.go", "update.Metadata = make(map[string]string, len(ParkReleaseMetadataKeys))"},
 		{"../../internal/sling/sling_core.go", "if check.Idempotent && !shouldReopenForReassign(opts) {"},
 		{"pool_start_backoff.go", "case conflict && attempt == 0:"},
@@ -713,7 +722,7 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 func TestPoolStartBackoff_ConcurrentChargesAreSerialized(t *testing.T) {
 	h := newPoolStartBackoffHarness(t, intPtr(0))
 	h.policy.mu = &sync.Mutex{}
-	prepared := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	prepared := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	prepared.attachWorkStartPolicy(h.policy)
 	const n = 24
 	var wg sync.WaitGroup
@@ -732,7 +741,7 @@ func TestPoolStartBackoff_ConcurrentChargesAreSerialized(t *testing.T) {
 	// At the threshold: one park, one mail, from many racing commits.
 	parkable := newPoolStartBackoffHarness(t, intPtr(1))
 	parkable.policy.mu = &sync.Mutex{}
-	prepared = preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: parkable.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	prepared = preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: parkable.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	prepared.attachWorkStartPolicy(parkable.policy)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -751,11 +760,10 @@ func TestPoolStartBackoff_ConcurrentChargesAreSerialized(t *testing.T) {
 	}
 }
 
-// TestPoolStartBackoff_RigBeadWithEmptyStoreRefIsCharged pins the assigned
-// tier's request shape: it carries no store ref, so a rig-owned trigger is
-// found in the rig store by id and charged there, never mis-charged on the
-// city store or dropped as a miss.
-func TestPoolStartBackoff_RigBeadWithEmptyStoreRefIsCharged(t *testing.T) {
+// TestPoolStartBackoff_RigBeadWithStoreRefIsCharged checks that a rig trigger
+// charges and resets only the explicitly named store.
+
+func TestPoolStartBackoff_RigBeadWithStoreRefIsCharged(t *testing.T) {
 	city := beads.NewMemStore()
 	rig := beads.NewMemStore()
 	work, err := rig.Create(beads.Bead{Title: "rig work", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "helper"}})
@@ -765,7 +773,7 @@ func TestPoolStartBackoff_RigBeadWithEmptyStoreRefIsCharged(t *testing.T) {
 	policy := newWorkStartFailurePolicy(&config.City{Agents: []config.Agent{{Name: "helper"}}}, city, map[string]beads.Store{"riga": rig}, mail.NewFake(), "mayor")
 	clk := &clock.Fake{Time: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
 	var stderr bytes.Buffer
-	for _, ref := range []string{"", "rig:riga"} {
+	for _, ref := range []string{"rig:riga", "rig:riga"} {
 		prepared := preparedStart{candidate: startCandidate{tp: TemplateParams{TemplateName: "helper"}}, workStartFailures: policy, triggerBeadID: work.ID, triggerStoreRef: ref}
 		recordWorkStartFailure(startResult{prepared: prepared, err: errPreStart, outcome: TraceOutcomeProviderError}, clk, &stderr, nil)
 	}
@@ -774,7 +782,7 @@ func TestPoolStartBackoff_RigBeadWithEmptyStoreRefIsCharged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Metadata[beadmeta.StartFailuresMetadataKey] != "2" {
-		t.Fatalf("rig bead gc.start_failures = %q, want 2 (empty ref and rig ref both charged in the rig store)\nstderr:\n%s", got.Metadata[beadmeta.StartFailuresMetadataKey], stderr.String())
+		t.Fatalf("rig bead gc.start_failures = %q, want 2 (both starts charged in the named rig store)\nstderr:\n%s", got.Metadata[beadmeta.StartFailuresMetadataKey], stderr.String())
 	}
 	if _, err := city.Get(work.ID); err == nil {
 		t.Fatal("the city store gained the rig bead")
@@ -782,8 +790,8 @@ func TestPoolStartBackoff_RigBeadWithEmptyStoreRefIsCharged(t *testing.T) {
 	if stderr.String() != "" && strings.Contains(stderr.String(), "not charged") {
 		t.Fatalf("a reachable rig bead was reported as a miss:\n%s", stderr.String())
 	}
-	// A recovered success with the empty ref clears it in the rig store too.
-	recordWorkStartSuccessFor(policy, work.ID, "", &stderr)
+	// A recovered success clears it in the same named rig store.
+	recordWorkStartSuccessFor(policy, work.ID, "rig:riga", &stderr)
 	got, _ = rig.Get(work.ID)
 	if got.Metadata[beadmeta.StartFailuresMetadataKey] != "" {
 		t.Fatalf("rig bead counter = %q after a confirmed start, want cleared", got.Metadata[beadmeta.StartFailuresMetadataKey])
@@ -800,7 +808,7 @@ func TestPoolStartBackoff_ChargesTheTriggerTheStartCarried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	item.attachWorkStartPolicy(h.policy)
 	// The refresh swaps the session's trigger to `other` while the start is in flight.
 	item.candidate.info.TriggerBeadID = other.ID
@@ -836,11 +844,12 @@ func TestPoolStartBackoff_RecoveryCommitResetsTheCounter(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name":                    "sky",
-			"pending_create_claim":            "true",
-			"state":                           "active",
-			"state_reason":                    "creation_complete",
-			beadmeta.TriggerBeadIDMetadataKey: h.work.ID,
+			"session_name":                          "sky",
+			"pending_create_claim":                  "true",
+			"state":                                 "active",
+			"state_reason":                          "creation_complete",
+			beadmeta.TriggerBeadIDMetadataKey:       h.work.ID,
+			beadmeta.TriggerBeadStoreRefMetadataKey: "city",
 		},
 	})
 	if err != nil {
@@ -919,11 +928,11 @@ func TestPoolStartBackoff_InFlightSessionForDeferredTriggerIsNotReused(t *testin
 	sessions := sessionInfosFromBeads([]beads.Bead{inFlight})
 	counts := map[string]int{"claude": 1}
 
-	reused := ComputePoolDesiredStatesDeferring(cfg, nil, sessions, counts, nil, nil, nil)
+	reused := ComputePoolDesiredStatesDeferring(cfg, nil, nil, sessions, counts, nil, nil, nil)
 	if len(reused) != 1 || len(reused[0].Requests) != 1 || reused[0].Requests[0].SessionBeadID != "sess-parked" {
 		t.Fatalf("control: without a deferred set the in-flight session is reused: %#v", reused)
 	}
-	gated := ComputePoolDesiredStatesDeferring(cfg, nil, sessions, counts, nil, map[string]struct{}{"W": {}}, nil)
+	gated := ComputePoolDesiredStatesDeferring(cfg, nil, nil, sessions, counts, nil, map[string]struct{}{"W": {}}, nil)
 	if len(gated) != 1 || len(gated[0].Requests) != 1 {
 		t.Fatalf("gated result = %#v, want one request", gated)
 	}
@@ -932,22 +941,14 @@ func TestPoolStartBackoff_InFlightSessionForDeferredTriggerIsNotReused(t *testin
 	}
 }
 
-// TestPoolStartBackoff_AmbiguousIDWithNoStoreRefIsNotCharged pins the
-// fail-closed form of the empty-ref lookup (codex r2 MAJOR 2): the same id in
-// two independent stores is logged once and charged nowhere.
-func TestPoolStartBackoff_AmbiguousIDWithNoStoreRefIsNotCharged(t *testing.T) {
+// TestPoolStartBackoff_EmptyStoreRefIsAMiss pins the
+// missing-ref contract: even a unique id is logged once and charged nowhere.
+func TestPoolStartBackoff_EmptyStoreRefIsAMiss(t *testing.T) {
 	city := beads.NewMemStore()
 	rig := beads.NewMemStore()
 	cityWork, err := city.Create(beads.Bead{Title: "city", Type: "task"})
 	if err != nil {
 		t.Fatal(err)
-	}
-	rigWork, err := rig.Create(beads.Bead{Title: "rig", Type: "task"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cityWork.ID != rigWork.ID {
-		t.Fatalf("fixture: ids differ (%s vs %s); two independent stores must share an id here", cityWork.ID, rigWork.ID)
 	}
 	policy := newWorkStartFailurePolicy(&config.City{Agents: []config.Agent{{Name: "helper"}}}, city, map[string]beads.Store{"riga": rig}, mail.NewFake(), "mayor")
 	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: cityWork.ID}, tp: TemplateParams{TemplateName: "helper"}}}
@@ -960,11 +961,11 @@ func TestPoolStartBackoff_AmbiguousIDWithNoStoreRefIsNotCharged(t *testing.T) {
 	for name, store := range map[string]beads.Store{"city": city, "rig": rig} {
 		got, _ := store.Get(cityWork.ID)
 		if got.Metadata[beadmeta.StartFailuresMetadataKey] != "" || got.Metadata[beadmeta.ParkedAtMetadataKey] != "" {
-			t.Fatalf("%s bead was charged on an ambiguous id: %v", name, got.Metadata)
+			t.Fatalf("%s bead was charged with no store ref: %v", name, got.Metadata)
 		}
 	}
-	if n := strings.Count(stderr.String(), "ambiguous"); n != 1 {
-		t.Fatalf("ambiguity lines = %d, want exactly 1:\n%s", n, stderr.String())
+	if n := strings.Count(stderr.String(), "no store ref"); n != 1 {
+		t.Fatalf("missing-ref lines = %d, want exactly 1:\n%s", n, stderr.String())
 	}
 }
 
@@ -977,7 +978,7 @@ func TestPoolStartBackoff_ResetBetweenReadAndWriteSurvives(t *testing.T) {
 	if err := h.store.Update(h.work.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.StartFailuresMetadataKey: "4"}}); err != nil {
 		t.Fatal(err)
 	}
-	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	item := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: h.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	item.attachWorkStartPolicy(h.policy)
 	resets := 0
 	h.policy.testBeforeWrite = func() {
@@ -1044,7 +1045,7 @@ func TestPoolStartBackoff_ParkMailDoesNotHoldTheLock(t *testing.T) {
 	a := newPoolStartBackoffHarness(t, intPtr(1))
 	blocker := &blockingMail{Provider: mail.NewFake(), entered: make(chan struct{}), release: make(chan struct{})}
 	a.policy.mail = blocker
-	itemA := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: a.work.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	itemA := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: a.work.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	itemA.attachWorkStartPolicy(a.policy)
 	done := make(chan struct{})
 	go func() {
@@ -1058,7 +1059,7 @@ func TestPoolStartBackoff_ParkMailDoesNotHoldTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	itemB := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: other.ID}, tp: TemplateParams{TemplateName: "helper"}}}
+	itemB := preparedStart{candidate: startCandidate{info: sessionpkg.Info{TriggerBeadID: other.ID, TriggerBeadStoreRef: "city"}, tp: TemplateParams{TemplateName: "helper"}}}
 	itemB.attachWorkStartPolicy(a.policy)
 	charged := make(chan struct{})
 	go func() {

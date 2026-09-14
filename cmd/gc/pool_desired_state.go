@@ -75,35 +75,42 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // own actionable work.
 // Each bead's gc.routed_to determines which agent template it belongs to.
 // scaleCheckCounts maps agent template → new session demand from scale_check.
-// Pass nil for either when unavailable.
+// assignedWorkStoreRefs is index-aligned with assignedWorkBeads: empty entries
+// identify city work, bare rig names identify rig work, and canonical refs are
+// preserved. Pass nil for unavailable inputs; missing refs remain unknown.
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, nil, nil, nil)
 }
 
+// ComputePoolDesiredStatesTraced includes decisions in the supplied trace.
 func ComputePoolDesiredStatesTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, nil, nil, trace)
 }
 
+// ComputePoolDesiredStatesWithDemandTraced also binds scale-check work to requests.
 func ComputePoolDesiredStatesWithDemandTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, trace)
 }
 
 // ComputePoolDesiredStatesDeferring is the production entry: deferredTriggers
@@ -115,18 +122,20 @@ func ComputePoolDesiredStatesWithDemandTraced(
 func ComputePoolDesiredStatesDeferring(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	deferredTriggers map[string]struct{},
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, trace)
 }
 
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -178,7 +187,7 @@ func computePoolDesiredStates(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for _, wb := range assignedWorkBeads {
+		for workIndex, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
@@ -220,6 +229,7 @@ func computePoolDesiredStates(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -254,6 +264,7 @@ func computePoolDesiredStates(
 				BeadPriority:   beadPriority(wb),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -358,6 +369,22 @@ func computePoolDesiredStates(
 	}
 
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+// assignedWorkRequestStoreRef translates census shorthand at the request boundary.
+// An empty entry is known city work; an absent entry is an unknown store.
+func assignedWorkRequestStoreRef(refs []string, index int) string {
+	if index >= len(refs) {
+		return ""
+	}
+	ref := strings.TrimSpace(refs[index])
+	if ref == "" {
+		return "city"
+	}
+	if strings.Contains(ref, ":") {
+		return ref
+	}
+	return "rig:" + ref
 }
 
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {

@@ -2506,11 +2506,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		tickDeferral := newWorkStartDeferralPass(time.Now(), trace)
-		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
+		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, nil, tickDeferral.deferred, trace)),
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), result.ScaleCheckCounts, nil, tickDeferral.deferred, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3342,11 +3342,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	dispatcherDeferral := newWorkStartDeferralPass(time.Now(), nil)
-	_, poolWorkBeads := poolDemandAssignedWork(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
+	_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, dispatcherDeferral.deferred, nil)),
+			filteredCfg, poolWorkBeads, poolWorkStoreRefs, openInfos, wfcResult.ScaleCheckCounts, nil, dispatcherDeferral.deferred, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -3616,11 +3616,11 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		snapshotDeferral := newWorkStartDeferralPass(time.Now(), trace)
-		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
+		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, snapshotDeferral.deferred, trace)),
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, openSessionInfos, result.ScaleCheckCounts, nil, snapshotDeferral.deferred, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)

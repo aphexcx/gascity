@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,7 +154,8 @@ func earliestRecheck(a, b time.Time) time.Time {
 // what a session OWNS, unfiltered so a session minted for a parked or
 // backed-off bead stays owned by it and is never reused for other work);
 // demand is owned minus the rows the start gate holds back, the only slice a
-// ComputePoolDesiredStates call may take (codex r3 finding 4).
+// ComputePoolDesiredStates call may take (codex r3 finding 4). demandStoreRefs
+// is index-aligned with demand and uses the assigned-work census shorthand.
 func poolDemandAssignedWork(
 	cfg *config.City,
 	cityPath string,
@@ -163,9 +163,11 @@ func poolDemandAssignedWork(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 	pass *workStartDeferralPass,
-) (owned, demand []beads.Bead) {
-	owned = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
-	return owned, pass.filter(owned)
+) (owned, demand []beads.Bead, demandStoreRefs []string) {
+	var ownedStoreRefs []string
+	owned, ownedStoreRefs = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	demand, demandStoreRefs = pass.filterWithRefs(owned, ownedStoreRefs)
+	return owned, demand, demandStoreRefs
 }
 
 // workStartFailurePolicy is what the commit paths need to charge or clear the
@@ -235,76 +237,29 @@ func (p *workStartFailurePolicy) storeFor(ref string) beads.Store {
 	return nil
 }
 
-// workBead reads the trigger work bead of a start; a store or bead the ref does
-// not reach is logged once and returns ok=false. An EMPTY ref (the assigned
-// tier's requests carry none) means the city work store first, then each rig
-// store by id (bead ids are unique within a deployment): the start request's
-// own store set, not a sweep for relocated class beads.
+// workBead reads the trigger work bead from the store its start request names.
+// A missing ref, unreachable store, or missing bead is logged once and not charged.
 func (p *workStartFailurePolicy) workBead(id, ref string, stderr io.Writer) (beads.Store, beads.Bead, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, beads.Bead{}, false
 	}
 	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		p.logMissOnce(stderr, id, "no store ref on the start request")
+		return nil, beads.Bead{}, false
+	}
 	store := p.storeFor(ref)
 	if store == nil {
 		p.logMissOnce(stderr, id, fmt.Sprintf("store ref %q not reachable from the reconciler", ref))
 		return nil, beads.Bead{}, false
 	}
-	if ref != "" {
-		b, err := store.Get(id)
-		if err != nil {
-			p.logMissOnce(stderr, id, fmt.Sprintf("read from store ref %q: %v", ref, err))
-			return nil, beads.Bead{}, false
-		}
-		return store, b, true
+	b, err := store.Get(id)
+	if err != nil {
+		p.logMissOnce(stderr, id, fmt.Sprintf("read from store ref %q: %v", ref, err))
+		return nil, beads.Bead{}, false
 	}
-	// Empty ref: the id must be found in exactly one of the request's stores.
-	// Independent stores may share an id (storeScopedBeadKey exists for that);
-	// two hits cannot be told apart here, so the charge fails closed.
-	candidates := []beads.Store{store}
-	names := make([]string, 0, len(p.rigStores))
-	for name := range p.rigStores {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if p.rigStores[name] != nil {
-			candidates = append(candidates, p.rigStores[name])
-		}
-	}
-	var (
-		hitStore beads.Store
-		hit      beads.Bead
-		hits     int
-		lastErr  error
-	)
-	for _, candidate := range candidates {
-		b, err := candidate.Get(id)
-		if err != nil {
-			if !errors.Is(err, beads.ErrNotFound) {
-				lastErr = err
-			}
-			continue
-		}
-		hits++
-		hitStore, hit = candidate, b
-	}
-	switch {
-	case hits == 1 && lastErr == nil:
-		return hitStore, hit, true
-	case hits > 1:
-		p.logMissOnce(stderr, id, fmt.Sprintf("id found in %d stores with no store ref on the start request; ambiguous", hits))
-	case hits == 1:
-		// One hit and one store that could not be read: uniqueness was never
-		// established, so the hit is not charged (codex r3 finding 2).
-		p.logMissOnce(stderr, id, fmt.Sprintf("partial read with no store ref (one hit, one store unreadable): %v", lastErr))
-	case lastErr != nil:
-		p.logMissOnce(stderr, id, fmt.Sprintf("read with no store ref: %v", lastErr))
-	default:
-		p.logMissOnce(stderr, id, "not found in the city store or any rig store")
-	}
-	return nil, beads.Bead{}, false
+	return store, b, true
 }
 
 // unconditionalWorkBeadWriteLogged gates the one-per-process line that says

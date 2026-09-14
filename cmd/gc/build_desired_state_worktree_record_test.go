@@ -175,7 +175,7 @@ func TestAssignedActivePoolResumePreservesConcreteWorkDir(t *testing.T) {
 		},
 	}
 
-	states := ComputePoolDesiredStates(cfg, []beads.Bead{assigned}, []session.Info{info}, nil)
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{assigned}, nil, []session.Info{info}, nil)
 	if len(states) != 1 || len(states[0].Requests) != 1 {
 		t.Fatalf("desired states = %#v, want one resume request", states)
 	}
@@ -245,7 +245,7 @@ func TestWakeKnownIdentityRequestCarriesWorkBeadTitle(t *testing.T) {
 		},
 	}
 
-	states := ComputePoolDesiredStates(cfg, []beads.Bead{assigned}, nil, nil)
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{assigned}, nil, nil, nil)
 	if len(states) != 1 || len(states[0].Requests) != 1 {
 		t.Fatalf("desired states = %#v, want one wake-known-identity request", states)
 	}
