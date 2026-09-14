@@ -3383,7 +3383,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
-		withWorkStartFailurePolicy(cr.workStartFailurePolicy(cr.cityBeadStore(), cr.rigBeadStores())),
+		withWorkStartFailurePolicy(cr.workStartFailurePolicy(cr.cityBeadStore(), cr.rigBeadStores())), // residency:allow explicit-ref lookup index only; gp-d7my reads the request's named store without probing others.
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
