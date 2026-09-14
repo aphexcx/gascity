@@ -2773,7 +2773,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
 			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(infoByID[id], tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(infoByID[id], tp, cfg, store, clk, trace, reconcileOpts.workStartFailures, stderr)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -3445,9 +3445,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedIDs {
 		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
+	// The awake input alone sees the assigned work minus the rows the pool
+	// start gate holds back (parked, or backed off at this clock): a bead the
+	// pool must not start is not wake demand for its holder either. Every other
+	// consumer of assignedWorkBeads keeps the full slice (pool_start_backoff.go).
+	awakeWorkBeads, awakeReadyFlags := newWorkStartDeferralPass(clk.Now(), trace).filterWithFlags(assignedWorkBeads, reconcileOpts.readyAssignedFlags)
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
-		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
+		awakeWorkBeads, awakeReadyFlags, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
