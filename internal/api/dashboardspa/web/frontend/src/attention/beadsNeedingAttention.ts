@@ -59,6 +59,21 @@ const WAITING_CHECKPOINT_VALUE = 'awaiting-human';
 const WAITING_WHO_META_KEY = 'gc.waiting_on';
 const HOLD_LABEL_PREFIX = 'hold:';
 
+// The two canonical `hold:<value>` label values, mirrored from
+// internal/beadmeta/hold_labels.go (HoldMayorLabel / HoldExternalLabel).
+// engdocs/contributors/hold-label-conventions.md is the shared definition:
+// these are the ONLY sanctioned hold values — "the required next actor is the
+// mayor" and "the required next actor or condition is outside this bd
+// instance" — and neither carries a parenthetical, so without an explicit
+// mapping both fall through to the generic "human" and lose the actor this
+// chip exists to name. Keep in sync with the Go constants.
+const HOLD_MAYOR_LABEL = 'hold:mayor';
+const HOLD_EXTERNAL_LABEL = 'hold:external';
+const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([
+  [HOLD_MAYOR_LABEL, 'mayor'],
+  [HOLD_EXTERNAL_LABEL, 'external'],
+]);
+
 // Where a live worker's activity shows up: the session's own last_active, and
 // the lease heartbeat the worker stamps onto the bead.
 const HEARTBEAT_META_KEY = 'gc.last_heartbeat_at';
@@ -201,10 +216,15 @@ function waitingHumanRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
   const who = waitingOn(bead, holdText);
   const phrase =
     waitMs === null ? `waiting on ${who}` : `waiting on ${who} for ${formatElapsed(waitMs)}`;
+  // hold:external means the next actor or condition is outside this bd
+  // instance by definition — there is nobody here to nag, so it stays `watch`
+  // however long it waits. Escalating it would be pure operator noise.
+  const escalates =
+    waitMs !== null && waitMs >= WAITING_ATTENTION_MS && !hasLabel(bead, HOLD_EXTERNAL_LABEL);
   return {
     beadId: bead.id,
     reason: 'waiting-human',
-    severity: waitMs !== null && waitMs >= WAITING_ATTENTION_MS ? 'attention' : 'watch',
+    severity: escalates ? 'attention' : 'watch',
     summary: phrase,
     updatedAt: bead.updated_at ?? bead.created_at,
   };
@@ -312,15 +332,34 @@ function waitingHoldText(bead: Bead): string | null {
 }
 
 // WHO the bead waits on — the whole point of the chip (mayor design check,
-// gp-6xd): `gc.waiting_on` when stamped, else the parenthetical in the hold
-// text ("founder design review (Taylor+Afik)" → "Taylor+Afik"), else "human".
+// gp-6xd): `gc.waiting_on` when stamped, else one of the two canonical hold
+// labels, else the parenthetical in the hold text ("founder design review
+// (Taylor+Afik)" → "Taylor+Afik"), else "human". The canonical labels carry no
+// parenthetical, so they must be mapped explicitly or the most common real
+// input renders as the actorless "waiting on human".
 function waitingOn(bead: Bead, holdText: string): string {
   const stamped = bead.metadata?.[WAITING_WHO_META_KEY]?.trim();
   if (stamped !== undefined && stamped.length > 0) return stamped;
+  const canonical = canonicalHoldActor(bead);
+  if (canonical !== undefined) return canonical;
   const parenthetical = /\(([^)]+)\)/.exec(holdText);
   const inner = parenthetical?.[1]?.trim();
   if (inner !== undefined && inner.length > 0) return inner;
   return 'human';
+}
+
+// The actor named by a canonical hold label, or undefined for an ad hoc
+// `hold:<something>` value that is not part of the sanctioned taxonomy.
+function canonicalHoldActor(bead: Bead): string | undefined {
+  for (const label of bead.labels ?? []) {
+    const actor = CANONICAL_HOLD_ACTORS.get(label.trim());
+    if (actor !== undefined) return actor;
+  }
+  return undefined;
+}
+
+function hasLabel(bead: Bead, wanted: string): boolean {
+  return (bead.labels ?? []).some((label) => label.trim() === wanted);
 }
 
 function hasAssignee(bead: Bead): boolean {

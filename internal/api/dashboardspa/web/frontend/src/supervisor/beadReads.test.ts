@@ -119,6 +119,35 @@ describe('supervisor bead reads', () => {
     expect(result.upstream_total).toBe(3000);
   });
 
+  // The truncation notice compares upstream_fetched against upstream_total.
+  // Counting the MERGED array would let past-window beads recovered by the
+  // in-progress leg pad the count up to (or past) upstream_total and silence
+  // the notice exactly when the window really did drop beads.
+  it('reports upstream_fetched from the window leg alone, so a merge cannot mask truncation', async () => {
+    const listBeads = vi.fn(async (_city: string, query: { status?: string; limit?: number }) =>
+      query.status === 'in_progress'
+        ? {
+            items: [bead({ id: 'past-window-a', issue_type: 'task', status: 'in_progress' })],
+            total: 1,
+          }
+        : {
+            items: [bead({ id: 'in-window', issue_type: 'task' })],
+            // upstream_total sits just above what the window returned: the
+            // window IS truncated.
+            total: 2,
+          },
+    );
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    const result = await listSupervisorBeads({ limit: 1 });
+
+    // The merge recovered a second bead, but the window still fetched only one.
+    expect(result.items).toHaveLength(2);
+    expect(result.upstream_total).toBe(2);
+    expect(result.upstream_fetched).toBe(1);
+    expect(result.upstream_fetched).toBeLessThan(result.upstream_total ?? 0);
+  });
+
   it('degrades to the window alone when the in-progress leg fails', async () => {
     const listBeads = vi.fn(async (_city: string, query: { status?: string }) => {
       if (query.status === 'in_progress') throw new Error('leg down');

@@ -160,7 +160,7 @@ export async function fetchBeadsAttention(
       }),
       listDecisionBeads(cityName, decisionLabel, signal),
       listEscalationBeads(cityName, signal),
-      supervisorApi().listSessions(cityName),
+      listCitySessions(cityName),
     ] as const);
   throwIfAborted(signal);
   let reads = await read();
@@ -264,6 +264,14 @@ async function listEscalationBeads(cityName: string, signal?: AbortSignal) {
     },
     signal,
   );
+}
+
+// Async so a client that is missing `listSessions` entirely (a partial test
+// double, an older generated client) becomes a REJECTED leg rather than a
+// synchronous throw out of the `Promise.allSettled` argument list — which
+// would abandon the three sibling reads before allSettled ever saw them.
+async function listCitySessions(cityName: string) {
+  return supervisorApi().listSessions(cityName);
 }
 
 async function fetchMailAttention(

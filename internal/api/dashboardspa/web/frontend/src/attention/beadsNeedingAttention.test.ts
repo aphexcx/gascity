@@ -330,6 +330,49 @@ describe('waiting-on-human detection (gp-6xd)', () => {
     );
   });
 
+  // The two canonical hold values (engdocs/contributors/hold-label-conventions.md,
+  // internal/beadmeta/hold_labels.go). Neither carries a parenthetical, so
+  // without an explicit mapping both would render the actorless "waiting on
+  // human" on the most common real input.
+  const heldByLabel = (label: string, overrides: Partial<Bead> = {}) =>
+    bead({
+      id: 'B-held',
+      status: 'in_progress',
+      assignee: 'worker-ci-1',
+      updated_at: '2026-06-07T11:30:00.000Z',
+      labels: [label],
+      ...overrides,
+    });
+
+  it('names the mayor for the canonical hold:mayor label', () => {
+    const rows = select({ beads: [heldByLabel('hold:mayor')] });
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        reason: 'waiting-human',
+        summary: expect.stringContaining('waiting on mayor'),
+      }),
+    );
+  });
+
+  it('names external for the canonical hold:external label', () => {
+    const rows = select({ beads: [heldByLabel('hold:external')] });
+    expect(rows[0]?.summary).toContain('waiting on external');
+  });
+
+  it('never escalates hold:external — the next actor is outside this bd instance', () => {
+    const rows = select({
+      beads: [heldByLabel('hold:external', { updated_at: '2026-06-07T09:00:00.000Z' })],
+    });
+    expect(rows[0]).toEqual(expect.objectContaining({ severity: 'watch' }));
+  });
+
+  it('still escalates hold:mayor past two hours — the mayor is here to answer', () => {
+    const rows = select({
+      beads: [heldByLabel('hold:mayor', { updated_at: '2026-06-07T09:00:00.000Z' })],
+    });
+    expect(rows[0]).toEqual(expect.objectContaining({ severity: 'attention' }));
+  });
+
   it('takes precedence over stalled — a parked worker is not lost, it is waiting', () => {
     const rows = select({
       beads: [held()],

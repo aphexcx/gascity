@@ -78,7 +78,8 @@ export async function listSupervisorBeads(
     listWith(baseQuery),
     listWith(inProgressQuery).catch(() => null),
   ]);
-  const items = uniqueById([...(list.items ?? []), ...(inProgress?.items ?? [])]);
+  const windowItems = uniqueById(list.items ?? []);
+  const items = uniqueById([...windowItems, ...(inProgress?.items ?? [])]);
   const statusFiltered = includeClosed ? items : items.filter((bead) => bead.status !== 'closed');
   const filtered = includeBookkeeping ? statusFiltered : statusFiltered.filter(defaultBeadFilter);
   const upstreamTotal = countAsNumber(list.total);
@@ -86,7 +87,11 @@ export async function listSupervisorBeads(
     items: filtered,
     total: filtered.length,
     ...(upstreamTotal === undefined ? {} : { upstream_total: upstreamTotal }),
-    upstream_fetched: items.length,
+    // Counted from the WINDOW leg alone, against which `upstream_total` is
+    // reported. Counting the merged array would let beads recovered by the
+    // in-progress leg pad the figure past the window size and silence the
+    // truncation notice precisely when window beads really were dropped.
+    upstream_fetched: windowItems.length,
     fetch_limit: limit,
   };
 }
