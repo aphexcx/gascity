@@ -288,7 +288,7 @@ func TestPoolStartBackoff_ParksAfterMaxFailuresWithOneMailAndNoStart(t *testing.
 	// ZERO starts: neither demand tier lists the parked bead.
 	work = h.workBead()
 	pass := newWorkStartDeferralPass(h.clk.Now().Add(24*time.Hour), nil)
-	if rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
+	if _, rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
 		t.Fatalf("assigned tier listed a parked bead: %+v", rows)
 	}
 	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
@@ -397,7 +397,7 @@ func TestPoolStartBackoff_DeadlineJudgedByTheClock(t *testing.T) {
 			t.Fatalf("%s: reason=%q until=%v, want start_backoff until %v", tc.name, reason, gotUntil, until)
 		}
 		pass := newWorkStartDeferralPass(tc.now, nil)
-		rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass)
+		_, rows := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass)
 		counts, _, _, _ := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
 		if tc.want && (len(rows) != 0 || counts["helper"] != 0) {
 			t.Fatalf("%s: tiers served a backed-off bead: rows=%d count=%d", tc.name, len(rows), counts["helper"])
@@ -545,13 +545,19 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 				continue
 			}
 			gated := map[string]bool{}
+			owned := map[string]bool{}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				assign, ok := n.(*ast.AssignStmt)
-				if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+				if !ok || len(assign.Lhs) != 2 || len(assign.Rhs) != 1 {
 					return true
 				}
 				if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && calleeName(call) == "poolDemandAssignedWork" {
+					// (owned, demand): the first is what a session OWNS (the
+					// unfiltered projection), the second the gated demand rows.
 					if id, ok := assign.Lhs[0].(*ast.Ident); ok {
+						owned[id.Name] = true
+					}
+					if id, ok := assign.Lhs[1].(*ast.Ident); ok {
 						gated[id.Name] = true
 					}
 				}
@@ -578,6 +584,28 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 					sites = append(sites, site)
 				case name == "filterAssignedWorkBeadsForPoolDemand":
 					rawFilterCallers = append(rawFilterCallers, site)
+				}
+				return true
+			})
+			// The materializer's ownership slice (bp.assignedWorkBeads) takes
+			// the OWNED result, never the gated one: a session minted for a
+			// held-back bead stays owned by it and is not reused for other work
+			// (codex r3 finding 4).
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				assign, ok := n.(*ast.AssignStmt)
+				if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+					return true
+				}
+				sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "assignedWorkBeads" {
+					return true
+				}
+				if base, ok := sel.X.(*ast.Ident); !ok || base.Name != "bp" {
+					return true
+				}
+				id, ok := assign.Rhs[0].(*ast.Ident)
+				if !ok || !owned[id.Name] || gated[id.Name] {
+					t.Errorf("%s:%s: bp.assignedWorkBeads = %s; the ownership slice must be poolDemandAssignedWork's OWNED result", file, fn.Name.Name, exprString(fset, assign.Rhs[0]))
 				}
 				return true
 			})
@@ -638,6 +666,26 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 		{"../../internal/sling/sling_core.go", "if err := reopenForReassign(child.ID, deps); err != nil {"},
 		{"pool_desired_state.go", "poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers)"},
 		{"pool_desired_state.go", "if _, deferred := deferredTriggers[strings.TrimSpace(sb.TriggerBeadID)]; deferred {"},
+		// Round 4, family A (the operator-verb write path): the conditional
+		// writer resolves through the policy wrapper; a partial read charges
+		// nothing; every release clears all eight keys; the batch releases a
+		// child only after its checks; the reset retries once.
+		{"pool_start_backoff.go", "writer, ok := ownerBackfillConditionalWriter(store)"},
+		{"pool_start_backoff.go", "case hits == 1 && lastErr == nil:"},
+		{"../../internal/sling/sling_core.go", "update.Metadata = make(map[string]string, len(ParkReleaseMetadataKeys))"},
+		{"../../internal/sling/sling_core.go", "if check.Idempotent && !shouldReopenForReassign(opts) {"},
+		{"pool_start_backoff.go", "case conflict && attempt == 0:"},
+		// Round 4, family B (the session-survivor consumers): the ownership
+		// slice keeps the owned rows (the AST check above); the deferred set
+		// rides on the awake input and every wake collector excludes it; the
+		// in-flight tier excludes it (the pin above).
+		{"build_desired_state.go", "bp.assignedWorkBeads = poolOwnedWorkBeads"},
+		{"session_reconciler.go", "awakeInput.DeferredTriggers = awakeDeferral.deferred"},
+		{"compute_awake_set.go", "active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template))"},
+		{"compute_awake_set.go", "creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template))"},
+		{"compute_awake_set.go", "if active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template)); len(active) > 0 {"},
+		{"compute_awake_set.go", "if creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template)); len(creating) > 0 {"},
+		{"compute_awake_set.go", "for _, bead := range input.excludeDeferredSessions(cityStopPoolBeads(input.SessionBeads, template)) {"},
 	} {
 		src, err := os.ReadFile(pin.file)
 		if err != nil {

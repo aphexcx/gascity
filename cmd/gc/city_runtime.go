@@ -2506,7 +2506,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if poolDesired == nil {
 		phaseStart = time.Now()
 		tickDeferral := newWorkStartDeferralPass(time.Now(), trace)
-		poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
+		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
@@ -3342,7 +3342,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
 	dispatcherDeferral := newWorkStartDeferralPass(time.Now(), nil)
-	poolWorkBeads := poolDemandAssignedWork(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
+	_, poolWorkBeads := poolDemandAssignedWork(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
@@ -3616,7 +3616,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
 		snapshotDeferral := newWorkStartDeferralPass(time.Now(), trace)
-		poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
+		_, poolWorkBeads := poolDemandAssignedWork(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(

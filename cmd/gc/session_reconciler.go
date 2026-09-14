@@ -3449,11 +3449,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// start gate holds back (parked, or backed off at this clock): a bead the
 	// pool must not start is not wake demand for its holder either. Every other
 	// consumer of assignedWorkBeads keeps the full slice (pool_start_backoff.go).
-	awakeWorkBeads, awakeReadyFlags := newWorkStartDeferralPass(clk.Now(), trace).filterWithFlags(assignedWorkBeads, reconcileOpts.readyAssignedFlags)
+	// The same pass's deferred set rides on the awake input as a SESSION
+	// exclusion: a surviving session minted for a held-back bead is neither
+	// scaled demand nor a work-query wake (codex r3 finding 5).
+	awakeDeferral := newWorkStartDeferralPass(clk.Now(), trace)
+	awakeWorkBeads, awakeReadyFlags := awakeDeferral.filterWithFlags(assignedWorkBeads, reconcileOpts.readyAssignedFlags)
 	awakeInput := buildAwakeInputFromReconciler(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		awakeWorkBeads, awakeReadyFlags, wakeTargets, sp, clk.Now(),
 	)
+	awakeInput.DeferredTriggers = awakeDeferral.deferred
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 

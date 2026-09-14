@@ -1020,7 +1020,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
 	startDeferral := newWorkStartDeferralPass(time.Now(), nil)
-	poolWorkBeads := poolDemandAssignedWork(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, startDeferral)
+	_, poolWorkBeads := poolDemandAssignedWork(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, startDeferral)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(

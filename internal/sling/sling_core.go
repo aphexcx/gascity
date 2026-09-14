@@ -1634,31 +1634,22 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
 
-		// The same release the single-bead path performs, per child and BEFORE
-		// its idempotency check: a parked child already routed to this target
-		// must be released by --reassign, not skipped (pool_start_backoff.go C6).
-		if shouldReopenForReassign(opts) {
-			if err := reopenForReassign(child.ID, deps); err != nil {
-				err = fmt.Errorf("reopening %s for reassign: %w", child.ID, err)
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
-				batchResult.Children = append(batchResult.Children, childResult)
-				childErrors = append(childErrors, err)
-				failed++
-				continue
-			}
-		}
-
+		// --reassign defers a child's idempotent skip until after the release
+		// below: a parked child already routed to this target must be released,
+		// not skipped (pool_start_backoff.go C6). Without --reassign the skip
+		// stands where it was.
+		idempotentChild := false
 		if !opts.Force {
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})
-			if check.Idempotent {
+			if check.Idempotent && !shouldReopenForReassign(opts) {
 				childResult.Skipped = true
 				batchResult.Children = append(batchResult.Children, childResult)
 				idempotent++
 				continue
 			}
+			idempotentChild = check.Idempotent
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
 		}
 
@@ -1670,6 +1661,29 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
 				failed++
+				continue
+			}
+		}
+
+		// The same release the single-bead path performs, per child, AFTER the
+		// child's state check and its route-store reachability check (the
+		// single-bead ordering): a refused child releases nothing, so a convoy
+		// routed to an unreachable store keeps every child's assignee, park and
+		// count (the mayor's gate r1 on #19).
+		if shouldReopenForReassign(opts) {
+			if err := reopenForReassign(child.ID, deps); err != nil {
+				err = fmt.Errorf("reopening %s for reassign: %w", child.ID, err)
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				failed++
+				continue
+			}
+			if idempotentChild {
+				childResult.Skipped = true
+				batchResult.Children = append(batchResult.Children, childResult)
+				idempotent++
 				continue
 			}
 		}
@@ -1861,19 +1875,14 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 	}
 	// A re-dispatch is the hand act that releases a pool park and its
 	// start-failure count (cmd/gc/pool_start_backoff.go): clear every park and
-	// counter key the bead carries in the same update, so the target pool
-	// starts it with a clean count. Nothing in the reconciler clears these.
+	// counter key in the same update, so the target pool starts it with a
+	// clean count. All eight keys are written empty on every release, not only
+	// the ones the read saw: a park committed between this read and this
+	// write must be cleared too (codex r3 finding 3). Nothing in the
+	// reconciler clears these.
+	update.Metadata = make(map[string]string, len(ParkReleaseMetadataKeys))
 	for _, key := range ParkReleaseMetadataKeys {
-		if strings.TrimSpace(b.Metadata[key]) == "" {
-			continue
-		}
-		if update.Metadata == nil {
-			update.Metadata = make(map[string]string)
-		}
 		update.Metadata[key] = ""
-	}
-	if update.Assignee == nil && update.Status == nil && len(update.Metadata) == 0 {
-		return nil
 	}
 	return store.Update(beadID, update)
 }
