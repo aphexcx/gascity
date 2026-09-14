@@ -9,6 +9,38 @@ import (
 	"testing"
 )
 
+func TestScanWithRootExcludesInfrastructure(t *testing.T) {
+	root := t.TempDir()
+	env := map[string]string{"GC_SESSION_ID": "ci-x"}
+	for _, proc := range []struct {
+		pid, ppid int
+		command   string
+	}{
+		{5000, 1, "tmux: server"},
+		{5001, 5000, "claude"},
+		{5002, 5001, "sh"},
+	} {
+		buildFakeProc(t, root, proc.pid, env)
+		dir := filepath.Join(root, strconv.Itoa(proc.pid))
+		if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(proc.command+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		stat := strconv.Itoa(proc.pid) + " (cmd) S " + strconv.Itoa(proc.ppid) + " 0 0"
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"ci-x", ""} {
+		got, err := scanWithRoot(root, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].PID != 5001 || got[0].SessionID != "ci-x" {
+			t.Errorf("scanWithRoot(%q) = %v, want only pane root 5001", id, got)
+		}
+	}
+}
+
 // buildFakeProc builds a minimal /proc-shaped fixture tree under root for pid
 // with parent PID 1 (init). environ is written as NUL-delimited key=value pairs.
 func buildFakeProc(t *testing.T, root string, pid int, env map[string]string) {

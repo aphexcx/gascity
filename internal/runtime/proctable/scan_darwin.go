@@ -23,6 +23,10 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	return scanPSRecords(records, id), nil
+}
+
+func scanPSRecords(records map[int]psRecord, id string) []runtime.LiveRuntime {
 	var out []runtime.LiveRuntime
 	for _, record := range records {
 		if record.pid <= 1 {
@@ -33,6 +37,11 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 			continue
 		}
 		if id != "" && sessionID != id {
+			continue
+		}
+		// A shared server may have inherited the first client's session ID.
+		// It is infrastructure, never an agent root eligible for orphan reaping.
+		if isInfrastructureCommand(record.command) {
 			continue
 		}
 		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
@@ -56,7 +65,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if out == nil {
 		out = []runtime.LiveRuntime{}
 	}
-	return out, nil
+	return out
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
