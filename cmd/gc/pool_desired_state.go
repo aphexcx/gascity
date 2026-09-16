@@ -75,43 +75,71 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 // own actionable work.
 // Each bead's gc.routed_to determines which agent template it belongs to.
 // scaleCheckCounts maps agent template → new session demand from scale_check.
-// Pass nil for either when unavailable.
+// assignedWorkStoreRefs is index-aligned with assignedWorkBeads: empty entries
+// identify city work, bare rig names identify rig work, and canonical refs are
+// preserved. Pass nil for unavailable inputs; missing refs remain unknown.
 func ComputePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, nil, nil, nil)
 }
 
+// ComputePoolDesiredStatesTraced includes decisions in the supplied trace.
 func ComputePoolDesiredStatesTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, nil, nil, trace)
 }
 
+// ComputePoolDesiredStatesWithDemandTraced also binds scale-check work to requests.
 func ComputePoolDesiredStatesWithDemandTraced(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, trace)
+}
+
+// ComputePoolDesiredStatesDeferring is the production entry: deferredTriggers
+// (the work bead ids the start gate held back this build,
+// workStartDeferralPass.deferred) keeps a session already minted for such a
+// bead out of the in-flight tier, so it is neither reused as spent new demand
+// nor started for the bead (pool_start_backoff.go). The other entries pass nil
+// and are the test surface.
+func ComputePoolDesiredStatesDeferring(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	deferredTriggers map[string]struct{},
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, trace)
 }
 
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	deferredTriggers map[string]struct{},
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
@@ -159,7 +187,7 @@ func computePoolDesiredStates(
 
 		// Resume tier: actionable assigned work beads whose assignee resolves
 		// to a non-closed session bead. These sessions must stay alive.
-		for _, wb := range assignedWorkBeads {
+		for workIndex, wb := range assignedWorkBeads {
 			routedTo := routedToOrLegacyWorkflowTarget(wb)
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
@@ -201,6 +229,7 @@ func computePoolDesiredStates(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -235,6 +264,7 @@ func computePoolDesiredStates(
 				BeadPriority:   beadPriority(wb),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 				WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -258,7 +288,7 @@ func computePoolDesiredStates(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs)
+	inFlightNewRequests := poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
 	// the authoritative signal for new unassigned demand only; resume requests
@@ -341,6 +371,22 @@ func computePoolDesiredStates(
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
 }
 
+// assignedWorkRequestStoreRef translates census shorthand at the request boundary.
+// An empty entry is known city work; an absent entry is an unknown store.
+func assignedWorkRequestStoreRef(refs []string, index int) string {
+	if index >= len(refs) {
+		return ""
+	}
+	ref := strings.TrimSpace(refs[index])
+	if ref == "" {
+		return "city"
+	}
+	if strings.Contains(ref, ":") {
+		return ref
+	}
+	return "rig:" + ref
+}
+
 func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessionpkg.Info) map[string]struct{} {
 	held := make(map[string]struct{})
 	if cfg == nil {
@@ -383,7 +429,7 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 	return held
 }
 
-func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}) map[string][]SessionRequest {
+func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, resumeSessionBeadIDs map[string]struct{}, deferredTriggers map[string]struct{}) map[string][]SessionRequest {
 	requests := make(map[string][]SessionRequest)
 	sortedSessionInfos := append([]sessionpkg.Info(nil), sessionInfos...)
 	sort.SliceStable(sortedSessionInfos, func(i, j int) bool {
@@ -415,6 +461,11 @@ func poolInFlightNewRequests(cfg *config.City, sessionInfos []sessionpkg.Info, r
 				continue
 			}
 			if !poolSessionConsumesNewDemandInfo(sb) {
+				continue
+			}
+			// A session minted for a bead the start gate holds back is not spent
+			// demand: reusing it would start it for that bead (pool_start_backoff.go).
+			if _, deferred := deferredTriggers[strings.TrimSpace(sb.TriggerBeadID)]; deferred {
 				continue
 			}
 			requests[template] = append(requests[template], SessionRequest{

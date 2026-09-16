@@ -1564,7 +1564,7 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get claimed bead: %v", err)
 	}
-	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, sessionInfosFromBeads([]beads.Bead{{
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, nil, sessionInfosFromBeads([]beads.Bead{{
 		ID:     polecatSession,
 		Status: "open",
 		Type:   sessionBeadType,
