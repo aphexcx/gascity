@@ -169,6 +169,7 @@ func assignedWorkIndexReachableFromAgentOnClaimRefs(
 // backing template because pool scale decisions are per agent template.
 // leading is the store this arm was handed; it resolves the claim refs, and is
 // a property of the CITY so it is read once rather than per bead.
+// Store refs remain index-aligned with the surviving rows.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
@@ -177,11 +178,26 @@ func filterAssignedWorkBeadsForPoolDemand(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 ) []beads.Bead {
+	filtered, _ := filterAssignedWorkBeadsForPoolDemandWithRefs(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	return filtered
+}
+
+// filterAssignedWorkBeadsForPoolDemandWithRefs is filterAssignedWorkBeadsForPoolDemand
+// returning the surviving rows' store refs as well; the pool start gate
+// (pool_start_backoff.go) needs both slices index-aligned.
+func filterAssignedWorkBeadsForPoolDemandWithRefs(
+	cfg *config.City,
+	cityPath string,
+	leading beads.Store,
+	sessionInfos []sessionpkg.Info,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+) ([]beads.Bead, []string) {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
 	assigneeToSessionBeadID := make(map[string]string)
@@ -203,6 +219,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	now := time.Now().UTC()
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredRefs := make([]string, 0, len(assignedWorkStoreRefs))
 	for i, wb := range assignedWorkBeads {
 		// A deferred bead is deliberately parked (future defer_until) and is
 		// invisible to bd ready, so scale_check reports zero demand for it.
@@ -236,9 +253,10 @@ func filterAssignedWorkBeadsForPoolDemand(
 		}
 		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
 			filtered = append(filtered, wb)
+			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 		}
 	}
-	return filtered
+	return filtered, filteredRefs
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment

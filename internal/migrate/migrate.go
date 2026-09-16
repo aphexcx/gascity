@@ -92,6 +92,7 @@ type agentFile struct {
 	MaxSessionAgeJitter    string                  `toml:"max_session_age_jitter,omitempty"`
 	SleepAfterIdle         string                  `toml:"sleep_after_idle,omitempty"`
 	AutoReclaimStaleClaims bool                    `toml:"auto_reclaim_stale_claims,omitempty"`
+	MaxStartFailures       *int                    `toml:"max_start_failures,omitempty"`
 	AssignedWorkDeferLimit *int                    `toml:"assigned_work_defer_limit,omitempty"`
 	InstallAgentHooks      []string                `toml:"install_agent_hooks,omitempty"`
 	HooksInstalled         *bool                   `toml:"hooks_installed,omitempty"`
@@ -913,6 +914,11 @@ func encodeTOML(v any) ([]byte, error) {
 }
 
 func agentConfigFromAgent(agent config.Agent) agentFile {
+	var maxStartFailures *int
+	if agent.MaxStartFailures != nil {
+		value := *agent.MaxStartFailures
+		maxStartFailures = &value
+	}
 	return agentFile{
 		Description:            agent.Description,
 		Dir:                    agent.Dir,
@@ -950,6 +956,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
 		SleepAfterIdle:         agent.SleepAfterIdle,
 		AutoReclaimStaleClaims: agent.AutoReclaimStaleClaims,
+		MaxStartFailures:       maxStartFailures,
 		AssignedWorkDeferLimit: agent.AssignedWorkDeferLimit,
 		InstallAgentHooks:      agent.InstallAgentHooks,
 		HooksInstalled:         agent.HooksInstalled,
@@ -1004,6 +1011,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxSessionAge == "" &&
 		cfg.MaxSessionAgeJitter == "" &&
 		cfg.SleepAfterIdle == "" &&
+		cfg.MaxStartFailures == nil &&
 		cfg.AssignedWorkDeferLimit == nil &&
 		len(cfg.InstallAgentHooks) == 0 &&
 		cfg.HooksInstalled == nil &&

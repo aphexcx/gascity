@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/federation"
@@ -254,7 +255,7 @@ func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPre
 		// did not move since the re-read above; only when that lands is the
 		// owner label written, unfenced but immediately after the proof. The
 		// stamp doubles as the audit mark of which beads the backfill labeled.
-		stamp := beads.UpdateOpts{Metadata: map[string]string{"gc.owner_backfill_at": time.Now().UTC().Format(time.RFC3339)}}
+		stamp := beads.UpdateOpts{Metadata: map[string]string{beadmeta.OwnerBackfillAtMetadataKey: time.Now().UTC().Format(time.RFC3339)}}
 		err = writer.UpdateIfMatch(id, fresh.Revision, stamp)
 		if err == nil {
 			err = store.Update(id, beads.UpdateOpts{Labels: []string{owner}})

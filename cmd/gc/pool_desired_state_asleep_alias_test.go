@@ -129,7 +129,7 @@ func TestComputePoolDesiredStates_AsleepNamedHolderSuppressesRedundantStandby(t 
 	// (build_desired_state.go:469-471).
 	result := ComputePoolDesiredStates(
 		cfg,
-		nil,
+		nil, nil,
 		sessionInfosFromBeads([]beads.Bead{asleepNamedAliasHolder()}),
 		map[string]int{"mayor": 1},
 	)

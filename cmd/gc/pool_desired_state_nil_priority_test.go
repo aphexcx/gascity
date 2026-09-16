@@ -51,7 +51,7 @@ func TestComputePoolDesiredStates_ExplicitP1BeatsNilPriority(t *testing.T) {
 		sessionBead("s2", "open"),
 	}
 
-	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	result := ComputePoolDesiredStates(cfg, work, nil, sessionInfosFromBeads(sessions), nil)
 
 	if len(result) != 1 || len(result[0].Requests) != 1 {
 		t.Fatalf("expected 1 request under cap=1, got %#v", result)

@@ -5835,7 +5835,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -12643,7 +12643,7 @@ func TestReconcileSessionBeads_FileStoreAlwaysNamedRecoversWithLeakedDuplicateOp
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -12779,7 +12779,7 @@ func reconcileConfiguredSessionsOnce(
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -13294,7 +13294,7 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderAFreshBeadScop
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
 			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, firstTick.AssignedWorkBeads, sessionInfosFromBeads(sessions), firstTick.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, firstTick.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), firstTick.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = make(map[string]int)
 			}
@@ -13411,7 +13411,7 @@ func runPoolTeardownHoldTick(t *testing.T, cfg *config.City, sp runtime.Provider
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
 	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, tick.AssignedWorkBeads, sessionInfosFromBeads(sessions), tick.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, tick.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), tick.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -13626,7 +13626,7 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 		t.Fatalf("fresh named-session state = %q, want start-pending", fresh.Metadata["state"])
 	}
 
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, nil, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}

@@ -249,6 +249,13 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// workStartFailures is the tick's start-failure policy, copied from the
+	// start options so the commit path reads it off the result without a
+	// signature change; triggerBeadID/triggerStoreRef are the trigger THIS
+	// start carried at prepare time (pool_start_backoff.go attachWorkStartPolicy).
+	workStartFailures *workStartFailurePolicy
+	triggerBeadID     string
+	triggerStoreRef   string
 }
 
 type startResult struct {
@@ -370,6 +377,9 @@ type startExecutionOptions struct {
 	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
+	// workStartFailures charges/clears the WORK bead a start was for (pool
+	// start-failure backoff and park, pool_start_backoff.go). nil = no charge.
+	workStartFailures *workStartFailurePolicy
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -1948,6 +1958,10 @@ func commitAsyncStartResultWithContext(
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
 		outcome := settleUncommittedAsyncStart(result, refresh, sp, sessFront, clk, stderr)
+		// The provider start already failed; a session-bead refresh that cannot
+		// decide the session side does not un-happen it. The WORK bead is charged
+		// from the enqueue-time trigger (pool_start_backoff.go).
+		recordWorkStartFailure(result, clk, stderr, trace)
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
@@ -1963,6 +1977,9 @@ func commitAsyncStartResultWithContext(
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
+		// A completed provider failure is charged even when the tick's context is
+		// gone before the session-side commit (pool_start_backoff.go).
+		recordWorkStartFailure(refreshed, clk, stderr, trace)
 		// A bead-scoped pool row may only close once its runtime is confirmed
 		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9): its successor gets a
 		// new name, so a box that outlives the close is never addressed
@@ -2566,6 +2583,9 @@ func commitStartResultTraced(
 		}
 	}
 	clearLegacyPoolStartupHealthEpisode(info, name, sessFront, stderr)
+	// The batch above is the creation_complete stamp: the one event that clears
+	// the work bead's start-failure counter (pool_start_backoff.go).
+	recordWorkStartSuccess(result, stderr)
 	// Announce the wake only after the metadata batch has durably landed.
 	// Emitting earlier lets a subscriber observe a session.woke for a start
 	// whose commit then fails — a fact the store never recorded, since the
@@ -2601,6 +2621,11 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	// Charge the WORK bead this start was for before the per-arm session-bead
+	// side effects: the rollback arm below closes the session bead, so the work
+	// bead is the only place a consecutive-failure count survives the tick
+	// (pool_start_backoff.go; provider-error outcomes only).
+	recordWorkStartFailure(result, clk, stderr, trace)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
 		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 			// The runtime teardown could not be confirmed, so the row must stay
@@ -2747,6 +2772,8 @@ func recoverRunningPendingCreate(
 	store beads.Store,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
+	workStartFailures *workStartFailurePolicy,
+	stderr io.Writer,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
 		return false, nil
@@ -2841,6 +2868,10 @@ func recoverRunningPendingCreate(
 	if tok := prepared.candidate.info.InstanceToken; tok != "" {
 		metadata["instance_token"] = tok
 	}
+	// This batch stamped creation_complete_at too: the recovered start is a
+	// confirmed start, so the work bead's failure counter clears here exactly
+	// as it does on the ordinary commit (pool_start_backoff.go).
+	recordWorkStartSuccessFor(workStartFailures, info.TriggerBeadID, info.TriggerBeadStoreRef, stderr)
 	if trace != nil {
 		trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateHealed, TraceOutcomeHealed, tp.TemplateName, tp.SessionName, nil)
 	}
@@ -3388,6 +3419,7 @@ func executePlannedStartsTraced(
 					}
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item.attachWorkStartPolicy(startOpts.workStartFailures)
 				if err != nil {
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
