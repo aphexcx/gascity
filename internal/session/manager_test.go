@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -416,12 +417,17 @@ func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testin
 }
 
 func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
 	store := beads.NewMemStore()
 	sp := &orphanScanProvider{
 		Fake: runtime.NewFake(),
 		results: []runtime.LiveRuntime{{
-			PID:       1234,
-			IsTracked: false,
+			PID:          1234,
+			IsTracked:    false,
+			ProviderName: "orphan-runtime",
 		}},
 	}
 	mgr := NewManagerWithOptions(store, sp)
@@ -434,6 +440,10 @@ func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+	wantLog := fmt.Sprintf("session: terminated orphaned runtime for %s pid=1234 provider_name=%q", info.ID, "orphan-runtime")
+	if !strings.Contains(logs.String(), wantLog) {
+		t.Errorf("orphan termination log = %q, want %q", logs.String(), wantLog)
 	}
 }
 
