@@ -713,6 +713,8 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+		} else {
+			log.Printf("session: terminated orphaned runtime for %s pid=%d provider_name=%q", sessionID, live.PID, live.ProviderName)
 		}
 	}
 	if len(termErrs) > 0 {
