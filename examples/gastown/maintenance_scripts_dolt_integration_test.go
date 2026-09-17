@@ -48,6 +48,11 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 
 	binDir := t.TempDir()
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	anomalyLog := filepath.Join(t.TempDir(), "anomalies.log")
+	escalatePath := filepath.Join(binDir, "escalate")
+	writeExecutable(t, escalatePath, `#!/bin/sh
+printf '%s\n' "$*" >> "$ANOMALY_LOG"
+`)
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
@@ -76,16 +81,21 @@ exit 0
 `)
 
 	env := map[string]string{
-		"BD_CALL_LOG":      bdLog,
-		"GC_CITY":          cityDir,
-		"GC_CITY_PATH":     cityDir,
-		"GC_DOLT_HOST":     "127.0.0.1",
-		"GC_DOLT_PORT":     fmt.Sprintf("%d", port),
-		"GC_DOLT_USER":     "root",
-		"GC_DOLT_PASSWORD": "",
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_CALL_LOG":        bdLog,
+		"ANOMALY_LOG":        anomalyLog,
+		"GC_ESCALATE_SCRIPT": escalatePath,
+		"GC_CITY":            cityDir,
+		"GC_CITY_PATH":       cityDir,
+		"GC_DOLT_HOST":       "127.0.0.1",
+		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":       "root",
+		"GC_DOLT_PASSWORD":   "",
+		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
-	runScript(t, coreScriptPath("reaper.sh"), env)
+	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+	if err != nil {
+		t.Fatalf("reaper failed: %v\n%s", err, out)
+	}
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -118,6 +128,33 @@ exit 0
 		"issue-dep-root":          "open",
 		"issue-dep-live":          "in_progress",
 		"issue-non-root-workflow": "open",
+	})
+
+	// Step 5 must preserve system records without changing ordinary stale closes.
+	t.Run("stale system issues", func(t *testing.T) {
+		if cityIssueStatuses["stale-binding"] != "open" {
+			t.Errorf("stale gc:extmsg-binding status = %q, want open", cityIssueStatuses["stale-binding"])
+		}
+		if cityIssueStatuses["stale-plain"] != "closed" {
+			t.Errorf("plain stale issue status = %q, want closed", cityIssueStatuses["stale-plain"])
+		}
+		if !strings.Contains(string(bdData), "close stale-plain --reason stale:auto-closed by reaper") {
+			t.Errorf("plain stale issue missing stale close reason:\n%s", bdData)
+		}
+		if strings.Contains(string(bdData), "close stale-binding ") {
+			t.Errorf("system record was sent to bd close:\n%s", bdData)
+		}
+		// Multiple system labels on one record must still count as one skip.
+		if !strings.Contains(string(out), "skipped_system_issues:1,") {
+			t.Errorf("summary missing one system skip:\n%s", out)
+		}
+		anomalies, err := os.ReadFile(anomalyLog)
+		if err != nil {
+			t.Fatalf("ReadFile(anomalies): %v", err)
+		}
+		if !strings.Contains(string(anomalies), "citydb: 1 stale system issues skipped (gc: labels)") {
+			t.Errorf("anomaly record missing one system skip:\n%s", anomalies)
+		}
 	})
 
 	rigWispStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "wisps")
@@ -212,6 +249,13 @@ INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated
   ('issue-dep-live', 'live issue dependency child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
 INSERT INTO dependencies (issue_id, depends_on_issue_id, type) VALUES
   ('issue-dep-live', 'issue-dep-root', 'blocks');
+INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
+  ('stale-binding', 'live routing record', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}'),
+  ('stale-plain', 'ordinary backlog issue', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}');
+INSERT INTO labels (issue_id, label) VALUES
+  ('stale-binding', 'gc:extmsg-binding'),
+  ('stale-binding', 'gc:system-fixture'),
+  ('stale-plain', 'owner:test');
 `
 }
 
