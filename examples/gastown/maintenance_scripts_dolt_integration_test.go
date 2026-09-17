@@ -52,6 +52,7 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 	escalatePath := filepath.Join(binDir, "escalate")
 	writeExecutable(t, escalatePath, `#!/bin/sh
 printf '%s\n' "$*" >> "$ANOMALY_LOG"
+exit "${ESCALATE_EXIT_STATUS:-0}"
 `)
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
@@ -92,10 +93,15 @@ exit 0
 		"GC_DOLT_PASSWORD":   "",
 		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
-	// A dry run must not consume the first real run's change notification.
+	// Even successful escalation during a dry run must not consume the notification.
 	statePath := filepath.Join(cityDir, ".beads", "reaper-system-skips-state.tsv")
+	env["ESCALATE_EXIT_STATUS"] = "0"
 	env["GC_REAPER_DRY_RUN"] = "1"
 	runScript(t, coreScriptPath("reaper.sh"), env)
+	dryAnomalies, err := os.ReadFile(anomalyLog)
+	if err != nil || !strings.Contains(string(dryAnomalies), "citydb: 1 stale system issues skipped (gc: labels)") {
+		t.Fatalf("dry run did not escalate the skip anomaly: %v\n%s", err, dryAnomalies)
+	}
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Fatalf("dry run created skip-count state: %v", err)
 	}
@@ -103,10 +109,15 @@ exit 0
 	if err := os.WriteFile(anomalyLog, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	env["ESCALATE_EXIT_STATUS"] = "1"
 	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
 	if err != nil {
 		t.Fatalf("reaper failed: %v\n%s", err, out)
 	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("failed escalation created skip-count state: %v", err)
+	}
+	t.Log("run A: escalation failed; citydb baseline must remain absent")
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -217,7 +228,16 @@ exit 0
 			}
 			t.Logf("summary skips=%d; new skip anomaly=%t; dry run=%q", wantCount, gotAnomaly, env["GC_REAPER_DRY_RUN"])
 		}
+		// Retry the same population after delivery recovers, then suppress repeats.
+		env["ESCALATE_EXIT_STATUS"] = "0"
+		runAndCheck(1, true)
+		state, err := os.ReadFile(statePath)
+		if err != nil || string(state) != "citydb\t1\n" {
+			t.Errorf("recovered escalation did not save baseline: %v; state=%q", err, state)
+		}
+		t.Log("run B: escalation recovered; citydb baseline must be one")
 		runAndCheck(1, false)
+		t.Log("run C: unchanged population must not repeat the skip anomaly")
 		runServerSQL(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata)
 VALUES ('stale-binding-added', 'new routing record', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}');
 INSERT INTO labels (issue_id, label) VALUES ('stale-binding-added', 'gc:extmsg-binding');`)
