@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +38,7 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, time.Time{}, nil)
 	if partial {
 		t.Errorf("collectOpenUnassignedRoutedWork reported partial on a healthy live read")
 	}
@@ -50,6 +52,48 @@ func TestCollectOpenUnassignedRoutedWorkExcludesBlocked(t *testing.T) {
 	}
 	if got["BLK-1"] {
 		t.Errorf("blocked routed bead BLK-1 counted as spawn demand: %v — a Live read must exclude it (gc-ft31x)", ids(work))
+	}
+}
+
+// Foreign work must not escape into any routed-view consumer; retained triples
+// must still refer to the matching row, store and store scope.
+func TestCollectOpenUnassignedRoutedWorkOwnerFence(t *testing.T) {
+	for _, tc := range []struct {
+		name, identity string
+		labels         []string
+		want           int
+	}{
+		{"foreign", "jadegate", []string{"owner:citadel"}, 0},
+		{"owner", "citadel", []string{"owner:citadel"}, 1},
+		{"unfederated", "", []string{"owner:citadel"}, 1},
+		{"unowned", "jadegate", nil, 1},
+		{"handoff", "jadegate", []string{"owner:citadel", "handoff:jadegate"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := beads.Bead{ID: "routed-work", Type: "task", Status: "open", Labels: tc.labels, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}
+			store := collapsedBlockedStatusStore{Store: beads.NewMemStore(), liveSnapshot: []beads.Bead{row, row}}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			cfg.Federation.Identity = tc.identity
+			var out bytes.Buffer
+			var refusals claimRefusalLog
+			now := time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)
+			for tick := 0; tick < 2; tick++ {
+				work, stores, refs, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, &out, now.Add(time.Duration(tick)*time.Minute), &refusals)
+				if partial || len(work) != tc.want || len(stores) != tc.want || len(refs) != tc.want {
+					t.Fatalf("work=%v stores=%d refs=%v partial=%v, want %d aligned rows", ids(work), len(stores), refs, partial, tc.want)
+				}
+				if tc.want == 1 && (work[0].ID != "routed-work" || stores[0] == nil || refs[0] != "city:test-city") {
+					t.Errorf("retained triple = %v / %v / %v", work, stores, refs)
+				}
+				wantLogs := 0
+				if tc.want == 0 {
+					wantLogs = 1
+				}
+				if got := strings.Count(out.String(), "cross-city-fence refused bead=routed-work owner=citadel this_identity=jadegate missing=handoff:jadegate"); got != wantLogs {
+					t.Errorf("refusal lines=%d, want %d; %s", got, wantLogs, out.String())
+				}
+			}
+		})
 	}
 }
 
@@ -79,7 +123,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsPartialOnLiveOutage(t *testing.T)
 	store := liveOpenListErrorStore{Store: beads.NewMemStore(), err: errors.New("live open list outage")}
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard)
+	work, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, time.Time{}, nil)
 
 	if !partial {
 		t.Errorf("collectOpenUnassignedRoutedWork did not report partial on a live List outage (fail-open-to-zero, gc-ft31x)")

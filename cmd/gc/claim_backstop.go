@@ -155,6 +155,7 @@ func nudgeStalledSeatClaims(
 	now time.Time,
 	rec events.Recorder,
 	stdout io.Writer,
+	refusals *claimRefusalLog,
 ) {
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return // hot reconcile path: never panic on a half-built dependency
@@ -172,7 +173,7 @@ func nudgeStalledSeatClaims(
 		store:  store,
 		stdout: stdout,
 		work: newSeatOpenWorkSnapshot(
-			now, federationIdentity(cfg), sessionBeads,
+			now, federationIdentity(cfg), refusals, sessionBeads,
 			assignedWork, assignedWorkStores, assignedWorkStoreRefs,
 			routedWork, routedWorkStores, routedWorkStoreRefs,
 		),
@@ -205,6 +206,7 @@ type seatOpenWork struct {
 // stores.
 type seatOpenWorkSnapshot struct {
 	federationIdentity string
+	refusalLog         *claimRefusalLog
 	// refused deduplicates diagnostics across both work views for this tick.
 	refused        map[storeScopedBeadKey]bool
 	openByIdentity map[string][]seatOpenWork
@@ -221,6 +223,7 @@ type seatOpenWorkSnapshot struct {
 func newSeatOpenWorkSnapshot(
 	now time.Time,
 	identity string,
+	refusals *claimRefusalLog,
 	sessionBeads []beads.Bead,
 	assignedWork []beads.Bead,
 	assignedStores []beads.Store,
@@ -231,6 +234,7 @@ func newSeatOpenWorkSnapshot(
 ) seatOpenWorkSnapshot {
 	snapshot := seatOpenWorkSnapshot{
 		federationIdentity:    identity,
+		refusalLog:            refusals,
 		refused:               make(map[storeScopedBeadKey]bool),
 		openByIdentity:        make(map[string][]seatOpenWork),
 		inProgressIdentities:  make(map[string]bool),
@@ -243,7 +247,9 @@ func newSeatOpenWorkSnapshot(
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(wb.Status), "in_progress") {
-			snapshot.inProgressIdentities[assignee] = true
+			if !snapshot.refuse(now, wb, storeRefAt(assignedStoreRefs, i)) {
+				snapshot.inProgressIdentities[assignee] = true
+			}
 			continue
 		}
 		snapshot.add(now, wb, assignee, true, storeAt(assignedStores, i), storeRefAt(assignedStoreRefs, i))
@@ -281,13 +287,10 @@ func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string,
 	key := storeScopedBeadKey{StoreRef: storeRef, ID: strings.TrimSpace(wb.ID)}
 	// A seat must not be nudged for work its claim hook will refuse. Apply the
 	// same owner fence to assigned and routed rows before either is indexed.
-	if ok, reason := federation.MayClaim(wb.Labels, s.federationIdentity); !ok {
-		if !s.refused[key] {
-			log.Printf("%s: %s", seatClaimNudgeLabel, federation.ClaimRefusalLine(wb.ID, reason))
-			s.refused[key] = true
-		}
+	if s.refuse(now, wb, storeRef) {
 		return
 	}
+
 	row := seatOpenWork{
 		BeadID:            strings.TrimSpace(wb.ID),
 		RootID:            strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
@@ -302,6 +305,22 @@ func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string,
 	}
 	s.byKey[key] = row
 	s.openByIdentity[identity] = append(s.openByIdentity[identity], row)
+}
+
+// refuse also protects in-progress identity holds, which are indexed separately.
+func (s seatOpenWorkSnapshot) refuse(now time.Time, wb beads.Bead, storeRef string) bool {
+	ok, reason := federation.MayClaim(wb.Labels, s.federationIdentity)
+	if ok {
+		return false
+	}
+	key := storeScopedBeadKey{StoreRef: storeRef, ID: strings.TrimSpace(wb.ID)}
+	if !s.refused[key] {
+		s.refused[key] = true
+		if s.refusalLog.shouldLog(now, key, reason) {
+			log.Printf("%s: %s", seatClaimNudgeLabel, federation.ClaimRefusalLine(wb.ID, reason))
+		}
+	}
+	return true
 }
 
 func storeAt(stores []beads.Store, i int) beads.Store {

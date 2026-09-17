@@ -27,6 +27,7 @@ import (
 // ever drains a seat over work it merely has not started.
 
 type claimBackstopFixture struct {
+	refusals claimRefusalLog
 	cfg      *config.City
 	store    beads.Store
 	depStore beads.Store // what the lane is handed; wraps store to inject read failures
@@ -202,7 +203,7 @@ func (f *claimBackstopFixture) tick(t *testing.T) {
 		f.sp, f.cfg, f.store, sessions,
 		assigned, assignedStores, assignedRefs,
 		routed, routedStores, routedRefs,
-		f.partial, f.now, f.rec, &f.stdout,
+		f.partial, f.now, f.rec, &f.stdout, &f.refusals,
 	)
 }
 
@@ -344,7 +345,7 @@ func TestSeatClaimBackstopOwnerFence(t *testing.T) {
 				f.advance(t)
 				wantNudges, wantRefusals := 1, 0
 				if tc.refused {
-					wantNudges, wantRefusals = 0, 2 // one refusal on each tick
+					wantNudges, wantRefusals = 0, 1 // repeated ticks share the hourly bound
 				}
 				if got := f.nudgeCount(); got != wantNudges {
 					t.Errorf("nudges = %d, want %d; stdout=%s", got, wantNudges, f.stdout.String())
@@ -370,7 +371,7 @@ func TestSeatClaimBackstopOwnerFence(t *testing.T) {
 
 // Duplicate sightings in the two work views must not multiply refusal logs or
 // hide this pool seat's own work behind a foreign row.
-func TestSeatClaimBackstopOwnerFenceLogsOncePerTick(t *testing.T) {
+func TestSeatClaimBackstopOwnerFenceLogsBounded(t *testing.T) {
 	f := newClaimBackstopFixture(t)
 	f.cfg.Federation.Identity = "jadegate"
 	f.asPoolSeat(t)
@@ -395,10 +396,10 @@ func TestSeatClaimBackstopOwnerFenceLogsOncePerTick(t *testing.T) {
 		nudgeStalledSeatClaims(f.sp, f.cfg, f.store, []beads.Bead{f.reread(t, f.session.ID)},
 			[]beads.Bead{foreign, foreign, local}, []beads.Store{f.store, f.store, f.store}, []string{"city", "city", "city"},
 			[]beads.Bead{routedForeign}, []beads.Store{f.store}, []string{"city"},
-			false, f.now, f.rec, &f.stdout)
+			false, f.now, f.rec, &f.stdout, &f.refusals)
 		refusal := "cross-city-fence refused bead=aaa-foreign owner=citadel this_identity=jadegate missing=handoff:jadegate"
-		if got := strings.Count(logs.String(), refusal); got != tick {
-			t.Errorf("tick %d: refusal lines = %d, want %d; logs=%s", tick, got, tick, logs.String())
+		if got := strings.Count(logs.String(), refusal); got != 1 {
+			t.Errorf("tick %d: refusal lines = %d, want %d; logs=%s", tick, got, 1, logs.String())
 		}
 		if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != local.ID {
 			t.Errorf("tick %d: nudge candidate = %q, want local bead %q", tick, got, local.ID)
@@ -407,6 +408,26 @@ func TestSeatClaimBackstopOwnerFenceLogsOncePerTick(t *testing.T) {
 			t.Errorf("tick %d: nudges = %d, want %d", tick, got, tick-1)
 		}
 		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	}
+}
+
+// A foreign claim under the same bare assignee must not silence local work.
+func TestSeatClaimBackstopOwnerFenceForeignInProgress(t *testing.T) {
+	f := newClaimBackstopFixture(t)
+	f.cfg.Federation.Identity = "jadegate"
+	foreign, err := f.store.Create(beads.Bead{Title: "foreign claim", Type: "task", Status: "in_progress", Assignee: f.identity, Labels: []string{"owner:citadel"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	if err := f.store.Update(foreign.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatal(err)
+	}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	f.advance(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Errorf("local nudges=%d, want 1 beside foreign claim %s; %s", got, foreign.ID, f.stdout.String())
 	}
 }
 

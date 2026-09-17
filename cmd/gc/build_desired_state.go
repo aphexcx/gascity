@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/poolplan"
@@ -405,6 +406,7 @@ func buildDesiredState(
 		sessionBeads,
 		nil,
 		stderr,
+		nil,
 	)
 	result.SessionQueryPartial = result.SessionQueryPartial || sessionQueryPartial
 	return result
@@ -448,6 +450,7 @@ func buildDesiredStateWithSessionBeads(
 		sessionBeads,
 		trace,
 		stderr,
+		nil,
 	)
 }
 
@@ -461,6 +464,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	sessionBeads *sessionBeadSnapshot,
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
+	refusals *claimRefusalLog,
 ) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
@@ -848,7 +852,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
 		subPhaseStart = time.Now()
-		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr, poolDecisionTime, refusals)
 		// Same repair as above, over the open/unassigned collection: a bead
 		// released back to open by a drain is clobbered the same way an
 		// in_progress one is, and never appears in assignedWorkBeads once
@@ -1184,7 +1188,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			assignedWorkBeads,
 			assignedWorkStores,
 			assignedWorkStoreRefs,
-			readyAssigned,
+			readyAssigned, federationIdentity(cfg), poolDecisionTime, refusals,
 		)
 	}
 
@@ -5384,7 +5388,7 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 // `gc storage migrate` moving it to the binding, after which this arm sees it on
 // the very next tick; the lost-route half is separately converged off-tick by the
 // route-recovery backstop, which reads every leg (route_recovery_lane.go).
-func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer) ([]beads.Bead, []beads.Store, []string, bool) {
+func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool, stderr io.Writer, now time.Time, refusals *claimRefusalLog) ([]beads.Bead, []beads.Store, []string, bool) {
 	if cfg == nil {
 		return nil, nil, nil, false
 	}
@@ -5428,6 +5432,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 	var workStores []beads.Store
 	var workStoreRefs []string
 	var partial bool
+	identity := federationIdentity(cfg)
 	seen := make(map[storeScopedBeadKey]struct{})
 	for i, source := range stores {
 		if source.store == nil {
@@ -5469,6 +5474,12 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 				continue
 			}
 			seen[key] = struct{}{}
+			if ok, reason := federation.MayClaim(b.Labels, identity); !ok {
+				if refusals.shouldLog(now, key, reason) {
+					fmt.Fprintf(stderr, "collectOpenUnassignedRoutedWork: %s\n", federation.ClaimRefusalLine(b.ID, reason)) //nolint:errcheck
+				}
+				continue
+			}
 			workBeads = append(workBeads, b)
 			workStores = append(workStores, source.store)
 			workStoreRefs = append(workStoreRefs, storeRef)
@@ -5628,7 +5639,13 @@ func selectReadyContinuationClaimCandidates(
 	workStores []beads.Store,
 	workStoreRefs []string,
 	readyAssigned map[storeScopedBeadKey]bool,
+	identity string,
+	now time.Time,
+	refusals *claimRefusalLog,
 ) ([]ContinuationClaimCandidate, bool) {
+	if refusals == nil {
+		refusals = &claimRefusalLog{}
+	}
 	if len(work) != len(workStores) || len(work) != len(workStoreRefs) {
 		return nil, true
 	}
@@ -5668,7 +5685,7 @@ func selectReadyContinuationClaimCandidates(
 			workStores,
 			workStoreRefs,
 			key.StoreRef,
-			readyAssigned,
+			readyAssigned, identity, now, refusals,
 		)
 		if hold {
 			partial = true
@@ -5714,6 +5731,9 @@ func foldReadyContinuationClaimGroup(
 	workStoreRefs []string,
 	canonicalStoreRef string,
 	readyAssigned map[storeScopedBeadKey]bool,
+	identity string,
+	now time.Time,
+	refusals *claimRefusalLog,
 ) (valid []ContinuationClaimCandidate, absent bool, hold bool) {
 	for _, i := range rows {
 		candidate, resolution := evaluateReadyContinuationClaimCandidate(
@@ -5721,7 +5741,7 @@ func foldReadyContinuationClaimGroup(
 			workStores[i],
 			workStoreRefs[i],
 			canonicalStoreRef,
-			readyAssigned,
+			readyAssigned, identity, now, refusals,
 		)
 		switch resolution {
 		case continuationCandidateAbsent:
@@ -5776,6 +5796,9 @@ func evaluateReadyContinuationClaimCandidate(
 	rawStoreRef string,
 	canonicalStoreRef string,
 	readyAssigned map[storeScopedBeadKey]bool,
+	identity string,
+	now time.Time,
+	refusals *claimRefusalLog,
 ) (ContinuationClaimCandidate, continuationCandidateResolution) {
 	// Scope is answered before eligibility: a row another scope owns is foreign
 	// to this leg whatever its own state, and a co-resident copy that is merely
@@ -5791,6 +5814,14 @@ func evaluateReadyContinuationClaimCandidate(
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
+
+	if ok, reason := federation.MayClaim(bead.Labels, identity); !ok {
+		key := storeScopedBeadKey{StoreRef: ownerStoreRef, ID: bead.ID}
+		if refusals.shouldLog(now, key, reason) {
+			log.Printf("continuation-claim-nudge: %s", federation.ClaimRefusalLine(bead.ID, reason))
+		}
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 

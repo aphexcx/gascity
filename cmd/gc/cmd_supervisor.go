@@ -2975,6 +2975,7 @@ func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*
 
 func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	beaconTime := time.Now()
+	var refusals claimRefusalLog
 	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 		return buildDesiredStateWithSessionBeadsAt(
 			cityName,
@@ -2988,6 +2989,7 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 			sessionBeads,
 			trace,
 			stderr,
+			&refusals,
 		)
 	}
 }
