@@ -300,6 +300,51 @@ func (f *claimBackstopFixture) routedWorkWithID(t *testing.T, id, title string) 
 	return work
 }
 
+// TestSeatClaimBackstopAgentOptOut catches nudges to seats that explicitly opt out.
+func TestSeatClaimBackstopAgentOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setting    string
+		dir        string
+		wantNudges int
+	}{
+		{name: "omitted defaults to enabled", wantNudges: 1},
+		{name: "explicitly enabled", setting: "claim_backstop = true", wantNudges: 1},
+		{name: "disabled", setting: "claim_backstop = false"},
+		{name: "disabled rig agent", setting: "claim_backstop = false", dir: "rig"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newClaimBackstopFixture(t)
+			cfg, err := config.Parse([]byte(fmt.Sprintf("[workspace]\nname = 'test-city'\n[[agent]]\nname = 'seat'\ndir = %q\n%s\n", tc.dir, tc.setting)))
+			if err != nil {
+				t.Fatalf("parsing agent config: %v", err)
+			}
+			f.cfg = cfg
+			f.restamp(t, map[string]string{"template": cfg.Agents[0].QualifiedName()})
+			f.assignWorkToTheSeat(t)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+			f.advance(t)
+
+			if got := f.nudgeCount(); got != tc.wantNudges {
+				t.Fatalf("nudges = %d, want %d; stdout=%s", got, tc.wantNudges, f.stdout.String())
+			}
+			wantMessage := ""
+			if tc.wantNudges != 0 {
+				wantMessage = defaultPoolClaimNudge
+			}
+			if got := f.lastNudge(); got != wantMessage {
+				t.Errorf("delivered nudge = %q, want %q", got, wantMessage)
+			}
+			if tc.wantNudges == 0 {
+				if got := f.sessionMeta(t, seatClaimNudgeWorkKey); got != "" {
+					t.Errorf("disabled agent has work marker %q, want none", got)
+				}
+			}
+		})
+	}
+}
+
 // TestSeatClaimBackstopNudgesANamedSeatOnItsOwnRoutedWork is the ga-evxqd core
 // row. The seat is awake and quiet, the bead is open, routed to the seat's own
 // identity, unassigned, and has zero unmet dependencies — and nothing in the
