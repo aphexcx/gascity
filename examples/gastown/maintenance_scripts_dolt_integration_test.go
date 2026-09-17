@@ -185,15 +185,9 @@ exit 0
 	t.Run("system skip count changes", func(t *testing.T) {
 		runServerSQL := func(query string) {
 			t.Helper()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, doltPath,
+			runDoltForMaintenanceTest(t, doltPath, dataDir,
 				"--host", "127.0.0.1", "--port", fmt.Sprint(port), "--user", "root", "--no-tls", "--use-db", "citydb",
 				"sql", "-q", query)
-			cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("updating fixture: %v\n%s", err, out)
-			}
 		}
 		readAnomalies := func() string {
 			t.Helper()
@@ -357,6 +351,11 @@ func runDoltForMaintenanceTest(t *testing.T, doltPath, dir string, args ...strin
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath, args...)
 	cmd.Dir = dir
+	// Server commands use the fixture's passwordless root account; local
+	// commands must not receive a password without an explicit user.
+	if len(args) > 0 && args[0] == "--host" {
+		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dolt %s failed in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
