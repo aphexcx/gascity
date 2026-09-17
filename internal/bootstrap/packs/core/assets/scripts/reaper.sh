@@ -1121,7 +1121,9 @@ while IFS= read -r DB; do
     fi
 
     # Step 5: Auto-close stale issues (exclude gc:-labelled system records, P0/P1, epics, active deps).
+    # Report system skips only on first appearance or a per-database count change.
     DB_ISSUES_CLOSED=0
+    SYSTEM_SKIP_ANOMALIES_BEFORE="$ANOMALIES"
     get_sql_count "$DB" "stale system issue" "
         SELECT COUNT(*)
         FROM \`$DB\`.issues
@@ -1148,8 +1150,34 @@ while IFS= read -r DB; do
         )
     "
     TOTAL_STALE_SYSTEM_SKIPPED=$((TOTAL_STALE_SYSTEM_SKIPPED + SQL_COUNT_RESULT))
-    if [ "$SQL_COUNT_RESULT" -gt 0 ]; then
-        record_anomaly "$DB" "$SQL_COUNT_RESULT stale system issues skipped (gc: labels)"
+    # A failed count returns zero but records an anomaly; preserve its baseline.
+    if [ "$ANOMALIES" = "$SYSTEM_SKIP_ANOMALIES_BEFORE" ]; then
+        SYSTEM_SKIP_STATE="$CITY_BEADS_DIR/reaper-system-skips-state.tsv"
+        SYSTEM_SKIP_SOURCE=/dev/null
+        PREVIOUS_SYSTEM_SKIPS=""
+        if [ -f "$SYSTEM_SKIP_STATE" ]; then
+            SYSTEM_SKIP_SOURCE="$SYSTEM_SKIP_STATE"
+            if ! PREVIOUS_SYSTEM_SKIPS=$(awk -F '\t' -v db="$DB" '$1 == db { print $2; exit }' "$SYSTEM_SKIP_STATE"); then
+                record_anomaly "$DB" "could not read system skip state: $SYSTEM_SKIP_STATE"
+            fi
+        fi
+        if [ "$ANOMALIES" = "$SYSTEM_SKIP_ANOMALIES_BEFORE" ] &&
+            [ "$SQL_COUNT_RESULT" != "$PREVIOUS_SYSTEM_SKIPS" ] &&
+            { [ "$SQL_COUNT_RESULT" -gt 0 ] || [ -n "$PREVIOUS_SYSTEM_SKIPS" ]; }; then
+            record_anomaly "$DB" "$SQL_COUNT_RESULT stale system issues skipped (gc: labels)"
+            if [ -z "$DRY_RUN" ]; then
+                SYSTEM_SKIP_TMP=""
+                if SYSTEM_SKIP_TMP=$(mktemp "$SYSTEM_SKIP_STATE.XXXXXX") &&
+                    awk -F '\t' -v db="$DB" '$1 != db' "$SYSTEM_SKIP_SOURCE" > "$SYSTEM_SKIP_TMP" &&
+                    printf '%s\t%s\n' "$DB" "$SQL_COUNT_RESULT" >> "$SYSTEM_SKIP_TMP" &&
+                    mv -f "$SYSTEM_SKIP_TMP" "$SYSTEM_SKIP_STATE"; then
+                    :
+                else
+                    rm -f "$SYSTEM_SKIP_TMP"
+                    record_anomaly "$DB" "could not write system skip state: $SYSTEM_SKIP_STATE"
+                fi
+            fi
+        fi
     fi
 
     get_sql_rows "$DB" "stale issue" "

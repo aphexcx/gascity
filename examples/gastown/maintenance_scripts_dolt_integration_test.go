@@ -92,6 +92,17 @@ exit 0
 		"GC_DOLT_PASSWORD":   "",
 		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
+	// A dry run must not consume the first real run's change notification.
+	statePath := filepath.Join(cityDir, ".beads", "reaper-system-skips-state.tsv")
+	env["GC_REAPER_DRY_RUN"] = "1"
+	runScript(t, coreScriptPath("reaper.sh"), env)
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("dry run created skip-count state: %v", err)
+	}
+	env["GC_REAPER_DRY_RUN"] = ""
+	if err := os.WriteFile(anomalyLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
 	if err != nil {
 		t.Fatalf("reaper failed: %v\n%s", err, out)
@@ -167,6 +178,75 @@ exit 0
 	rigIssueStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "issues")
 	requireMaintenanceStatuses(t, rigIssueStatuses, map[string]string{
 		"rig-issue-preserve": "open",
+	})
+
+	// A steady population must stay visible in the summary without sending
+	// another anomaly; a changed population must notify again.
+	t.Run("system skip count changes", func(t *testing.T) {
+		runServerSQL := func(query string) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, doltPath,
+				"--host", "127.0.0.1", "--port", fmt.Sprint(port), "--user", "root", "--no-tls", "--use-db", "citydb",
+				"sql", "-q", query)
+			cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("updating fixture: %v\n%s", err, out)
+			}
+		}
+		readAnomalies := func() string {
+			t.Helper()
+			data, err := os.ReadFile(anomalyLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+		runAndCheck := func(wantCount int, wantAnomaly bool) {
+			t.Helper()
+			before := readAnomalies()
+			out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+			if err != nil {
+				t.Fatalf("reaper failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), fmt.Sprintf("skipped_system_issues:%d,", wantCount)) {
+				t.Errorf("summary missing %d system skips:\n%s", wantCount, out)
+			}
+			newAnomalies := strings.TrimPrefix(readAnomalies(), before)
+			gotAnomaly := strings.Contains(newAnomalies, "stale system issues skipped (gc: labels)")
+			if gotAnomaly != wantAnomaly {
+				t.Errorf("system skip anomaly = %t, want %t; new anomalies:\n%s", gotAnomaly, wantAnomaly, newAnomalies)
+			}
+			if wantAnomaly && !strings.Contains(newAnomalies, fmt.Sprintf("citydb: %d stale system issues skipped (gc: labels)", wantCount)) {
+				t.Errorf("anomaly missing changed citydb count %d:\n%s", wantCount, newAnomalies)
+			}
+			t.Logf("summary skips=%d; new skip anomaly=%t; dry run=%q", wantCount, gotAnomaly, env["GC_REAPER_DRY_RUN"])
+		}
+		runAndCheck(1, false)
+		runServerSQL(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata)
+VALUES ('stale-binding-added', 'new routing record', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}');
+INSERT INTO labels (issue_id, label) VALUES ('stale-binding-added', 'gc:extmsg-binding');`)
+		runAndCheck(2, true)
+
+		// Dry runs must not overwrite an existing baseline either.
+		before, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runServerSQL("UPDATE issues SET status='closed' WHERE id IN ('stale-binding', 'stale-binding-added')")
+		env["GC_REAPER_DRY_RUN"] = "1"
+		runAndCheck(0, true)
+		after, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Errorf("dry run changed skip-count state: before=%q after=%q", before, after)
+		}
+		env["GC_REAPER_DRY_RUN"] = ""
+		runAndCheck(0, true)
+		runAndCheck(0, false)
 	})
 }
 
@@ -255,6 +335,7 @@ INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated
 INSERT INTO labels (issue_id, label) VALUES
   ('stale-binding', 'gc:extmsg-binding'),
   ('stale-binding', 'gc:system-fixture'),
+  ('stale-binding', 'owner:test'),
   ('stale-plain', 'owner:test');
 `
 }
