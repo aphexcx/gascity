@@ -213,7 +213,11 @@
               "ready",
               "storage-recover-stranded",
               "beads-metadata-cas",
-              "maintenance-owner-backfill"
+              "maintenance-owner-backfill",
+              "worktree-ensure",
+              "worktree-verify",
+              "storage-preflight",
+              "worktree-cleanup"
             ]
           },
           "event_id": {

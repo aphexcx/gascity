@@ -329,14 +329,23 @@ func TestResolveConvoyStoreForCommandCountsOpenFailureAsSkipped(t *testing.T) {
 	}
 }
 
-// Opening is fatal only when nothing opened; the first failure is the error.
+// Opening is fatal only when nothing opened; retain every failed probe so a
+// binding resolver can distinguish an unavailable rig from a retained city.
 func TestOpenConvoyStoresWithSkippedFailsOnlyWhenNothingOpens(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
-	_, skipped, err := openConvoyStoresWithSkipped(convoyDarkTestCity(), "/city", "", func(string) (beads.Store, error) {
+	stores, skipped, err := openConvoyStoresWithSkipped(convoyDarkTestCity(), "/city", "", func(string) (beads.Store, error) {
 		return nil, errConvoyStoreDark
 	})
-	if !errors.Is(err, errConvoyStoreDark) || skipped != nil {
-		t.Fatalf("openConvoyStoresWithSkipped = (%v, %v), want the first open error and no skipped list", skipped, err)
+	if !errors.Is(err, errConvoyStoreDark) || len(stores) != 0 || len(skipped) != 2 {
+		t.Fatalf("openConvoyStoresWithSkipped = (%v, %v, %v), want no stores, both skipped probes and the first open error", stores, skipped, err)
+	}
+	if skipped[0].path != "/city" || skipped[1].path != "/rigs/hello-world" {
+		t.Fatalf("skipped paths = %+v, want city and rig evidence", skipped)
+	}
+	for _, failure := range skipped {
+		if !errors.Is(failure.err, errConvoyStoreDark) {
+			t.Fatalf("skipped cause = %v, want the open failure", failure.err)
+		}
 	}
 }
 

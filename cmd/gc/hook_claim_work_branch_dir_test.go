@@ -18,9 +18,9 @@ type workBranchDirSpy struct {
 	dir      string
 }
 
-func (s *workBranchDirSpy) resolve(dir string) string {
-	s.dir = dir
-	return s.branches[dir]
+func (s *workBranchDirSpy) resolve(tree hookClaimWorkTree) string {
+	s.dir = tree.Dir
+	return s.branches[tree.Dir]
 }
 
 func workBranchDirClaimOps(spy *workBranchDirSpy, stamped *map[string]string) hookClaimOps {
@@ -31,7 +31,8 @@ func workBranchDirClaimOps(spy *workBranchDirSpy, stamped *map[string]string) ho
 		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		ResolveWorkBranch: spy.resolve,
+		ResolveWorkBranch:     spy.resolve,
+		ResolveSessionWorkDir: func(string) string { return "" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, patch map[string]string) error {
 			*stamped = patch
 			return nil
@@ -46,9 +47,9 @@ func workBranchDirClaimOps(spy *workBranchDirSpy, stamped *map[string]string) ho
 // worker whose lane was on gp-1 got gc.work_branch=main stamped.
 //
 // Contract pinned here: GC_DIR wins when it is an absolute path naming an
-// existing directory (the runtime always exports an absolute path; a symlink
+// existing directory outside the store (the runtime exports an absolute path; a symlink
 // is passed through as given and git resolves it); anything else — unset,
-// empty, relative, missing, or a regular file — falls back to the store dir.
+// empty, relative, missing, or a regular file — stamps no store branch.
 // Duplicate entries follow hookClaimEnvValue: the last one wins.
 func TestDoHookClaimResolvesWorkBranchFromSessionWorkDir(t *testing.T) {
 	storeDir := t.TempDir()   // the rig root, checked out on main
@@ -73,22 +74,22 @@ func TestDoHookClaimResolvesWorkBranchFromSessionWorkDir(t *testing.T) {
 			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + sessionDir}, wantDir: sessionDir, wantBranch: "gp-1",
 		},
 		"GC_DIR names the store dir itself (no work_dir: the scope root is the workdir)": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + storeDir}, wantDir: storeDir, wantBranch: "main",
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + storeDir}, wantDir: "", wantBranch: "",
 		},
-		"no GC_DIR falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1"}, wantDir: storeDir, wantBranch: "main",
+		"no GC_DIR stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1"}, wantDir: "", wantBranch: "",
 		},
-		"empty GC_DIR falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR="}, wantDir: storeDir, wantBranch: "main",
+		"empty GC_DIR stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR="}, wantDir: "", wantBranch: "",
 		},
-		"GC_DIR that does not exist falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + missingDir}, wantDir: storeDir, wantBranch: "main",
+		"GC_DIR that does not exist stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + missingDir}, wantDir: "", wantBranch: "",
 		},
-		"GC_DIR naming a regular file falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + regularFile}, wantDir: storeDir, wantBranch: "main",
+		"GC_DIR naming a regular file stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + regularFile}, wantDir: "", wantBranch: "",
 		},
-		"relative GC_DIR falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR=."}, wantDir: storeDir, wantBranch: "main",
+		"relative GC_DIR stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR=."}, wantDir: "", wantBranch: "",
 		},
 		"symlinked GC_DIR is used as given": {
 			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + linkDir}, wantDir: linkDir, wantBranch: "gp-1",
@@ -96,8 +97,8 @@ func TestDoHookClaimResolvesWorkBranchFromSessionWorkDir(t *testing.T) {
 		"duplicate GC_DIR entries: the last one wins": {
 			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + storeDir, "GC_DIR=" + sessionDir}, wantDir: sessionDir, wantBranch: "gp-1",
 		},
-		"trailing empty GC_DIR override falls back to the store dir": {
-			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + sessionDir, "GC_DIR="}, wantDir: storeDir, wantBranch: "main",
+		"trailing empty GC_DIR override stamps no store branch": {
+			env: []string{"GC_SESSION_ID=s1", "GC_DIR=" + sessionDir, "GC_DIR="}, wantDir: "", wantBranch: "",
 		},
 	}
 	for name, tc := range cases {

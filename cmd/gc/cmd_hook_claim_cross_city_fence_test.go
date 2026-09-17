@@ -826,7 +826,7 @@ func TestClaimHookWorkCrossCityFenceResolvesAcrossFederatedLegs(t *testing.T) {
 	quietOps := func() hookClaimOps {
 		return hookClaimOps{
 			EmitClaimRejected: func(string, string, string) {},
-			ResolveWorkBranch: func(string) string { return "" },
+			ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		}
 	}
 
@@ -985,4 +985,43 @@ func TestClaimHookWorkCrossCityFenceResolvesAcrossFederatedLegs(t *testing.T) {
 		}
 		assertCrossCityRefusalLogged(t, &stderr, beadID, foreignOwner, "adoption")
 	})
+}
+
+// Stale-claim recovery is a write before the claim CAS. A query snapshot with
+// local ownership cannot authorize reclaim after the canonical owner changes.
+func TestHookClaimCrossCityFenceRechecksBeforeStaleReclaim(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		readErr   error
+		wantWrite bool
+	}{
+		{name: "local", labels: []string{crossCityOwnerLabel(crossCityThisCity)}, wantWrite: true},
+		{name: "foreign", labels: []string{crossCityOwnerLabel(crossCityForeignCity)}},
+		{name: "unreadable", readErr: errors.New("owner read failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writes := 0
+			ops := hookClaimOps{
+				ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					return beads.Bead{ID: "jg-1", Labels: tc.labels}, tc.readErr
+				},
+				ReclaimStale: func(context.Context, string, []string, string) (bool, string, error) {
+					writes++
+					return true, "old-seat", nil
+				},
+			}
+			ops.applyDefaults()
+			var stderr bytes.Buffer
+			ops.installCrossCityWriteFence(crossCityClaimOptions(), &stderr)
+			reclaimed, _, err := ops.ReclaimStale(context.Background(), "/tmp/work", nil, "jg-1")
+			if tc.wantWrite {
+				if writes != 1 || !reclaimed || err != nil {
+					t.Fatalf("reclaim = %v, %v; writes=%d", reclaimed, err, writes)
+				}
+			} else if writes != 0 || reclaimed || err == nil {
+				t.Fatalf("refused reclaim = %v, %v; writes=%d", reclaimed, err, writes)
+			}
+		})
+	}
 }

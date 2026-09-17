@@ -159,13 +159,14 @@ func earliestRecheck(a, b time.Time) time.Time {
 func poolDemandAssignedWork(
 	cfg *config.City,
 	cityPath string,
+	leading beads.Store,
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 	pass *workStartDeferralPass,
 ) (owned, demand []beads.Bead, demandStoreRefs []string) {
 	var ownedStoreRefs []string
-	owned, ownedStoreRefs = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
+	owned, ownedStoreRefs = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
 	demand, demandStoreRefs = pass.filterWithRefs(owned, ownedStoreRefs)
 	return owned, demand, demandStoreRefs
 }

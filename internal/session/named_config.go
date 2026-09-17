@@ -220,6 +220,79 @@ func configuredNamedIdentitySignalsMatch(b beads.Bead, owner string) bool {
 	return false
 }
 
+// RecyclableDeadConfiguredNamePhantom reports whether a session bead is a
+// process-dead phantom squatting a configured named-session runtime name
+// without being that identity's recognized canonical owner, returning the
+// squatted identity when so. The caller must independently confirm the backing
+// process is gone — process-absence alone is not a trigger (a healthy asleep
+// on_demand session is also process-absent), which is why this predicate keys
+// on the registry-vs-config name collision instead.
+//
+// This is the residual ga-n2d Gap B deadlock: such a phantom is registry-asleep
+// with its backing process gone, still holds the configured runtime name (so a
+// fresh canonical bead collides with ErrSessionNameExists on materialization),
+// and still holds work assigned to the configured identity (so the reconciler's
+// standard close guard, which refuses to close a bead with assigned work, keeps
+// it open). Closing it anyway is safe: the work is assigned to the stable
+// configured identity — not to this dead bead's ephemeral ID — so a freshly
+// materialized canonical bead re-adopts it; only the dead bead is discarded.
+// A closed configured-named bead also releases its reserved runtime name (see
+// ensureSessionNameAvailableForSelfAndOwner), unblocking respawn.
+//
+// Healthy asleep canonical sessions never qualify: they carry a
+// configured_named_identity, so preserveConfiguredNamedSessionBead keeps them
+// open upstream and the non-empty recorded identity short-circuits here. Only
+// the empty-identity legacy phantom (the documented Gap B class) is recyclable.
+// Recognition is gated on wasConfiguredNamedSession OR
+// configuredNamedIdentitySignalsMatch — the same recognition the closed-bead
+// name release uses (ga-841 / Gap A) — so that closing actually frees the name.
+func RecyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentity(b) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, identity) {
+		return identity, true
+	}
+	return "", false
+}
+
+// configuredIdentityForRuntimeName returns the configured named-session identity
+// whose resolved runtime session name equals sessionName, if any.
+func configuredIdentityForRuntimeName(cfg *config.City, cityName, sessionName string) (string, bool) {
+	sessionName = strings.TrimSpace(sessionName)
+	if cfg == nil || sessionName == "" {
+		return "", false
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = config.EffectiveCityName(cfg, "")
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) == sessionName {
+			return identity, true
+		}
+	}
+	return "", false
+}
+
 // NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
@@ -244,6 +317,64 @@ func IsNamedSessionInfo(i Info) bool {
 // value).
 func NamedSessionIdentityInfo(i Info) string {
 	return strings.TrimSpace(i.ConfiguredNamedIdentity)
+}
+
+// wasConfiguredNamedSessionInfo is the session.Info mirror of
+// wasConfiguredNamedSession.
+func wasConfiguredNamedSessionInfo(i Info) bool {
+	return IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != ""
+}
+
+// configuredNamedIdentitySignalsMatchInfo is the session.Info mirror of
+// configuredNamedIdentitySignalsMatch, reading the same four identity signals
+// off their Info projections.
+func configuredNamedIdentitySignalsMatchInfo(i Info, owner string) bool {
+	owner = NormalizeNamedSessionTarget(owner)
+	if owner == "" {
+		return false
+	}
+	for _, signal := range []string{
+		i.ConfiguredNamedIdentity,
+		i.Alias,
+		i.AgentName,
+		i.Template,
+	} {
+		if NormalizeNamedSessionTarget(strings.TrimSpace(signal)) == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// RecyclableDeadConfiguredNamePhantomInfo is the session.Info mirror of
+// RecyclableDeadConfiguredNamePhantom.
+//
+// It reads Info.SessionNameMetadata — the RAW session_name metadata — and not
+// Info.SessionName, which applies a sessionNameFor(ID) fallback that would make
+// every bead appear to squat a runtime name and defeat the empty-name guard.
+func RecyclableDeadConfiguredNamePhantomInfo(i Info, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(i.SessionNameMetadata)
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentityInfo(i) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSessionInfo(i) || configuredNamedIdentitySignalsMatchInfo(i, identity) {
+		return identity, true
+	}
+	return "", false
 }
 
 // NamedSessionInfoMatchesSpec is the session.Info mirror of
@@ -372,6 +503,7 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 	candidates := make([]beads.Bead, 0, 4)
 	seen := make(map[string]bool)
 	var runtimeSessionNameMatches []beads.Bead
+	var aliasMatches []beads.Bead
 
 	if spec.Identity != "" {
 		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, NamedSessionIdentityMetadata, spec.Identity)
@@ -407,18 +539,24 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 	}
 
+	if spec.Identity != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias-matching named session candidates: %w", err)
+		}
+		aliasMatches = matches
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
 	if !includeConflict {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
-	if spec.Identity != "" {
-		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
-		if err != nil {
-			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias conflicts: %w", err)
-		}
-		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(matches)), matches)
-	}
+	conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
 	}
@@ -530,10 +668,14 @@ func beadMatchesNamedSessionResolutionFilter(b beads.Bead, identity, sessionName
 	return false
 }
 
-// FindNamedSessionConflict finds the first live session bead that blocks a configured named session.
+// FindNamedSessionConflict finds the first live session bead that blocks a
+// configured named session. It uses the same continuity gate as canonical
+// detection (NamedSessionContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	for _, b := range candidates {
-		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" ||
+			!NamedSessionContinuityEligible(b) {
 			continue
 		}
 		if BeadConflictsWithNamedSession(b, spec) {
@@ -545,10 +687,13 @@ func FindNamedSessionConflict(candidates []beads.Bead, spec NamedSessionSpec) (b
 
 // FindNamedSessionConflictInfo is the session.Info mirror of
 // FindNamedSessionConflict: it finds the first live session Info that blocks a
-// configured named session.
+// configured named session, using the same continuity gate as canonical
+// detection (NamedSessionInfoContinuityEligible), so a bead that cannot own a
+// name cannot block it either.
 func FindNamedSessionConflictInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
 	for _, i := range candidates {
-		if !IsSessionBeadOrRepairableInfo(i) || i.Closed {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed ||
+			!NamedSessionInfoContinuityEligible(i) {
 			continue
 		}
 		if InfoConflictsWithNamedSession(i, spec) {
@@ -581,6 +726,31 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 		sn := strings.TrimSpace(i.SessionNameMetadata)
 		if sn == spec.SessionName || sn == identity {
 			return i, true
+		}
+	}
+	// Mirrors the alias-based pass in FindCanonicalNamedSessionBead: gated by
+	// NamedSessionInfoMatchesSpec (the backing-template check) and unique
+	// among only the template-matching alias candidates.
+	if identity != "" {
+		var aliasCanonical Info
+		aliasMatchCount := 0
+		for _, i := range candidates {
+			if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
+				continue
+			}
+			if !NamedSessionInfoMatchesSpec(i, spec) {
+				continue
+			}
+			if strings.TrimSpace(i.Alias) != identity {
+				continue
+			}
+			aliasMatchCount++
+			if aliasMatchCount == 1 {
+				aliasCanonical = i
+			}
+		}
+		if aliasMatchCount == 1 {
+			return aliasCanonical, true
 		}
 	}
 	return Info{}, false
@@ -673,6 +843,41 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 		sn := strings.TrimSpace(b.Metadata["session_name"])
 		if sn == spec.SessionName || sn == identity {
 			return b, true
+		}
+	}
+	// A bead whose only configured-named-session signal is `alias == identity`
+	// (no exact configured_named_identity/session_name metadata) is its own
+	// canonical session when it is the sole live, eligible, template-matching
+	// candidate. Gating on NamedSessionBeadMatchesSpec -- the same backing-
+	// template check pass two already requires -- keeps an unrelated bead that
+	// merely has alias set to the reserved identity, with no corroborating
+	// template/agent_name signal, from being promoted here (ga-4of1nc); it
+	// falls through to the existing conflict detection instead, which still
+	// flags it unconditionally. Requiring uniqueness among only the
+	// template-matching alias candidates -- not a bare sole-live-candidate
+	// count -- keeps a true collision (two distinct live beads that both
+	// genuinely match the backing template) falling through to conflict
+	// detection instead of one silently winning as first-match.
+	if identity != "" {
+		var aliasCanonical beads.Bead
+		aliasMatchCount := 0
+		for _, b := range candidates {
+			if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+				continue
+			}
+			if !NamedSessionBeadMatchesSpec(b, spec) {
+				continue
+			}
+			if strings.TrimSpace(b.Metadata["alias"]) != identity {
+				continue
+			}
+			aliasMatchCount++
+			if aliasMatchCount == 1 {
+				aliasCanonical = b
+			}
+		}
+		if aliasMatchCount == 1 {
+			return aliasCanonical, true
 		}
 	}
 	return beads.Bead{}, false

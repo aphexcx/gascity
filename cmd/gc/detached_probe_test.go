@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -140,9 +141,26 @@ func installFakeTmux(t *testing.T, body string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tmux")
-	script := "#!/bin/sh\n" + body + "\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+	// Exit-only fixtures do not need a freshly written shell script. Reuse
+	// the platform binary so interpreter startup under load cannot consume
+	// the product's one-second probe budget before the intended exit.
+	if body == "exit 0" || body == "exit 1" {
+		name := "true"
+		if body == "exit 1" {
+			name = "false"
+		}
+		binary, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("find %s for fake tmux: %v", name, err)
+		}
+		if err := os.Symlink(binary, path); err != nil {
+			t.Fatalf("symlink fake tmux: %v", err)
+		}
+	} else {
+		script := "#!/bin/sh\n" + body + "\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatalf("write fake tmux: %v", err)
+		}
 	}
 	pathEnv := dir
 	if existing := os.Getenv("PATH"); strings.TrimSpace(existing) != "" {

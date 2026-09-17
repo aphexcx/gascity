@@ -76,18 +76,15 @@ if (( ${#manifest_files[@]} == 0 )); then
     exit 1
 fi
 
-# in_manifest REL -> succeeds when REL is listed in the manifest. A linear scan
-# over the (small) manifest rather than an associative array: macOS ships
-# /bin/bash 3.2, which has no `declare -A`, and this guard runs on those hosts.
+manifest_set=$'\n'
 in_manifest() {
-    local listed
-    for listed in "${manifest_files[@]}"; do
-        [[ "$listed" == "$1" ]] && return 0
-    done
-    return 1
+    case "$manifest_set" in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
-
 for rel in "${manifest_files[@]}"; do
+    manifest_set+="$rel"$'\n'
     f="$repo_root/$rel"
     if [[ ! -f "$f" ]]; then
         echo "MANIFEST FILE MISSING: $rel (listed in the manifest but not on disk)"

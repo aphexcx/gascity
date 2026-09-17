@@ -289,7 +289,7 @@ func TestPoolStartBackoff_ParksAfterMaxFailuresWithOneMailAndNoStart(t *testing.
 	// ZERO starts: neither demand tier lists the parked bead.
 	work = h.workBead()
 	pass := newWorkStartDeferralPass(h.clk.Now().Add(24*time.Hour), nil)
-	if _, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
+	if _, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, nil, []beads.Bead{work}, []string{""}, pass); len(rows) != 0 {
 		t.Fatalf("assigned tier listed a parked bead: %+v", rows)
 	}
 	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
@@ -398,7 +398,7 @@ func TestPoolStartBackoff_DeadlineJudgedByTheClock(t *testing.T) {
 			t.Fatalf("%s: reason=%q until=%v, want start_backoff until %v", tc.name, reason, gotUntil, until)
 		}
 		pass := newWorkStartDeferralPass(tc.now, nil)
-		_, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, []beads.Bead{work}, []string{""}, pass)
+		_, rows, _ := poolDemandAssignedWork(h.cfg, "", nil, nil, []beads.Bead{work}, []string{""}, pass)
 		counts, _, _, _ := defaultScaleCheckCountsAndDemand(h.cfg, []defaultScaleCheckTarget{{template: "helper", storeKey: "city", store: h.store}}, pass)
 		if tc.want && (len(rows) != 0 || counts["helper"] != 0) {
 			t.Fatalf("%s: tiers served a backed-off bead: rows=%d count=%d", tc.name, len(rows), counts["helper"])
@@ -635,7 +635,7 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 	sort.Strings(rawFilterCallers)
 	t.Logf("raw filterAssignedWorkBeadsForPoolDemand callers: %s; scale_check WorkBeadIDs builders: %s", strings.Join(rawFilterCallers, ", "), strings.Join(workBeadIDBuilders, ", "))
 	wantSites := []string{
-		"build_desired_state.go:buildDesiredStateWithSessionBeads",
+		"build_desired_state.go:buildDesiredStateWithSessionBeadsAt",
 		"city_runtime.go:beadReconcileTick",
 		"city_runtime.go:controlDispatcherTick",
 		"city_runtime.go:loadDemandSnapshot",
@@ -673,7 +673,7 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 		{"session_lifecycle_parallel.go", "recordWorkStartSuccessFor(workStartFailures, info.TriggerBeadID, info.TriggerBeadStoreRef, stderr)"},
 		{"../../internal/sling/sling_core.go", "for _, key := range ParkReleaseMetadataKeys {"},
 		{"../../internal/sling/sling_core.go", "if err := reopenForReassign(child.ID, deps); err != nil {"},
-		{"pool_desired_state.go", "poolInFlightNewRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers)"},
+		{"pool_desired_state.go", "poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers, decisionTime)"},
 		{"pool_desired_state.go", "if _, deferred := deferredTriggers[strings.TrimSpace(sb.TriggerBeadID)]; deferred {"},
 		// Round 4, family A (the operator-verb write path): the conditional
 		// writer resolves through the policy wrapper; a partial read charges
@@ -690,9 +690,9 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 		// in-flight tier excludes it (the pin above).
 		{"build_desired_state.go", "bp.assignedWorkBeads = poolOwnedWorkBeads"},
 		{"session_reconciler.go", "awakeInput.DeferredTriggers = awakeDeferral.deferred"},
-		{"compute_awake_set.go", "active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template))"},
+		{"compute_awake_set.go", "active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now))"},
 		{"compute_awake_set.go", "creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template))"},
-		{"compute_awake_set.go", "if active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template)); len(active) > 0 {"},
+		{"compute_awake_set.go", "if active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now)); len(active) > 0 {"},
 		{"compute_awake_set.go", "if creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template)); len(creating) > 0 {"},
 		{"compute_awake_set.go", "for _, bead := range input.excludeDeferredSessions(cityStopPoolBeads(input.SessionBeads, template)) {"},
 	} {

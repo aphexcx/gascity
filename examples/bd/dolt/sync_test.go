@@ -31,6 +31,34 @@ func syncFilteredEnv() []string {
 	)
 }
 
+// runSync runs the sync script's CLI-mode path against a fake dolt CLI
+// already installed in binDir for the city rooted at cityPath, with extraEnv
+// appended after the standard CLI-mode env (GC_DOLT_PORT=1 so the script
+// cannot reach a SQL server and falls back to the dolt CLI), and returns
+// combined output plus the command's error so callers that must assert the
+// sync itself failed (as opposed to merely producing unexpected output) can
+// do so.
+func runSync(t *testing.T, binDir, cityPath string, extraEnv []string, args ...string) (string, error) {
+	t.Helper()
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+	dataDir := filepath.Join(cityPath, "data")
+
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_PORT=1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func startReachableTCPListener(t *testing.T) (int, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -55,6 +83,11 @@ func startReachableTCPListener(t *testing.T) (int, func()) {
 	return listener.Addr().(*net.TCPAddr).Port, cleanup
 }
 
+// writeSyncFakeDolt is shared with pull_test.go (writeSyncFakeDolt is called
+// from TestPull* there too) — its remote-lookup arm intentionally matches on
+// the query prefix only ("...FROM dolt_remotes", no trailing clause) so it
+// answers sync's and pull's remote-lookup queries identically without having
+// to track either one's trailing clause (both are "ORDER BY name" today).
 func writeSyncFakeDolt(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -65,8 +98,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -96,8 +129,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -130,8 +163,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     ;;
   *"CALL DOLT_FETCH("*)
     :
@@ -154,6 +187,8 @@ exit 0
 	return logPath
 }
 
+// writeSyncFakeDoltRemoteLookupFailure is shared with pull_test.go — see the
+// writeSyncFakeDolt comment for why the match is prefix-only.
 func writeSyncFakeDoltRemoteLookupFailure(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "dolt.log")
@@ -164,7 +199,7 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
+  *"SELECT name, url FROM dolt_remotes"*)
     printf 'sql lookup failed\n' >&2
     exit 7
     ;;
@@ -201,8 +236,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -247,8 +282,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -303,6 +338,32 @@ exit 0
 	}
 }
 
+// writeSyncFakeDoltCLIPushFailsForDB installs a fake dolt for CLI-mode tests
+// that fails `dolt push` only for the named database and succeeds for every
+// other one. CLI mode runs `dolt push` with cwd set to the per-database
+// directory (`cd "$d" && dolt push ...`), so the failing db is selected by
+// $PWD's basename rather than by argv.
+func writeSyncFakeDoltCLIPushFailsForDB(t *testing.T, dir, badDB string, exitCode int) {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"push "*)
+    if [ "$(basename "$PWD")" = "` + badDB + `" ]; then
+      printf 'remote rejected push\n' >&2
+      exit ` + strconv.Itoa(exitCode) + `
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
 // writeSyncFakeDoltPushEchoesArgs installs a fake dolt that, on the SQL-mode
 // DOLT_PUSH call, reports whether DOLT_CLI_PASSWORD was delivered via the
 // environment and echoes its own full argv to stderr (mimicking a dolt that
@@ -320,8 +381,8 @@ case "$*" in
     printf 'Id,Time,db\n'
     exit 0
     ;;
-  *"SELECT name, url FROM dolt_remotes LIMIT 1"*)
-    printf 'name,url\norigin,https://example.invalid/repo\n'
+  *"SELECT name, url FROM dolt_remotes ORDER BY name"*)
+    printf 'name,url\norigin,file:///example.invalid/repo\n'
     exit 0
     ;;
   *"CALL DOLT_FETCH("*)
@@ -416,7 +477,7 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 
 	// The success line is a parsed contract — assert it byte-for-byte so a
 	// format change is caught here rather than breaking downstream consumers.
-	if !strings.Contains(string(out), "  app: pushed main -> origin:main (https://example.invalid/repo)") {
+	if !strings.Contains(string(out), "  app: pushed main -> origin:main (file:///example.invalid/repo)") {
 		t.Fatalf("output missing byte-for-byte success line:\n%s", out)
 	}
 
@@ -430,7 +491,7 @@ func TestSyncUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	}
 	log := string(data)
 	for _, want := range []string{
-		"SELECT name, url FROM dolt_remotes LIMIT 1",
+		"SELECT name, url FROM dolt_remotes ORDER BY name",
 		"CALL DOLT_PUSH('origin', 'main')",
 	} {
 		if !strings.Contains(log, want) {
@@ -608,7 +669,7 @@ func TestSyncDryRunShowsResolvedActiveBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc dolt sync --dry-run failed: %v\n%s", err, out)
 	}
-	want := "app: would push gascity-3 -> origin:gascity-3 (https://example.invalid/repo)"
+	want := "app: would push gascity-3 -> origin:gascity-3 (file:///example.invalid/repo)"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("dry run output should show resolved refspec\nwant %q\ngot:\n%s", want, out)
 	}
@@ -701,7 +762,7 @@ func TestSyncReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 		t.Fatalf("read fake dolt log: %v", err)
 	}
 	log := string(data)
-	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes LIMIT 1") {
+	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes ORDER BY name") {
 		t.Fatalf("dolt log missing remote lookup:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_PUSH") {
@@ -719,7 +780,7 @@ func TestSyncCLIFallbackPushesOriginMain(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -907,7 +968,7 @@ func TestSyncCLIFallbackReadsRepoStateForActiveBranch(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -955,7 +1016,7 @@ func TestSyncCLIFallbackIgnoresNestedRepoStateHead(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -1613,16 +1674,13 @@ func TestSyncRejectsTripleZeroPushTimeout(t *testing.T) {
 // TestSyncCLIPushReportsExitCode verifies the CLI-mode plain push surfaces the
 // underlying exit code instead of a generic message (R4).
 func TestSyncCLIPushReportsExitCode(t *testing.T) {
-	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
-
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "data")
 	dbDir := filepath.Join(dataDir, "app")
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -1631,21 +1689,11 @@ func TestSyncCLIPushReportsExitCode(t *testing.T) {
 	writeSyncFakeDoltCLIPushFails(t, binDir, 3)
 	_ = writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", script, "--db", "app")
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		"GC_DOLT_PORT=1",
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	out, err := runSync(t, binDir, cityPath, nil, "--db", "app")
 	if err == nil {
 		t.Fatalf("expected CLI push failure, output:\n%s", out)
 	}
-	if !strings.Contains(string(out), "ERROR: push failed (exit 3)") {
+	if !strings.Contains(out, "ERROR: push failed (exit 3)") {
 		t.Fatalf("expected CLI exit-code-3 failure message, got:\n%s", out)
 	}
 }
@@ -1663,7 +1711,7 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
 		t.Fatalf("mkdir db: %v", err)
 	}
-	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
 	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
 		t.Fatalf("write remotes: %v", err)
 	}
@@ -1688,5 +1736,53 @@ func TestSyncCLIForcePushReportsExitCode(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "ERROR: push failed (exit 5)") {
 		t.Fatalf("expected CLI --force exit-code-5 failure message, got:\n%s", out)
+	}
+}
+
+// TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes covers the sync command's
+// exit-code/output contract when only one database among several fails to
+// push: the sticky aggregate `exit_code` used to carry no record of which
+// database(s) failed or why, so a caller (or an OrderFailed event built from
+// this output) could misread "some databases failed" as "every database
+// failed". The final line must name the failing database and reason, and
+// must not claim every database failed.
+func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	remotes := `{"remotes":[{"name":"origin","url":"file:///example.invalid/repo"}]}`
+	for _, name := range []string{"good1", "bad", "good2"} {
+		dbDir := filepath.Join(dataDir, name)
+		if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
+			t.Fatalf("write remotes for %s: %v", name, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	writeSyncFakeDoltCLIPushFailsForDB(t, binDir, "bad", 1)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	output, err := runSync(t, binDir, cityPath, nil)
+	if err == nil {
+		t.Fatalf("expected non-zero exit when one of three databases fails to push, output:\n%s", output)
+	}
+
+	if !strings.Contains(output, "good1: pushed") || !strings.Contains(output, "good2: pushed") {
+		t.Fatalf("expected both healthy databases to still push, got:\n%s", output)
+	}
+	if !strings.Contains(output, "bad: ERROR: push failed") {
+		t.Fatalf("expected the failing database's own error line, got:\n%s", output)
+	}
+
+	if !strings.Contains(output, "sync: 1/3 database(s) failed") {
+		t.Fatalf("expected a summary line naming exactly 1/3 failures, got:\n%s", output)
+	}
+	if !strings.Contains(output, "bad (push failed (exit 1))") {
+		t.Fatalf("expected the summary to name the failing database and reason, got:\n%s", output)
+	}
+	if strings.Contains(output, "3/3 database(s) failed") {
+		t.Fatalf("summary must not read as if every database failed, got:\n%s", output)
 	}
 }

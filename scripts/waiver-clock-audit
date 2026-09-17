@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # waiver-clock-audit
 #
-# Runs the checked ledger that carries dated waivers on the waiver clock -- in
-# this fork that is the runtime provider ledger (internal/testutil/providerledger)
-# alone; the resource census (internal/testpolicy/resourcecensus) does not ask
-# the clock here yet and its expiries stay fatal in every mode -- with the clock
-# in strict mode, so a lapsed date fails here instead of on somebody else's push.
+# Runs the two checked ledgers that carry dated waivers -- the runtime provider
+# ledger (internal/testutil/providerledger) and the resource census
+# (internal/testpolicy/resourcecensus) -- with the waiver clock in strict mode,
+# so a lapsed date fails here instead of on somebody else's push.
 #
 # Strict is the whole point. The fleet's push path runs the same tests in grace
 # mode (internal/testpolicy/waiverclock), which warns for 14 days before a lapse
@@ -78,7 +77,8 @@ fi
 # see a lapse that is already fatal, which is 14 days too late to be useful.
 set +e
 output=$(env GC_WAIVER_CLOCK=strict go test -count=1 -v \
-    ./internal/testutil/providerledger 2>&1)
+    ./internal/testutil/providerledger \
+    ./internal/testpolicy/resourcecensus 2>&1)
 test_status=$?
 set -e
 
@@ -141,10 +141,9 @@ Dated waivers owned by ${owner} have lapsed or are about to.
 
 ${matching}
 
-The fleet's push path runs the provider ledger in grace mode, so a lapse
-there warns for 14 days before it blocks anyone. This bead exists so that
-window gets used. (In this fork the resource census is not on the clock:
-its expiries fail from the day after the date, with no grace.)
+The fleet's push path runs these same ledgers in grace mode, so a lapse
+warns for 14 days before it blocks anyone. This bead exists so that window
+gets used.
 
 Two resolutions, both yours:
 
