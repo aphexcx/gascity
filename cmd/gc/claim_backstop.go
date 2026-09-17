@@ -739,6 +739,9 @@ func (p seatClaimBackstop) revalidate(target backstopTarget) backstopResolution 
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
+	if p.work.refuse(p.now, current, target.StoreRef) {
+		return backstopResolutionClear
+	}
 	// ownedByContinuationLane is re-checked here, not only in the snapshot: the
 	// dispatcher stamps continuation metadata on a row as it preassigns it, so a
 	// row can become the continuation lane's between the snapshot and delivery.

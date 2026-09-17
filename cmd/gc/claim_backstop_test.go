@@ -369,6 +369,69 @@ func TestSeatClaimBackstopOwnerFence(t *testing.T) {
 	}
 }
 
+func TestSeatClaimBackstopOwnerFenceRevalidate(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		snapshotLabels []string
+		liveLabels     []string
+		refused        bool
+	}{
+		{"owner-changed", []string{"owner:jadegate"}, []string{"owner:citadel"}, true},
+		{"handoff-revoked", []string{"owner:citadel", "handoff:jadegate"}, []string{"owner:citadel"}, true},
+		{"still-local", []string{"owner:jadegate"}, []string{"owner:jadegate"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newClaimBackstopFixture(t)
+			f.cfg.Federation.Identity = "jadegate"
+			if err := f.store.Update(f.work.ID, beads.UpdateOpts{Labels: tc.snapshotLabels}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := f.reread(t, f.work.ID)
+			if err := f.store.Update(f.work.ID, beads.UpdateOpts{RemoveLabels: tc.snapshotLabels}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.Update(f.work.ID, beads.UpdateOpts{Labels: tc.liveLabels}); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			previousLog := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previousLog) })
+			// Reuse the admitted snapshot while authoritative reads see the new
+			// labels. Two observe/delivery cycles also exercise the hourly log.
+			for tick := 0; tick < 4; tick++ {
+				f.idleFor(t, 10*time.Minute)
+				nudgeStalledSeatClaims(f.sp, f.cfg, f.store, []beads.Bead{f.reread(t, f.session.ID)},
+					nil, nil, nil,
+					[]beads.Bead{snapshot}, []beads.Store{f.store}, []string{"city"},
+					false, f.now, f.rec, &f.stdout, &f.refusals)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+			}
+			wantNudges, wantRefusals := 3, 0
+			if tc.refused {
+				wantNudges, wantRefusals = 0, 1
+				if got := f.lastNudge(); got != "" {
+					t.Errorf("foreign live row delivered a runtime nudge: %q", got)
+				}
+				for _, key := range []string{seatClaimNudgeWorkKey, seatClaimNudgeCountKey, seatClaimNudgeAtKey} {
+					if got := f.sessionMeta(t, key); got != "" {
+						t.Errorf("live refusal did not clear %s: %q", key, got)
+					}
+				}
+			} else if got := f.lastNudge(); got != f.cfg.Agents[0].Nudge {
+				t.Errorf("local live row nudge = %q, want %q", got, f.cfg.Agents[0].Nudge)
+			}
+			if got := f.nudgeCount(); got != wantNudges {
+				t.Errorf("nudges = %d, want %d; stdout=%s", got, wantNudges, f.stdout.String())
+			}
+			refusal := "seat-claim-nudge: cross-city-fence refused bead=" + f.work.ID + " owner=citadel this_identity=jadegate missing=handoff:jadegate"
+			if got := strings.Count(logs.String(), refusal); got != wantRefusals {
+				t.Errorf("refusal lines = %d, want %d; logs=%s", got, wantRefusals, logs.String())
+			}
+		})
+	}
+}
+
 // Duplicate sightings in the two work views must not multiply refusal logs or
 // hide this pool seat's own work behind a foreign row.
 func TestSeatClaimBackstopOwnerFenceLogsBounded(t *testing.T) {
