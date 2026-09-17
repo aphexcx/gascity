@@ -640,6 +640,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, notice) //nolint:errcheck // best-effort stderr
 		return code
 	}
+	if bdOwnerLabelDatabaseOverride(bdArgs, env) {
+		fmt.Fprintln(stderr, "gc bd: owner label not applied (bd database selection overrides the configured scope; label the created beads in the selected database)") //nolint:errcheck // best-effort stderr
+		return code
+	}
 	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: opening the %s store: %v\n", strings.Join(ids, ", "), scopeLabel(target), err) //nolint:errcheck // best-effort stderr
