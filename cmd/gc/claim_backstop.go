@@ -69,6 +69,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,6 +79,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -170,7 +172,7 @@ func nudgeStalledSeatClaims(
 		store:  store,
 		stdout: stdout,
 		work: newSeatOpenWorkSnapshot(
-			now, sessionBeads,
+			now, federationIdentity(cfg), sessionBeads,
 			assignedWork, assignedWorkStores, assignedWorkStoreRefs,
 			routedWork, routedWorkStores, routedWorkStoreRefs,
 		),
@@ -202,6 +204,9 @@ type seatOpenWork struct {
 // "what does THIS seat own", and the same bead id can exist in independent
 // stores.
 type seatOpenWorkSnapshot struct {
+	federationIdentity string
+	// refused deduplicates diagnostics across both work views for this tick.
+	refused        map[storeScopedBeadKey]bool
 	openByIdentity map[string][]seatOpenWork
 	// inProgressIdentities marks every identity holding at least one in_progress
 	// row. Such a seat belongs to the execution backstop for this tick.
@@ -215,6 +220,7 @@ type seatOpenWorkSnapshot struct {
 
 func newSeatOpenWorkSnapshot(
 	now time.Time,
+	identity string,
 	sessionBeads []beads.Bead,
 	assignedWork []beads.Bead,
 	assignedStores []beads.Store,
@@ -224,6 +230,8 @@ func newSeatOpenWorkSnapshot(
 	routedStoreRefs []string,
 ) seatOpenWorkSnapshot {
 	snapshot := seatOpenWorkSnapshot{
+		federationIdentity:    identity,
+		refused:               make(map[storeScopedBeadKey]bool),
 		openByIdentity:        make(map[string][]seatOpenWork),
 		inProgressIdentities:  make(map[string]bool),
 		poolManagedIdentities: poolManagedSeatIdentities(sessionBeads),
@@ -270,6 +278,16 @@ func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string,
 	if !claimableSeatWork(wb, now) || ownedByContinuationLane(wb, seatIsPoolManaged) {
 		return
 	}
+	key := storeScopedBeadKey{StoreRef: storeRef, ID: strings.TrimSpace(wb.ID)}
+	// A seat must not be nudged for work its claim hook will refuse. Apply the
+	// same owner fence to assigned and routed rows before either is indexed.
+	if ok, reason := federation.MayClaim(wb.Labels, s.federationIdentity); !ok {
+		if !s.refused[key] {
+			log.Printf("%s: %s", seatClaimNudgeLabel, federation.ClaimRefusalLine(wb.ID, reason))
+			s.refused[key] = true
+		}
+		return
+	}
 	row := seatOpenWork{
 		BeadID:            strings.TrimSpace(wb.ID),
 		RootID:            strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
@@ -279,7 +297,6 @@ func (s seatOpenWorkSnapshot) add(now time.Time, wb beads.Bead, identity string,
 		Store:             store,
 		SeatIsPoolManaged: seatIsPoolManaged,
 	}
-	key := storeScopedBeadKey{StoreRef: row.StoreRef, ID: row.BeadID}
 	if _, duplicate := s.byKey[key]; duplicate {
 		return
 	}
