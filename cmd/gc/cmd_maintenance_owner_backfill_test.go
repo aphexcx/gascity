@@ -98,6 +98,32 @@ func (s *staleReadStore) Get(id string) (beads.Bead, error) {
 
 func (s *staleReadStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
+type restrictedBackfillStore struct{ *beads.MemStore }
+
+func (s *restrictedBackfillStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return &beads.ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+}
+
+func TestApplyOwnerBackfillRefusesSeparatelyPersistedLabels(t *testing.T) {
+	store := &restrictedBackfillStore{beads.NewMemStore()}
+	b, err := store.Create(beads.Bead{Title: "ours", Assignee: "ci-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	labeled, skipped, unfenced, failed := applyOwnerBackfill(store, ownerBackfillRows([]beads.Bead{b}, "ci", nil), "owner:citadel", "ci", nil, &stdout, &stderr)
+	if labeled != 0 || skipped != 0 || unfenced != 1 || failed != 0 {
+		t.Fatalf("labeled/skipped/unfenced/failed = %d/%d/%d/%d; stderr=%q", labeled, skipped, unfenced, failed, stderr.String())
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Labels) != 0 {
+		t.Fatalf("unfenced labels = %v", got.Labels)
+	}
+}
+
 // TestApplyOwnerBackfillReChecksEveryBeadBeforeWriting: --apply must not
 // trust the dry-run snapshot. A bead that was closed, given an owner, or lost
 // its OURS signal since the list is skipped, and only a bead that still

@@ -73,7 +73,7 @@ func TestReleaseOrphanedPoolAssignmentsRefusesAnotherCitysBead(t *testing.T) {
 	store := beads.NewMemStore()
 	work := orphanedWork(t, store, "citadel-worker-7", "owner:citadel")
 
-	released := releaseOrphanedPoolAssignments(store, fenceReconcilerCfg("jadegate"), "", nil, []beads.Bead{work}, nil, nil, nil)
+	released := releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, fenceReconcilerCfg("jadegate"), "", nil, []beads.Bead{work}, nil, nil, nil, nil, nil)
 
 	if len(released) != 0 {
 		t.Fatalf("REGRESSION jg-66rdw8: the reconciler reopened another city's bead: %v", released)
@@ -109,7 +109,7 @@ func TestReleaseOrphanedPoolAssignmentsStillReopensThisCitysOrphans(t *testing.T
 			store := beads.NewMemStore()
 			work := orphanedWork(t, store, "gone-worker-3", tc.labels...)
 
-			released := releaseOrphanedPoolAssignments(store, fenceReconcilerCfg(tc.identity), "", nil, []beads.Bead{work}, nil, nil, nil)
+			released := releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, fenceReconcilerCfg(tc.identity), "", nil, []beads.Bead{work}, nil, nil, nil, nil, nil)
 
 			if len(released) != 1 || released[0].ID != work.ID {
 				t.Fatalf("want the orphan reopened, got %v\nlog: %s", released, logBuf.String())

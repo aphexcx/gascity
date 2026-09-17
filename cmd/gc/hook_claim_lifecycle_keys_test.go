@@ -70,7 +70,7 @@ func TestHookClaimWorkResultCarriesLifecycleKeysExplicitly(t *testing.T) {
 // types them as plain strings and never requires them for action=drain.
 func TestHookClaimDrainResultStillMatchesSchemaWithLifecycleKeys(t *testing.T) {
 	var out bytes.Buffer
-	code := writeHookClaimDrain(hookClaimReasonNoWork, true, false, nil, &out, &bytes.Buffer{})
+	code := writeHookClaimDrain("gc hook --claim", hookClaimReasonNoWork, true, false, nil, &out, &bytes.Buffer{})
 	if code != 1 {
 		t.Fatalf("drain without drain-ack exit = %d, want 1", code)
 	}

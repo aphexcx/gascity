@@ -16,7 +16,7 @@ type NudgeSubmit string
 
 const (
 	// NudgeSubmitConfirmed means the agent was observed taking the turn (its
-	// busy indicator appeared after the submit). The strongest claim a runtime
+	// busy indicator appeared after the submit, or its composer drained). The strongest claim a runtime
 	// makes.
 	NudgeSubmitConfirmed NudgeSubmit = "confirmed"
 	// NudgeSubmitUnconfirmed means the payload is in the pane — the receipt

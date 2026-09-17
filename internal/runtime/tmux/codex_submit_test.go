@@ -82,6 +82,26 @@ func TestCodexBusyIndicatorIsReadable(t *testing.T) {
 	if !paneContainsBusyIndicator([]string{"  working  (esc to interrupt)"}) {
 		t.Fatal("codex's busy indicator no longer matches; submit verification for codex would report every delivery unconfirmed")
 	}
+	// The footer as codex actually renders it, captured live off codex-cli
+	// 0.147.0 by atbrace in #5122. The synthetic string above pins the
+	// substring; this pins the real line it has to be found inside.
+	if !paneContainsBusyIndicator([]string{"• Working (3s • esc to interrupt)"}) {
+		t.Fatal("codex-cli's live Working footer no longer reads as busy; submit verification for codex would report every delivery unconfirmed")
+	}
+	// The other direction, and the one that matters most: an IDLE codex
+	// composer must not read as busy. Verification treats a busy pane as proof
+	// the turn started, so a false-busy read on idle chrome means a dropped
+	// Enter is never re-sent — the nudge sits unsubmitted in the composer while
+	// every liveness surface reads green. Fixture is atbrace's live idle pane
+	// from #5122: a finished reply, the empty prompt, and the model/cwd status
+	// line whose "·" separator is the near-miss the spinner regex must not take.
+	if paneContainsBusyIndicator([]string{
+		"• PONG",
+		"› Explain this codebase",
+		"  gpt-5.5 low · /tmp/probe",
+	}) {
+		t.Fatal("idle codex composer reads as busy; a lost Enter would never be re-sent and the nudge would stall unsubmitted")
+	}
 }
 
 // TestNudgeSessionComposesEscapeThenSubmitSequence pins the PROVENANCE of the
@@ -96,8 +116,8 @@ func TestCodexBusyIndicatorIsReadable(t *testing.T) {
 // something that no longer happens and this fails.
 func TestNudgeSessionComposesEscapeThenSubmitSequence(t *testing.T) {
 	body := nudgeSessionSource(t)
-	escapeAt := strings.Index(body, "t.shouldSendEscapeBeforeEnter(target)")
-	submitAt := strings.Index(body, "t.nudgeSubmitKeySequence(target)")
+	escapeAt := strings.Index(body, "shouldSendEscape(target)")
+	submitAt := strings.Index(body, "submitKeySequence(target)")
 	switch {
 	case escapeAt < 0:
 		t.Fatal("NudgeSession no longer consults shouldSendEscapeBeforeEnter; nudgeKeystrokesForFamily models a step that is gone")
@@ -109,7 +129,7 @@ func TestNudgeSessionComposesEscapeThenSubmitSequence(t *testing.T) {
 }
 
 // nudgeSessionSource returns the source text of NudgeSession's body. Since
-// gp-2io that body is nudgeSessionDelivery — NudgeSession itself is the thin
+// gp-2io that shared body is nudgeSession — NudgeSession itself is the thin
 // wrapper that turns an unconfirmed submit into ErrNudgeSubmitUnconfirmed for
 // retrying callers — so the decisions this file models are read from there.
 func nudgeSessionSource(t *testing.T) string {
@@ -119,9 +139,9 @@ func nudgeSessionSource(t *testing.T) string {
 		t.Fatalf("reading tmux.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func (t *Tmux) nudgeSessionDelivery(")
+	start := strings.Index(body, "func (t *Tmux) nudgeSession(")
 	if start < 0 {
-		t.Fatal("nudgeSessionDelivery (NudgeSession's body) not found in tmux.go")
+		t.Fatal("nudgeSession (NudgeSession's body) not found in tmux.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

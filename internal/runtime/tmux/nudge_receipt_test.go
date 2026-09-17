@@ -696,3 +696,54 @@ func TestCloseHiddenAttachClientReturnsWhileAWriteIsBlocked(t *testing.T) {
 }
 
 var _ runtime.ImmediateNudgeVouchingProvider = (*Provider)(nil)
+
+// Upstream's drained-composer proof must survive the fork's evidence adapter:
+// it is accepted delivery even if the busy-state observation missed the turn.
+func TestNudgeDeliveredConfirmsDrainedComposer(t *testing.T) {
+	const message = "accepted without a visible busy indicator"
+	p := NewProviderWithConfig(DefaultConfig())
+	p.tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+			return "GC_PROVIDER=claude", nil
+		}
+		if slices.Contains(args, "capture-pane") {
+			return "❯ \n? for shortcuts", nil
+		}
+		return "", nil
+	}}
+	p.tm.cfg.NudgeIdleTimeout = 0
+	p.tm.cfg.DebounceMs = 0
+	receipts := collectReceipts(p.tm)
+	delivery, err := p.NudgeDelivered("drained-composer", runtime.TextContent(message))
+	if err != nil {
+		t.Fatalf("NudgeDelivered: %v", err)
+	}
+	if want := (runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}); delivery != want {
+		t.Fatalf("delivery = %+v, want %+v", delivery, want)
+	}
+	if got := receipts(); len(got) != 1 || !got[0].Submitted || got[0].Bytes != len(message) {
+		t.Fatalf("receipts = %+v, want one accepted whole-payload receipt", got)
+	}
+}
+
+// A failed later Copilot startup chunk leaves a real partial paste. Preserve
+// both the bytes and the failure so startup still discards the incomplete role.
+func TestNudgeSessionRetainsPartialStartupPasteEvidence(t *testing.T) {
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = &fakeExecutor{}
+	receipts := collectReceipts(tm)
+	const message = "first chunk; second chunk"
+	const written = len("first chunk; ")
+	delivery, err := tm.nudgeSession("partial-startup", message,
+		func(string, string, time.Duration) (int, error) { return written, errPartialPasteDelivery },
+		func(string) bool { return false }, func(string) []string { return []string{"Enter"} })
+	if !errors.Is(err, errPartialPasteDelivery) {
+		t.Fatalf("error = %v, want partial paste", err)
+	}
+	if !delivery.Landed() || delivery.Bytes != written || delivery.Submit != runtime.NudgeSubmitUnconfirmed {
+		t.Fatalf("delivery = %+v, want %d landed bytes and unconfirmed submit", delivery, written)
+	}
+	if got := receipts(); len(got) != 1 || got[0].Bytes != written || got[0].Submitted {
+		t.Fatalf("receipts = %+v, want partial unconfirmed receipt", got)
+	}
+}

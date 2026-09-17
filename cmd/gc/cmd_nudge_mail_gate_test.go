@@ -148,9 +148,9 @@ func TestSplitQueuedNudgesForDelivery_MailLookupErrorHoldsOnlyThatItem(t *testin
 	}
 }
 
-// closeCountingStore wraps a MemStore so a test can observe the mail gate
+// mailGateCloseCountingStore wraps a MemStore so a test can observe the mail gate
 // releasing the work-store handle it opened.
-type closeCountingStore struct {
+type mailGateCloseCountingStore struct {
 	beads.Store
 	closes int
 }
@@ -158,7 +158,7 @@ type closeCountingStore struct {
 // CloseStore satisfies the release seam closeBeadStoreHandle looks for.
 //
 //nolint:unparam // the seam's signature is fixed; this double never fails
-func (c *closeCountingStore) CloseStore() error { c.closes++; return nil }
+func (c *mailGateCloseCountingStore) CloseStore() error { c.closes++; return nil }
 
 // TestMailStateLookupForNudgeTarget_ReadsTheMessageFromTheWorkStore pins the
 // codex round-2/3 findings: the message is read through the messaging-class
@@ -166,7 +166,7 @@ func (c *closeCountingStore) CloseStore() error { c.closes++; return nil }
 // store), and the handle the lookup opens is closed after each evaluation.
 func TestMailStateLookupForNudgeTarget_ReadsTheMessageFromTheWorkStore(t *testing.T) {
 	clearGCEnv(t)
-	work := &closeCountingStore{Store: beads.NewMemStore()}
+	work := &mailGateCloseCountingStore{Store: beads.NewMemStore()}
 	nudgesStore := beads.NewMemStore() // relocated nudges class: holds no mail
 	prev := openMailGateWorkStore
 	openMailGateWorkStore = func(string) (beads.Store, error) { return work, nil }

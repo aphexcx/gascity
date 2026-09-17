@@ -46,9 +46,9 @@ func remoteMailIdentity() string {
 // no local city is discoverable. It never consults the remote target.
 func localCityNameForRemoteMail() string {
 	var cityPath string
-	if ctx, handled, err := resolveContextFromCityEnv(); handled && err == nil {
+	if ctx, handled, err := resolveContextFromCityEnv(authoritativeResolution); handled && err == nil {
 		cityPath = ctx.CityPath
-	} else if ctx, err := resolveContextFromDir(); err == nil {
+	} else if ctx, err := resolveContextFromDir(authoritativeResolution); err == nil {
 		cityPath = ctx.CityPath
 	}
 	if cityPath == "" {

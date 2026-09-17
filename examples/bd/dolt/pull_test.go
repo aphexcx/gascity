@@ -41,6 +41,7 @@ func TestPullUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 		fmt.Sprintf("GC_DOLT_PORT=%d", port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_PULL_ALLOW_REMOTE_APP=1",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -57,7 +58,7 @@ func TestPullUsesLiveSQLWhenManagedServerReachable(t *testing.T) {
 	}
 	log := string(data)
 	for _, want := range []string{
-		"SELECT name, url FROM dolt_remotes LIMIT 1",
+		"SELECT name, url FROM dolt_remotes ORDER BY name",
 		"CALL DOLT_PULL(", "= CONNECTION_ID(), 'origin', JSON_EXTRACT('gc-remote-op-lost', '$')), 'main')", // the remote is the CALL's ownership-checked first argument
 	} {
 		if !strings.Contains(log, want) {
@@ -112,7 +113,7 @@ func TestPullReportsLiveSQLRemoteLookupFailure(t *testing.T) {
 		t.Fatalf("read fake dolt log: %v", err)
 	}
 	log := string(data)
-	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes LIMIT 1") {
+	if !strings.Contains(log, "SELECT name, url FROM dolt_remotes ORDER BY name") {
 		t.Fatalf("dolt log missing remote lookup:\n%s", log)
 	}
 	if strings.Contains(log, "CALL DOLT_PULL(") {
@@ -155,8 +156,8 @@ func writePullFakeDoltArms(t *testing.T, dir, processlistArm, pullArm, killArm, 
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
 		"case \"$*\" in\n" +
-		"  *\"SELECT name, url FROM dolt_remotes LIMIT 1\"*)\n" +
-		"    printf 'name,url\\norigin,https://example.invalid/repo\\n' ; exit 0 ;;\n" +
+		"  *\"SELECT name, url FROM dolt_remotes ORDER BY name\"*)\n" +
+		"    printf 'name,url\\norigin,file:///example.invalid/repo\\n' ; exit 0 ;;\n" +
 		"  *\"information_schema.processlist\"*) " + processlistArm + " ;;\n" +
 		"  *\"CALL DOLT_PULL(\"*) " + pullArm + " ;;\n" +
 		"  *\"KILL \"*) " + killArm + " ;;\n" +
@@ -350,7 +351,7 @@ func TestPullIsAttributedAndSelfIdentifying(t *testing.T) {
 		t.Fatalf("the pull must run with --use-db app so the server attributes the session.\nline: %s", pullLine)
 	}
 	assertGateBeforeCall(t, pullLine, "app", "CALL DOLT_PULL(")
-	if !strings.Contains(out, "app: pulled from https://example.invalid/repo") {
+	if !strings.Contains(out, "app: pulled from file:///example.invalid/repo") {
 		t.Fatalf("expected the pulled line.\nout:\n%s", out)
 	}
 }

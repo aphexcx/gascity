@@ -248,6 +248,7 @@ func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPre
 		}
 		err = writer.UpdateIfMatch(id, fresh.Revision, beads.UpdateOpts{Labels: []string{owner}})
 		var precondition *beads.PreconditionFailedError
+		var unsupportedField *beads.ConditionalUpdateFieldUnsupportedError
 		switch {
 		case err == nil:
 			labeled++
@@ -255,7 +256,7 @@ func applyOwnerBackfill(store beads.Store, rows []ownerBackfillRow, owner, hqPre
 		case errors.As(err, &precondition):
 			skipped++
 			fmt.Fprintf(stdout, "skipped %s: changed while labeling (revision %d is now %d)\n", id, precondition.Expected, precondition.Current) //nolint:errcheck // best-effort stdout
-		case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+		case errors.Is(err, beads.ErrConditionalWriteUnsupported), errors.As(err, &unsupportedField):
 			unfenced++
 			fmt.Fprintf(stderr, "%s: %s unfenced: %v; not written\n", cmdName, id, err) //nolint:errcheck // best-effort stderr
 		default:
