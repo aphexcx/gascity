@@ -796,6 +796,40 @@ func (m *StringMap) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// bdRevision is bd's signed optimistic-concurrency token at the JSON edge.
+// Current bd emits a decimal string; older supported versions emitted a JSON
+// integer. Both forms parse directly to int64 without passing through float64.
+type bdRevision int64
+
+// UnmarshalJSON accepts current decimal-string and legacy integer revisions.
+func (r *bdRevision) UnmarshalJSON(data []byte) error {
+	token := bytes.TrimSpace(data)
+	if len(token) == 0 {
+		return errors.New("bd revision is empty")
+	}
+	// A JSON null revision means the row has no recorded token yet (legacy rows,
+	// or a backend that has not minted one). Decode it as the zero token — the
+	// same "no revision" sentinel a never-mutated bead carries — rather than
+	// failing the whole issue decode on strconv.ParseInt("null").
+	if string(token) == "null" {
+		*r = 0
+		return nil
+	}
+
+	decimal := string(token)
+	if token[0] == '"' {
+		if err := json.Unmarshal(token, &decimal); err != nil {
+			return fmt.Errorf("decoding bd revision string: %w", err)
+		}
+	}
+	value, err := strconv.ParseInt(decimal, 10, 64)
+	if err != nil {
+		return fmt.Errorf("decoding bd revision %q: %w", decimal, err)
+	}
+	*r = bdRevision(value)
+	return nil
+}
+
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
@@ -826,14 +860,9 @@ type bdIssue struct {
 	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
-	// Pre-#4682 bd omits it, so it decodes to 0; toBead stamps it onto the
-	// otherwise json:"-" Bead.Revision field. The "revision" key is provisional:
-	// bd #4682 (which adds the column and --if-revision) is unlanded, so the
-	// exact wire key is unconfirmed. The integration conformance row against a
-	// #4682-capable bd is the guard — an absent key is indistinguishable from
-	// legacy bd here (both decode to 0), so a key-name mismatch would fail there,
-	// not silently.
-	Revision int64 `json:"revision,omitempty"`
+	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
+	// otherwise json:"-" Bead.Revision field.
+	Revision bdRevision `json:"revision,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -986,7 +1015,7 @@ func (b *bdIssue) toBead() Bead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
 		IsBlocked:    b.IsBlocked.ptr(),
-		Revision:     b.Revision,
+		Revision:     int64(b.Revision),
 	}
 }
 
