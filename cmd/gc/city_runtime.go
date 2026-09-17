@@ -101,6 +101,9 @@ var orderRescanInterval = time.Minute
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
+	// Shared by this city's nudge backstops and targeted demand tick.
+	claimRefusals claimRefusalLog
+
 	cityPath     string
 	cityName     string
 	configName   string
@@ -2823,7 +2826,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		claimWorkStoreRefs := make([]string, len(claimWork))
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout, &cr.claimRefusals)
 		nudgeStalledPoolContinuations(
 			cr.sp,
 			cr.cfg,
@@ -2834,7 +2837,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 				result.SessionQueryPartial ||
 				result.ContinuationClaimQueryPartial,
 			time.Now(),
-			cr.stdout,
+			cr.stdout, &cr.claimRefusals,
 		)
 		// The claim-without-execution lane. Both backstops above end at the
 		// claim; this one starts there. It reads the UNFILTERED assigned-work
@@ -2857,7 +2860,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
-			cr.stdout,
+			cr.stdout, &cr.claimRefusals,
 		)
 		// The never-claimed lane (ga-evxqd). The three above key on a bead the
 		// seat was BOUND to, on one preassigned successor, or on an in_progress
@@ -2883,6 +2886,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.rec,
 			cr.stdout,
+			&cr.claimRefusals,
 		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
@@ -3490,6 +3494,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sessionBeads,
 		nil,
 		cr.stderr,
+		&cr.claimRefusals,
 	)
 	desiredState := wfcResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)

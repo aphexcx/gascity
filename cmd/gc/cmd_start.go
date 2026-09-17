@@ -42,6 +42,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 	beaconTime time.Time,
 	stderr io.Writer,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+	var refusals claimRefusalLog
 	return func(
 		c *config.City,
 		currentSP runtime.Provider,
@@ -62,6 +63,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 			sessionBeads,
 			trace,
 			stderr,
+			&refusals,
 		)
 	}
 }
@@ -1018,6 +1020,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sessionBeads,
 		nil,
 		stderr,
+		nil,
 	)
 	dsResult.SessionQueryPartial = dsResult.SessionQueryPartial || sessionQueryPartial
 	ds := dsResult.State
@@ -1048,6 +1051,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			sessionBeads,
 			nil,
 			stderr,
+			nil,
 		)
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
@@ -1104,6 +1108,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sessionBeads,
 		nil,
 		stderr,
+		nil,
 	)
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)

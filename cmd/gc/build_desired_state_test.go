@@ -12876,7 +12876,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		cityStore,
 		map[string]beads.Store{"city": rigStore},
 		nil,
-		io.Discard,
+		io.Discard, time.Time{}, nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -12944,7 +12944,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		listFailStore{Store: beads.NewMemStore()},
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
-		&stderr,
+		&stderr, time.Time{}, nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {
 		if !strings.Contains(stderr.String(), want) {
