@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -120,6 +121,66 @@ func TestReleaseOrphanedPoolAssignmentsStillReopensThisCitysOrphans(t *testing.T
 			}
 			if strings.Contains(logBuf.String(), "cross-city-fence") {
 				t.Fatalf("a claimable orphan must not log a refusal:\n%s", logBuf.String())
+			}
+		})
+	}
+}
+
+// A dead local session may still hold foreign-owned work from a pre-fence
+// claim. Confirming its runtime dead does not authorize releasing that work.
+func TestReleaseConfirmedOrphanSessionWorkHonorsCrossCityFence(t *testing.T) {
+	cases := []struct {
+		name        string
+		identity    string
+		labels      []string
+		wantRelease bool
+	}{
+		{"foreign pre-fence claim", "citadel", []string{"owner:jadegate"}, false},
+		{"own bead", "citadel", []string{"owner:citadel"}, true},
+		{"legacy unlabeled bead", "citadel", nil, true},
+		{"handed-off foreign bead", "citadel", []string{"owner:jadegate", "handoff:citadel"}, true},
+		{"not federated", "", []string{"owner:jadegate"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logBuf := captureLog(t)
+			store := beads.NewMemStore()
+			work := orphanedWork(t, store, "citadel-dead-worker", tc.labels...)
+
+			released := releaseConfirmedOrphanSessionWork(
+				fenceReconcilerCfg(tc.identity), store, nil, []beads.Bead{work},
+				[]beads.Store{store}, session.Info{ID: "citadel-dead-worker"},
+			)
+
+			got, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if tc.wantRelease {
+				if len(released) != 1 || released[0].ID != work.ID || released[0].Index != 0 {
+					t.Errorf("released = %v, want the orphan at index 0", released)
+				}
+				if got.Status != "open" || got.Assignee != "" {
+					t.Errorf("orphan not released: status=%q assignee=%q", got.Status, got.Assignee)
+				}
+				if strings.Contains(logBuf.String(), "cross-city-fence") {
+					t.Errorf("claimable orphan logged a refusal: %s", logBuf.String())
+				}
+				return
+			}
+			if len(released) != 0 {
+				t.Errorf("foreign-owned pre-fence claim released: %v", released)
+			}
+			if !reflect.DeepEqual(got, work) {
+				t.Errorf("foreign bead changed: got %#v, want %#v", got, work)
+			}
+			if strings.Count(logBuf.String(), "cross-city-fence refused") != 1 {
+				t.Errorf("want one refusal log line, got: %s", logBuf.String())
+			}
+			for _, want := range []string{"releaseConfirmedOrphanSessionWork:", "bead=" + work.ID, "owner=jadegate", "this_identity=citadel", "missing=handoff:citadel"} {
+				if !strings.Contains(logBuf.String(), want) {
+					t.Errorf("refusal log lacks %q: %s", want, logBuf.String())
+				}
 			}
 		})
 	}

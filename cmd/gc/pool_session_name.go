@@ -466,6 +466,12 @@ func releaseConfirmedOrphanSessionWork(
 		if _, ok := identifiers[assignee]; !ok {
 			continue
 		}
+		// A dead local session may hold a pre-fence claim on another city's
+		// work. Runtime death does not authorize reopening or unassigning it.
+		if ok, reason := federation.MayClaim(wb.Labels, federationIdentity(cfg)); !ok {
+			log.Printf("releaseConfirmedOrphanSessionWork: %s: another city's work is not this city's to reopen; leaving it as it is", federation.ClaimRefusalLine(wb.ID, reason))
+			continue
+		}
 		template := routedToOrLegacyWorkflowTarget(wb)
 		if template == "" {
 			continue
