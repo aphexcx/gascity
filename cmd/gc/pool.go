@@ -405,6 +405,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.EmitsPermissionWarning
 		dst.EmitsPermissionWarning = &v
 	}
+	if src.ClaimBackstop != nil {
+		v := *src.ClaimBackstop
+		dst.ClaimBackstop = &v
+	}
 	if src.HooksInstalled != nil {
 		v := *src.HooksInstalled
 		dst.HooksInstalled = &v
