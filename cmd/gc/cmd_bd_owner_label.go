@@ -220,6 +220,32 @@ func bdHasBoolFlag(bdArgs []string, flag string) bool {
 	return set
 }
 
+// bdOwnerLabelDatabaseOverride reports selections that a reopen of the scope's
+// configured store cannot safely reproduce. Inspect the actual child environment
+// (after gc's projections), not the ambient environment. Conservatively skip the
+// follow-up stamp even when an explicit override happens to name the same store.
+func bdOwnerLabelDatabaseOverride(bdArgs, env []string) bool {
+	overridden := false
+	bdFlagTokens(bdArgs, func(_ int, name, _ string, _ bool) {
+		if name == "--database" || name == "--db" {
+			overridden = true
+		}
+	})
+	if overridden {
+		return true
+	}
+	for _, entry := range env {
+		name, value, _ := strings.Cut(entry, "=")
+		switch name {
+		case "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE":
+			if value != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // bdBeadIDRE is the shape of a bead id — <prefix>-<suffix>, with an optional
 // class or wisp segment, and bd's dotted hierarchical children (ci-root.1);
 // anything else in bd's output is not an id.
@@ -228,7 +254,7 @@ var bdBeadIDRE = regexp.MustCompile(`^[A-Za-z0-9]+(?:[-.][A-Za-z0-9]+)+$`)
 var (
 	// bdCreatedIssueRE matches bd's single-create success line:
 	//   ✓ Created issue: <id> — <title>
-	bdCreatedIssueRE = regexp.MustCompile(`Created issue: (\S+)`)
+	bdCreatedIssueRE = regexp.MustCompile(`^\s*(?:✓\s+)?Created issue: (\S+)(?:\s|$)`)
 	// bdGraphCreatedRE matches one line of `bd create --graph`'s text listing
 	// after its "Created N issues" header:   <key> -> <id>
 	bdGraphCreatedRE = regexp.MustCompile(`^\s+\S+ -> (\S+)\s*$`)
@@ -283,18 +309,7 @@ func bdCreatedIDs(out string) []string {
 	}
 	inGraphListing, inMarkdownListing := false, false
 	for _, line := range strings.Split(out, "\n") {
-		if m := bdCreatedIssueRE.FindStringSubmatch(line); m != nil {
-			add(m[1])
-			continue
-		}
-		switch {
-		case strings.Contains(line, "Created ") && strings.Contains(line, " issues from "):
-			inMarkdownListing, inGraphListing = true, false
-			continue
-		case strings.HasPrefix(strings.TrimSpace(line), "Created ") && strings.Contains(line, " issues"):
-			inGraphListing, inMarkdownListing = true, false
-			continue
-		}
+		// Consume batch records before inspecting text that can be a title.
 		if inGraphListing {
 			if m := bdGraphCreatedRE.FindStringSubmatch(line); m != nil {
 				add(m[1])
@@ -306,6 +321,19 @@ func bdCreatedIDs(out string) []string {
 				add(m[1])
 				continue
 			}
+		}
+		if m := bdCreatedIssueRE.FindStringSubmatch(line); m != nil {
+			add(m[1])
+			continue
+		}
+		header := strings.TrimPrefix(strings.TrimSpace(line), "✓ ")
+		switch {
+		case strings.HasPrefix(header, "Created ") && strings.Contains(header, " issues from "):
+			inMarkdownListing, inGraphListing = true, false
+			continue
+		case strings.HasPrefix(header, "Created ") && strings.Contains(header, " issues"):
+			inGraphListing, inMarkdownListing = true, false
+			continue
 		}
 		// --silent prints the bare id and nothing else.
 		if bare := strings.TrimSpace(line); bare == line && bdBeadIDRE.MatchString(bare) {

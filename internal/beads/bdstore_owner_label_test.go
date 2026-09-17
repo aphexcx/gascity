@@ -115,12 +115,10 @@ func TestBdStoreCreateUnderAnOwnedParentInheritsThatOwner(t *testing.T) {
 	tests := []struct {
 		name         string
 		parentLabels string // JSON array body for show --json
-		parentErr    bool
 		want         string
 	}{
-		{"parent owned by another city", `"hold:mayor","owner:jadegate"`, false, "owner:jadegate"},
-		{"parent without an owner", `"hold:mayor"`, false, "owner:citadel"},
-		{"parent unreadable: the creator's owner", "", true, "owner:citadel"},
+		{"parent owned by another city", `"hold:mayor","owner:jadegate"`, "owner:jadegate"},
+		{"parent without an owner", `"hold:mayor"`, "owner:citadel"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,9 +126,6 @@ func TestBdStoreCreateUnderAnOwnedParentInheritsThatOwner(t *testing.T) {
 			runner := func(_, _ string, args ...string) ([]byte, error) {
 				switch args[0] {
 				case "show":
-					if tt.parentErr {
-						return nil, errors.New("bd show: boom")
-					}
 					return []byte(`[{"id":"P","title":"parent","status":"open","issue_type":"epic","created_at":"2026-09-01T00:00:00Z","labels":[` + tt.parentLabels + `]}]`), nil
 				case "create":
 					createArgs = args
@@ -179,33 +174,40 @@ func TestBdStoreCreateExplicitOwnerUnderAForeignParentIsExclusive(t *testing.T) 
 	}
 }
 
-// TestBdStoreCreateExplicitOwnerStaysExclusiveWhenTheParentIsUnreadable: the
-// parent could not be read, so nothing is known about the owner bd would copy
-// onto the child. A child that names its own owner keeps bd's copying off
-// regardless — the one operand bd cannot move — and ends with exactly the
-// owner it was given; the parent's other labels cannot be carried, since they
-// could not be read.
-func TestBdStoreCreateExplicitOwnerStaysExclusiveWhenTheParentIsUnreadable(t *testing.T) {
-	var createArgs []string
-	runner := func(_, _ string, args ...string) ([]byte, error) {
-		switch args[0] {
-		case "show":
-			return nil, errors.New("bd show: boom")
-		case "create":
-			createArgs = args
-			return []byte(`{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z"}`), nil
-		}
-		return nil, errors.New("unexpected: " + strings.Join(args, " "))
+func TestBdStoreCreateWithStorageStopsWhenOwnedParentCannotBeRead(t *testing.T) {
+	lookupErr := errors.New("bd show: boom")
+	tests := []struct {
+		name   string
+		labels []string
+	}{
+		{"implicit owner", nil},
+		{"explicit owner", []string{"owner:boomtown"}},
 	}
-	s := beads.NewBdStore("/city", runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
-	if _, err := s.Create(beads.Bead{Title: "t", ParentID: "P", Labels: []string{"owner:boomtown"}}); err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(createArgs, " ")
-	if got, _ := bdCreateLabelsArg(t, createArgs); got != "owner:boomtown" {
-		t.Fatalf("--labels = %q, want exactly the explicit owner; args=%q", got, joined)
-	}
-	if !strings.Contains(joined, "--no-inherit-labels") {
-		t.Fatalf("args = %q, want --no-inherit-labels: the parent is unreadable, so its owner must not be copied", joined)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			createCalls := 0
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				switch args[0] {
+				case "show":
+					return nil, lookupErr
+				case "create":
+					createCalls++
+					return []byte(`{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z"}`), nil
+				}
+				return nil, errors.New("unexpected: " + strings.Join(args, " "))
+			}
+			s := beads.NewBdStore("/city", runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
+			_, err := s.CreateWithStorage(beads.Bead{
+				Title:    "t",
+				ParentID: "P",
+				Labels:   tt.labels,
+			}, beads.StorageDefault)
+			if !errors.Is(err, lookupErr) {
+				t.Fatalf("CreateWithStorage error = %v, want parent lookup error", err)
+			}
+			if createCalls != 0 {
+				t.Fatalf("bd create calls = %d, want 0 after parent lookup failure", createCalls)
+			}
+		})
 	}
 }
