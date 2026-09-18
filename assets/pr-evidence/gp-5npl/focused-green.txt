@@ -1,0 +1,22 @@
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- PASS: TestReaperStaleCloseDisabled (16.14s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (2.00s)
+    --- PASS: TestReaperStaleCloseDisabled/never (2.76s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (2.21s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (2.45s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (2.63s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (2.13s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (1.74s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.22s)
+=== RUN   TestReaperOrderAndScriptDefaults
+--- PASS: TestReaperOrderAndScriptDefaults (0.00s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/gastown	20.473s

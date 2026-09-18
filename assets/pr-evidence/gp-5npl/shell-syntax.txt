@@ -1,0 +1,1 @@
+PASS: bash -n internal/bootstrap/packs/core/assets/scripts/reaper.sh

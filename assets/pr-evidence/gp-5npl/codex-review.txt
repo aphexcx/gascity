@@ -1,0 +1,9 @@
+Codex STANDARD review, round 1: CHANGES_REQUIRED
+P2: the existing no-database/no-session-prune early exit bypassed the required disabled summary.
+
+Resolution: the silent exit now applies only when stale closes are enabled. Added off_without_databases regression; observed its red failure before the fix.
+
+Codex STANDARD review, round 2: CLEAN
+Independent read-only review of git diff HEAD. Reviewer independently reproduced one disabled summary with zero counters on macOS Bash 3.2 without databases. Normalization, duration-conversion bypass, full Step 5 guard, TTL/default preservation, and executable tests reviewed.
+Reviewer task: /root/review_reaper_off
+Mayor gate and Fable read: pending after READY.

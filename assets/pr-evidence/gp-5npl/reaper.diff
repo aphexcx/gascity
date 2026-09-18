@@ -1,0 +1,131 @@
+diff --git a/internal/bootstrap/packs/core/assets/scripts/reaper.sh b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+index 22470d225..83e5937bb 100755
+--- a/internal/bootstrap/packs/core/assets/scripts/reaper.sh
++++ b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+@@ -54,0 +55,3 @@ STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
++# off, never, or 0 (case-insensitive, trimmed) disables age-based issue closes.
++STALE_ISSUE_AGE="${STALE_ISSUE_AGE#"${STALE_ISSUE_AGE%%[![:space:]]*}"}"
++STALE_ISSUE_AGE="${STALE_ISSUE_AGE%"${STALE_ISSUE_AGE##*[![:space:]]}"}"
+@@ -79 +82,5 @@ PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
+-STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
++STALE_CLOSE_DISABLED=0
++case "$STALE_ISSUE_AGE" in
++    [oO][fF][fF]|[nN][eE][vV][eE][rR]|0) STALE_CLOSE_DISABLED=1 ;;
++    *) STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE") ;;
++esac
+@@ -1124,22 +1131,23 @@ while IFS= read -r DB; do
+-    get_sql_rows "$DB" "stale issue" "
+-        SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
+-        FROM \`$DB\`.issues
+-        WHERE status IN ('open', 'in_progress')
+-        AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+-        AND priority > 1
+-        AND issue_type != 'epic'
+-        AND (
+-            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+-            OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+-        )
+-        AND id NOT IN (
+-            SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
+-            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
+-            WHERE i.status IN ('open', 'in_progress')
+-            UNION
+-            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
+-            INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
+-            WHERE i.status IN ('open', 'in_progress')
+-        )
+-    "
+-    STALE_IDS=$SQL_ROWS_RESULT
++    if [ "$STALE_CLOSE_DISABLED" -eq 0 ]; then
++        get_sql_rows "$DB" "stale issue" "
++            SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
++            FROM \`$DB\`.issues
++            WHERE status IN ('open', 'in_progress')
++            AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
++            AND priority > 1
++            AND issue_type != 'epic'
++            AND (
++                JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
++                OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
++            )
++            AND id NOT IN (
++                SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
++                INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
++                WHERE i.status IN ('open', 'in_progress')
++                UNION
++                SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
++                INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
++                WHERE i.status IN ('open', 'in_progress')
++            )
++        "
++        STALE_IDS=$SQL_ROWS_RESULT
+@@ -1147,29 +1155,5 @@ while IFS= read -r DB; do
+-    if [ -n "$STALE_IDS" ] && [ -z "$DRY_RUN" ]; then
+-        if [ -z "$CITY_DB" ]; then
+-            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
+-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; stale issue auto-close disabled"
+-                CITY_DB_ANOMALY_RECORDED=1
+-            fi
+-            SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
+-        elif [ "$DB" != "$CITY_DB" ]; then
+-            SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
+-        else
+-            while IFS=, read -r issue_id close_mode; do
+-                [ -z "$issue_id" ] && continue
+-                # close_mode comes from the query's per-row CASE: 'force' when the
+-                # row carried a non-empty assignee at select time and 'bare'
+-                # otherwise. A 'force' row is another actor's bead (the reaper runs
+-                # as order:reaper), so it needs --force to pass bd's cross-actor
+-                # close guard. A 'bare' row was open/unassigned; keeping its close
+-                # bare lets the guard reject it if the row was concurrently
+-                # re-claimed after the select, instead of clobbering the new claim.
+-                STALE_FORCE=""
+-                [ "$close_mode" = "force" ] && STALE_FORCE="force"
+-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" "$STALE_FORCE" 2>&1); then
+-                    DB_ISSUES_CLOSED=$((DB_ISSUES_CLOSED + 1))
+-                    TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
+-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
+-                else
+-                    record_anomaly "$DB" "closing stale issue $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
++        if [ -n "$STALE_IDS" ] && [ -z "$DRY_RUN" ]; then
++            if [ -z "$CITY_DB" ]; then
++                if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
++                    record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; stale issue auto-close disabled"
++                    CITY_DB_ANOMALY_RECORDED=1
+@@ -1177 +1161,26 @@ while IFS= read -r DB; do
+-            done <<< "$STALE_IDS"
++                SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
++                TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
++            elif [ "$DB" != "$CITY_DB" ]; then
++                SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
++                TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
++            else
++                while IFS=, read -r issue_id close_mode; do
++                    [ -z "$issue_id" ] && continue
++                    # close_mode comes from the query's per-row CASE: 'force' when the
++                    # row carried a non-empty assignee at select time and 'bare'
++                    # otherwise. A 'force' row is another actor's bead (the reaper runs
++                    # as order:reaper), so it needs --force to pass bd's cross-actor
++                    # close guard. A 'bare' row was open/unassigned; keeping its close
++                    # bare lets the guard reject it if the row was concurrently
++                    # re-claimed after the select, instead of clobbering the new claim.
++                    STALE_FORCE=""
++                    [ "$close_mode" = "force" ] && STALE_FORCE="force"
++                    if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" "$STALE_FORCE" 2>&1); then
++                        DB_ISSUES_CLOSED=$((DB_ISSUES_CLOSED + 1))
++                        TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
++                        DB_MUTATIONS=$((DB_MUTATIONS + 1))
++                    else
++                        record_anomaly "$DB" "closing stale issue $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
++                    fi
++                done <<< "$STALE_IDS"
++            fi
+@@ -1500 +1509 @@ fi
+-if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ]; then
++if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ] && [ "$STALE_CLOSE_DISABLED" -eq 0 ]; then
+@@ -1511,0 +1521,3 @@ SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_W
++if [ "$STALE_CLOSE_DISABLED" -eq 1 ]; then
++    SUMMARY="$SUMMARY, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=$STALE_ISSUE_AGE)"
++fi
