@@ -1,0 +1,4 @@
+Fork source: aae1e068036a8c729593ac95a5fe95006c21e88c
+Upstream base: a76bff41c79473e646600e8ad42dab53f3dac067
+Upstream cherry-pick: b0cb8eece9418ba1eaceeb34459b1ce48fcfa9ea
+Clean cherry-pick; all four changed source/test/doc files have identical Git blob hashes on fork and upstream.

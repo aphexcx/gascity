@@ -1,0 +1,199 @@
+?   	github.com/gastownhall/gascity	[no test files]
+ok  	github.com/gastownhall/gascity/cmd/gc-write-mint	0.225s
+?   	github.com/gastownhall/gascity/cmd/gen-client	[no test files]
+ok  	github.com/gastownhall/gascity/cmd/gen-command-census	0.419s
+?   	github.com/gastownhall/gascity/cmd/genschema	[no test files]
+?   	github.com/gastownhall/gascity/cmd/genspec	[no test files]
+ok  	github.com/gastownhall/gascity/examples	0.218s
+?   	github.com/gastownhall/gascity/examples/bd	[no test files]
+ok  	github.com/gastownhall/gascity/examples/bd/dolt	390.787s
+ok  	github.com/gastownhall/gascity/examples/gastown	173.678s
+ok  	github.com/gastownhall/gascity/examples/swarm	1.520s
+ok  	github.com/gastownhall/gascity/examples/t3bridge-gastown	1.140s
+ok  	github.com/gastownhall/gascity/internal/agent	0.213s
+ok  	github.com/gastownhall/gascity/internal/agentutil	1.115s
+ok  	github.com/gastownhall/gascity/internal/api	69.326s
+ok  	github.com/gastownhall/gascity/internal/api/apierr	0.224s
+ok  	github.com/gastownhall/gascity/internal/api/dashboardbff	5.581s
+ok  	github.com/gastownhall/gascity/internal/api/dashboardspa	0.232s
+ok  	github.com/gastownhall/gascity/internal/api/genclient	1.696s
+ok  	github.com/gastownhall/gascity/internal/bdflags	1.278s
+ok  	github.com/gastownhall/gascity/internal/beadmeta	0.704s
+ok  	github.com/gastownhall/gascity/internal/beads	14.939s
+ok  	github.com/gastownhall/gascity/internal/beads/beadstest	1.014s
+?   	github.com/gastownhall/gascity/internal/beads/closeorder	[no test files]
+ok  	github.com/gastownhall/gascity/internal/beads/contract	0.714s
+ok  	github.com/gastownhall/gascity/internal/beads/exec	15.747s
+ok  	github.com/gastownhall/gascity/internal/beads/splittest	1.101s
+ok  	github.com/gastownhall/gascity/internal/bootstrap	1.078s
+ok  	github.com/gastownhall/gascity/internal/bootstrap/packs/core	1.383s
+ok  	github.com/gastownhall/gascity/internal/buildimage	0.234s
+ok  	github.com/gastownhall/gascity/internal/builtinpacks	2.795s
+ok  	github.com/gastownhall/gascity/internal/chartest	0.217s
+ok  	github.com/gastownhall/gascity/internal/cityinit	0.984s
+ok  	github.com/gastownhall/gascity/internal/citylayout	0.197s
+ok  	github.com/gastownhall/gascity/internal/citywriteauth	0.192s
+ok  	github.com/gastownhall/gascity/internal/cliauth	0.244s
+ok  	github.com/gastownhall/gascity/internal/clientauth	0.222s
+ok  	github.com/gastownhall/gascity/internal/clientcontext	0.206s
+ok  	github.com/gastownhall/gascity/internal/clientgrant	0.214s
+?   	github.com/gastownhall/gascity/internal/clock	[no test files]
+ok  	github.com/gastownhall/gascity/internal/commandcensus	0.247s
+ok  	github.com/gastownhall/gascity/internal/config	24.118s
+ok  	github.com/gastownhall/gascity/internal/configedit	1.215s
+ok  	github.com/gastownhall/gascity/internal/convergence	6.017s
+ok  	github.com/gastownhall/gascity/internal/convoy	1.030s
+ok  	github.com/gastownhall/gascity/internal/coordclass	1.069s
+ok  	github.com/gastownhall/gascity/internal/credentialprovider	0.210s
+ok  	github.com/gastownhall/gascity/internal/deps	0.192s
+ok  	github.com/gastownhall/gascity/internal/dispatch	5.528s
+ok  	github.com/gastownhall/gascity/internal/docgen	27.173s
+ok  	github.com/gastownhall/gascity/internal/doctor	27.120s
+ok  	github.com/gastownhall/gascity/internal/doltauth	0.208s
+ok  	github.com/gastownhall/gascity/internal/doltorphan	0.214s
+ok  	github.com/gastownhall/gascity/internal/doltpool	0.228s
+ok  	github.com/gastownhall/gascity/internal/doltversion	0.190s
+ok  	github.com/gastownhall/gascity/internal/emergency	0.207s
+ok  	github.com/gastownhall/gascity/internal/eventfeed	0.230s
+ok  	github.com/gastownhall/gascity/internal/events	7.503s
+?   	github.com/gastownhall/gascity/internal/events/eventstest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/events/exec	10.775s
+ok  	github.com/gastownhall/gascity/internal/execenv	0.193s
+ok  	github.com/gastownhall/gascity/internal/execgrace	1.700s
+ok  	github.com/gastownhall/gascity/internal/executionevent	1.093s
+ok  	github.com/gastownhall/gascity/internal/extmsg	1.054s
+ok  	github.com/gastownhall/gascity/internal/featureflags	0.973s
+ok  	github.com/gastownhall/gascity/internal/federation	0.198s
+ok  	github.com/gastownhall/gascity/internal/formula	2.016s
+?   	github.com/gastownhall/gascity/internal/formulatest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/fsys	0.234s
+?   	github.com/gastownhall/gascity/internal/fsys/fsystest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/gchome	0.201s
+ok  	github.com/gastownhall/gascity/internal/git	8.062s
+ok  	github.com/gastownhall/gascity/internal/gitcred	0.281s
+ok  	github.com/gastownhall/gascity/internal/githubmonitor	1.033s
+ok  	github.com/gastownhall/gascity/internal/graphroute	1.012s
+ok  	github.com/gastownhall/gascity/internal/graphv2	1.264s
+ok  	github.com/gastownhall/gascity/internal/hooks	1.005s
+ok  	github.com/gastownhall/gascity/internal/hostboot	0.214s [no tests to run]
+ok  	github.com/gastownhall/gascity/internal/importsvc	1.045s
+ok  	github.com/gastownhall/gascity/internal/logutil	0.421s
+ok  	github.com/gastownhall/gascity/internal/mail	0.194s
+ok  	github.com/gastownhall/gascity/internal/mail/beadmail	0.991s
+ok  	github.com/gastownhall/gascity/internal/mail/exec	61.726s
+?   	github.com/gastownhall/gascity/internal/mail/mailtest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/materialize	1.168s
+ok  	github.com/gastownhall/gascity/internal/migrate	1.057s
+ok  	github.com/gastownhall/gascity/internal/modelwindow	0.202s
+ok  	github.com/gastownhall/gascity/internal/molecule	2.591s
+ok  	github.com/gastownhall/gascity/internal/nudgepoller	0.207s
+ok  	github.com/gastownhall/gascity/internal/nudgequeue	9.193s
+ok  	github.com/gastownhall/gascity/internal/orderdiscovery	1.001s
+?   	github.com/gastownhall/gascity/internal/orderdispatch	[no test files]
+ok  	github.com/gastownhall/gascity/internal/orders	2.390s
+ok  	github.com/gastownhall/gascity/internal/overlay	0.235s
+ok  	github.com/gastownhall/gascity/internal/packman	5.333s
+ok  	github.com/gastownhall/gascity/internal/packregistry	0.687s
+ok  	github.com/gastownhall/gascity/internal/pathdurability	0.203s
+ok  	github.com/gastownhall/gascity/internal/pathutil	0.190s
+ok  	github.com/gastownhall/gascity/internal/pidutil	4.597s
+ok  	github.com/gastownhall/gascity/internal/poolplan	0.204s
+ok  	github.com/gastownhall/gascity/internal/pricing	0.211s
+ok  	github.com/gastownhall/gascity/internal/processenv	0.274s
+ok  	github.com/gastownhall/gascity/internal/processgroup	0.191s
+?   	github.com/gastownhall/gascity/internal/processgroup/processgrouptest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/productmetrics	12.905s
+ok  	github.com/gastownhall/gascity/internal/promptmeta	0.196s
+ok  	github.com/gastownhall/gascity/internal/promptsafe	0.300s
+ok  	github.com/gastownhall/gascity/internal/reliability	0.192s
+ok  	github.com/gastownhall/gascity/internal/remotesource	0.198s
+ok  	github.com/gastownhall/gascity/internal/resilience	0.212s
+ok  	github.com/gastownhall/gascity/internal/reviewquorum	0.199s
+ok  	github.com/gastownhall/gascity/internal/rig	1.013s
+ok  	github.com/gastownhall/gascity/internal/rollout	1.048s
+?   	github.com/gastownhall/gascity/internal/rollout/gate	[no test files]
+ok  	github.com/gastownhall/gascity/internal/runproj	1.017s
+ok  	github.com/gastownhall/gascity/internal/runtime	13.965s
+ok  	github.com/gastownhall/gascity/internal/runtime/acp	3.635s
+ok  	github.com/gastownhall/gascity/internal/runtime/auto	0.204s
+ok  	github.com/gastownhall/gascity/internal/runtime/exec	25.538s
+ok  	github.com/gastownhall/gascity/internal/runtime/herdr	17.158s
+ok  	github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest	0.207s
+ok  	github.com/gastownhall/gascity/internal/runtime/hybrid	0.201s
+ok  	github.com/gastownhall/gascity/internal/runtime/k8s	10.715s
+ok  	github.com/gastownhall/gascity/internal/runtime/proctable	0.329s
+ok  	github.com/gastownhall/gascity/internal/runtime/registry	0.993s
+ok  	github.com/gastownhall/gascity/internal/runtime/rppcheck	7.235s
+ok  	github.com/gastownhall/gascity/internal/runtime/runtimecapability	4.527s
+ok  	github.com/gastownhall/gascity/internal/runtime/runtimecontract	3.259s
+ok  	github.com/gastownhall/gascity/internal/runtime/runtimetest	0.208s
+ok  	github.com/gastownhall/gascity/internal/runtime/ssh	0.296s
+ok  	github.com/gastownhall/gascity/internal/runtime/subprocess	1.302s
+ok  	github.com/gastownhall/gascity/internal/runtime/t3bridge	26.631s
+ok  	github.com/gastownhall/gascity/internal/runtime/tmux	62.740s
+ok  	github.com/gastownhall/gascity/internal/sdnotify	0.290s
+ok  	github.com/gastownhall/gascity/internal/searchpath	0.208s
+ok  	github.com/gastownhall/gascity/internal/session	4.725s
+ok  	github.com/gastownhall/gascity/internal/session/sessiontest	0.996s
+ok  	github.com/gastownhall/gascity/internal/sessionlog	5.036s
+ok  	github.com/gastownhall/gascity/internal/shellquote	0.199s
+ok  	github.com/gastownhall/gascity/internal/sling	1.409s
+ok  	github.com/gastownhall/gascity/internal/sourceworkflow	1.049s
+ok  	github.com/gastownhall/gascity/internal/ssrf	0.207s
+ok  	github.com/gastownhall/gascity/internal/storebinding	4.924s
+ok  	github.com/gastownhall/gascity/internal/storebinding/beadsworkspace	1.182s
+ok  	github.com/gastownhall/gascity/internal/storebinding/sqlite	2.265s
+ok  	github.com/gastownhall/gascity/internal/storebinding/storebindingtest	1.058s
+ok  	github.com/gastownhall/gascity/internal/storehealth	0.205s
+ok  	github.com/gastownhall/gascity/internal/storeref	1.066s
+?   	github.com/gastownhall/gascity/internal/storeref/storereftest	[no test files]
+ok  	github.com/gastownhall/gascity/internal/supervisor	2.698s
+ok  	github.com/gastownhall/gascity/internal/suspensionstate	0.254s
+ok  	github.com/gastownhall/gascity/internal/telemetry	0.303s
+ok  	github.com/gastownhall/gascity/internal/testenv	14.134s
+?   	github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows	[no test files]
+ok  	github.com/gastownhall/gascity/internal/testpolicy/resourcecensus	1.758s
+ok  	github.com/gastownhall/gascity/internal/testpolicy/timingplan	0.205s
+?   	github.com/gastownhall/gascity/internal/testpolicy/timingplancli	[no test files]
+ok  	github.com/gastownhall/gascity/internal/testpolicy/timingsummary	0.552s
+ok  	github.com/gastownhall/gascity/internal/testpolicy/waiverclock	0.198s
+?   	github.com/gastownhall/gascity/internal/testutil	[no test files]
+ok  	github.com/gastownhall/gascity/internal/testutil/providerledger	1.298s
+ok  	github.com/gastownhall/gascity/internal/transcriptmeta	0.202s
+ok  	github.com/gastownhall/gascity/internal/usage	1.011s
+ok  	github.com/gastownhall/gascity/internal/validation	1.039s
+ok  	github.com/gastownhall/gascity/internal/warmup	1.543s
+ok  	github.com/gastownhall/gascity/internal/webhookmatch	1.009s
+ok  	github.com/gastownhall/gascity/internal/webhooksink	0.971s
+ok  	github.com/gastownhall/gascity/internal/webhookverify	1.421s
+ok  	github.com/gastownhall/gascity/internal/workdir	1.045s
+ok  	github.com/gastownhall/gascity/internal/worker	14.712s
+ok  	github.com/gastownhall/gascity/internal/worker/adapters/zcode	8.977s
+ok  	github.com/gastownhall/gascity/internal/worker/builtin	0.200s
+ok  	github.com/gastownhall/gascity/internal/worker/fake	0.301s
+?   	github.com/gastownhall/gascity/internal/worker/fakecmd	[no test files]
+ok  	github.com/gastownhall/gascity/internal/worker/transcript	1.034s
+ok  	github.com/gastownhall/gascity/internal/worker/workertest	8.139s
+ok  	github.com/gastownhall/gascity/internal/workrecord	1.585s
+ok  	github.com/gastownhall/gascity/internal/workspacesvc	3.533s
+ok  	github.com/gastownhall/gascity/internal/worktree	20.178s
+ok  	github.com/gastownhall/gascity/pkg/eventexport	0.518s
+ok  	github.com/gastownhall/gascity/scripts	233.068s
+ok  	github.com/gastownhall/gascity/scripts/cipolicy	0.408s
+ok  	github.com/gastownhall/gascity/scripts/prwatchdog	0.210s
+?   	github.com/gastownhall/gascity/scripts/prwatchdog/cmd/watchdog	[no test files]
+ok  	github.com/gastownhall/gascity/test/acceptance	0.203s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/acceptance/helpers	0.358s
+ok  	github.com/gastownhall/gascity/test/acceptance/tier_b	0.187s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/acceptance/tier_c	0.184s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/acceptance/tutorial_goldens	0.185s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/acceptance/worker_inference	0.186s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/dashport	0.186s [no tests to run]
+ok  	github.com/gastownhall/gascity/test/docsync	3.940s
+ok  	github.com/gastownhall/gascity/test/dolttest	0.202s
+ok  	github.com/gastownhall/gascity/test/integration	0.200s
+ok  	github.com/gastownhall/gascity/test/integration/filebdshim	1.017s
+ok  	github.com/gastownhall/gascity/test/packlint	0.299s
+ok  	github.com/gastownhall/gascity/test/qualification	1.312s
+ok  	github.com/gastownhall/gascity/test/tmuxtest	0.322s
+ok  	github.com/gastownhall/gascity/test/workflows	2.039s

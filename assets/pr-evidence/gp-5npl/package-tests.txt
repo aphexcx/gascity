@@ -1,0 +1,721 @@
+=== RUN   TestBindKeyScriptDirectBind
+=== RUN   TestBindKeyScriptDirectBind/no_existing_binding_installs_command_directly
+=== RUN   TestBindKeyScriptDirectBind/default_tmux_binding_overwritten_without_if-shell_wrap
+=== RUN   TestBindKeyScriptDirectBind/idempotent:_same_command_already_bound_is_a_no-op
+=== RUN   TestBindKeyScriptDirectBind/different_command_in_same_key_triggers_re-bind
+--- PASS: TestBindKeyScriptDirectBind (1.17s)
+    --- PASS: TestBindKeyScriptDirectBind/no_existing_binding_installs_command_directly (0.54s)
+    --- PASS: TestBindKeyScriptDirectBind/default_tmux_binding_overwritten_without_if-shell_wrap (0.16s)
+    --- PASS: TestBindKeyScriptDirectBind/idempotent:_same_command_already_bound_is_a_no-op (0.20s)
+    --- PASS: TestBindKeyScriptDirectBind/different_command_in_same_key_triggers_re-bind (0.23s)
+=== RUN   TestBindKeyScriptNoRecursiveWrapping
+--- PASS: TestBindKeyScriptNoRecursiveWrapping (0.56s)
+=== RUN   TestCycleScriptGroupsBySeparator
+=== RUN   TestCycleScriptGroupsBySeparator/rig:_witness_with_dormant_infra_reaches_crew
+=== RUN   TestCycleScriptGroupsBySeparator/rig:_prev_from_witness_rotates_to_crew_member
+=== RUN   TestCycleScriptGroupsBySeparator/rig:_cycle_from_crew_rotates_within_rig
+=== RUN   TestCycleScriptGroupsBySeparator/rig:_cycle_does_not_cross_to_other_rigs
+=== RUN   TestCycleScriptGroupsBySeparator/scope:_groups_all_<scope>__*_together
+=== RUN   TestCycleScriptGroupsBySeparator/scope:_prev_cycles_within_scope
+=== RUN   TestCycleScriptGroupsBySeparator/pool:_cycles_same-base_-N_members
+=== RUN   TestCycleScriptGroupsBySeparator/pool:_does_not_cycle_across_base_names
+=== RUN   TestCycleScriptGroupsBySeparator/single-member_group_is_a_no-op
+--- PASS: TestCycleScriptGroupsBySeparator (2.43s)
+    --- PASS: TestCycleScriptGroupsBySeparator/rig:_witness_with_dormant_infra_reaches_crew (0.68s)
+    --- PASS: TestCycleScriptGroupsBySeparator/rig:_prev_from_witness_rotates_to_crew_member (0.23s)
+    --- PASS: TestCycleScriptGroupsBySeparator/rig:_cycle_from_crew_rotates_within_rig (0.18s)
+    --- PASS: TestCycleScriptGroupsBySeparator/rig:_cycle_does_not_cross_to_other_rigs (0.21s)
+    --- PASS: TestCycleScriptGroupsBySeparator/scope:_groups_all_<scope>__*_together (0.20s)
+    --- PASS: TestCycleScriptGroupsBySeparator/scope:_prev_cycles_within_scope (0.23s)
+    --- PASS: TestCycleScriptGroupsBySeparator/pool:_cycles_same-base_-N_members (0.20s)
+    --- PASS: TestCycleScriptGroupsBySeparator/pool:_does_not_cycle_across_base_names (0.19s)
+    --- PASS: TestCycleScriptGroupsBySeparator/single-member_group_is_a_no-op (0.31s)
+=== RUN   TestCityTomlParses
+--- PASS: TestCityTomlParses (0.00s)
+=== RUN   TestCityPackTomlParses
+--- PASS: TestCityPackTomlParses (0.00s)
+=== RUN   TestCityTomlValidates
+--- PASS: TestCityTomlValidates (0.39s)
+=== RUN   TestHeartbeatAgentsCarryMaxSessionAge
+--- PASS: TestHeartbeatAgentsCarryMaxSessionAge (0.41s)
+=== RUN   TestPromptFilesExist
+--- PASS: TestPromptFilesExist (0.36s)
+=== RUN   TestTmuxKeybindingsScrollWheel
+--- PASS: TestTmuxKeybindingsScrollWheel (0.00s)
+=== RUN   TestTmuxKeybindingsAlternateScreenPassthrough
+    gastown_test.go:456: embedded gascity-packs does not yet include #{alternate_on} in WheelUpPane (gastownhall/gascity-packs#136); test activates once go.mod is bumped to that release
+--- SKIP: TestTmuxKeybindingsAlternateScreenPassthrough (0.00s)
+=== RUN   TestOverlayDirsExist
+--- PASS: TestOverlayDirsExist (0.26s)
+=== RUN   TestRefineryPromptSeedsTargetBranchVar
+--- PASS: TestRefineryPromptSeedsTargetBranchVar (0.00s)
+=== RUN   TestRefineryFormulaSupportsMergeStrategies
+--- PASS: TestRefineryFormulaSupportsMergeStrategies (0.00s)
+=== RUN   TestRefineryFormulaChainsMergeMetadataWithClose
+--- PASS: TestRefineryFormulaChainsMergeMetadataWithClose (0.00s)
+=== RUN   TestRefineryFormulaDirectMergeUsesDetachedWorktree
+--- PASS: TestRefineryFormulaDirectMergeUsesDetachedWorktree (0.00s)
+=== RUN   TestRefineryFormulaRefusesZeroDiffMerge
+--- PASS: TestRefineryFormulaRefusesZeroDiffMerge (0.00s)
+=== RUN   TestRefineryBranchHasRealChangeExec
+=== RUN   TestRefineryBranchHasRealChangeExec/empty_refuses
+=== RUN   TestRefineryBranchHasRealChangeExec/real_allows
+=== RUN   TestRefineryBranchHasRealChangeExec/netzero_refuses
+=== RUN   TestRefineryBranchHasRealChangeExec/uncomputable_base_refuses
+--- PASS: TestRefineryBranchHasRealChangeExec (0.55s)
+    --- PASS: TestRefineryBranchHasRealChangeExec/empty_refuses (0.04s)
+    --- PASS: TestRefineryBranchHasRealChangeExec/real_allows (0.08s)
+    --- PASS: TestRefineryBranchHasRealChangeExec/netzero_refuses (0.05s)
+    --- PASS: TestRefineryBranchHasRealChangeExec/uncomputable_base_refuses (0.02s)
+=== RUN   TestRefineryPromptRejectionFlowEnforcesClearOnMerge
+--- PASS: TestRefineryPromptRejectionFlowEnforcesClearOnMerge (0.00s)
+=== RUN   TestPolecatFormulaTreatsMetadataBranchAsAuthoritative
+--- PASS: TestPolecatFormulaTreatsMetadataBranchAsAuthoritative (0.00s)
+=== RUN   TestPolecatFormulaRecordsExistingPRMetadataOnSubmit
+--- PASS: TestPolecatFormulaRecordsExistingPRMetadataOnSubmit (0.00s)
+=== RUN   TestPolecatFormulaSignalsRefineryAfterReassign
+--- PASS: TestPolecatFormulaSignalsRefineryAfterReassign (0.00s)
+=== RUN   TestPolecatFormulaSubmitHasBranchShapeGate
+--- PASS: TestPolecatFormulaSubmitHasBranchShapeGate (0.00s)
+=== RUN   TestPolecatPromptInlinesBranchConvention
+--- PASS: TestPolecatPromptInlinesBranchConvention (0.00s)
+=== RUN   TestPolecatFormulaSelfReviewRendersAffectedTestModes
+--- PASS: TestPolecatFormulaSelfReviewRendersAffectedTestModes (0.00s)
+=== RUN   TestPolecatPromptDoneSequenceSignalsRefinery
+--- PASS: TestPolecatPromptDoneSequenceSignalsRefinery (0.00s)
+=== RUN   TestPolecatPromptHaltsOnAutoPushFalse
+--- PASS: TestPolecatPromptHaltsOnAutoPushFalse (0.00s)
+=== RUN   TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse
+--- PASS: TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse (0.00s)
+=== RUN   TestPolecatFormulaHaltsOnAutoPushFalse
+--- PASS: TestPolecatFormulaHaltsOnAutoPushFalse (0.00s)
+=== RUN   TestRefineryFormulaRespectsExistingPRMetadata
+--- PASS: TestRefineryFormulaRespectsExistingPRMetadata (0.00s)
+=== RUN   TestRefineryFormulaExistingPRNoGhUsesSharedRESTLookup
+--- PASS: TestRefineryFormulaExistingPRNoGhUsesSharedRESTLookup (0.00s)
+=== RUN   TestRefineryFormulaExistingPRNoGhRejectsCrossRepoFullURL
+--- PASS: TestRefineryFormulaExistingPRNoGhRejectsCrossRepoFullURL (0.04s)
+=== RUN   TestRefineryFormulaNoGhRESTLookupExecutesNumberAndBranchPaths
+--- PASS: TestRefineryFormulaNoGhRESTLookupExecutesNumberAndBranchPaths (0.91s)
+=== RUN   TestRefineryFormulaNoGhPRCreateSendsJSONContentType
+--- PASS: TestRefineryFormulaNoGhPRCreateSendsJSONContentType (0.65s)
+=== RUN   TestRefineryFormulaResolveGithubTokenUsesNonInteractiveCredentialFill
+--- PASS: TestRefineryFormulaResolveGithubTokenUsesNonInteractiveCredentialFill (0.16s)
+=== RUN   TestRefineryFormulaExistingPRNoGhCrossRepoEscalatesToHuman
+--- PASS: TestRefineryFormulaExistingPRNoGhCrossRepoEscalatesToHuman (0.34s)
+=== RUN   TestWorktreeSetupKeepsIgnoresLocal
+--- PASS: TestWorktreeSetupKeepsIgnoresLocal (0.88s)
+=== RUN   TestWorktreeSetupBootstrapsPrepopulatedTargetDir
+--- PASS: TestWorktreeSetupBootstrapsPrepopulatedTargetDir (0.83s)
+=== RUN   TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree
+--- PASS: TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree (0.83s)
+=== RUN   TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir
+--- PASS: TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir (0.93s)
+=== RUN   TestWorktreeSetupSupportsLegacySignature
+--- PASS: TestWorktreeSetupSupportsLegacySignature (0.75s)
+=== RUN   TestWorktreeSetupReusesExistingAgentBranch
+--- PASS: TestWorktreeSetupReusesExistingAgentBranch (1.18s)
+=== RUN   TestWorktreeSetupNamespacesAgentBranchesByWorktreePath
+--- PASS: TestWorktreeSetupNamespacesAgentBranchesByWorktreePath (1.44s)
+=== RUN   TestWorktreeSetupSyncSkipsMissingOrigin
+--- PASS: TestWorktreeSetupSyncSkipsMissingOrigin (0.78s)
+=== RUN   TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees
+--- PASS: TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees (0.00s)
+=== RUN   TestGastownRoutedToTargetsUseBindingPrefix
+--- PASS: TestGastownRoutedToTargetsUseBindingPrefix (0.00s)
+=== RUN   TestGastownWarrantCreateCommandsUseCreateMetadata
+--- PASS: TestGastownWarrantCreateCommandsUseCreateMetadata (0.00s)
+=== RUN   TestShutdownDanceUsesClaimedWarrantModel
+--- PASS: TestShutdownDanceUsesClaimedWarrantModel (0.00s)
+=== RUN   TestDogAndDigestVaporFormulasHaveNoCompilerRequirement
+--- PASS: TestDogAndDigestVaporFormulasHaveNoCompilerRequirement (0.00s)
+=== RUN   TestDogStartupPromptUsesSplitClaimFirstQueries
+--- PASS: TestDogStartupPromptUsesSplitClaimFirstQueries (0.00s)
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-mayor"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-crew"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-deacon"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-witness"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-polecat"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-refinery"_}}
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-mayor"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-crew"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-deacon"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-witness"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-polecat"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-refinery"_}}#01
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/polecat/prompt.template.md/##_Startup_Protocol
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/deacon/prompt.template.md/##_Startup_Protocol
+=== RUN   TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/refinery/prompt.template.md/#_Step_1:_Check_for_an_in-progress_patrol_wisp
+--- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-mayor"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-crew"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-deacon"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-witness"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-polecat"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-refinery"_}} (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-mayor"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-crew"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-deacon"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-witness"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-polecat"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/template-fragments/propulsion.template.md/{{_define_"propulsion-refinery"_}}#01 (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/polecat/prompt.template.md/##_Startup_Protocol (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/deacon/prompt.template.md/##_Startup_Protocol (0.00s)
+    --- PASS: TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup/packs/gastown/agents/refinery/prompt.template.md/#_Step_1:_Check_for_an_in-progress_patrol_wisp (0.00s)
+=== RUN   TestPolecatStartupUsesHookClaim
+--- PASS: TestPolecatStartupUsesHookClaim (0.00s)
+=== RUN   TestWitnessStartupAndNoIdleReconcileWisps
+--- PASS: TestWitnessStartupAndNoIdleReconcileWisps (0.00s)
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/refinery_hq_no_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/refinery_rig_with_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/polecat_hq_with_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/polecat_rig_with_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/mayor_polecat_hq_with_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/mayor_polecat_rig_with_binding
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/gc_rig_expression_ignores_target_rig
+=== RUN   TestGastownRigTargetShellExpressionsRenderForRigAndHQ/target_rig_expression_ignores_gc_rig
+--- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ (0.08s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/refinery_hq_no_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/refinery_rig_with_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/polecat_hq_with_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/polecat_rig_with_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/mayor_polecat_hq_with_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/mayor_polecat_rig_with_binding (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/gc_rig_expression_ignores_target_rig (0.01s)
+    --- PASS: TestGastownRigTargetShellExpressionsRenderForRigAndHQ/target_rig_expression_ignores_gc_rig (0.02s)
+=== RUN   TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool
+=== RUN   TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool/rebase_conflict_rejection
+=== RUN   TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool/test_failure_rejection
+--- PASS: TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool (0.00s)
+    --- PASS: TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool/rebase_conflict_rejection (0.00s)
+    --- PASS: TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool/test_failure_rejection (0.00s)
+=== RUN   TestGastownPromptPeerAddressesUseBindingPrefix
+--- PASS: TestGastownPromptPeerAddressesUseBindingPrefix (0.02s)
+=== RUN   TestGastownPatrolWispCommandsPropagateRoutingNamespace
+--- PASS: TestGastownPatrolWispCommandsPropagateRoutingNamespace (0.00s)
+=== RUN   TestGastownPatrolPromptFallbackPreservesLifecycle
+--- PASS: TestGastownPatrolPromptFallbackPreservesLifecycle (0.00s)
+=== RUN   TestRefineryPatrolRestartGuidanceAssignsSuccessor
+--- PASS: TestRefineryPatrolRestartGuidanceAssignsSuccessor (0.00s)
+=== RUN   TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding
+=== RUN   TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/polecat
+=== RUN   TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/witness
+=== RUN   TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/refinery
+--- PASS: TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding (0.01s)
+    --- PASS: TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/polecat (0.00s)
+    --- PASS: TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/witness (0.01s)
+    --- PASS: TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding/refinery (0.00s)
+=== RUN   TestGastownFormulasUsingBindingPrefixDefaultToUnbound
+--- PASS: TestGastownFormulasUsingBindingPrefixDefaultToUnbound (0.00s)
+=== RUN   TestBootPromptMatchesNamedSessionLifecycle
+--- PASS: TestBootPromptMatchesNamedSessionLifecycle (0.42s)
+=== RUN   TestIdeaToPlanFormulaUsesSupportedPrimitives
+--- PASS: TestIdeaToPlanFormulaUsesSupportedPrimitives (0.00s)
+=== RUN   TestReviewLegFormulaPersistsReportAndNotifiesCoordinator
+--- PASS: TestReviewLegFormulaPersistsReportAndNotifiesCoordinator (0.00s)
+=== RUN   TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity
+--- PASS: TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity (0.00s)
+=== RUN   TestWitnessPatrolStateClassificationCoversSessionStates
+--- PASS: TestWitnessPatrolStateClassificationCoversSessionStates (0.00s)
+=== RUN   TestWitnessPatrolAllStepsContinueNotExit
+--- PASS: TestWitnessPatrolAllStepsContinueNotExit (0.00s)
+=== RUN   TestAllFormulasExist
+--- PASS: TestAllFormulasExist (0.00s)
+=== RUN   TestAllPackTomlsParse
+--- PASS: TestAllPackTomlsParse (0.02s)
+=== RUN   TestAllPromptTemplatesExist
+--- PASS: TestAllPromptTemplatesExist (0.01s)
+=== RUN   TestAgentNudgeField
+--- PASS: TestAgentNudgeField (0.47s)
+=== RUN   TestFormulasDir
+--- PASS: TestFormulasDir (0.43s)
+=== RUN   TestPackDirsPopulated
+--- PASS: TestPackDirsPopulated (0.46s)
+=== RUN   TestGlobalFragmentsParsed
+--- PASS: TestGlobalFragmentsParsed (0.00s)
+=== RUN   TestDaemonConfig
+--- PASS: TestDaemonConfig (0.00s)
+=== RUN   TestCombinedPackParses
+--- PASS: TestCombinedPackParses (0.00s)
+=== RUN   TestPackUsesIsolatedWorkDirs
+--- PASS: TestPackUsesIsolatedWorkDirs (0.00s)
+=== RUN   TestPackPromptFilesExist
+--- PASS: TestPackPromptFilesExist (0.00s)
+=== RUN   TestCityAgentsFilter
+--- PASS: TestCityAgentsFilter (0.36s)
+=== RUN   TestExpandedCityUsesGastownDog
+--- PASS: TestExpandedCityUsesGastownDog (0.36s)
+=== RUN   TestDoltHealthFormulasExist
+--- PASS: TestDoltHealthFormulasExist (0.00s)
+=== RUN   TestDeaconPatrolDetectsQueueStarvation
+--- PASS: TestDeaconPatrolDetectsQueueStarvation (0.00s)
+=== RUN   TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit
+--- PASS: TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit (0.00s)
+=== RUN   TestRefineryPromptUsesCanonicalAgentIdentity
+--- PASS: TestRefineryPromptUsesCanonicalAgentIdentity (0.00s)
+=== RUN   TestRefineryAssignedWorkQueriesUsePortableRigScope
+--- PASS: TestRefineryAssignedWorkQueriesUsePortableRigScope (0.00s)
+=== RUN   TestAttachedRigScopeShellToken
+=== RUN   TestAttachedRigScopeShellToken/sh
+=== RUN   TestAttachedRigScopeShellToken/zsh
+--- PASS: TestAttachedRigScopeShellToken (0.06s)
+    --- PASS: TestAttachedRigScopeShellToken/sh (0.02s)
+    --- PASS: TestAttachedRigScopeShellToken/zsh (0.04s)
+=== RUN   TestRefineryFormulaValidatesAgentIdentityAtStartup
+--- PASS: TestRefineryFormulaValidatesAgentIdentityAtStartup (0.00s)
+=== RUN   TestMaintenanceCheckBinariesTreatsGhAsOptional
+--- PASS: TestMaintenanceCheckBinariesTreatsGhAsOptional (0.01s)
+=== RUN   TestMaintenanceDoltScriptsUseProjectedConnectionTarget
+=== RUN   TestMaintenanceDoltScriptsUseProjectedConnectionTarget/reaper
+=== RUN   TestMaintenanceDoltScriptsUseProjectedConnectionTarget/jsonl_export
+--- PASS: TestMaintenanceDoltScriptsUseProjectedConnectionTarget (2.13s)
+    --- PASS: TestMaintenanceDoltScriptsUseProjectedConnectionTarget/reaper (1.14s)
+    --- PASS: TestMaintenanceDoltScriptsUseProjectedConnectionTarget/jsonl_export (0.99s)
+=== RUN   TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget
+=== RUN   TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget/reaper
+=== RUN   TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget/jsonl_export
+--- PASS: TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget (0.03s)
+    --- PASS: TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget/reaper (0.02s)
+    --- PASS: TestMaintenanceScriptsSkipWhenCityHasNoDoltTarget/jsonl_export (0.01s)
+=== RUN   TestOrphanSweepPreservesQualifiedRigAssignees
+--- PASS: TestOrphanSweepPreservesQualifiedRigAssignees (0.80s)
+=== RUN   TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent
+--- PASS: TestOrphanSweepPreservesBareShortFormOfLiveQualifiedAgent (0.58s)
+=== RUN   TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead
+--- PASS: TestOrphanSweepResetsBareShortFormWhenQualifiedAgentDead (0.61s)
+=== RUN   TestOrphanSweepPreservesHumanOperatorAssignee
+--- PASS: TestOrphanSweepPreservesHumanOperatorAssignee (0.49s)
+=== RUN   TestOrphanSweepResetsHumanLikeDeadAssignee
+--- PASS: TestOrphanSweepResetsHumanLikeDeadAssignee (0.51s)
+=== RUN   TestOrphanSweepConfigShowFallbackPreservesQualifiedAssignees
+--- PASS: TestOrphanSweepConfigShowFallbackPreservesQualifiedAssignees (0.87s)
+=== RUN   TestOrphanSweepRefreshesLivenessAfterBeadList
+--- PASS: TestOrphanSweepRefreshesLivenessAfterBeadList (0.49s)
+=== RUN   TestOrphanSweepRefreshesRigLivenessAfterBeadList
+--- PASS: TestOrphanSweepRefreshesRigLivenessAfterBeadList (0.46s)
+=== RUN   TestOrphanSweepRevalidatesWorkBeadBeforeReset
+--- PASS: TestOrphanSweepRevalidatesWorkBeadBeforeReset (0.34s)
+=== RUN   TestOrphanSweepUsesConditionalResetAfterRevalidation
+--- PASS: TestOrphanSweepUsesConditionalResetAfterRevalidation (0.60s)
+=== RUN   TestOrphanSweepUsesSessionBeadShowWhenSessionListLags
+--- PASS: TestOrphanSweepUsesSessionBeadShowWhenSessionListLags (0.56s)
+=== RUN   TestOrphanSweepPreservesWorkWhenSessionBeadProbeErrors
+--- PASS: TestOrphanSweepPreservesWorkWhenSessionBeadProbeErrors (0.45s)
+=== RUN   TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable
+=== RUN   TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/rig_scope_double_dash
+=== RUN   TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/city_scope_double_underscore
+=== RUN   TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/city_scope_numbered_slot
+--- PASS: TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable (1.17s)
+    --- PASS: TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/rig_scope_double_dash (0.33s)
+    --- PASS: TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/city_scope_double_underscore (0.42s)
+    --- PASS: TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable/city_scope_numbered_slot (0.41s)
+=== RUN   TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags
+=== RUN   TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags/bare_session_bead_assignee
+=== RUN   TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags/generic_mc_suffix
+--- PASS: TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags (0.95s)
+    --- PASS: TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags/bare_session_bead_assignee (0.46s)
+    --- PASS: TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags/generic_mc_suffix (0.49s)
+=== RUN   TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema
+--- PASS: TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSchema (0.80s)
+=== RUN   TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat
+--- PASS: TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat (0.86s)
+=== RUN   TestOrphanSweepContinuesAfterSingleRigSessionListFailure
+--- PASS: TestOrphanSweepContinuesAfterSingleRigSessionListFailure (0.69s)
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/hq-reported-shape
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-neutral-direct
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-refinery-direct
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-witness-direct
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-pool-instance
+=== RUN   TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-live-session-only
+--- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp (3.22s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/hq-reported-shape (0.55s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-neutral-direct (0.55s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-refinery-direct (0.50s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-witness-direct (0.58s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-pool-instance (0.48s)
+    --- PASS: TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp/rig-live-session-only (0.56s)
+=== RUN   TestOrphanSweepSkipsRigWhenSessionListSucceedsButReportsZeroSessions
+--- PASS: TestOrphanSweepSkipsRigWhenSessionListSucceedsButReportsZeroSessions (0.73s)
+=== RUN   TestOrphanSweepPreservesPoolSeatWithOnlySessionNameMetadataWhenLive
+--- PASS: TestOrphanSweepPreservesPoolSeatWithOnlySessionNameMetadataWhenLive (0.43s)
+=== RUN   TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable
+--- PASS: TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable (0.57s)
+=== RUN   TestOrphanSweepRecordsCauseNoteOnEveryReset
+--- PASS: TestOrphanSweepRecordsCauseNoteOnEveryReset (0.64s)
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/managed_runtime_state
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/managed_state_beats_compatibility_port_mirror
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/invalid_managed_state_falls_back_to_provider_state
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/corrupt_managed_state_exits_78_despite_compatibility_port_mirror
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/managed_runtime_state
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/managed_state_beats_compatibility_port_mirror
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/invalid_managed_state_falls_back_to_provider_state
+=== RUN   TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/corrupt_managed_state_exits_78_despite_compatibility_port_mirror
+--- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts (7.32s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/managed_runtime_state (1.07s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/managed_state_beats_compatibility_port_mirror (1.38s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/invalid_managed_state_falls_back_to_provider_state (1.55s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/reaper/corrupt_managed_state_exits_78_despite_compatibility_port_mirror (0.08s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/managed_runtime_state (0.84s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/managed_state_beats_compatibility_port_mirror (1.02s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/invalid_managed_state_falls_back_to_provider_state (1.30s)
+    --- PASS: TestMaintenanceDoltScriptsUseManagedRuntimePorts/jsonl_export/corrupt_managed_state_exits_78_despite_compatibility_port_mirror (0.08s)
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/inconclusive_lsof_accepts_reachable_port
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/mismatched_lsof_pid_still_rejects_port
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/inconclusive_lsof_with_unreachable_port_still_rejects_port
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/inconclusive_lsof_accepts_reachable_port
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/mismatched_lsof_pid_still_rejects_port
+=== RUN   TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/inconclusive_lsof_with_unreachable_port_still_rejects_port
+--- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof (15.09s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/inconclusive_lsof_accepts_reachable_port (1.56s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/mismatched_lsof_pid_still_rejects_port (5.23s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/reaper/inconclusive_lsof_with_unreachable_port_still_rejects_port (0.53s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/inconclusive_lsof_accepts_reachable_port (1.70s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/mismatched_lsof_pid_still_rejects_port (5.45s)
+    --- PASS: TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof/jsonl_export/inconclusive_lsof_with_unreachable_port_still_rejects_port (0.62s)
+=== RUN   TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts
+=== RUN   TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/reaper/listener_pid_match_via_ps_fallback
+=== RUN   TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/reaper/reachable_port_via_ps_fallback_when_lsof_is_inconclusive
+=== RUN   TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/jsonl_export/listener_pid_match_via_ps_fallback
+=== RUN   TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/jsonl_export/reachable_port_via_ps_fallback_when_lsof_is_inconclusive
+--- PASS: TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts (7.12s)
+    --- PASS: TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/reaper/listener_pid_match_via_ps_fallback (1.36s)
+    --- PASS: TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/reaper/reachable_port_via_ps_fallback_when_lsof_is_inconclusive (1.73s)
+    --- PASS: TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/jsonl_export/listener_pid_match_via_ps_fallback (2.20s)
+    --- PASS: TestMaintenanceDoltScriptsUsePsConfirmedManagedRuntimePorts/jsonl_export/reachable_port_via_ps_fallback_when_lsof_is_inconclusive (1.82s)
+=== RUN   TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed
+=== RUN   TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed/reaper
+=== RUN   TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed/jsonl_export
+--- PASS: TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed (2.74s)
+    --- PASS: TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed/reaper (1.51s)
+    --- PASS: TestMaintenanceDoltScriptsParseManagedRuntimeStateWithPortableSed/jsonl_export (1.23s)
+=== RUN   TestMaintenanceDoltScriptsRejectInvalidManagedPort
+--- PASS: TestMaintenanceDoltScriptsRejectInvalidManagedPort (0.02s)
+=== RUN   TestReaperMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly
+--- PASS: TestReaperMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly (0.97s)
+=== RUN   TestReaperFreshNonMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly
+--- PASS: TestReaperFreshNonMessageWispsAboveAlertThresholdDoNotTriggerReapFailureAnomaly (0.77s)
+=== RUN   TestReaperStaleNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly
+--- PASS: TestReaperStaleNonMessageWispsAboveAlertThresholdStillTriggerReapFailureAnomaly (0.78s)
+=== RUN   TestReaperMailAlertThresholdPositiveBranchEmitsMailBacklogAnomaly
+--- PASS: TestReaperMailAlertThresholdPositiveBranchEmitsMailBacklogAnomaly (1.02s)
+=== RUN   TestReaperMailWispsSummaryFieldAlwaysPresent
+--- PASS: TestReaperMailWispsSummaryFieldAlwaysPresent (1.39s)
+=== RUN   TestMaintenanceDoltScriptsSkipTestPatternDatabases
+=== RUN   TestMaintenanceDoltScriptsSkipTestPatternDatabases/reaper
+=== RUN   TestMaintenanceDoltScriptsSkipTestPatternDatabases/jsonl_export
+--- PASS: TestMaintenanceDoltScriptsSkipTestPatternDatabases (7.46s)
+    --- PASS: TestMaintenanceDoltScriptsSkipTestPatternDatabases/reaper (6.26s)
+    --- PASS: TestMaintenanceDoltScriptsSkipTestPatternDatabases/jsonl_export (1.20s)
+=== RUN   TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers
+=== RUN   TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers/reaper
+=== RUN   TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers/jsonl_export
+--- PASS: TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers (1.37s)
+    --- PASS: TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers/reaper (0.77s)
+    --- PASS: TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers/jsonl_export (0.61s)
+=== RUN   TestReaperScriptSQLReflectsCurrentSchema
+--- PASS: TestReaperScriptSQLReflectsCurrentSchema (0.01s)
+=== RUN   TestReaperParentIDIsParentChildDependencyProjection
+--- PASS: TestReaperParentIDIsParentChildDependencyProjection (0.00s)
+=== RUN   TestReaperSQLReflectsCurrentSchema
+--- PASS: TestReaperSQLReflectsCurrentSchema (0.70s)
+=== RUN   TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets
+--- PASS: TestReaperSkipsDependencyQueriesWithoutGenericDependencyTargets (0.32s)
+=== RUN   TestReaperSkipsDependencyQueriesWithoutWispDependencyTable
+--- PASS: TestReaperSkipsDependencyQueriesWithoutWispDependencyTable (0.41s)
+=== RUN   TestReaperSplitSchemaQueriesUseSplitColumns
+--- PASS: TestReaperSplitSchemaQueriesUseSplitColumns (0.80s)
+=== RUN   TestReaperPrunesClosedSessionBeadsWithBdPrune
+--- PASS: TestReaperPrunesClosedSessionBeadsWithBdPrune (1.27s)
+=== RUN   TestReaperPrunesTerminalSessionStatesWithGcSessionPrune
+--- PASS: TestReaperPrunesTerminalSessionStatesWithGcSessionPrune (1.04s)
+=== RUN   TestReaperSessionStatePruneFailureEscalates
+--- PASS: TestReaperSessionStatePruneFailureEscalates (0.85s)
+=== RUN   TestReaperSessionPruneDryRunOmitsForce
+--- PASS: TestReaperSessionPruneDryRunOmitsForce (2.54s)
+=== RUN   TestReaperSessionPruneAnomalyEscalates
+--- PASS: TestReaperSessionPruneAnomalyEscalates (0.84s)
+=== RUN   TestReaperSessionPruneMissingBdDegradesToZero
+--- PASS: TestReaperSessionPruneMissingBdDegradesToZero (0.79s)
+=== RUN   TestReaperSessionPruneRunsWhenNoDoltDatabases
+--- PASS: TestReaperSessionPruneRunsWhenNoDoltDatabases (0.52s)
+=== RUN   TestReaperClosesStaleWispChainsToFixpoint
+--- PASS: TestReaperClosesStaleWispChainsToFixpoint (0.79s)
+=== RUN   TestReaperDryRunReportsWouldCloseStaleWisps
+--- PASS: TestReaperDryRunReportsWouldCloseStaleWisps (0.83s)
+=== RUN   TestReaperCountQueriesIgnoreSuccessfulStderrWarnings
+--- PASS: TestReaperCountQueriesIgnoreSuccessfulStderrWarnings (2.00s)
+=== RUN   TestReaperRowQueriesIgnoreSuccessfulStderrWarnings
+--- PASS: TestReaperRowQueriesIgnoreSuccessfulStderrWarnings (1.08s)
+=== RUN   TestReaperDoesNotCloseNonClosedWispsByAgeOnly
+--- PASS: TestReaperDoesNotCloseNonClosedWispsByAgeOnly (0.77s)
+=== RUN   TestReaperClosesStaleWispsOnlyWithClosedParent
+--- PASS: TestReaperClosesStaleWispsOnlyWithClosedParent (0.85s)
+=== RUN   TestReaperClosesGraphWorkflowWispTrackedToClosedRoot
+--- PASS: TestReaperClosesGraphWorkflowWispTrackedToClosedRoot (0.80s)
+=== RUN   TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor
+--- PASS: TestReaperDoesNotCloseStaleWispWithClosedBlocksPredecessor (0.73s)
+=== RUN   TestReaperClosesStaleInactiveWorkflowRoots
+--- PASS: TestReaperClosesStaleInactiveWorkflowRoots (1.07s)
+=== RUN   TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper
+--- PASS: TestReaperWorkflowRootPredicateIsGeneratedFromOneHelper (0.00s)
+=== RUN   TestReaperPreservesWorkflowRootsWithLiveDescendants
+--- PASS: TestReaperPreservesWorkflowRootsWithLiveDescendants (2.40s)
+=== RUN   TestReaperDryRunReportsWouldCloseWorkflowRoots
+--- PASS: TestReaperDryRunReportsWouldCloseWorkflowRoots (0.85s)
+=== RUN   TestReaperEscalatesDoltCommitFailure
+--- PASS: TestReaperEscalatesDoltCommitFailure (0.65s)
+=== RUN   TestReaperDoesNotCountFailedPurgeAsSuccess
+--- PASS: TestReaperDoesNotCountFailedPurgeAsSuccess (0.67s)
+=== RUN   TestReaperFailureAnomalyPreservesDoltErrorTail
+--- PASS: TestReaperFailureAnomalyPreservesDoltErrorTail (0.58s)
+=== RUN   TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery
+--- PASS: TestReaperFailureAnomalyPreservesDoltErrorTailForLongQuery (0.68s)
+=== RUN   TestReaperCommitReportsOnlySuccessfulPurgeRows
+--- PASS: TestReaperCommitReportsOnlySuccessfulPurgeRows (0.70s)
+=== RUN   TestReaperDoesNotCountFailedIssueCloseAsSuccess
+--- PASS: TestReaperDoesNotCountFailedIssueCloseAsSuccess (0.91s)
+=== RUN   TestReaperAutoClosesIssuesOnlyInCityDatabase
+--- PASS: TestReaperAutoClosesIssuesOnlyInCityDatabase (1.22s)
+=== RUN   TestReaperStaleAutoCloseForcesAssignedIssueButKeepsUnassignedBare
+--- PASS: TestReaperStaleAutoCloseForcesAssignedIssueButKeepsUnassignedBare (0.92s)
+=== RUN   TestReaperDoesNotStaleCloseIssueWithFutureExpiresAt
+--- PASS: TestReaperDoesNotStaleCloseIssueWithFutureExpiresAt (0.63s)
+=== RUN   TestReaperClosesNudgeBeadWithElapsedExpiresAt
+--- PASS: TestReaperClosesNudgeBeadWithElapsedExpiresAt (0.95s)
+=== RUN   TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt
+--- PASS: TestReaperDoesNotTTLCloseNonNudgeBeadWithElapsedExpiresAt (0.78s)
+=== RUN   TestReaperCityDatabaseUsesGCCityPathFallback
+--- PASS: TestReaperCityDatabaseUsesGCCityPathFallback (0.75s)
+=== RUN   TestReaperScopesIssueAutoCloseToCityBeadsDir
+--- PASS: TestReaperScopesIssueAutoCloseToCityBeadsDir (0.78s)
+=== RUN   TestReaperSkipsIssueAutoCloseWhenConfiguredCityDatabaseDoesNotMatchMetadata
+--- PASS: TestReaperSkipsIssueAutoCloseWhenConfiguredCityDatabaseDoesNotMatchMetadata (0.95s)
+=== RUN   TestReaperSkipsIssueAutoCloseWhenCityMetadataIsNotJSON
+--- PASS: TestReaperSkipsIssueAutoCloseWhenCityMetadataIsNotJSON (0.60s)
+=== RUN   TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable
+--- PASS: TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable (0.80s)
+=== RUN   TestReaperSkipsIssueAutoCloseWhenCityMetadataIsMalformed
+--- PASS: TestReaperSkipsIssueAutoCloseWhenCityMetadataIsMalformed (0.59s)
+=== RUN   TestReaperSkipsIssueAutoCloseWhenCityDatabaseUnknown
+--- PASS: TestReaperSkipsIssueAutoCloseWhenCityDatabaseUnknown (0.86s)
+=== RUN   TestReaperIgnoresNothingToCommitAfterMutationRace
+--- PASS: TestReaperIgnoresNothingToCommitAfterMutationRace (0.66s)
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- PASS: TestReaperStaleCloseDisabled (13.45s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (1.01s)
+    --- PASS: TestReaperStaleCloseDisabled/never (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (2.07s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (1.07s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (2.75s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (2.57s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (2.86s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.23s)
+=== RUN   TestReaperOrderAndScriptDefaults
+--- PASS: TestReaperOrderAndScriptDefaults (0.00s)
+=== RUN   TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable
+=== RUN   TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable/reaper
+=== RUN   TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable/jsonl_export
+--- PASS: TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable (1.49s)
+    --- PASS: TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable/reaper (0.83s)
+    --- PASS: TestMaintenanceDoltScriptsSkipDatabasesWithoutWispsTable/jsonl_export (0.66s)
+=== RUN   TestDoltDoctorScriptUsesExplicitSQLTarget
+=== RUN   TestDoltDoctorScriptUsesExplicitSQLTarget/mol-dog-doctor.sh
+--- PASS: TestDoltDoctorScriptUsesExplicitSQLTarget (0.00s)
+    --- PASS: TestDoltDoctorScriptUsesExplicitSQLTarget/mol-dog-doctor.sh (0.00s)
+=== RUN   TestSpawnStormDetectPersistsNewLedgerCounts
+--- PASS: TestSpawnStormDetectPersistsNewLedgerCounts (0.46s)
+=== RUN   TestSpawnStormDetectPersistsCountWhenTitleLookupFails
+--- PASS: TestSpawnStormDetectPersistsCountWhenTitleLookupFails (0.52s)
+=== RUN   TestSpawnStormDetectFailsOnMalformedOpenBeadJSON
+--- PASS: TestSpawnStormDetectFailsOnMalformedOpenBeadJSON (0.41s)
+=== RUN   TestSpawnStormDetectPrunesClosedAndDeletedLedgerEntries
+--- PASS: TestSpawnStormDetectPrunesClosedAndDeletedLedgerEntries (0.96s)
+=== RUN   TestSpawnStormDetectPreservesLedgerOnTransientShowFailure
+--- PASS: TestSpawnStormDetectPreservesLedgerOnTransientShowFailure (0.71s)
+=== RUN   TestJsonlExportCountsRecordsViaJq
+--- PASS: TestJsonlExportCountsRecordsViaJq (2.06s)
+=== RUN   TestJsonlExportSkipsSpikeCheckBelowMinPrev
+--- PASS: TestJsonlExportSkipsSpikeCheckBelowMinPrev (0.83s)
+=== RUN   TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy
+--- PASS: TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy (0.80s)
+=== RUN   TestJsonlExportPreservesDropSpikeWhenDoltSourceCountAlsoShrank
+--- PASS: TestJsonlExportPreservesDropSpikeWhenDoltSourceCountAlsoShrank (2.30s)
+=== RUN   TestJsonlExportCommitsOnHaltToAdvanceBaseline
+--- PASS: TestJsonlExportCommitsOnHaltToAdvanceBaseline (1.86s)
+=== RUN   TestJsonlExportFirstRunWithDisabledFloorSkipsSpikeCheck
+--- PASS: TestJsonlExportFirstRunWithDisabledFloorSkipsSpikeCheck (1.98s)
+=== RUN   TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload
+--- PASS: TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload (0.86s)
+=== RUN   TestJsonlExportHaltCommitAdvancesBaselineWithoutLocalGitIdentity
+--- PASS: TestJsonlExportHaltCommitAdvancesBaselineWithoutLocalGitIdentity (0.79s)
+=== RUN   TestJsonlExportDeletedHeadBaselineSkipsPreviousCountLookup
+--- PASS: TestJsonlExportDeletedHeadBaselineSkipsPreviousCountLookup (0.79s)
+=== RUN   TestJsonlExportScrubFailureDoesNotCommitBrokenOutputs
+--- PASS: TestJsonlExportScrubFailureDoesNotCommitBrokenOutputs (0.77s)
+=== RUN   TestJsonlExportMalformedPayloadWithoutScrubDoesNotCommitBrokenOutputs
+--- PASS: TestJsonlExportMalformedPayloadWithoutScrubDoesNotCommitBrokenOutputs (1.55s)
+=== RUN   TestJsonlExportHaltStagingFailureExitsWithoutAdvancingBaseline
+--- PASS: TestJsonlExportHaltStagingFailureExitsWithoutAdvancingBaseline (0.86s)
+=== RUN   TestJsonlExportHaltCommitFailureLeavesArchiveClean
+--- PASS: TestJsonlExportHaltCommitFailureLeavesArchiveClean (0.81s)
+=== RUN   TestJsonlExportHaltMailFailurePersistsPendingAlertAndRetriesNextRun
+--- PASS: TestJsonlExportHaltMailFailurePersistsPendingAlertAndRetriesNextRun (1.15s)
+=== RUN   TestJsonlExportNoChangePushesPendingArchiveCommitAfterHalt
+--- PASS: TestJsonlExportNoChangePushesPendingArchiveCommitAfterHalt (1.35s)
+=== RUN   TestJsonlExportNoChangePushesPendingArchiveCommitWithoutPendingState
+--- PASS: TestJsonlExportNoChangePushesPendingArchiveCommitWithoutPendingState (1.37s)
+=== RUN   TestJsonlExportNoUserDatabasesPushesPendingArchiveCommit
+--- PASS: TestJsonlExportNoUserDatabasesPushesPendingArchiveCommit (1.27s)
+=== RUN   TestJsonlExportNoChangeRebasesPendingArchiveCommitOntoAdvancedRemote
+--- PASS: TestJsonlExportNoChangeRebasesPendingArchiveCommitOntoAdvancedRemote (1.69s)
+=== RUN   TestJsonlExportNoChangePushFailureWithMalformedStateUsesTrackingRef
+--- PASS: TestJsonlExportNoChangePushFailureWithMalformedStateUsesTrackingRef (1.56s)
+=== RUN   TestJsonlExportExportFailureDoesNotBlockPendingArchiveReplay
+--- PASS: TestJsonlExportExportFailureDoesNotBlockPendingArchiveReplay (1.84s)
+=== RUN   TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing
+--- PASS: TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing (0.98s)
+=== RUN   TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay
+--- PASS: TestJsonlExportLegacyStateBackupRecoversPendingArchiveReplay (1.25s)
+=== RUN   TestJsonlExportReusesMaintenancePackArchiveRepo
+--- PASS: TestJsonlExportReusesMaintenancePackArchiveRepo (0.71s)
+=== RUN   TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs
+--- PASS: TestJsonlExportEmptyIssuesPayloadDoesNotCommitBrokenOutputs (0.68s)
+=== RUN   TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary
+--- PASS: TestJsonlExportEmptyDatabaseDoesNotAppearInFailedSummary (0.67s)
+=== RUN   TestJsonlExportPushFailureRecoversFromMalformedState
+--- PASS: TestJsonlExportPushFailureRecoversFromMalformedState (0.91s)
+=== RUN   TestJsonlExportPushFailureRecoversFromWrongShapeState
+--- PASS: TestJsonlExportPushFailureRecoversFromWrongShapeState (1.06s)
+=== RUN   TestJsonlExportPushSuccessWritesLastPushAt
+--- PASS: TestJsonlExportPushSuccessWritesLastPushAt (1.04s)
+=== RUN   TestJsonlExportPushFailureWritesLastPushStderr
+--- PASS: TestJsonlExportPushFailureWritesLastPushStderr (1.19s)
+=== RUN   TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure
+--- PASS: TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure (1.47s)
+=== RUN   TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace
+--- PASS: TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace (1.90s)
+=== RUN   TestJsonlExportPushRetriesThreeTimesBeforeRecordingFailure
+--- PASS: TestJsonlExportPushRetriesThreeTimesBeforeRecordingFailure (1.58s)
+=== RUN   TestJsonlExportPushSuccessAfterFailureClearsLastPushStderr
+--- PASS: TestJsonlExportPushSuccessAfterFailureClearsLastPushStderr (1.07s)
+=== RUN   TestJsonlExportHaltMailFailureRecoversFromMalformedState
+--- PASS: TestJsonlExportHaltMailFailureRecoversFromMalformedState (0.66s)
+=== RUN   TestJsonlExportRetriesPendingAlertFromBackupAfterPrimaryCorruption
+--- PASS: TestJsonlExportRetriesPendingAlertFromBackupAfterPrimaryCorruption (1.20s)
+=== RUN   TestJsonlExportRetriesPendingAlertWithoutUserDatabases
+--- PASS: TestJsonlExportRetriesPendingAlertWithoutUserDatabases (0.40s)
+=== RUN   TestJsonlExportRetriesMultiplePendingAlertsWithoutUserDatabases
+--- PASS: TestJsonlExportRetriesMultiplePendingAlertsWithoutUserDatabases (0.47s)
+=== RUN   TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts
+--- PASS: TestJsonlExportHaltMailFailurePreservesExistingPendingAlerts (0.68s)
+=== RUN   TestJsonlExportLocalOnlyModeSkipsPushAndLogsMode
+--- PASS: TestJsonlExportLocalOnlyModeSkipsPushAndLogsMode (0.52s)
+=== RUN   TestJsonlExportPushModeAttemptsPushWhenOriginConfigured
+--- PASS: TestJsonlExportPushModeAttemptsPushWhenOriginConfigured (1.07s)
+=== RUN   TestJsonlExportPushModeMemoizesOriginForRun
+--- PASS: TestJsonlExportPushModeMemoizesOriginForRun (1.04s)
+=== RUN   TestJsonlExportModeRelogIntervalOverrideRelogsSameMode
+--- PASS: TestJsonlExportModeRelogIntervalOverrideRelogsSameMode (0.74s)
+=== RUN   TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState
+--- PASS: TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState (0.68s)
+=== RUN   TestJsonlExportLocalOnlyModeClearsStalePushFailureState
+--- PASS: TestJsonlExportLocalOnlyModeClearsStalePushFailureState (0.62s)
+=== RUN   TestJsonlExportLocalOnlyModeClearsStalePushEscalationMarker
+--- PASS: TestJsonlExportLocalOnlyModeClearsStalePushEscalationMarker (0.70s)
+=== RUN   TestJsonlExportModeTransitionFromPushToLocalOnlyRelogs
+--- PASS: TestJsonlExportModeTransitionFromPushToLocalOnlyRelogs (0.62s)
+=== RUN   TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation
+--- PASS: TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation (0.85s)
+=== RUN   TestJsonlExportPushFailureEscalatesOncePerUnresolvedFailure
+--- PASS: TestJsonlExportPushFailureEscalatesOncePerUnresolvedFailure (1.79s)
+=== RUN   TestGateSweepInvokesTimerAndGhGateChecks
+--- PASS: TestGateSweepInvokesTimerAndGhGateChecks (0.51s)
+=== RUN   TestGateSweepSkipsBeadAndUnsupportedGateTypes
+--- PASS: TestGateSweepSkipsBeadAndUnsupportedGateTypes (0.47s)
+=== RUN   TestGateSweepToleratesGhGateBdFailures
+--- PASS: TestGateSweepToleratesGhGateBdFailures (0.49s)
+=== RUN   TestGateSweepPropagatesTimerGateBdFailures
+--- PASS: TestGateSweepPropagatesTimerGateBdFailures (0.49s)
+=== RUN   TestPruneBranchesPrunesMergedGcBranches
+--- PASS: TestPruneBranchesPrunesMergedGcBranches (0.51s)
+=== RUN   TestPruneBranchesSkipsCurrentBranch
+--- PASS: TestPruneBranchesSkipsCurrentBranch (1.26s)
+=== RUN   TestPruneBranchesPreservesBranchWithUnmergedWork
+--- PASS: TestPruneBranchesPreservesBranchWithUnmergedWork (1.38s)
+=== RUN   TestPruneBranchesNoOpWhenNoGcBranches
+--- PASS: TestPruneBranchesNoOpWhenNoGcBranches (0.59s)
+=== RUN   TestWispCompactDeletesClosedPastTTL
+--- PASS: TestWispCompactDeletesClosedPastTTL (0.46s)
+=== RUN   TestWispCompactReportsSummaryForActions
+--- PASS: TestWispCompactReportsSummaryForActions (0.43s)
+=== RUN   TestWispCompactPromotesNonClosedPastTTL
+--- PASS: TestWispCompactPromotesNonClosedPastTTL (0.39s)
+=== RUN   TestWispCompactPromotesClosedWispsWithComments
+--- PASS: TestWispCompactPromotesClosedWispsWithComments (0.44s)
+=== RUN   TestWispCompactSkipsBeadsWithinTTL
+--- PASS: TestWispCompactSkipsBeadsWithinTTL (0.36s)
+=== RUN   TestWispCompactRespectsHeartbeatTTL
+--- PASS: TestWispCompactRespectsHeartbeatTTL (0.40s)
+=== RUN   TestWispCompactSkipsNonEphemeralBeads
+--- PASS: TestWispCompactSkipsNonEphemeralBeads (0.34s)
+=== RUN   TestCrossRigDepsConvertsExternalBlocksToRelated
+--- PASS: TestCrossRigDepsConvertsExternalBlocksToRelated (0.44s)
+=== RUN   TestCrossRigDepsReportsResolvedSummary
+--- PASS: TestCrossRigDepsReportsResolvedSummary (0.36s)
+=== RUN   TestCrossRigDepsSkipsInternalDeps
+--- PASS: TestCrossRigDepsSkipsInternalDeps (1.31s)
+=== RUN   TestCrossRigDepsNoOpWhenNothingClosed
+--- PASS: TestCrossRigDepsNoOpWhenNothingClosed (0.36s)
+=== RUN   TestCrossRigDepsHandlesEmptyDepsForClosedBead
+--- PASS: TestCrossRigDepsHandlesEmptyDepsForClosedBead (0.40s)
+=== RUN   TestWispCompactReportsNonZeroCounters
+--- PASS: TestWispCompactReportsNonZeroCounters (0.79s)
+=== RUN   TestWispCompactBSDDateZFallbackUsesUTC
+--- PASS: TestWispCompactBSDDateZFallbackUsesUTC (0.76s)
+=== RUN   TestCrossRigDepsReportsNonZeroCounter
+--- PASS: TestCrossRigDepsReportsNonZeroCounter (0.83s)
+=== RUN   TestOperationalAwarenessFragmentNonFatalDiagnostic
+=== RUN   TestOperationalAwarenessFragmentNonFatalDiagnostic/no_active_kill_QUIT
+=== RUN   TestOperationalAwarenessFragmentNonFatalDiagnostic/documents_non_fatal_default
+=== RUN   TestOperationalAwarenessFragmentNonFatalDiagnostic/no_false_safe_claim
+--- PASS: TestOperationalAwarenessFragmentNonFatalDiagnostic (0.00s)
+    --- PASS: TestOperationalAwarenessFragmentNonFatalDiagnostic/no_active_kill_QUIT (0.00s)
+    --- PASS: TestOperationalAwarenessFragmentNonFatalDiagnostic/documents_non_fatal_default (0.00s)
+    --- PASS: TestOperationalAwarenessFragmentNonFatalDiagnostic/no_false_safe_claim (0.00s)
+=== RUN   TestPreCompactHandoffHooksUseAuto
+=== RUN   TestPreCompactHandoffHooksUseAuto/internal/bootstrap/packs/core/overlay/per-provider/cursor/.cursor/hooks.json
+--- PASS: TestPreCompactHandoffHooksUseAuto (0.00s)
+    --- PASS: TestPreCompactHandoffHooksUseAuto/internal/bootstrap/packs/core/overlay/per-provider/cursor/.cursor/hooks.json (0.00s)
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_rig-scoped_agent
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_crew_(regression_for_original_bug)
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_rig-scoped_pool_member_(--polecat-1)
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/scope_tier:_city-scoped_role
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/scope_tier:_another_city-scoped_role
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/pool_tier:_generic_<base>-N_member
+=== RUN   TestTmuxThemeScriptDrivesByScopeTier/default_tier:_bare_name_(no_separator)
+--- PASS: TestTmuxThemeScriptDrivesByScopeTier (2.01s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_rig-scoped_agent (0.36s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_crew_(regression_for_original_bug) (0.36s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/rig_tier:_rig-scoped_pool_member_(--polecat-1) (0.35s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/scope_tier:_city-scoped_role (0.19s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/scope_tier:_another_city-scoped_role (0.27s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/pool_tier:_generic_<base>-N_member (0.24s)
+    --- PASS: TestTmuxThemeScriptDrivesByScopeTier/default_tier:_bare_name_(no_separator) (0.24s)
+=== RUN   TestTmuxThemeScriptHasNoHardcodedRoleNames
+--- PASS: TestTmuxThemeScriptHasNoHardcodedRoleNames (0.00s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/gastown	210.618s

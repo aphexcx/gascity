@@ -1,0 +1,8 @@
+=== RUN   TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds
+--- PASS: TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds (0.61s)
+=== RUN   TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds
+--- PASS: TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds (0.61s)
+=== RUN   TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds
+--- PASS: TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds (0.61s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	4.123s
