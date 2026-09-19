@@ -48,6 +48,12 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 
 	binDir := t.TempDir()
 	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	anomalyLog := filepath.Join(t.TempDir(), "anomalies.log")
+	escalatePath := filepath.Join(binDir, "escalate")
+	writeExecutable(t, escalatePath, `#!/bin/sh
+printf '%s\n' "$*" >> "$ANOMALY_LOG"
+exit "${ESCALATE_EXIT_STATUS:-0}"
+`)
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
@@ -76,16 +82,42 @@ exit 0
 `)
 
 	env := map[string]string{
-		"BD_CALL_LOG":      bdLog,
-		"GC_CITY":          cityDir,
-		"GC_CITY_PATH":     cityDir,
-		"GC_DOLT_HOST":     "127.0.0.1",
-		"GC_DOLT_PORT":     fmt.Sprintf("%d", port),
-		"GC_DOLT_USER":     "root",
-		"GC_DOLT_PASSWORD": "",
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_CALL_LOG":        bdLog,
+		"ANOMALY_LOG":        anomalyLog,
+		"GC_ESCALATE_SCRIPT": escalatePath,
+		"GC_CITY":            cityDir,
+		"GC_CITY_PATH":       cityDir,
+		"GC_DOLT_HOST":       "127.0.0.1",
+		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":       "root",
+		"GC_DOLT_PASSWORD":   "",
+		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
+	// Even successful escalation during a dry run must not consume the notification.
+	statePath := filepath.Join(cityDir, ".beads", "reaper-system-skips-state.tsv")
+	env["ESCALATE_EXIT_STATUS"] = "0"
+	env["GC_REAPER_DRY_RUN"] = "1"
 	runScript(t, coreScriptPath("reaper.sh"), env)
+	dryAnomalies, err := os.ReadFile(anomalyLog)
+	if err != nil || !strings.Contains(string(dryAnomalies), "citydb: 1 stale system issues skipped (gc: labels)") {
+		t.Fatalf("dry run did not escalate the skip anomaly: %v\n%s", err, dryAnomalies)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("dry run created skip-count state: %v", err)
+	}
+	env["GC_REAPER_DRY_RUN"] = ""
+	if err := os.WriteFile(anomalyLog, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env["ESCALATE_EXIT_STATUS"] = "1"
+	out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+	if err != nil {
+		t.Fatalf("reaper failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("failed escalation created skip-count state: %v", err)
+	}
+	t.Log("run A: escalation failed; citydb baseline must remain absent")
 
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
@@ -120,6 +152,33 @@ exit 0
 		"issue-non-root-workflow": "open",
 	})
 
+	// Step 5 must preserve system records without changing ordinary stale closes.
+	t.Run("stale system issues", func(t *testing.T) {
+		if cityIssueStatuses["stale-binding"] != "open" {
+			t.Errorf("stale gc:extmsg-binding status = %q, want open", cityIssueStatuses["stale-binding"])
+		}
+		if cityIssueStatuses["stale-plain"] != "closed" {
+			t.Errorf("plain stale issue status = %q, want closed", cityIssueStatuses["stale-plain"])
+		}
+		if !strings.Contains(string(bdData), "close stale-plain --reason stale:auto-closed by reaper") {
+			t.Errorf("plain stale issue missing stale close reason:\n%s", bdData)
+		}
+		if strings.Contains(string(bdData), "close stale-binding ") {
+			t.Errorf("system record was sent to bd close:\n%s", bdData)
+		}
+		// Multiple system labels on one record must still count as one skip.
+		if !strings.Contains(string(out), "skipped_system_issues:1,") {
+			t.Errorf("summary missing one system skip:\n%s", out)
+		}
+		anomalies, err := os.ReadFile(anomalyLog)
+		if err != nil {
+			t.Fatalf("ReadFile(anomalies): %v", err)
+		}
+		if !strings.Contains(string(anomalies), "citydb: 1 stale system issues skipped (gc: labels)") {
+			t.Errorf("anomaly record missing one system skip:\n%s", anomalies)
+		}
+	})
+
 	rigWispStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "wisps")
 	requireMaintenanceStatuses(t, rigWispStatuses, map[string]string{
 		"rig-wisp-close":            "closed",
@@ -130,6 +189,78 @@ exit 0
 	rigIssueStatuses := queryMaintenanceStatusByID(t, doltPath, port, "rigdb", "issues")
 	requireMaintenanceStatuses(t, rigIssueStatuses, map[string]string{
 		"rig-issue-preserve": "open",
+	})
+
+	// A steady population must stay visible in the summary without sending
+	// another anomaly; a changed population must notify again.
+	t.Run("system skip count changes", func(t *testing.T) {
+		runServerSQL := func(query string) {
+			t.Helper()
+			runDoltForMaintenanceTest(t, doltPath, dataDir,
+				"--host", "127.0.0.1", "--port", fmt.Sprint(port), "--user", "root", "--no-tls", "--use-db", "citydb",
+				"sql", "-q", query)
+		}
+		readAnomalies := func() string {
+			t.Helper()
+			data, err := os.ReadFile(anomalyLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+		runAndCheck := func(wantCount int, wantAnomaly bool) {
+			t.Helper()
+			before := readAnomalies()
+			out, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+			if err != nil {
+				t.Fatalf("reaper failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), fmt.Sprintf("skipped_system_issues:%d,", wantCount)) {
+				t.Errorf("summary missing %d system skips:\n%s", wantCount, out)
+			}
+			newAnomalies := strings.TrimPrefix(readAnomalies(), before)
+			gotAnomaly := strings.Contains(newAnomalies, "stale system issues skipped (gc: labels)")
+			if gotAnomaly != wantAnomaly {
+				t.Errorf("system skip anomaly = %t, want %t; new anomalies:\n%s", gotAnomaly, wantAnomaly, newAnomalies)
+			}
+			if wantAnomaly && !strings.Contains(newAnomalies, fmt.Sprintf("citydb: %d stale system issues skipped (gc: labels)", wantCount)) {
+				t.Errorf("anomaly missing changed citydb count %d:\n%s", wantCount, newAnomalies)
+			}
+			t.Logf("summary skips=%d; new skip anomaly=%t; dry run=%q", wantCount, gotAnomaly, env["GC_REAPER_DRY_RUN"])
+		}
+		// Retry the same population after delivery recovers, then suppress repeats.
+		env["ESCALATE_EXIT_STATUS"] = "0"
+		runAndCheck(1, true)
+		state, err := os.ReadFile(statePath)
+		if err != nil || string(state) != "citydb\t1\n" {
+			t.Errorf("recovered escalation did not save baseline: %v; state=%q", err, state)
+		}
+		t.Log("run B: escalation recovered; citydb baseline must be one")
+		runAndCheck(1, false)
+		t.Log("run C: unchanged population must not repeat the skip anomaly")
+		runServerSQL(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata)
+VALUES ('stale-binding-added', 'new routing record', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}');
+INSERT INTO labels (issue_id, label) VALUES ('stale-binding-added', 'gc:extmsg-binding');`)
+		runAndCheck(2, true)
+
+		// Dry runs must not overwrite an existing baseline either.
+		before, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runServerSQL("UPDATE issues SET status='closed' WHERE id IN ('stale-binding', 'stale-binding-added')")
+		env["GC_REAPER_DRY_RUN"] = "1"
+		runAndCheck(0, true)
+		after, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Errorf("dry run changed skip-count state: before=%q after=%q", before, after)
+		}
+		env["GC_REAPER_DRY_RUN"] = ""
+		runAndCheck(0, true)
+		runAndCheck(0, false)
 	})
 }
 
@@ -212,6 +343,14 @@ INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated
   ('issue-dep-live', 'live issue dependency child', 'in_progress', 'task', 2, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '', '{}');
 INSERT INTO dependencies (issue_id, depends_on_issue_id, type) VALUES
   ('issue-dep-live', 'issue-dep-root', 'blocks');
+INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
+  ('stale-binding', 'live routing record', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}'),
+  ('stale-plain', 'ordinary backlog issue', 'open', 'task', 2, DATE_SUB(NOW(), INTERVAL 800 HOUR), DATE_SUB(NOW(), INTERVAL 800 HOUR), '', '{}');
+INSERT INTO labels (issue_id, label) VALUES
+  ('stale-binding', 'gc:extmsg-binding'),
+  ('stale-binding', 'gc:system-fixture'),
+  ('stale-binding', 'owner:test'),
+  ('stale-plain', 'owner:test');
 `
 }
 
@@ -232,6 +371,11 @@ func runDoltForMaintenanceTest(t *testing.T, doltPath, dir string, args ...strin
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath, args...)
 	cmd.Dir = dir
+	// Server commands use the fixture's passwordless root account; local
+	// commands must not receive a password without an explicit user.
+	if len(args) > 0 && args[0] == "--host" {
+		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dolt %s failed in %s: %v\n%s", strings.Join(args, " "), dir, err, out)

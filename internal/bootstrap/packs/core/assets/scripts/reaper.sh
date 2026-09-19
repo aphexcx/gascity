@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale and TTL-expired issues.
+# reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale issues without gc: labels and TTL-expired issues.
 #
 # Core exec order. All operations are deterministic: SQL queries with age
 # thresholds, gc bd close/update commands, count comparisons against alert
@@ -175,11 +175,14 @@ TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=0
 TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_STALE_SYSTEM_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
+SYSTEM_SKIP_STATE="$CITY_BEADS_DIR/reaper-system-skips-state.tsv"
+SYSTEM_SKIP_PENDING=""
 
 sanitize_output() {
     local flattened
@@ -1119,8 +1122,54 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
+    # Step 5: Auto-close stale issues (exclude gc:-labelled system records, P0/P1, epics, active deps).
+    # Report system skips only on first appearance or a per-database count change; the baseline advances only after a delivered escalation.
     DB_ISSUES_CLOSED=0
+    SYSTEM_SKIP_ANOMALIES_BEFORE="$ANOMALIES"
+    get_sql_count "$DB" "stale system issue" "
+        SELECT COUNT(*)
+        FROM \`$DB\`.issues
+        WHERE status IN ('open', 'in_progress')
+        AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+        AND priority > 1
+        AND issue_type != 'epic'
+        AND (
+            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+            OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+        )
+        AND EXISTS (
+            SELECT 1 FROM \`$DB\`.labels lbl
+            WHERE lbl.issue_id = issues.id AND lbl.label LIKE 'gc:%'
+        )
+        AND id NOT IN (
+            SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
+            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
+            WHERE i.status IN ('open', 'in_progress')
+            UNION
+            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
+            INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
+            WHERE i.status IN ('open', 'in_progress')
+        )
+    "
+    TOTAL_STALE_SYSTEM_SKIPPED=$((TOTAL_STALE_SYSTEM_SKIPPED + SQL_COUNT_RESULT))
+    # A failed count returns zero but records an anomaly; preserve its baseline.
+    if [ "$ANOMALIES" = "$SYSTEM_SKIP_ANOMALIES_BEFORE" ]; then
+        PREVIOUS_SYSTEM_SKIPS=""
+        if [ -f "$SYSTEM_SKIP_STATE" ]; then
+            if ! PREVIOUS_SYSTEM_SKIPS=$(awk -F '\t' -v db="$DB" '$1 == db { print $2; exit }' "$SYSTEM_SKIP_STATE"); then
+                record_anomaly "$DB" "could not read system skip state: $SYSTEM_SKIP_STATE"
+            fi
+        fi
+        if [ "$ANOMALIES" = "$SYSTEM_SKIP_ANOMALIES_BEFORE" ] &&
+            [ "$SQL_COUNT_RESULT" != "$PREVIOUS_SYSTEM_SKIPS" ] &&
+            { [ "$SQL_COUNT_RESULT" -gt 0 ] || [ -n "$PREVIOUS_SYSTEM_SKIPS" ]; }; then
+            record_anomaly "$DB" "$SQL_COUNT_RESULT stale system issues skipped (gc: labels)"
+            if [ -z "$DRY_RUN" ]; then
+                printf -v SYSTEM_SKIP_PENDING '%s%s\t%s\n' "$SYSTEM_SKIP_PENDING" "$DB" "$SQL_COUNT_RESULT"
+            fi
+        fi
+    fi
+
     get_sql_rows "$DB" "stale issue" "
         SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
         FROM \`$DB\`.issues
@@ -1131,6 +1180,10 @@ while IFS= read -r DB; do
         AND (
             JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
             OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM \`$DB\`.labels lbl
+            WHERE lbl.issue_id = issues.id AND lbl.label LIKE 'gc:%'
         )
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
@@ -1503,12 +1556,28 @@ fi
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
+    ESCALATE_STATUS=0
     "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+        --message "$ANOMALIES" 2>/dev/null || ESCALATE_STATUS=$?
+    # Commit pending baselines together only after successful delivery, so failures retry next run.
+    if [ "$ESCALATE_STATUS" -eq 0 ] && [ -z "$DRY_RUN" ] && [ -n "$SYSTEM_SKIP_PENDING" ]; then
+        SYSTEM_SKIP_SOURCE=/dev/null
+        [ ! -f "$SYSTEM_SKIP_STATE" ] || SYSTEM_SKIP_SOURCE="$SYSTEM_SKIP_STATE"
+        SYSTEM_SKIP_TMP=""
+        if SYSTEM_SKIP_TMP=$(mktemp "$SYSTEM_SKIP_STATE.XXXXXX") &&
+            printf '%s' "$SYSTEM_SKIP_PENDING" | awk -F '\t' 'NR == FNR { pending[$1] = 1; next } !($1 in pending)' - "$SYSTEM_SKIP_SOURCE" > "$SYSTEM_SKIP_TMP" &&
+            printf '%s' "$SYSTEM_SKIP_PENDING" >> "$SYSTEM_SKIP_TMP" &&
+            mv -f "$SYSTEM_SKIP_TMP" "$SYSTEM_SKIP_STATE"; then
+            :
+        else
+            rm -f "$SYSTEM_SKIP_TMP"
+            echo "reaper: could not write system skip state: $SYSTEM_SKIP_STATE" >&2
+        fi
+    fi
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, skipped_system_issues:$TOTAL_STALE_SYSTEM_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
