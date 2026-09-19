@@ -1557,7 +1557,8 @@ fi
 # Report.
 if [ -n "$ANOMALIES" ]; then
     ESCALATE_STATUS=0
-    "$ESCALATE_SCRIPT" \
+    # Retry unconfirmed timeouts; a duplicate MEDIUM mail is preferable to suppressing an undelivered alert.
+    GC_ESCALATE_TIMEOUT_IS_UNCONFIRMED=1 "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
         --message "$ANOMALIES" 2>/dev/null || ESCALATE_STATUS=$?
     # Commit pending baselines together only after successful delivery, so failures retry next run.
