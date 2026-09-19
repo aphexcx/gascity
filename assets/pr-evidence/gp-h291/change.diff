@@ -1,0 +1,39 @@
+diff --git a/examples/bd/dolt/dog_exec_scripts_test.go b/examples/bd/dolt/dog_exec_scripts_test.go
+index 4d2eb2809..6e0feb5b3 100644
+--- a/examples/bd/dolt/dog_exec_scripts_test.go
++++ b/examples/bd/dolt/dog_exec_scripts_test.go
+@@ -5159,0 +5160,16 @@ exit %d
++func writeRecordingTimeoutSpy(t *testing.T, binDir string) string {
++	t.Helper()
++	logPath := filepath.Join(binDir, "timeout.log")
++	body := fmt.Sprintf(`#!/bin/sh
++printf 'timeout %%s\n' "$*" >> %s
++[ "$1" = "--kill-after=2" ] && shift
++shift
++exec "$@"
++`, shellQuote(logPath))
++	// runtime.sh prefers gtimeout; shadow both names regardless of host tools.
++	for _, name := range []string{"gtimeout", "timeout"} {
++		writeExecutable(t, filepath.Join(binDir, name), body)
++	}
++	return logPath
++}
++
+@@ -5298,7 +5314 @@ func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
+-	timeoutLogPath := filepath.Join(binDir, "timeout.log")
+-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+-printf 'timeout %%s\n' "$*" >> %s
+-[ "$1" = "--kill-after=2" ] && shift
+-shift
+-exec "$@"
+-`, shellQuote(timeoutLogPath)))
++	timeoutLogPath := writeRecordingTimeoutSpy(t, binDir)
+@@ -5361,7 +5371 @@ func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
+-			timeoutLogPath := filepath.Join(binDir, "timeout.log")
+-			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+-printf 'timeout %%s\n' "$*" >> %s
+-[ "$1" = "--kill-after=2" ] && shift
+-shift
+-exec "$@"
+-`, shellQuote(timeoutLogPath)))
++			timeoutLogPath := writeRecordingTimeoutSpy(t, binDir)
