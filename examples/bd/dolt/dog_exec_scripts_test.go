@@ -5157,6 +5157,22 @@ exit %d
 	return logPath
 }
 
+func writeRecordingTimeoutSpy(t *testing.T, binDir string) string {
+	t.Helper()
+	logPath := filepath.Join(binDir, "timeout.log")
+	body := fmt.Sprintf(`#!/bin/sh
+printf 'timeout %%s\n' "$*" >> %s
+[ "$1" = "--kill-after=2" ] && shift
+shift
+exec "$@"
+`, shellQuote(logPath))
+	// runtime.sh prefers gtimeout; shadow both names regardless of host tools.
+	for _, name := range []string{"gtimeout", "timeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), body)
+	}
+	return logPath
+}
+
 func writeBSDLikeGrep(t *testing.T, binDir string) {
 	t.Helper()
 	realGrep, err := exec.LookPath("grep")
@@ -5295,13 +5311,7 @@ func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 	_ = writeBackupFakeRsync(t, binDir, 1)
-	timeoutLogPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
+	timeoutLogPath := writeRecordingTimeoutSpy(t, binDir)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 		"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
@@ -5358,13 +5368,7 @@ func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
 			_ = writeDogFakeGC(t, binDir)
 			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 			_ = writeBackupFakeRsync(t, binDir)
-			timeoutLogPath := filepath.Join(binDir, "timeout.log")
-			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
+			timeoutLogPath := writeRecordingTimeoutSpy(t, binDir)
 
 			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
