@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # reaper — close stale wisps with closed parents/roots, purge old closed wisps,
-# auto-close stale and TTL-expired issues, and prune closed session beads.
+# auto-close stale issues without gc: labels and TTL-expired issues, and prune
+# closed session beads.
 #
 # Core exec order. Every bead scope (the city and each rig) is visited through
 # `gc bd --city <city> [--rig <rig>]`, and bd picks the transport for it, so
@@ -64,6 +65,9 @@ maintenance_done() {
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
+# off, never, or any zero duration (case-insensitive, trimmed) disables age-based issue closes.
+STALE_ISSUE_AGE="${STALE_ISSUE_AGE#"${STALE_ISSUE_AGE%%[![:space:]]*}"}"
+STALE_ISSUE_AGE="${STALE_ISSUE_AGE%"${STALE_ISSUE_AGE##*[![:space:]]}"}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
 SESSION_BEAD_PATTERN="${GC_REAPER_SESSION_BEAD_PATTERN-gm-*}"
 SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
@@ -114,7 +118,24 @@ duration_to_hours() {
 }
 
 MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
-STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
+STALE_CLOSE_DISABLED=0
+case "$STALE_ISSUE_AGE" in
+    [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;
+    *)
+        # Optional sign, then bare zero digits or zero-valued Go duration components.
+        # Each component needs a unit; a decimal needs digits on at least one side.
+        STALE_ZERO_RE='^[+-]?(0+|((0+([.]0*)?|[.]0+)(ns|us|µs|μs|ms|s|m|h))+)$'
+        STALE_HOURS_RE='^[+]?[0-9]+h?$'
+        if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then
+            STALE_CLOSE_DISABLED=1
+        elif [[ "$STALE_ISSUE_AGE" =~ $STALE_HOURS_RE ]]; then
+            STALE_AGE_H=$(duration_to_hours "${STALE_ISSUE_AGE#+}")
+        else
+            STALE_CLOSE_DISABLED=1
+            printf 'reaper: GC_REAPER_STALE_ISSUE_AGE=%s is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n' "$STALE_ISSUE_AGE"
+        fi
+        ;;
+esac
 
 TOTAL_SCOPES=0
 TOTAL_STALE_WISPS=0
@@ -131,11 +152,16 @@ TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=0
 TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_STALE_SYSTEM_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 ANOMALIES=""
 CITY_DB=""
+# Per-scope baseline of stale gc:-labelled records skipped by step 5; a change
+# is escalated once and the baseline advances only after a delivered escalation.
+SYSTEM_SKIP_STATE="$CITY_BEADS_DIR/reaper-system-skips-state.tsv"
+SYSTEM_SKIP_PENDING=""
 
 # run_budget_exhausted reports whether the run budget is spent, declaring the
 # partial outcome the first time.
@@ -793,56 +819,121 @@ reap_scope() {
 
     run_budget_exhausted && return 0
 
-    # Step 5: auto-close stale issues (exclude P0/P1, epics, durable extmsg
-    # records, TTL-stamped beads and beads with an active dependency in either
-    # direction). Only the city scope's issues are auto-closed; stale rig
-    # issues are counted as skipped.
-    if get_sql_rows "stale issue" "
-        SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
-        FROM \`$DB\`.issues
-        WHERE status IN ('open', 'in_progress')
-        AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
-        AND priority > 1
-        AND issue_type != 'epic'
-        AND (
-            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
-            OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
-        )
-        AND NOT EXISTS (
-            SELECT 1 FROM \`$DB\`.labels lbl
-            WHERE lbl.issue_id = \`$DB\`.issues.id
-            AND lbl.label IN (
-                'gc:extmsg-group',
-                'gc:extmsg-participant',
-                'gc:extmsg-binding',
-                'gc:extmsg-membership',
-                'gc:extmsg-transcript-state',
-                'gc:extmsg-transcript'
+    # Step 5: auto-close stale issues (exclude gc:-labelled system records --
+    # durable extmsg rows among them -- P0/P1, epics, TTL-stamped beads and
+    # beads with an active dependency in either direction). Only the city
+    # scope's issues are auto-closed; stale rig issues are counted as skipped.
+    # GC_REAPER_STALE_ISSUE_AGE=off|never|<zero duration> disables this step
+    # only. System skips are reported on first appearance or a per-scope count
+    # change; the baseline advances only after a delivered escalation.
+    if [ "$STALE_CLOSE_DISABLED" -eq 0 ]; then
+        local system_skip_anomalies_before="$ANOMALIES"
+        local previous_system_skips=""
+        if get_sql_count "stale system issue" "
+            SELECT COUNT(*)
+            FROM \`$DB\`.issues
+            WHERE status IN ('open', 'in_progress')
+            AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+            AND priority > 1
+            AND issue_type != 'epic'
+            AND (
+                JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+                OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
             )
-        )
-        AND id NOT IN (
-            SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
-            WHERE i.status IN ('open', 'in_progress')
-            AND d.issue_id IS NOT NULL
-            UNION
-            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
-            WHERE i.status IN ('open', 'in_progress')
-            AND d.depends_on_issue_id IS NOT NULL
-        )
-    "; then
-        rows=$SQL_ROWS_RESULT
-        count=$(count_lines "$rows")
-        if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
-            if [ "$SCOPE_KIND" != "city" ]; then
-                TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
-            else
-                # close_mode comes from the query's per-row CASE: 'force' when
-                # the row carried a non-empty assignee at select time and
-                # 'bare' otherwise (see close_ids).
-                close_ids_by_mode "closing stale issues" "$rows" "stale:auto-closed by reaper"
-                TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + CLOSE_IDS_OK))
+            AND EXISTS (
+                SELECT 1 FROM \`$DB\`.labels lbl
+                WHERE lbl.issue_id = \`$DB\`.issues.id
+                AND (
+                    lbl.label IN (
+                        'gc:extmsg-group',
+                        'gc:extmsg-participant',
+                        'gc:extmsg-binding',
+                        'gc:extmsg-membership',
+                        'gc:extmsg-transcript-state',
+                        'gc:extmsg-transcript'
+                    )
+                    OR lbl.label LIKE 'gc:%'
+                )
+            )
+            AND id NOT IN (
+                SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
+                INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
+                WHERE i.status IN ('open', 'in_progress')
+                AND d.issue_id IS NOT NULL
+                UNION
+                SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
+                INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
+                WHERE i.status IN ('open', 'in_progress')
+                AND d.depends_on_issue_id IS NOT NULL
+            )
+        "; then
+            TOTAL_STALE_SYSTEM_SKIPPED=$((TOTAL_STALE_SYSTEM_SKIPPED + SQL_COUNT_RESULT))
+            if [ -f "$SYSTEM_SKIP_STATE" ]; then
+                if ! previous_system_skips=$(awk -F '\t' -v db="$DB" '$1 == db { print $2; exit }' "$SYSTEM_SKIP_STATE"); then
+                    scope_anomaly "could not read system skip state: $SYSTEM_SKIP_STATE"
+                fi
+            fi
+            if [ "$ANOMALIES" = "$system_skip_anomalies_before" ] &&
+                [ "$SQL_COUNT_RESULT" != "$previous_system_skips" ] &&
+                { [ "$SQL_COUNT_RESULT" -gt 0 ] || [ -n "$previous_system_skips" ]; }; then
+                scope_anomaly "$SQL_COUNT_RESULT stale system issues skipped (gc: labels)"
+                if [ -z "$DRY_RUN" ]; then
+                    printf -v SYSTEM_SKIP_PENDING '%s%s\t%s\n' "$SYSTEM_SKIP_PENDING" "$DB" "$SQL_COUNT_RESULT"
+                fi
+            fi
+        fi
+        # A failed count records its own anomaly and leaves the baseline alone.
+
+        if get_sql_rows "stale issue" "
+            SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
+            FROM \`$DB\`.issues
+            WHERE status IN ('open', 'in_progress')
+            AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+            AND priority > 1
+            AND issue_type != 'epic'
+            AND (
+                JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+                OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM \`$DB\`.labels lbl
+                WHERE lbl.issue_id = \`$DB\`.issues.id
+                AND (
+                    lbl.label IN (
+                        'gc:extmsg-group',
+                        'gc:extmsg-participant',
+                        'gc:extmsg-binding',
+                        'gc:extmsg-membership',
+                        'gc:extmsg-transcript-state',
+                        'gc:extmsg-transcript'
+                    )
+                    OR lbl.label LIKE 'gc:%'
+                )
+            )
+            AND id NOT IN (
+                SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
+                INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
+                WHERE i.status IN ('open', 'in_progress')
+                AND d.issue_id IS NOT NULL
+                UNION
+                SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
+                INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
+                WHERE i.status IN ('open', 'in_progress')
+                AND d.depends_on_issue_id IS NOT NULL
+            )
+        "; then
+            rows=$SQL_ROWS_RESULT
+            count=$(count_lines "$rows")
+            if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
+                if [ "$SCOPE_KIND" != "city" ]; then
+                    TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
+                else
+                    # close_mode comes from the query's per-row CASE: 'force' when
+                    # the row carried a non-empty assignee at select time and
+                    # 'bare' otherwise (see close_ids).
+                    close_ids_by_mode "closing stale issues" "$rows" "stale:auto-closed by reaper"
+                    TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + CLOSE_IDS_OK))
+                fi
             fi
         fi
     fi
@@ -1236,12 +1327,35 @@ order_outcome_write
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
-    "$ESCALATE_SCRIPT" \
+    ESCALATE_STATUS=0
+    # Retry unconfirmed timeouts: a duplicate MEDIUM mail is preferable to
+    # suppressing an undelivered alert (the system-skip baseline below only
+    # advances on a delivered escalation).
+    GC_ESCALATE_TIMEOUT_IS_UNCONFIRMED=1 "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+        --message "$ANOMALIES" 2>/dev/null || ESCALATE_STATUS=$?
+    # Commit pending baselines together only after successful delivery, so
+    # failures retry next run.
+    if [ "$ESCALATE_STATUS" -eq 0 ] && [ -z "$DRY_RUN" ] && [ -n "$SYSTEM_SKIP_PENDING" ]; then
+        SYSTEM_SKIP_SOURCE=/dev/null
+        [ ! -f "$SYSTEM_SKIP_STATE" ] || SYSTEM_SKIP_SOURCE="$SYSTEM_SKIP_STATE"
+        SYSTEM_SKIP_TMP=""
+        if SYSTEM_SKIP_TMP=$(mktemp "$SYSTEM_SKIP_STATE.XXXXXX") &&
+            printf '%s' "$SYSTEM_SKIP_PENDING" | awk -F '\t' 'NR == FNR { pending[$1] = 1; next } !($1 in pending)' - "$SYSTEM_SKIP_SOURCE" > "$SYSTEM_SKIP_TMP" &&
+            printf '%s' "$SYSTEM_SKIP_PENDING" >> "$SYSTEM_SKIP_TMP" &&
+            mv -f "$SYSTEM_SKIP_TMP" "$SYSTEM_SKIP_STATE"; then
+            :
+        else
+            rm -f "$SYSTEM_SKIP_TMP"
+            echo "reaper: could not write system skip state: $SYSTEM_SKIP_STATE" >&2
+        fi
+    fi
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, skipped_system_issues:$TOTAL_STALE_SYSTEM_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+if [ "$STALE_CLOSE_DISABLED" -eq 1 ]; then
+    SUMMARY="$SUMMARY, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=$STALE_ISSUE_AGE)"
+fi
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

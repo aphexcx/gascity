@@ -3,6 +3,8 @@
 #
 # Packs can override escalation by shipping assets/scripts/escalate.sh and
 # placing that pack earlier in GC_ESCALATE_SEARCH_PACKS.
+# A send timeout can occur before the mail write on a stalled store, so delivery is ambiguous.
+# Set GC_ESCALATE_TIMEOUT_IS_UNCONFIRMED=1 to return 124 on timeout instead of best-effort success.
 set -euo pipefail
 
 SUBJECT=""
@@ -79,10 +81,12 @@ if command -v timeout >/dev/null 2>&1; then
     send_rc=0
     # shellcheck disable=SC2086 # NOTIFY_ARGS is a controlled empty-or-one-flag string
     timeout "$ESCALATE_SEND_TIMEOUT_SECS" gc mail send "$RECIPIENT" $NOTIFY_ARGS -s "$SUBJECT" -m "$MESSAGE" || send_rc=$?
-    # 124 means the wake outlived its bound after the mail was already written.
-    # Reporting that as a failed escalation would be wrong, and would make a
-    # caller retry a message that landed.
+    # Keep best-effort success unless the caller needs delivery confirmation.
     if [ "$send_rc" -eq 124 ]; then
+        if [ "${GC_ESCALATE_TIMEOUT_IS_UNCONFIRMED:-}" = 1 ]; then
+            echo "escalate: mail to $RECIPIENT sent; wake exceeded ${ESCALATE_SEND_TIMEOUT_SECS}s and was abandoned; delivery unconfirmed" >&2
+            exit 124
+        fi
         echo "escalate: mail to $RECIPIENT sent; wake exceeded ${ESCALATE_SEND_TIMEOUT_SECS}s and was abandoned" >&2
         exit 0
     fi
