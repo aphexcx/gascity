@@ -83,12 +83,15 @@ STALE_CLOSE_DISABLED=0
 case "$STALE_ISSUE_AGE" in
     [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;
     *)
-        STALE_ZERO_VALUE="${STALE_ISSUE_AGE%[hHmMsS]}"
-        STALE_ZERO_VALUE="${STALE_ZERO_VALUE#+}"
-        if [[ "$STALE_ZERO_VALUE" =~ ^0+$ ]]; then
+        STALE_ZERO_RE='^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$'
+        STALE_HOURS_RE='^[+]?[0-9]+h?$'
+        if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then
             STALE_CLOSE_DISABLED=1
+        elif [[ "$STALE_ISSUE_AGE" =~ $STALE_HOURS_RE ]]; then
+            STALE_AGE_H=$(duration_to_hours "${STALE_ISSUE_AGE#+}")
         else
-            STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
+            STALE_CLOSE_DISABLED=1
+            printf 'reaper: GC_REAPER_STALE_ISSUE_AGE=%s is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n' "$STALE_ISSUE_AGE" >&2
         fi
         ;;
 esac
