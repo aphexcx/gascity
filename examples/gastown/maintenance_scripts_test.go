@@ -6985,10 +6985,16 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
 		{name: "off dry run", age: "off", dryRun: "1", disabled: true},
 		{name: "never", age: "never", disabled: true},
 		{name: "zero", age: "0", disabled: true},
+		{name: "zero hours", age: "0h", disabled: true},
+		{name: "zero minutes", age: "0m", disabled: true},
+		{name: "multiple zeros", age: "00", disabled: true},
+		{name: "plus zero", age: "+0", disabled: true},
 		{name: "trimmed mixed case off", age: " \tOfF \r\n", disabled: true},
 		{name: "trimmed mixed case never", age: " \tNeVeR \r\n", disabled: true},
 		{name: "trimmed zero", age: " \t0 \r\n", disabled: true},
 		{name: "positive duration", age: "48h"},
+		{name: "one hour", age: "1h"},
+		{name: "default duration", age: "720h"},
 		{name: "off without databases", age: "off", dryRun: "1", disabled: true, noDatabases: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

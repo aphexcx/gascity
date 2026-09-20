@@ -1,0 +1,6 @@
+Base: 9d78b47b7c10110f060b28404480c93805d63d99
+go version go1.26.6 darwin/arm64
+Original four added zero cases failed the stale-age query assertion; 14 focused cases now pass.
+Bash syntax check passed. Parser boundary matrix: 27 cases passed on macOS Bash 3.2.57.
+Upstream gastownhall/gascity#6470 state OPEN, mergedAt null at claim; upstream twin HELD.
+Source scope is four files (script, test, README, order), plus required evidence.

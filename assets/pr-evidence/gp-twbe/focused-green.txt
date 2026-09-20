@@ -1,0 +1,36 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+$ go test ./examples/gastown/... -run ^TestReaperStaleCloseDisabled$ -count=1 -v
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/zero_hours
+=== RUN   TestReaperStaleCloseDisabled/zero_minutes
+=== RUN   TestReaperStaleCloseDisabled/multiple_zeros
+=== RUN   TestReaperStaleCloseDisabled/plus_zero
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/one_hour
+=== RUN   TestReaperStaleCloseDisabled/default_duration
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- PASS: TestReaperStaleCloseDisabled (11.71s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/never (0.85s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_hours (0.93s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_minutes (0.90s)
+    --- PASS: TestReaperStaleCloseDisabled/multiple_zeros (0.84s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_zero (0.85s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (0.85s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (0.90s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (0.89s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/one_hour (0.95s)
+    --- PASS: TestReaperStaleCloseDisabled/default_duration (0.85s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.16s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/gastown	13.141s
+Exit: 0
+Wall seconds: 17.728

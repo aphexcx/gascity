@@ -29,7 +29,7 @@ The **event-driven nudge orders** are documented in detail below.
 
 ## Reaper thresholds
 
-`GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or `0`
+`GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or any zero duration
 (case-insensitive, with surrounding whitespace ignored) to disable age-based
 issue closes while retaining wisp cleanup, purge, and `expires_at` closes.
 
