@@ -1,0 +1,23 @@
+Environment for every direct Go test:
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include
+CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+Go: go1.26.6 darwin/arm64
+
+RED at fork base 14270dec96aa9d5434fdab15731dcb9fb25ea0c0:
+go test -count=1 -v ./examples/bd/dolt/ -run 'TestBackupScript'
+Exit 1; 6.159s package time. Exactly the two reported top-level tests fail.
+
+GREEN with change.diff applied:
+go test -count=1 -v ./examples/bd/dolt/ -run 'TestBackupScript'
+Exit 0; 6.328s package time.
+go test -count=1 -v ./examples/bd/dolt/
+Exit 0; 173.992s package time.
+
+red-backup.txt: top-level {'PASS': 9, 'FAIL': 2}; subtests {'FAIL': 2}
+green-backup.txt: top-level {'PASS': 11}; subtests {'PASS': 2}
+green-package.txt: top-level {'PASS': 388}; subtests {'PASS': 106}
+
+make check-hooks: PASS (.githooks active).
+git diff --check: PASS.
+Commit hooks: PASS (lint 0 issues, code generation clean, go vet ./... passed).
+Source commit: 36242328b70b0d2e3966803c5cae67b14b6f74c3

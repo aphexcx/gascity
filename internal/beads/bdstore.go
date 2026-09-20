@@ -1337,16 +1337,13 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 		// child of another city's bead must carry that owner, not a second —
 		// unless the child names its own owner, in which case bd's copying is
 		// turned off for this create and the parent's other labels travel
-		// explicitly. A parent that could not be read has an owner gc never
-		// saw: a child that names its own owner keeps bd's copying off
-		// regardless — the one operand bd cannot move — so no unseen owner
-		// lands beside the one it was given. (Its other labels cannot travel;
-		// they could not be read.)
+		// explicitly. If the parent cannot be read, its ownership is unknown
+		// and the create must stop before bd can inherit unseen labels.
 		parentLabels, parentErr := s.ownerParentLabels(b.ParentID)
-		labels, inherit = federation.ChildLabels(b.Labels, parentLabels, s.ownerLabel)
-		if parentErr != nil && federation.HasOwnerLabel(b.Labels) {
-			inherit = false
+		if parentErr != nil {
+			return Bead{}, fmt.Errorf("bd create: reading parent %q: %w", b.ParentID, parentErr)
 		}
+		labels, inherit = federation.ChildLabels(b.Labels, parentLabels, s.ownerLabel)
 	}
 	if len(labels) > 0 {
 		args = append(args, "--labels", strings.Join(labels, ","))

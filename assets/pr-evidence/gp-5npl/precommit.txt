@@ -1,0 +1,12 @@
+lint-changed: ./examples/gastown
+0 issues.
+Generated: docs/reference/cli.md
+Generated:
+  docs/reference/schema/city-schema.json
+  docs/reference/schema/city-schema.txt
+  docs/reference/schema/pack-schema.json
+  docs/reference/schema/pack-schema.txt
+  docs/reference/config.md
+  docs/reference/cli.md
+GOFLAGS="$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly" go vet ./...
+ok  	github.com/gastownhall/gascity/test/docsync	6.346s

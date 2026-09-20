@@ -1,0 +1,1342 @@
+=== RUN   TestDogAgentWorkDirDoesNotResolveToCityRoot
+--- PASS: TestDogAgentWorkDirDoesNotResolveToCityRoot (0.00s)
+=== RUN   TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin
+=== PAUSE TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin
+=== RUN   TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush
+=== PAUSE TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush
+=== RUN   TestCompactScriptExcludesNonFileRemotesAndAuthoritativeFromBackupReconciliation
+=== PAUSE TestCompactScriptExcludesNonFileRemotesAndAuthoritativeFromBackupReconciliation
+=== RUN   TestCompactScriptSkipsRemotePhaseForNoSyncDatabase
+=== PAUSE TestCompactScriptSkipsRemotePhaseForNoSyncDatabase
+=== RUN   TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync
+=== PAUSE TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync
+=== RUN   TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase
+=== PAUSE TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase
+=== RUN   TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh
+=== PAUSE TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh
+=== RUN   TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle
+=== PAUSE TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle
+=== RUN   TestCompactScriptQuarantineRenotifiesAfterBackstopElapses
+=== PAUSE TestCompactScriptQuarantineRenotifiesAfterBackstopElapses
+=== RUN   TestDoctorCheckVersionFloor
+=== RUN   TestDoctorCheckVersionFloor/previous_pinned_2.0.3_rejected
+=== RUN   TestDoctorCheckVersionFloor/previous_floor_2.0.7_rejected
+=== RUN   TestDoctorCheckVersionFloor/previous_multi-digit_patch_2.0.10_rejected
+=== RUN   TestDoctorCheckVersionFloor/boundary_2.1.0_accepted
+=== RUN   TestDoctorCheckVersionFloor/multi-digit_patch_2.1.10_accepted
+=== RUN   TestDoctorCheckVersionFloor/later_minor_2.2.0_accepted
+=== RUN   TestDoctorCheckVersionFloor/pre-release_2.1.0-rc1_rejected
+=== RUN   TestDoctorCheckVersionFloor/pre-release_with_build_metadata_2.1.0-rc1+build.5_rejected
+=== RUN   TestDoctorCheckVersionFloor/dev_build_2.1.0-dev_rejected
+=== RUN   TestDoctorCheckVersionFloor/pre-release_above_floor_2.1.1-rc1_rejected
+=== RUN   TestDoctorCheckVersionFloor/pre-release_later_minor_2.2.0-rc1_rejected
+=== RUN   TestDoctorCheckVersionFloor/build_metadata_on_2.1.0_accepted
+=== RUN   TestDoctorCheckVersionFloor/hyphenated_build_metadata_on_2.1.0_accepted
+=== RUN   TestDoctorCheckVersionFloor/v-prefixed_2.1.0_accepted
+=== RUN   TestDoctorCheckVersionFloor/empty_version_output_rejected_before_gate
+=== RUN   TestDoctorCheckVersionFloor/non-version_output_fails_closed
+=== RUN   TestDoctorCheckVersionFloor/two-component_2.0_rejected
+=== RUN   TestDoctorCheckVersionFloor/leading_whitespace_output_rejected
+--- PASS: TestDoctorCheckVersionFloor (3.09s)
+    --- PASS: TestDoctorCheckVersionFloor/previous_pinned_2.0.3_rejected (0.22s)
+    --- PASS: TestDoctorCheckVersionFloor/previous_floor_2.0.7_rejected (0.20s)
+    --- PASS: TestDoctorCheckVersionFloor/previous_multi-digit_patch_2.0.10_rejected (0.19s)
+    --- PASS: TestDoctorCheckVersionFloor/boundary_2.1.0_accepted (0.19s)
+    --- PASS: TestDoctorCheckVersionFloor/multi-digit_patch_2.1.10_accepted (0.17s)
+    --- PASS: TestDoctorCheckVersionFloor/later_minor_2.2.0_accepted (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/pre-release_2.1.0-rc1_rejected (0.17s)
+    --- PASS: TestDoctorCheckVersionFloor/pre-release_with_build_metadata_2.1.0-rc1+build.5_rejected (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/dev_build_2.1.0-dev_rejected (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/pre-release_above_floor_2.1.1-rc1_rejected (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/pre-release_later_minor_2.2.0-rc1_rejected (0.17s)
+    --- PASS: TestDoctorCheckVersionFloor/build_metadata_on_2.1.0_accepted (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/hyphenated_build_metadata_on_2.1.0_accepted (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/v-prefixed_2.1.0_accepted (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/empty_version_output_rejected_before_gate (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/non-version_output_fails_closed (0.16s)
+    --- PASS: TestDoctorCheckVersionFloor/two-component_2.0_rejected (0.17s)
+    --- PASS: TestDoctorCheckVersionFloor/leading_whitespace_output_rejected (0.16s)
+=== RUN   TestDoctorCheckVersionFloorDoesNotRequireVersionSort
+--- PASS: TestDoctorCheckVersionFloorDoesNotRequireVersionSort (0.14s)
+=== RUN   TestDoctorCheckMissingFlock
+--- PASS: TestDoctorCheckMissingFlock (0.01s)
+=== RUN   TestDoctorCheckMissingLsof
+--- PASS: TestDoctorCheckMissingLsof (0.00s)
+=== RUN   TestDogExecScriptsAreBashSyntaxValid
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/_notify.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/mol-dog-backup.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/mol-dog-doctor.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/mol-dog-phantom-db.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/cleanup/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/compact/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/health/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/health-check/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/list/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/logs/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/pull/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/recover/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/restart/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/rollback/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/sql/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/start/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/status/run.sh
+=== RUN   TestDogExecScriptsAreBashSyntaxValid/commands/sync/run.sh
+--- PASS: TestDogExecScriptsAreBashSyntaxValid (0.06s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/_notify.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/mol-dog-backup.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/mol-dog-doctor.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/mol-dog-phantom-db.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/cleanup/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/compact/run.sh (0.01s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/health/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/health-check/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/list/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/logs/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/pull/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/recover/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/restart/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/rollback/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/sql/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/start/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/status/run.sh (0.00s)
+    --- PASS: TestDogExecScriptsAreBashSyntaxValid/commands/sync/run.sh (0.00s)
+=== RUN   TestCompactScriptFixtureTimeoutsAccommodateLoadedHost
+--- PASS: TestCompactScriptFixtureTimeoutsAccommodateLoadedHost (0.00s)
+=== RUN   TestCompactScriptSkipsBelowThresholdWithoutFlattening
+=== PAUSE TestCompactScriptSkipsBelowThresholdWithoutFlattening
+=== RUN   TestCompactScriptDefaultThresholdIs2000
+=== PAUSE TestCompactScriptDefaultThresholdIs2000
+=== RUN   TestCompactScriptToleratesSlowRigListDiscovery
+=== PAUSE TestCompactScriptToleratesSlowRigListDiscovery
+=== RUN   TestCompactScriptFlattensAndVerifies
+=== PAUSE TestCompactScriptFlattensAndVerifies
+=== RUN   TestCompactScriptRefetchesAndForcePushesRemote
+=== PAUSE TestCompactScriptRefetchesAndForcePushesRemote
+=== RUN   TestCompactScriptPushesActiveBranchToRemote
+=== PAUSE TestCompactScriptPushesActiveBranchToRemote
+=== RUN   TestCompactScriptUsesRefspecEnvOverrideForRemoteBranch
+=== PAUSE TestCompactScriptUsesRefspecEnvOverrideForRemoteBranch
+=== RUN   TestCompactScriptRejectsRefspecEnvOverrideForDifferentActiveBranch
+=== PAUSE TestCompactScriptRejectsRefspecEnvOverrideForDifferentActiveBranch
+=== RUN   TestCompactScriptRefspecOptionShapedOverrideFails
+=== PAUSE TestCompactScriptRefspecOptionShapedOverrideFails
+=== RUN   TestCompactScriptWarnsWhenActiveBranchFallbacksToMain
+=== PAUSE TestCompactScriptWarnsWhenActiveBranchFallbacksToMain
+=== RUN   TestCompactScriptPrefersOriginWhenMultipleRemotesExist
+=== PAUSE TestCompactScriptPrefersOriginWhenMultipleRemotesExist
+=== RUN   TestCompactScriptFailsWhenMultipleRemotesLackOrigin
+=== PAUSE TestCompactScriptFailsWhenMultipleRemotesLackOrigin
+=== RUN   TestCompactScriptUsesExplicitRemote
+=== PAUSE TestCompactScriptUsesExplicitRemote
+=== RUN   TestCompactScriptRecordsPendingPushWhenRemoteHeadChangesAfterCompaction
+=== PAUSE TestCompactScriptRecordsPendingPushWhenRemoteHeadChangesAfterCompaction
+=== RUN   TestCompactScriptPushesWhenPreflightFetchFailsOnceThenRemoteHeadIsLocal
+=== PAUSE TestCompactScriptPushesWhenPreflightFetchFailsOnceThenRemoteHeadIsLocal
+=== RUN   TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteAheadIsUnknown
+=== PAUSE TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteAheadIsUnknown
+=== RUN   TestCompactScriptFailsRetryWhenPendingPushRemoteHeadRemainsUnverified
+=== PAUSE TestCompactScriptFailsRetryWhenPendingPushRemoteHeadRemainsUnverified
+=== RUN   TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails
+=== PAUSE TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails
+=== RUN   TestCompactScriptRetriesPendingPushWhenRemoteHeadBecomesLocalLogAncestor
+=== PAUSE TestCompactScriptRetriesPendingPushWhenRemoteHeadBecomesLocalLogAncestor
+=== RUN   TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch
+=== PAUSE TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch
+=== RUN   TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries
+=== PAUSE TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries
+=== RUN   TestCompactScriptRetriesPreflightWhenHeadStabilizes
+=== PAUSE TestCompactScriptRetriesPreflightWhenHeadStabilizes
+=== RUN   TestCompactScriptFailsWhenPreflightHeadVerifyProbeFails
+=== PAUSE TestCompactScriptFailsWhenPreflightHeadVerifyProbeFails
+=== RUN   TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteFetchFails
+=== PAUSE TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteFetchFails
+=== RUN   TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource
+=== PAUSE TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource
+=== RUN   TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries
+=== PAUSE TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries
+=== RUN   TestCompactScriptParsesPendingPushCreatedAtWithBSDDateFallback
+=== PAUSE TestCompactScriptParsesPendingPushCreatedAtWithBSDDateFallback
+=== RUN   TestCompactScriptRecordsUnverifiedPendingPushWhenRemoteHeadIsEmpty
+=== PAUSE TestCompactScriptRecordsUnverifiedPendingPushWhenRemoteHeadIsEmpty
+=== RUN   TestCompactScriptRecordsPendingPushWhenRemotePushFails
+=== PAUSE TestCompactScriptRecordsPendingPushWhenRemotePushFails
+=== RUN   TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush
+=== PAUSE TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush
+=== RUN   TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview
+=== PAUSE TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview
+=== RUN   TestCompactScriptDryRunReportsStalePendingPushMarker
+=== PAUSE TestCompactScriptDryRunReportsStalePendingPushMarker
+=== RUN   TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal
+=== PAUSE TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal
+=== RUN   TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory
+=== PAUSE TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory
+=== RUN   TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain
+=== PAUSE TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain
+=== RUN   TestCompactScriptRetriesPendingPushBeforeBelowThresholdSkip
+=== PAUSE TestCompactScriptRetriesPendingPushBeforeBelowThresholdSkip
+=== RUN   TestCompactScriptFailsBeforeFlattenWhenPendingPushMarkerCannotBeWritten
+=== PAUSE TestCompactScriptFailsBeforeFlattenWhenPendingPushMarkerCannotBeWritten
+=== RUN   TestCompactScriptFailsBeforeFlattenWhenPendingGCMarkerCannotBeWritten
+=== PAUSE TestCompactScriptFailsBeforeFlattenWhenPendingGCMarkerCannotBeWritten
+=== RUN   TestCompactScriptFailsBeforeFlattenWhenQuarantineMarkerCannotBeWritten
+=== PAUSE TestCompactScriptFailsBeforeFlattenWhenQuarantineMarkerCannotBeWritten
+=== RUN   TestCompactScriptFailsOnTableDiscoveryProbeFailure
+=== PAUSE TestCompactScriptFailsOnTableDiscoveryProbeFailure
+=== RUN   TestCompactScriptFailsOnCommitCountProbeFailure
+=== PAUSE TestCompactScriptFailsOnCommitCountProbeFailure
+=== RUN   TestCompactScriptAllowsRowCountIncreaseWithStableValueHashes
+=== PAUSE TestCompactScriptAllowsRowCountIncreaseWithStableValueHashes
+=== RUN   TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC
+=== RUN   TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC
+=== RUN   TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace
+=== PAUSE TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace
+=== RUN   TestCompactScriptDefersWhenWriterCommitsBeforeFlatten
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsBeforeFlatten
+=== RUN   TestCompactScriptDefersWhenWriterCommitsDuringVerify
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsDuringVerify
+=== RUN   TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift
+=== RUN   TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash
+=== RUN   TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC
+=== RUN   TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter
+=== PAUSE TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter
+=== RUN   TestCompactScriptDefersProvenWriterRaceSameCountHashDrift
+=== PAUSE TestCompactScriptDefersProvenWriterRaceSameCountHashDrift
+=== RUN   TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails
+=== PAUSE TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails
+=== RUN   TestCompactScriptRetriesPendingGCAfterWriterRaceDefer
+=== PAUSE TestCompactScriptRetriesPendingGCAfterWriterRaceDefer
+=== RUN   TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace
+=== PAUSE TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace
+=== RUN   TestCompactScriptWriterRaceGateUsesFlagNotReasonText
+--- PASS: TestCompactScriptWriterRaceGateUsesFlagNotReasonText (0.00s)
+=== RUN   TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead
+=== PAUSE TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead
+=== RUN   TestCompactScriptExcludesUnversionedTableChurnFromVerification
+=== PAUSE TestCompactScriptExcludesUnversionedTableChurnFromVerification
+=== RUN   TestCompactScriptExcludesDoltIgnoredCommittedTableFromVerification
+=== PAUSE TestCompactScriptExcludesDoltIgnoredCommittedTableFromVerification
+=== RUN   TestCompactScriptPinsDatabaseHashToCommittedRoot
+=== PAUSE TestCompactScriptPinsDatabaseHashToCommittedRoot
+=== RUN   TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift
+=== PAUSE TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift
+=== RUN   TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables
+=== PAUSE TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables
+=== RUN   TestCompactScriptDefersDroppedDoltIgnoredTableDbHashDrift
+=== PAUSE TestCompactScriptDefersDroppedDoltIgnoredTableDbHashDrift
+=== RUN   TestCompactScriptDefersFirstCommittedProbeTableDbHashDrift
+=== PAUSE TestCompactScriptDefersFirstCommittedProbeTableDbHashDrift
+=== RUN   TestCompactScriptQuarantinesFirstCommittedTableWithNonAdditiveDiff
+=== PAUSE TestCompactScriptQuarantinesFirstCommittedTableWithNonAdditiveDiff
+=== RUN   TestCompactScriptQuarantinesFirstCommittedTableWhenDiffProbeFails
+=== PAUSE TestCompactScriptQuarantinesFirstCommittedTableWhenDiffProbeFails
+=== RUN   TestCompactScriptDefersMixedVerifiedAndFirstCommittedDrift
+=== PAUSE TestCompactScriptDefersMixedVerifiedAndFirstCommittedDrift
+=== RUN   TestCompactScriptVersionsDirtyDoltIgnoreBeforeFlatten
+=== PAUSE TestCompactScriptVersionsDirtyDoltIgnoreBeforeFlatten
+=== RUN   TestCompactScriptProceedsWhenDoltIgnoreStagingFails
+=== PAUSE TestCompactScriptProceedsWhenDoltIgnoreStagingFails
+=== RUN   TestCompactScriptProceedsWhenDoltIgnoreCommitFails
+=== PAUSE TestCompactScriptProceedsWhenDoltIgnoreCommitFails
+=== RUN   TestCompactScriptDryRunSkipsDoltIgnoreVersioning
+=== PAUSE TestCompactScriptDryRunSkipsDoltIgnoreVersioning
+=== RUN   TestCompactScriptFailsOnRowCountDecreaseBeforeGC
+=== PAUSE TestCompactScriptFailsOnRowCountDecreaseBeforeGC
+=== RUN   TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately
+=== PAUSE TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately
+=== RUN   TestCompactScriptQuarantinesPostFlattenTableListDriftBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesPostFlattenTableListDriftBeforeFullGC
+=== RUN   TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately
+=== PAUSE TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately
+=== RUN   TestCompactScriptQuarantinesPostFlattenInvalidTableNameBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesPostFlattenInvalidTableNameBeforeFullGC
+=== RUN   TestCompactScriptPreservesRowGainReasonForDatabaseHashDrift
+=== PAUSE TestCompactScriptPreservesRowGainReasonForDatabaseHashDrift
+=== RUN   TestCompactScriptPreservesNoGainReasonForDatabaseHashDrift
+=== PAUSE TestCompactScriptPreservesNoGainReasonForDatabaseHashDrift
+=== RUN   TestCompactScriptPreservesPrimaryIntegrityReasonBeforeLaterProbeFailure
+=== PAUSE TestCompactScriptPreservesPrimaryIntegrityReasonBeforeLaterProbeFailure
+=== RUN   TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure
+=== PAUSE TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure
+=== RUN   TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC
+=== RUN   TestCompactScriptFailsOnEmptyPreflightValueHash
+=== PAUSE TestCompactScriptFailsOnEmptyPreflightValueHash
+=== RUN   TestCompactScriptFailsOnEmptyPreflightTableValueHash
+=== PAUSE TestCompactScriptFailsOnEmptyPreflightTableValueHash
+=== RUN   TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC
+=== RUN   TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases
+=== PAUSE TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases
+=== RUN   TestCompactScriptQuarantinesEmptyPostflightTableValueHashBeforeFullGC
+=== PAUSE TestCompactScriptQuarantinesEmptyPostflightTableValueHashBeforeFullGC
+=== RUN   TestCompactScriptSurfacesRootCommitProbeFailureStderr
+=== PAUSE TestCompactScriptSurfacesRootCommitProbeFailureStderr
+=== RUN   TestCompactScriptSurfacesRowCountProbeFailureStderr
+=== PAUSE TestCompactScriptSurfacesRowCountProbeFailureStderr
+=== RUN   TestCompactScriptFailsOnInvalidTableNameBeforeRowCount
+=== PAUSE TestCompactScriptFailsOnInvalidTableNameBeforeRowCount
+=== RUN   TestCompactScriptRestoresHeadWhenFlattenCommitFails
+=== PAUSE TestCompactScriptRestoresHeadWhenFlattenCommitFails
+=== RUN   TestCompactScriptRefusesToRestoreOverExternalHeadAdvance
+=== PAUSE TestCompactScriptRefusesToRestoreOverExternalHeadAdvance
+=== RUN   TestCompactScriptSurfacesFlattenFailureStderr
+=== PAUSE TestCompactScriptSurfacesFlattenFailureStderr
+=== RUN   TestCompactScriptSurfacesGCFailureStderr
+=== PAUSE TestCompactScriptSurfacesGCFailureStderr
+=== RUN   TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker
+=== PAUSE TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker
+=== RUN   TestCompactScriptRetriesPendingGCThenPushesRemote
+=== PAUSE TestCompactScriptRetriesPendingGCThenPushesRemote
+=== RUN   TestCompactScriptKeepsPendingGCWhenPendingPushHandoffCannotBeWritten
+=== PAUSE TestCompactScriptKeepsPendingGCWhenPendingPushHandoffCannotBeWritten
+=== RUN   TestCompactScriptSkipsHealthyBelowThresholdOldgenWithoutPendingMarker
+=== PAUSE TestCompactScriptSkipsHealthyBelowThresholdOldgenWithoutPendingMarker
+=== RUN   TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease
+=== PAUSE TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease
+=== RUN   TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible
+=== PAUSE TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible
+=== RUN   TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
+=== PAUSE TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
+=== RUN   TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables
+=== RUN   TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_no_gain
+=== PAUSE TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_no_gain
+=== RUN   TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_gain
+=== PAUSE TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_gain
+=== RUN   TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_gain
+=== PAUSE TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_gain
+=== RUN   TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_no_gain
+=== PAUSE TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_no_gain
+=== CONT  TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_no_gain
+=== CONT  TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_gain
+=== CONT  TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_gain
+=== CONT  TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_no_gain
+--- PASS: TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables (0.00s)
+    --- PASS: TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_no_gain (2.65s)
+    --- PASS: TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_no_gain (2.80s)
+    --- PASS: TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/database_gain (2.92s)
+    --- PASS: TestCompactScriptAutoClearsRaceClassQuarantineWhenDriftConfinedToKnownTables/table_gain (3.00s)
+=== RUN   TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear
+=== PAUSE TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear
+=== RUN   TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear
+=== PAUSE TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear
+=== RUN   TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert
+=== PAUSE TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert
+=== RUN   TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear
+=== PAUSE TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear
+=== RUN   TestCompactScriptQuarantineMailFailureIsRetriedNextCycle
+=== PAUSE TestCompactScriptQuarantineMailFailureIsRetriedNextCycle
+=== RUN   TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker
+=== PAUSE TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker
+=== RUN   TestCompactScriptQuarantineReasonChangeReMails
+=== PAUSE TestCompactScriptQuarantineReasonChangeReMails
+=== RUN   TestCompactScriptUnreadableQuarantineMarkerIsNotClobbered
+=== PAUSE TestCompactScriptUnreadableQuarantineMarkerIsNotClobbered
+=== RUN   TestCompactScriptFreshQuarantineMarkerAlertsDefaultMayor
+=== PAUSE TestCompactScriptFreshQuarantineMarkerAlertsDefaultMayor
+=== RUN   TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC
+=== RUN   TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/flatten_database
+=== PAUSE TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/flatten_database
+=== RUN   TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/bare_gc_database
+=== PAUSE TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/bare_gc_database
+=== CONT  TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/flatten_database
+=== CONT  TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/bare_gc_database
+--- PASS: TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC (0.00s)
+    --- PASS: TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/bare_gc_database (0.54s)
+    --- PASS: TestCompactScriptExistingQuarantineMarkerAlertsDefaultMayorBeforeFlattenAndBareGC/flatten_database (0.66s)
+=== RUN   TestCompactScriptQuarantineAlertRecipientCanBeOverridden
+=== PAUSE TestCompactScriptQuarantineAlertRecipientCanBeOverridden
+=== RUN   TestCompactScriptDryRunSkipsMutations
+=== PAUSE TestCompactScriptDryRunSkipsMutations
+=== RUN   TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState
+=== PAUSE TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState
+=== RUN   TestCompactScriptSkipsNonLocalExternalEndpoint
+=== PAUSE TestCompactScriptSkipsNonLocalExternalEndpoint
+=== RUN   TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort
+=== PAUSE TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort
+=== RUN   TestCompactScriptOnlyDBsAllowlistFiltersDatabases
+=== PAUSE TestCompactScriptOnlyDBsAllowlistFiltersDatabases
+=== RUN   TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase
+=== PAUSE TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase
+=== RUN   TestCompactScriptTableNameDoesNotClobberDatabaseName
+=== PAUSE TestCompactScriptTableNameDoesNotClobberDatabaseName
+=== RUN   TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten
+=== PAUSE TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten
+=== RUN   TestCompactScriptBareGCDryRunSkipsMutations
+=== PAUSE TestCompactScriptBareGCDryRunSkipsMutations
+=== RUN   TestCompactScriptBareGCHonorsOnlyDBsAllowlist
+=== PAUSE TestCompactScriptBareGCHonorsOnlyDBsAllowlist
+=== RUN   TestCompactScriptBareGCRefusesQuarantinedDatabase
+=== PAUSE TestCompactScriptBareGCRefusesQuarantinedDatabase
+=== RUN   TestCompactScriptBareGCSurfacesDoltGCFailureStderr
+=== PAUSE TestCompactScriptBareGCSurfacesDoltGCFailureStderr
+=== RUN   TestCompactScriptBareGCRejectsInvalidValue
+=== PAUSE TestCompactScriptBareGCRejectsInvalidValue
+=== RUN   TestCompactScriptBareGCDisabledWhenEnvFalsy
+=== PAUSE TestCompactScriptBareGCDisabledWhenEnvFalsy
+=== RUN   TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC
+=== PAUSE TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC
+=== RUN   TestCompactScriptGCOnlyQuarantineRefusalStillReports
+=== PAUSE TestCompactScriptGCOnlyQuarantineRefusalStillReports
+=== RUN   TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag
+=== PAUSE TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag
+=== RUN   TestCompactScriptGCOnlyFlagDryRunSkipsMutations
+=== PAUSE TestCompactScriptGCOnlyFlagDryRunSkipsMutations
+=== RUN   TestCompactScriptGCOnlyFlagRefusesQuarantinedDatabase
+=== PAUSE TestCompactScriptGCOnlyFlagRefusesQuarantinedDatabase
+=== RUN   TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure
+=== PAUSE TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure
+=== RUN   TestCompactScriptGCOnlyFlagRejectsBareGCEnvCombination
+=== PAUSE TestCompactScriptGCOnlyFlagRejectsBareGCEnvCombination
+=== RUN   TestCompactScriptRejectsUnknownFlag
+=== PAUSE TestCompactScriptRejectsUnknownFlag
+=== RUN   TestCompactScriptOnlyDBFlagRequiresValue
+=== PAUSE TestCompactScriptOnlyDBFlagRequiresValue
+=== RUN   TestPhantomDBScriptEscalatesAndPreservesAllDatabases
+--- PASS: TestPhantomDBScriptEscalatesAndPreservesAllDatabases (0.20s)
+=== RUN   TestBackupScriptSkipsOldDoltBeforeSync
+--- PASS: TestBackupScriptSkipsOldDoltBeforeSync (0.32s)
+=== RUN   TestBackupOrderTimeoutCoversScriptBudget
+--- PASS: TestBackupOrderTimeoutCoversScriptBudget (0.00s)
+=== RUN   TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite
+--- PASS: TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite (0.43s)
+=== RUN   TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound
+--- PASS: TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound (0.84s)
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/0
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number
+--- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout (1.21s)
+    --- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout/0 (0.58s)
+    --- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number (0.63s)
+=== RUN   TestBackupScriptSkipsConcurrentRunBeforeBackupSync
+--- PASS: TestBackupScriptSkipsConcurrentRunBeforeBackupSync (0.37s)
+=== RUN   TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep
+--- PASS: TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep (0.44s)
+=== RUN   TestBackupScriptCountsFailedDatabasesByDatabase
+--- PASS: TestBackupScriptCountsFailedDatabasesByDatabase (0.39s)
+=== RUN   TestBackupScriptAutoConfiguresMissingBackupRemotes
+--- PASS: TestBackupScriptAutoConfiguresMissingBackupRemotes (0.25s)
+=== RUN   TestBackupScriptCountsFailedRemoteAutoConfiguration
+--- PASS: TestBackupScriptCountsFailedRemoteAutoConfiguration (0.40s)
+=== RUN   TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase
+--- PASS: TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase (0.45s)
+=== RUN   TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness
+--- PASS: TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness (0.22s)
+=== RUN   TestDoctorWarnsOnUserDBsMissingBackupRemote
+--- PASS: TestDoctorWarnsOnUserDBsMissingBackupRemote (0.48s)
+=== RUN   TestDoctorScriptDetectsDoctestOrphansWithBSDGrep
+--- PASS: TestDoctorScriptDetectsDoctestOrphansWithBSDGrep (0.60s)
+=== RUN   TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase
+--- PASS: TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase (0.52s)
+=== RUN   TestDoctorScriptUsesServerMaxConnections
+=== RUN   TestDoctorScriptUsesServerMaxConnections/server_value
+=== RUN   TestDoctorScriptUsesServerMaxConnections/explicit_override
+=== RUN   TestDoctorScriptUsesServerMaxConnections/malformed_server_value_fallback
+--- PASS: TestDoctorScriptUsesServerMaxConnections (0.87s)
+    --- PASS: TestDoctorScriptUsesServerMaxConnections/server_value (0.25s)
+    --- PASS: TestDoctorScriptUsesServerMaxConnections/explicit_override (0.23s)
+    --- PASS: TestDoctorScriptUsesServerMaxConnections/malformed_server_value_fallback (0.39s)
+=== RUN   TestDoctorScriptAdvisoryMailUsesGenericEscalation
+--- PASS: TestDoctorScriptAdvisoryMailUsesGenericEscalation (0.39s)
+=== RUN   TestDoctorScriptAdvisorySweepPrecedesFreshSend
+--- PASS: TestDoctorScriptAdvisorySweepPrecedesFreshSend (0.38s)
+=== RUN   TestDoctorScriptHealthySweepsRecordedAdvisory
+--- PASS: TestDoctorScriptHealthySweepsRecordedAdvisory (0.35s)
+=== RUN   TestDoctorScriptSteadyHealthySkipsSweep
+--- PASS: TestDoctorScriptSteadyHealthySkipsSweep (0.22s)
+=== RUN   TestDoctorScriptSuppressedTickSkipsSweepAndSend
+--- PASS: TestDoctorScriptSuppressedTickSkipsSweepAndSend (0.20s)
+=== RUN   TestDoctorScriptUnreachableEscalationUsesGenericEscalation
+--- PASS: TestDoctorScriptUnreachableEscalationUsesGenericEscalation (0.32s)
+=== RUN   TestDoctorScriptUnreachableEscalationReportsMailFailure
+--- PASS: TestDoctorScriptUnreachableEscalationReportsMailFailure (0.34s)
+=== RUN   TestCompactScriptDefersWhenWriterDeletesRows
+=== PAUSE TestCompactScriptDefersWhenWriterDeletesRows
+=== RUN   TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift
+=== PAUSE TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift
+=== RUN   TestCompactScriptStillQuarantinesRowDecreaseWithStableHead
+=== PAUSE TestCompactScriptStillQuarantinesRowDecreaseWithStableHead
+=== RUN   TestCompactScriptSkipFetchFlagBypassesFetch
+=== RUN   TestCompactScriptSkipFetchFlagBypassesFetch/flag
+=== PAUSE TestCompactScriptSkipFetchFlagBypassesFetch/flag
+=== RUN   TestCompactScriptSkipFetchFlagBypassesFetch/env
+=== PAUSE TestCompactScriptSkipFetchFlagBypassesFetch/env
+=== CONT  TestCompactScriptSkipFetchFlagBypassesFetch/flag
+=== CONT  TestCompactScriptSkipFetchFlagBypassesFetch/env
+--- PASS: TestCompactScriptSkipFetchFlagBypassesFetch (0.00s)
+    --- PASS: TestCompactScriptSkipFetchFlagBypassesFetch/flag (1.51s)
+    --- PASS: TestCompactScriptSkipFetchFlagBypassesFetch/env (1.67s)
+=== RUN   TestCompactScriptSkipFetchPerDBList
+=== RUN   TestCompactScriptSkipFetchPerDBList/listed_db_skips_fetch
+=== PAUSE TestCompactScriptSkipFetchPerDBList/listed_db_skips_fetch
+=== RUN   TestCompactScriptSkipFetchPerDBList/unlisted_db_fetches
+=== PAUSE TestCompactScriptSkipFetchPerDBList/unlisted_db_fetches
+=== CONT  TestCompactScriptSkipFetchPerDBList/listed_db_skips_fetch
+=== CONT  TestCompactScriptSkipFetchPerDBList/unlisted_db_fetches
+--- PASS: TestCompactScriptSkipFetchPerDBList (0.00s)
+    --- PASS: TestCompactScriptSkipFetchPerDBList/listed_db_skips_fetch (1.51s)
+    --- PASS: TestCompactScriptSkipFetchPerDBList/unlisted_db_fetches (1.73s)
+=== RUN   TestCompactScriptSkipFetchDefersPush
+=== PAUSE TestCompactScriptSkipFetchDefersPush
+=== RUN   TestCompactScriptSkipFetchRejectsInvalidValue
+=== PAUSE TestCompactScriptSkipFetchRejectsInvalidValue
+=== RUN   TestBackupScriptRetriesMarginalSyncFailure
+--- PASS: TestBackupScriptRetriesMarginalSyncFailure (0.26s)
+=== RUN   TestBackupScriptSurfacesSyncDiagnosticInEscalation
+--- PASS: TestBackupScriptSurfacesSyncDiagnosticInEscalation (0.40s)
+=== RUN   TestDogPromptNamesTheHookClaimCommand
+--- PASS: TestDogPromptNamesTheHookClaimCommand (0.00s)
+=== RUN   TestDoltHealthOrderIsDiagnosticOnly
+--- PASS: TestDoltHealthOrderIsDiagnosticOnly (0.00s)
+=== RUN   TestDoltHealthCheckFailsUnreachableReportWithUsefulMessage
+--- PASS: TestDoltHealthCheckFailsUnreachableReportWithUsefulMessage (0.03s)
+=== RUN   TestDoltHealthCheckPassesReachableReport
+--- PASS: TestDoltHealthCheckPassesReachableReport (0.03s)
+=== RUN   TestFilteredEnvStripsGCAndDOLTPrefixes
+--- PASS: TestFilteredEnvStripsGCAndDOLTPrefixes (0.00s)
+=== RUN   TestHealthScriptIsBounded
+--- PASS: TestHealthScriptIsBounded (5.41s)
+=== RUN   TestHealthScriptDoesNotInvokeDoltLog
+--- PASS: TestHealthScriptDoesNotInvokeDoltLog (0.00s)
+=== RUN   TestHealthOrphansFromCleanupAuthority
+--- PASS: TestHealthOrphansFromCleanupAuthority (5.50s)
+=== RUN   TestHealthScriptToleratesSlowRigListDiscovery
+--- PASS: TestHealthScriptToleratesSlowRigListDiscovery (7.64s)
+=== RUN   TestRuntimeScriptPortPrecedence
+=== RUN   TestRuntimeScriptPortPrecedence/managed_state_beats_compatibility_port_mirror
+=== RUN   TestRuntimeScriptPortPrecedence/invalid_managed_state_falls_back_to_provider_state
+=== RUN   TestRuntimeScriptPortPrecedence/corrupt_managed_state_exits_78_despite_compatibility_port_mirror
+--- PASS: TestRuntimeScriptPortPrecedence (0.22s)
+    --- PASS: TestRuntimeScriptPortPrecedence/managed_state_beats_compatibility_port_mirror (0.09s)
+    --- PASS: TestRuntimeScriptPortPrecedence/invalid_managed_state_falls_back_to_provider_state (0.11s)
+    --- PASS: TestRuntimeScriptPortPrecedence/corrupt_managed_state_exits_78_despite_compatibility_port_mirror (0.02s)
+=== RUN   TestRuntimeScriptManagedStateBeatsStaleEnvPort
+--- PASS: TestRuntimeScriptManagedStateBeatsStaleEnvPort (0.08s)
+=== RUN   TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof
+=== RUN   TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/inconclusive_lsof_accepts_reachable_port
+=== RUN   TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/mismatched_lsof_pid_still_rejects_port
+=== RUN   TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/inconclusive_lsof_with_unreachable_port_still_rejects_port
+--- PASS: TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof (5.83s)
+    --- PASS: TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/inconclusive_lsof_accepts_reachable_port (0.32s)
+    --- PASS: TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/mismatched_lsof_pid_still_rejects_port (5.21s)
+    --- PASS: TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof/inconclusive_lsof_with_unreachable_port_still_rejects_port (0.30s)
+=== RUN   TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid
+=== RUN   TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid/listener_pid_match_via_ps_fallback
+=== RUN   TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid/reachable_port_via_ps_fallback_when_lsof_is_inconclusive
+--- PASS: TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid (0.76s)
+    --- PASS: TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid/listener_pid_match_via_ps_fallback (0.34s)
+    --- PASS: TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid/reachable_port_via_ps_fallback_when_lsof_is_inconclusive (0.42s)
+=== RUN   TestRuntimeScriptPortPrecedenceParsesManagedRuntimeStateWithPortableSed
+--- PASS: TestRuntimeScriptPortPrecedenceParsesManagedRuntimeStateWithPortableSed (0.26s)
+=== RUN   TestHealthScriptReportsRunningWhenLsofIsInconclusive
+--- PASS: TestHealthScriptReportsRunningWhenLsofIsInconclusive (1.40s)
+=== RUN   TestHealthScriptPortableTimestampFallbacksRemainNumeric
+=== RUN   TestHealthScriptPortableTimestampFallbacksRemainNumeric/bsd_percent_n_literal
+=== RUN   TestHealthScriptPortableTimestampFallbacksRemainNumeric/empty_percent_n_output
+--- PASS: TestHealthScriptPortableTimestampFallbacksRemainNumeric (3.05s)
+    --- PASS: TestHealthScriptPortableTimestampFallbacksRemainNumeric/bsd_percent_n_literal (1.58s)
+    --- PASS: TestHealthScriptPortableTimestampFallbacksRemainNumeric/empty_percent_n_output (1.47s)
+=== RUN   TestHealthScriptProbesConfiguredExternalHost
+--- PASS: TestHealthScriptProbesConfiguredExternalHost (0.47s)
+=== RUN   TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL
+--- PASS: TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL (0.51s)
+=== RUN   TestHealthScriptLocalEndpointIsNotExternal
+--- PASS: TestHealthScriptLocalEndpointIsNotExternal (0.67s)
+=== RUN   TestHealthScriptNonOneLoopbackHostIsExternal
+--- PASS: TestHealthScriptNonOneLoopbackHostIsExternal (0.48s)
+=== RUN   TestHealthScriptZombieScanExcludesRigLocalServers
+=== RUN   TestHealthScriptZombieScanExcludesRigLocalServers/bare_port
+=== RUN   TestHealthScriptZombieScanExcludesRigLocalServers/quoted_port
+--- PASS: TestHealthScriptZombieScanExcludesRigLocalServers (1.60s)
+    --- PASS: TestHealthScriptZombieScanExcludesRigLocalServers/bare_port (0.85s)
+    --- PASS: TestHealthScriptZombieScanExcludesRigLocalServers/quoted_port (0.75s)
+=== RUN   TestHealthScriptZombieScanExcludesForeignManagedServers
+--- PASS: TestHealthScriptZombieScanExcludesForeignManagedServers (0.82s)
+=== RUN   TestHealthScriptZombieScanFlagsMismatchedForeignPidFile
+--- PASS: TestHealthScriptZombieScanFlagsMismatchedForeignPidFile (0.81s)
+=== RUN   TestHealthScriptZombieScanExcludesExternallyManagedServers
+--- PASS: TestHealthScriptZombieScanExcludesExternallyManagedServers (0.82s)
+=== RUN   TestHealthScriptZombieScanIsBoundedFork
+--- PASS: TestHealthScriptZombieScanIsBoundedFork (0.81s)
+=== RUN   TestHealthScriptJSONAlwaysExitsZero
+--- PASS: TestHealthScriptJSONAlwaysExitsZero (1.05s)
+=== RUN   TestHealthScriptSurfacesQuarantineInJSON
+--- PASS: TestHealthScriptSurfacesQuarantineInJSON (0.50s)
+=== RUN   TestHealthScriptQuarantineHumanExitCode
+=== RUN   TestHealthScriptQuarantineHumanExitCode/marker_present_exits_2_with_section
+=== RUN   TestHealthScriptQuarantineHumanExitCode/no_marker_exits_0_without_section
+=== RUN   TestHealthScriptQuarantineHumanExitCode/transient_siblings_only_exits_0_without_section
+--- PASS: TestHealthScriptQuarantineHumanExitCode (2.50s)
+    --- PASS: TestHealthScriptQuarantineHumanExitCode/marker_present_exits_2_with_section (0.57s)
+    --- PASS: TestHealthScriptQuarantineHumanExitCode/no_marker_exits_0_without_section (1.34s)
+    --- PASS: TestHealthScriptQuarantineHumanExitCode/transient_siblings_only_exits_0_without_section (0.59s)
+=== RUN   TestHealthScriptReportsFetchSessionsInJSON
+--- PASS: TestHealthScriptReportsFetchSessionsInJSON (1.34s)
+=== RUN   TestHealthScriptFetchSessionsBelowThresholdDoesNotWarn
+--- PASS: TestHealthScriptFetchSessionsBelowThresholdDoesNotWarn (2.26s)
+=== RUN   TestHealthScriptFetchSessionsWarnLineHumanMode
+--- PASS: TestHealthScriptFetchSessionsWarnLineHumanMode (1.34s)
+=== RUN   TestHealthScriptFetchSessionsThresholdOverride
+--- PASS: TestHealthScriptFetchSessionsThresholdOverride (1.27s)
+=== RUN   TestHealthScriptRejectsInvalidFetchSessionsThreshold
+--- PASS: TestHealthScriptRejectsInvalidFetchSessionsThreshold (0.05s)
+=== RUN   TestHealthScriptFetchSessionsProbeFailureIsReported
+--- PASS: TestHealthScriptFetchSessionsProbeFailureIsReported (1.24s)
+=== RUN   TestHealthScriptFetchSessionsThresholdLeadingZerosStayValidJSON
+--- PASS: TestHealthScriptFetchSessionsThresholdLeadingZerosStayValidJSON (2.13s)
+=== RUN   TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict
+--- PASS: TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict (0.51s)
+=== RUN   TestHealthReportsStaleBackupPerDatabase
+--- PASS: TestHealthReportsStaleBackupPerDatabase (0.50s)
+=== RUN   TestHealthReportsNeverBackedUpDatabaseAsStale
+--- PASS: TestHealthReportsNeverBackedUpDatabaseAsStale (0.46s)
+=== RUN   TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase
+--- PASS: TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase (0.47s)
+=== RUN   TestHealthReportsFreshnessForABackupWrittenThisSecond
+--- PASS: TestHealthReportsFreshnessForABackupWrittenThisSecond (0.46s)
+=== RUN   TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk
+--- PASS: TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk (0.46s)
+=== RUN   TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp
+--- PASS: TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp (0.44s)
+=== RUN   TestLogsScriptExternalMissingLogIsLimitationNotError
+--- PASS: TestLogsScriptExternalMissingLogIsLimitationNotError (0.01s)
+=== RUN   TestLogsScriptLocalMissingLogIsError
+--- PASS: TestLogsScriptLocalMissingLogIsError (0.01s)
+=== RUN   TestDoltEventFlushDisabledInTestProcess
+--- PASS: TestDoltEventFlushDisabledInTestProcess (0.00s)
+=== RUN   TestPortResolveOrDieEnvOverride
+--- PASS: TestPortResolveOrDieEnvOverride (0.01s)
+=== RUN   TestPortResolveOrDieDiscoverySuccess
+--- PASS: TestPortResolveOrDieDiscoverySuccess (0.01s)
+=== RUN   TestPortResolveOrDieProviderDiscoverySuccess
+--- PASS: TestPortResolveOrDieProviderDiscoverySuccess (0.01s)
+=== RUN   TestPortResolveOrDieExplicitStateSkipsProviderFallback
+--- PASS: TestPortResolveOrDieExplicitStateSkipsProviderFallback (0.01s)
+=== RUN   TestPortResolveOrDieMissingState
+--- PASS: TestPortResolveOrDieMissingState (0.01s)
+=== RUN   TestPortResolveOrDieStatePresentNotRunning
+--- PASS: TestPortResolveOrDieStatePresentNotRunning (0.01s)
+=== RUN   TestPortResolveOrDieExit78OnEmptyState
+--- PASS: TestPortResolveOrDieExit78OnEmptyState (0.01s)
+=== RUN   TestRuntimeShUsesPortResolve
+--- PASS: TestRuntimeShUsesPortResolve (0.00s)
+=== RUN   TestDoltTargetShUsesPortResolve
+--- PASS: TestDoltTargetShUsesPortResolve (0.00s)
+=== RUN   TestPullResolvesRowLockOnlyConflictInsideOneTransaction
+=== RUN   TestPullResolvesRowLockOnlyConflictInsideOneTransaction/sql=true
+=== RUN   TestPullResolvesRowLockOnlyConflictInsideOneTransaction/sql=false
+--- PASS: TestPullResolvesRowLockOnlyConflictInsideOneTransaction (0.94s)
+    --- PASS: TestPullResolvesRowLockOnlyConflictInsideOneTransaction/sql=true (0.50s)
+    --- PASS: TestPullResolvesRowLockOnlyConflictInsideOneTransaction/sql=false (0.45s)
+=== RUN   TestPullFailsClosedWhenAnyOtherColumnConflicts
+=== RUN   TestPullFailsClosedWhenAnyOtherColumnConflicts/sql=true
+=== RUN   TestPullFailsClosedWhenAnyOtherColumnConflicts/sql=false
+--- PASS: TestPullFailsClosedWhenAnyOtherColumnConflicts (0.99s)
+    --- PASS: TestPullFailsClosedWhenAnyOtherColumnConflicts/sql=true (0.50s)
+    --- PASS: TestPullFailsClosedWhenAnyOtherColumnConflicts/sql=false (0.49s)
+=== RUN   TestPullReportsRetriedPullWithNoConflictAsPlainPull
+--- PASS: TestPullReportsRetriedPullWithNoConflictAsPlainPull (0.51s)
+=== RUN   TestPullNeverAutoResolvesANonBdIssuesTable
+=== RUN   TestPullNeverAutoResolvesANonBdIssuesTable/sql=true
+=== RUN   TestPullNeverAutoResolvesANonBdIssuesTable/sql=false
+--- PASS: TestPullNeverAutoResolvesANonBdIssuesTable (0.95s)
+    --- PASS: TestPullNeverAutoResolvesANonBdIssuesTable/sql=true (0.48s)
+    --- PASS: TestPullNeverAutoResolvesANonBdIssuesTable/sql=false (0.46s)
+=== RUN   TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText
+=== RUN   TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText/sql=true
+=== RUN   TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText/sql=false
+--- PASS: TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText (1.00s)
+    --- PASS: TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText/sql=true (0.50s)
+    --- PASS: TestPullNothingToCommitIsMatchedByTheErrorLineNotByResultText/sql=false (0.49s)
+=== RUN   TestPullNonConflictFailureIsUnchanged
+--- PASS: TestPullNonConflictFailureIsUnchanged (0.43s)
+=== RUN   TestPullResolvingPullTimeoutKillsItsServerSideSession
+--- PASS: TestPullResolvingPullTimeoutKillsItsServerSideSession (0.53s)
+=== RUN   TestPullResolvingPullGateRefusedSkips
+--- PASS: TestPullResolvingPullGateRefusedSkips (0.50s)
+=== RUN   TestPullCLISchemaOnlyConflictAbortsTheMerge
+=== RUN   TestPullCLISchemaOnlyConflictAbortsTheMerge/sql=true
+=== RUN   TestPullCLISchemaOnlyConflictAbortsTheMerge/sql=false
+--- PASS: TestPullCLISchemaOnlyConflictAbortsTheMerge (0.95s)
+    --- PASS: TestPullCLISchemaOnlyConflictAbortsTheMerge/sql=true (0.53s)
+    --- PASS: TestPullCLISchemaOnlyConflictAbortsTheMerge/sql=false (0.41s)
+=== RUN   TestPullCLIAbortsWhenTheConflictsCannotBeRead
+--- PASS: TestPullCLIAbortsWhenTheConflictsCannotBeRead (0.41s)
+=== RUN   TestPullCLIWithoutAMergeInProgressIsAPlainFailure
+--- PASS: TestPullCLIWithoutAMergeInProgressIsAPlainFailure (0.39s)
+=== RUN   TestPullCLIRefusesToTouchAMergeAlreadyInProgress
+--- PASS: TestPullCLIRefusesToTouchAMergeAlreadyInProgress (0.35s)
+=== RUN   TestPullSQLMultipleRemotesRefusesWithoutOverride
+=== PAUSE TestPullSQLMultipleRemotesRefusesWithoutOverride
+=== RUN   TestPullSQLMultipleRemotesOverrideSelectsFileRemote
+=== PAUSE TestPullSQLMultipleRemotesOverrideSelectsFileRemote
+=== RUN   TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag
+=== PAUSE TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag
+=== RUN   TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds
+=== PAUSE TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds
+=== RUN   TestPullCLIMultipleRemotesRefusesWithoutOverride
+=== PAUSE TestPullCLIMultipleRemotesRefusesWithoutOverride
+=== RUN   TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses
+=== PAUSE TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses
+=== RUN   TestPullSQLMultipleRemotesUnknownOverrideRefuses
+=== PAUSE TestPullSQLMultipleRemotesUnknownOverrideRefuses
+=== RUN   TestPullCLIMultipleRemotesOverrideSelectsNamed
+=== PAUSE TestPullCLIMultipleRemotesOverrideSelectsNamed
+=== RUN   TestPullSQLSoleNonLocalRemoteRequiresAllowFlag
+=== PAUSE TestPullSQLSoleNonLocalRemoteRequiresAllowFlag
+=== RUN   TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds
+=== PAUSE TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds
+=== RUN   TestPullSQLSoleFileRemoteProceedsWithoutOverride
+=== PAUSE TestPullSQLSoleFileRemoteProceedsWithoutOverride
+=== RUN   TestPullUsesLiveSQLWhenManagedServerReachable
+--- PASS: TestPullUsesLiveSQLWhenManagedServerReachable (0.25s)
+=== RUN   TestPullReportsLiveSQLRemoteLookupFailure
+--- PASS: TestPullReportsLiveSQLRemoteLookupFailure (0.20s)
+=== RUN   TestPullInFlightSkipsNeverPulls
+--- PASS: TestPullInFlightSkipsNeverPulls (0.22s)
+=== RUN   TestPullProcesslistFailureSkipsNeverPulls
+--- PASS: TestPullProcesslistFailureSkipsNeverPulls (0.65s)
+=== RUN   TestPullLostRunLockBeforeCallSkipsKillsNothing
+--- PASS: TestPullLostRunLockBeforeCallSkipsKillsNothing (0.25s)
+=== RUN   TestPullInFlightOtherDatabaseCountsToo
+--- PASS: TestPullInFlightOtherDatabaseCountsToo (0.22s)
+=== RUN   TestPullGateMarkerInOrdinaryErrorIsNotRefusal
+--- PASS: TestPullGateMarkerInOrdinaryErrorIsNotRefusal (0.24s)
+=== RUN   TestPullTimeoutKillsItsServerSideSession
+--- PASS: TestPullTimeoutKillsItsServerSideSession (0.48s)
+=== RUN   TestPullIsAttributedAndSelfIdentifying
+--- PASS: TestPullIsAttributedAndSelfIdentifying (0.27s)
+=== RUN   TestPullRejectsInvalidTimeout
+--- PASS: TestPullRejectsInvalidTimeout (0.09s)
+=== RUN   TestPullClientExit137StillKillsServerSideSession
+--- PASS: TestPullClientExit137StillKillsServerSideSession (0.36s)
+=== RUN   TestPullTimeoutLeadingZerosAreCanonical
+--- PASS: TestPullTimeoutLeadingZerosAreCanonical (0.49s)
+=== RUN   TestPullGateRefusedSkips
+--- PASS: TestPullGateRefusedSkips (0.29s)
+=== RUN   TestPullTimeoutOutranksGateText
+--- PASS: TestPullTimeoutOutranksGateText (0.30s)
+=== RUN   TestPullIDIsTheGateStatement
+--- PASS: TestPullIDIsTheGateStatement (0.27s)
+=== RUN   TestPullTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock
+--- PASS: TestPullTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock (0.30s)
+=== RUN   TestRecoverTreatsLocalHostsAsManaged
+=== RUN   TestRecoverTreatsLocalHostsAsManaged/unset
+=== RUN   TestRecoverTreatsLocalHostsAsManaged/127.0.0.1
+=== RUN   TestRecoverTreatsLocalHostsAsManaged/0.0.0.0
+=== RUN   TestRecoverTreatsLocalHostsAsManaged/localhost
+=== RUN   TestRecoverTreatsLocalHostsAsManaged/::1
+--- PASS: TestRecoverTreatsLocalHostsAsManaged (0.70s)
+    --- PASS: TestRecoverTreatsLocalHostsAsManaged/unset (0.15s)
+    --- PASS: TestRecoverTreatsLocalHostsAsManaged/127.0.0.1 (0.14s)
+    --- PASS: TestRecoverTreatsLocalHostsAsManaged/0.0.0.0 (0.13s)
+    --- PASS: TestRecoverTreatsLocalHostsAsManaged/localhost (0.14s)
+    --- PASS: TestRecoverTreatsLocalHostsAsManaged/::1 (0.14s)
+=== RUN   TestRecoverRejectsRemoteHostWithDiagnostic
+--- PASS: TestRecoverRejectsRemoteHostWithDiagnostic (0.01s)
+=== RUN   TestRestartCallsStopThenStart_HappyPath
+--- PASS: TestRestartCallsStopThenStart_HappyPath (0.16s)
+=== RUN   TestRestartCallsStartWhenStopReportsNothingRunning
+--- PASS: TestRestartCallsStartWhenStopReportsNothingRunning (0.16s)
+=== RUN   TestRestartDoesNotRequirePortWhenStopReportsNothingRunning
+--- PASS: TestRestartDoesNotRequirePortWhenStopReportsNothingRunning (0.16s)
+=== RUN   TestRestartAbortsAndDoesNotStartWhenStopFails
+--- PASS: TestRestartAbortsAndDoesNotStartWhenStopFails (0.16s)
+=== RUN   TestRestartPropagatesStartFailureWithDiagnostic
+--- PASS: TestRestartPropagatesStartFailureWithDiagnostic (0.16s)
+=== RUN   TestRestartRefusesRecentENOSPCUnlessForced
+--- PASS: TestRestartRefusesRecentENOSPCUnlessForced (0.18s)
+=== RUN   TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged
+=== RUN   TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/127.0.0.1
+=== RUN   TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/0.0.0.0
+=== RUN   TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/localhost
+=== RUN   TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/::1
+--- PASS: TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged (0.74s)
+    --- PASS: TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/127.0.0.1 (0.19s)
+    --- PASS: TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/0.0.0.0 (0.19s)
+    --- PASS: TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/localhost (0.19s)
+    --- PASS: TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged/::1 (0.17s)
+=== RUN   TestRestartRejectsRemoteHostWithDiagnostic
+--- PASS: TestRestartRejectsRemoteHostWithDiagnostic (0.01s)
+=== RUN   TestRunBoundedPython3FallbackSendsSigtermBeforeKill
+--- PASS: TestRunBoundedPython3FallbackSendsSigtermBeforeKill (1.07s)
+=== RUN   TestRunBoundedPython3FallbackEscalatesToSigkillAfterGrace
+--- PASS: TestRunBoundedPython3FallbackEscalatesToSigkillAfterGrace (3.11s)
+=== RUN   TestRunBoundedPython3FallbackPassesThroughOutputAndExitCode
+--- PASS: TestRunBoundedPython3FallbackPassesThroughOutputAndExitCode (0.07s)
+=== RUN   TestSQLScriptForwardsQueryArgs
+--- PASS: TestSQLScriptForwardsQueryArgs (0.19s)
+=== RUN   TestSQLScriptConnectedBranchExportsPassword
+--- PASS: TestSQLScriptConnectedBranchExportsPassword (0.16s)
+=== RUN   TestStaleDBFormulaRuntimeContract
+--- PASS: TestStaleDBFormulaRuntimeContract (0.00s)
+=== RUN   TestStaleDBFormulaRenderedShellIsStrictAndValid
+--- PASS: TestStaleDBFormulaRenderedShellIsStrictAndValid (0.01s)
+=== RUN   TestStaleDBFormulaApplyErrorsLeaveWorkOpen
+--- PASS: TestStaleDBFormulaApplyErrorsLeaveWorkOpen (0.41s)
+=== RUN   TestStaleDBFormulaApplyCommandFailureAppendsApplyJSON
+--- PASS: TestStaleDBFormulaApplyCommandFailureAppendsApplyJSON (0.39s)
+=== RUN   TestStaleDBFormulaDryRunFailureAppendsScanJSON
+--- PASS: TestStaleDBFormulaDryRunFailureAppendsScanJSON (0.35s)
+=== RUN   TestStaleDBFormulaCleanApplyClosesWorkAndUsesDBThreshold
+--- PASS: TestStaleDBFormulaCleanApplyClosesWorkAndUsesDBThreshold (0.47s)
+=== RUN   TestStaleDBFormulaCloseUsesSessionNameWhenAliasBlank
+--- PASS: TestStaleDBFormulaCloseUsesSessionNameWhenAliasBlank (0.41s)
+=== RUN   TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain
+--- PASS: TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain (0.40s)
+=== RUN   TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable
+--- PASS: TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable (0.16s)
+=== RUN   TestStaleDBFormulaPurgeOnlyScanApplies
+--- PASS: TestStaleDBFormulaPurgeOnlyScanApplies (0.41s)
+=== RUN   TestStaleDBFormulaPurgeOnlyApplySQLFailureLeavesWorkOpen
+--- PASS: TestStaleDBFormulaPurgeOnlyApplySQLFailureLeavesWorkOpen (0.41s)
+=== RUN   TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvents
+--- PASS: TestStaleDBFormulaExitZeroMaxOrphanRefusalLeavesWorkOpenWithoutSuccessEvents (0.50s)
+=== RUN   TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply
+--- PASS: TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply (0.33s)
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/dry_run_command_failure
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/invalid_scan_JSON
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/apply_command_failure
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/invalid_apply_JSON
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/apply_misses_dry-run_reclaimable_bytes
+=== RUN   TestStaleDBFormulaFailurePathsDrainAck/invalid_identifier_skipped_in_scan
+--- PASS: TestStaleDBFormulaFailurePathsDrainAck (1.96s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/dry_run_command_failure (0.27s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/invalid_scan_JSON (0.29s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/apply_command_failure (0.36s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/invalid_apply_JSON (0.33s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/apply_misses_dry-run_reclaimable_bytes (0.39s)
+    --- PASS: TestStaleDBFormulaFailurePathsDrainAck/invalid_identifier_skipped_in_scan (0.32s)
+=== RUN   TestStaleDBFormulaSuccessPathFailuresDrainAck
+=== RUN   TestStaleDBFormulaSuccessPathFailuresDrainAck/scan_event_failure
+=== RUN   TestStaleDBFormulaSuccessPathFailuresDrainAck/scan_note_failure
+=== RUN   TestStaleDBFormulaSuccessPathFailuresDrainAck/close_failure
+--- PASS: TestStaleDBFormulaSuccessPathFailuresDrainAck (0.96s)
+    --- PASS: TestStaleDBFormulaSuccessPathFailuresDrainAck/scan_event_failure (0.32s)
+    --- PASS: TestStaleDBFormulaSuccessPathFailuresDrainAck/scan_note_failure (0.32s)
+    --- PASS: TestStaleDBFormulaSuccessPathFailuresDrainAck/close_failure (0.32s)
+=== RUN   TestStaleDBOrderUsesParsedFieldsOnly
+--- PASS: TestStaleDBOrderUsesParsedFieldsOnly (0.00s)
+=== RUN   TestStatusScriptExternalReachablePrintsEndpointText
+--- PASS: TestStatusScriptExternalReachablePrintsEndpointText (0.16s)
+=== RUN   TestStatusScriptExternalUnreachablePrintsEndpointText
+--- PASS: TestStatusScriptExternalUnreachablePrintsEndpointText (0.16s)
+=== RUN   TestStatusScriptLocalRunningPrintsManagedText
+--- PASS: TestStatusScriptLocalRunningPrintsManagedText (0.13s)
+=== RUN   TestSyncAheadOnlyFastForwardPushes
+--- PASS: TestSyncAheadOnlyFastForwardPushes (0.33s)
+=== RUN   TestSyncBehindRefusesAndDoesNotPush
+--- PASS: TestSyncBehindRefusesAndDoesNotPush (0.34s)
+=== RUN   TestSyncDivergedRefusesAndDoesNotPush
+--- PASS: TestSyncDivergedRefusesAndDoesNotPush (0.34s)
+=== RUN   TestSyncUpToDateSkipsPush
+--- PASS: TestSyncUpToDateSkipsPush (0.31s)
+=== RUN   TestSyncFetchTimeoutSkipsNeverPushes
+--- PASS: TestSyncFetchTimeoutSkipsNeverPushes (0.32s)
+=== RUN   TestSyncFirstPushWhenRemoteRefAbsentPushes
+--- PASS: TestSyncFirstPushWhenRemoteRefAbsentPushes (0.33s)
+=== RUN   TestSyncForceStillPushesWhenDiverged
+--- PASS: TestSyncForceStillPushesWhenDiverged (0.28s)
+=== RUN   TestSyncEmptyRemoteFirstPushPushes
+--- PASS: TestSyncEmptyRemoteFirstPushPushes (0.31s)
+=== RUN   TestSyncRemoteSelectionIsOrderIndependent
+=== PAUSE TestSyncRemoteSelectionIsOrderIndependent
+=== RUN   TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes
+=== PAUSE TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes
+=== RUN   TestSyncMultiRemotePrefersLocalOverGitHttpsRemote
+=== PAUSE TestSyncMultiRemotePrefersLocalOverGitHttpsRemote
+=== RUN   TestSyncRemoteEnvOverridePinsNonLocalRemote
+=== PAUSE TestSyncRemoteEnvOverridePinsNonLocalRemote
+=== RUN   TestSyncSoleNonLocalRemoteSkipsAndNeverPushes
+=== PAUSE TestSyncSoleNonLocalRemoteSkipsAndNeverPushes
+=== RUN   TestSyncSQLUnknownRemoteOverrideFailsWithStatedReason
+=== PAUSE TestSyncSQLUnknownRemoteOverrideFailsWithStatedReason
+=== RUN   TestSyncCLIMultiRemotePrefersLocal
+=== PAUSE TestSyncCLIMultiRemotePrefersLocal
+=== RUN   TestSyncCLISoleNonLocalRemoteSkips
+=== PAUSE TestSyncCLISoleNonLocalRemoteSkips
+=== RUN   TestSyncCLIRemoteOverridePinsNonLocal
+=== PAUSE TestSyncCLIRemoteOverridePinsNonLocal
+=== RUN   TestSyncRejectsInvalidFetchTimeout
+--- PASS: TestSyncRejectsInvalidFetchTimeout (0.08s)
+=== RUN   TestSyncFetchInFlightSkipsNeverFetches
+--- PASS: TestSyncFetchInFlightSkipsNeverFetches (0.26s)
+=== RUN   TestSyncFetchInFlightOtherDatabaseCountsToo
+--- PASS: TestSyncFetchInFlightOtherDatabaseCountsToo (0.24s)
+=== RUN   TestSyncFetchInFlightCaseInsensitiveDatabase
+--- PASS: TestSyncFetchInFlightCaseInsensitiveDatabase (0.24s)
+=== RUN   TestSyncFetchInFlightRevisionQualifiedDatabaseCounts
+--- PASS: TestSyncFetchInFlightRevisionQualifiedDatabaseCounts (0.50s)
+=== RUN   TestSyncGateMarkerInOrdinaryErrorIsNotRefusal
+--- PASS: TestSyncGateMarkerInOrdinaryErrorIsNotRefusal (0.33s)
+=== RUN   TestSyncFetchInFlightUnattributedSkips
+--- PASS: TestSyncFetchInFlightUnattributedSkips (0.28s)
+=== RUN   TestSyncProcesslistQueryFailureSkipsNeverFetches
+--- PASS: TestSyncProcesslistQueryFailureSkipsNeverFetches (0.26s)
+=== RUN   TestSyncProcesslistAnswerWithoutHeaderSkips
+--- PASS: TestSyncProcesslistAnswerWithoutHeaderSkips (0.26s)
+=== RUN   TestSyncProcesslistMalformedHeaderSkips
+--- PASS: TestSyncProcesslistMalformedHeaderSkips (1.59s)
+=== RUN   TestSyncFetchTimeoutKillsItsServerSideSession
+--- PASS: TestSyncFetchTimeoutKillsItsServerSideSession (0.37s)
+=== RUN   TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight
+--- PASS: TestSyncFetchTimeoutKillNotConfirmedReportsStillInFlight (0.36s)
+=== RUN   TestSyncFetchBoundReachesTheFetch
+--- PASS: TestSyncFetchBoundReachesTheFetch (0.51s)
+=== RUN   TestSyncRefusesToRunWithoutARandomNonce
+--- PASS: TestSyncRefusesToRunWithoutARandomNonce (0.16s)
+=== RUN   TestSyncFetchLostRunLockBeforeCallSkipsKillsNothing
+--- PASS: TestSyncFetchLostRunLockBeforeCallSkipsKillsNothing (0.28s)
+=== RUN   TestSyncFetchTimeoutKillGuardedByRunLock
+--- PASS: TestSyncFetchTimeoutKillGuardedByRunLock (0.68s)
+=== RUN   TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer
+--- PASS: TestSyncFetchTimeoutKillVerdictRefusesMalformedAnswer (0.33s)
+=== RUN   TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven
+--- PASS: TestSyncFetchTimeoutWithoutIDKillsNothingAndReportsUnproven (0.33s)
+=== RUN   TestSyncFetchTimeoutWithoutIDAndNothingListedKillsNothing
+--- PASS: TestSyncFetchTimeoutWithoutIDAndNothingListedKillsNothing (0.34s)
+=== RUN   TestSyncFetchIsAttributedAndSelfIdentifying
+--- PASS: TestSyncFetchIsAttributedAndSelfIdentifying (0.34s)
+=== RUN   TestSyncProcesslistMalformedRowSkips
+--- PASS: TestSyncProcesslistMalformedRowSkips (2.60s)
+=== RUN   TestSyncFetchClientExit137StillKillsServerSideSession
+--- PASS: TestSyncFetchClientExit137StillKillsServerSideSession (0.35s)
+=== RUN   TestSyncFetchGateRefusedSkipsNeverPushes
+--- PASS: TestSyncFetchGateRefusedSkipsNeverPushes (0.31s)
+=== RUN   TestSyncFetchTimeoutOutranksFirstPushText
+--- PASS: TestSyncFetchTimeoutOutranksFirstPushText (0.72s)
+=== RUN   TestSyncFetchIDIsTheGateStatement
+--- PASS: TestSyncFetchIDIsTheGateStatement (0.35s)
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_gone,_lock_free
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_gone,_lock_free_(the_server_restarted)
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_gone,_another_session_holds_this_run's_lock
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_gone,_another_session_holds_this_run's_lock
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_still_listed
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_not_listed,_the_recorded_id_still_holds_this_run's_lock
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_not_listed,_the_recorded_id_still_holds_this_run's_lock
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_query_fails
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_answer_is_not_a_holder_answer
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_answer_is_empty
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/no_id,_nothing_listed,_lock_free
+=== RUN   TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/no_id,_nothing_listed,_a_session_holds_this_run's_lock
+--- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld (2.51s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_gone,_lock_free (0.23s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_gone,_lock_free_(the_server_restarted) (0.20s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_gone,_another_session_holds_this_run's_lock (0.20s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_gone,_another_session_holds_this_run's_lock (0.20s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_still_listed (0.22s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/killed,_not_listed,_the_recorded_id_still_holds_this_run's_lock (0.21s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/guarded,_not_listed,_the_recorded_id_still_holds_this_run's_lock (0.21s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_query_fails (0.21s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_answer_is_not_a_holder_answer (0.21s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/holder_answer_is_empty (0.20s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/no_id,_nothing_listed,_lock_free (0.21s)
+    --- PASS: TestKillRemoteOpSessionNeverReturnsZeroWhileTheRunLockIsHeld/no_id,_nothing_listed,_a_session_holds_this_run's_lock (0.20s)
+=== RUN   TestSyncFetchTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock
+--- PASS: TestSyncFetchTimeoutKillRefusesWhenAnotherSessionHoldsTheRunLock (0.33s)
+=== RUN   TestSyncUsesLiveSQLWhenManagedServerReachable
+--- PASS: TestSyncUsesLiveSQLWhenManagedServerReachable (0.34s)
+=== RUN   TestSyncForceUsesSetUpstreamWithLiveSQL
+--- PASS: TestSyncForceUsesSetUpstreamWithLiveSQL (0.27s)
+=== RUN   TestSyncForceUsesResolvedActiveBranchWithLiveSQL
+--- PASS: TestSyncForceUsesResolvedActiveBranchWithLiveSQL (0.26s)
+=== RUN   TestSyncForceUsesRefspecEnvOverrideWithLiveSQL
+--- PASS: TestSyncForceUsesRefspecEnvOverrideWithLiveSQL (0.24s)
+=== RUN   TestSyncDryRunShowsResolvedActiveBranch
+--- PASS: TestSyncDryRunShowsResolvedActiveBranch (0.31s)
+=== RUN   TestSyncSkipsDatabasesWithNoSyncMarker
+--- PASS: TestSyncSkipsDatabasesWithNoSyncMarker (0.04s)
+=== RUN   TestSyncReportsLiveSQLRemoteLookupFailure
+--- PASS: TestSyncReportsLiveSQLRemoteLookupFailure (0.22s)
+=== RUN   TestSyncCLIFallbackPushesOriginMain
+--- PASS: TestSyncCLIFallbackPushesOriginMain (0.22s)
+=== RUN   TestSyncPushesActiveBranchWhenSet
+--- PASS: TestSyncPushesActiveBranchWhenSet (0.32s)
+=== RUN   TestSyncRefspecEnvOverride
+--- PASS: TestSyncRefspecEnvOverride (0.34s)
+=== RUN   TestSyncRefspecEnvOverrideHyphenInDBName
+--- PASS: TestSyncRefspecEnvOverrideHyphenInDBName (0.33s)
+=== RUN   TestSyncCLIFallbackReadsRepoStateForActiveBranch
+--- PASS: TestSyncCLIFallbackReadsRepoStateForActiveBranch (0.24s)
+=== RUN   TestSyncCLIFallbackIgnoresNestedRepoStateHead
+--- PASS: TestSyncCLIFallbackIgnoresNestedRepoStateHead (0.22s)
+=== RUN   TestSyncRefspecInvalidOverrideFails
+--- PASS: TestSyncRefspecInvalidOverrideFails (0.21s)
+=== RUN   TestSyncRefspecOptionShapedOverrideFails
+--- PASS: TestSyncRefspecOptionShapedOverrideFails (0.22s)
+=== RUN   TestSyncWarnsWhenActiveBranchFallbacksToMain
+--- PASS: TestSyncWarnsWhenActiveBranchFallbacksToMain (0.32s)
+=== RUN   TestSyncSQLPushTimeoutReportsTimeout
+--- PASS: TestSyncSQLPushTimeoutReportsTimeout (0.35s)
+=== RUN   TestSyncSQLPushReportsExitCode
+--- PASS: TestSyncSQLPushReportsExitCode (0.35s)
+=== RUN   TestSyncSQLPushReplaysStderr
+--- PASS: TestSyncSQLPushReplaysStderr (0.33s)
+=== RUN   TestSyncSQLPushReplaysStderrFinalLineWithoutTrailingNewline
+--- PASS: TestSyncSQLPushReplaysStderrFinalLineWithoutTrailingNewline (0.34s)
+=== RUN   TestSyncSQLPushEmptyStderrNoBlankLines
+--- PASS: TestSyncSQLPushEmptyStderrNoBlankLines (0.34s)
+=== RUN   TestSyncSQLPushTimeoutHonorsConfiguredCeiling
+--- PASS: TestSyncSQLPushTimeoutHonorsConfiguredCeiling (0.36s)
+=== RUN   TestSyncSQLPushReplayDoesNotLeakPassword
+--- PASS: TestSyncSQLPushReplayDoesNotLeakPassword (0.32s)
+=== RUN   TestSyncSQLPushTimeoutReplaysNoMechanismMarker
+--- PASS: TestSyncSQLPushTimeoutReplaysNoMechanismMarker (0.33s)
+=== RUN   TestSyncSQLPushTempFileFailureDegradesPerDb
+--- PASS: TestSyncSQLPushTempFileFailureDegradesPerDb (0.40s)
+=== RUN   TestSyncRejectsNonNumericPushTimeout
+--- PASS: TestSyncRejectsNonNumericPushTimeout (0.02s)
+=== RUN   TestSyncRejectsZeroPushTimeout
+--- PASS: TestSyncRejectsZeroPushTimeout (0.02s)
+=== RUN   TestSyncRejectsEmptyPushTimeout
+--- PASS: TestSyncRejectsEmptyPushTimeout (0.02s)
+=== RUN   TestSyncRejectsLeadingZeroPushTimeout
+--- PASS: TestSyncRejectsLeadingZeroPushTimeout (0.02s)
+=== RUN   TestSyncRejectsTripleZeroPushTimeout
+--- PASS: TestSyncRejectsTripleZeroPushTimeout (0.02s)
+=== RUN   TestSyncCLIPushReportsExitCode
+--- PASS: TestSyncCLIPushReportsExitCode (0.24s)
+=== RUN   TestSyncCLIForcePushReportsExitCode
+--- PASS: TestSyncCLIForcePushReportsExitCode (0.20s)
+=== RUN   TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes
+--- PASS: TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes (0.29s)
+=== CONT  TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin
+=== CONT  TestCompactScriptQuarantinesPostFlattenInvalidTableNameBeforeFullGC
+=== CONT  TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory
+=== CONT  TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten
+=== CONT  TestSyncCLIMultiRemotePrefersLocal
+=== CONT  TestCompactScriptParsesPendingPushCreatedAtWithBSDDateFallback
+=== CONT  TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds
+=== CONT  TestCompactScriptPrefersOriginWhenMultipleRemotesExist
+=== CONT  TestCompactScriptUsesRefspecEnvOverrideForRemoteBranch
+=== CONT  TestCompactScriptRefspecOptionShapedOverrideFails
+=== CONT  TestPullSQLMultipleRemotesRefusesWithoutOverride
+=== CONT  TestCompactScriptUsesExplicitRemote
+=== CONT  TestCompactScriptRefetchesAndForcePushesRemote
+=== CONT  TestCompactScriptToleratesSlowRigListDiscovery
+=== CONT  TestCompactScriptPushesActiveBranchToRemote
+=== CONT  TestSyncCLIRemoteOverridePinsNonLocal
+=== CONT  TestSyncCLISoleNonLocalRemoteSkips
+=== CONT  TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal
+=== CONT  TestCompactScriptDryRunReportsStalePendingPushMarker
+=== CONT  TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview
+=== CONT  TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush
+=== CONT  TestCompactScriptRecordsPendingPushWhenRemotePushFails
+=== CONT  TestCompactScriptRecordsUnverifiedPendingPushWhenRemoteHeadIsEmpty
+=== CONT  TestCompactScriptFailsWhenMultipleRemotesLackOrigin
+=== CONT  TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch
+=== CONT  TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries
+=== CONT  TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource
+=== CONT  TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteFetchFails
+=== CONT  TestCompactScriptFailsWhenPreflightHeadVerifyProbeFails
+=== CONT  TestCompactScriptRetriesPreflightWhenHeadStabilizes
+=== CONT  TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries
+=== CONT  TestCompactScriptWarnsWhenActiveBranchFallbacksToMain
+--- PASS: TestSyncCLISoleNonLocalRemoteSkips (0.08s)
+=== CONT  TestCompactScriptFailsRetryWhenPendingPushRemoteHeadRemainsUnverified
+--- PASS: TestSyncCLIRemoteOverridePinsNonLocal (0.09s)
+=== CONT  TestCompactScriptRetriesPendingPushWhenRemoteHeadBecomesLocalLogAncestor
+--- PASS: TestSyncCLIMultiRemotePrefersLocal (0.09s)
+=== CONT  TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails
+--- PASS: TestPullSQLMultipleRemotesRefusesWithoutOverride (0.26s)
+=== CONT  TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses
+--- PASS: TestPullSQLSoleNonLocalRemoteWithAllowFlagProceeds (0.45s)
+=== CONT  TestPullSQLMultipleRemotesUnknownOverrideRefuses
+--- PASS: TestPullSQLMultipleRemotesInvalidOverrideSyntaxRefuses (1.42s)
+=== CONT  TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace
+--- PASS: TestPullSQLMultipleRemotesUnknownOverrideRefuses (1.38s)
+=== CONT  TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately
+--- PASS: TestCompactScriptQuarantinesPostFlattenInvalidTableNameBeforeFullGC (2.50s)
+=== CONT  TestCompactScriptQuarantinesPostFlattenTableListDriftBeforeFullGC
+--- PASS: TestCompactScriptRefspecOptionShapedOverrideFails (2.56s)
+=== CONT  TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately
+--- PASS: TestCompactScriptBareGCBypassesThresholdAndSkipsFlatten (2.72s)
+=== CONT  TestCompactScriptFailsOnRowCountDecreaseBeforeGC
+--- PASS: TestCompactScriptReconcilesFileBackupRemoteAlongsideOrigin (2.96s)
+=== CONT  TestCompactScriptDryRunSkipsDoltIgnoreVersioning
+--- PASS: TestCompactScriptUsesRefspecEnvOverrideForRemoteBranch (3.38s)
+=== CONT  TestCompactScriptProceedsWhenDoltIgnoreCommitFails
+--- PASS: TestCompactScriptLegacyPendingPushMarkerRequiresRemoteHeadInLocalHistory (3.47s)
+=== CONT  TestCompactScriptProceedsWhenDoltIgnoreStagingFails
+--- PASS: TestCompactScriptPrefersOriginWhenMultipleRemotesExist (3.80s)
+=== CONT  TestCompactScriptVersionsDirtyDoltIgnoreBeforeFlatten
+--- PASS: TestCompactScriptUsesExplicitRemote (4.36s)
+=== CONT  TestCompactScriptDefersMixedVerifiedAndFirstCommittedDrift
+--- PASS: TestCompactScriptParsesPendingPushCreatedAtWithBSDDateFallback (4.62s)
+=== CONT  TestCompactScriptQuarantinesFirstCommittedTableWhenDiffProbeFails
+--- PASS: TestCompactScriptRefetchesAndForcePushesRemote (4.81s)
+=== CONT  TestCompactScriptQuarantinesFirstCommittedTableWithNonAdditiveDiff
+--- PASS: TestCompactScriptPushesActiveBranchToRemote (5.21s)
+=== CONT  TestCompactScriptDefersFirstCommittedProbeTableDbHashDrift
+--- PASS: TestCompactScriptRecoversLegacyPendingPushMarkerWhenRemoteHeadIsLocal (5.98s)
+=== CONT  TestCompactScriptDefersDroppedDoltIgnoredTableDbHashDrift
+--- PASS: TestCompactScriptDryRunReportsStalePendingPushMarker (6.01s)
+=== CONT  TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables
+--- PASS: TestCompactScriptStalePendingPushMarkerAlertsDefaultMayorBeforeManualReview (6.33s)
+=== CONT  TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift
+--- PASS: TestCompactScriptFailsWhenMultipleRemotesLackOrigin (6.33s)
+=== CONT  TestCompactScriptPinsDatabaseHashToCommittedRoot
+--- PASS: TestCompactScriptRecordsPendingPushWhenRemotePushFails (6.57s)
+=== CONT  TestCompactScriptExcludesDoltIgnoredCommittedTableFromVerification
+--- PASS: TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush (6.78s)
+=== CONT  TestCompactScriptExcludesUnversionedTableChurnFromVerification
+--- PASS: TestCompactScriptRecordsUnverifiedPendingPushWhenRemoteHeadIsEmpty (6.85s)
+=== CONT  TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead
+--- PASS: TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch (7.78s)
+=== CONT  TestPullCLIMultipleRemotesOverrideSelectsNamed
+--- PASS: TestCompactScriptFailsWhenPreflightHeadVerifyProbeFails (8.27s)
+=== CONT  TestCompactScriptGCOnlyFlagDryRunSkipsMutations
+--- PASS: TestPullCLIMultipleRemotesOverrideSelectsNamed (0.62s)
+=== CONT  TestCompactScriptSkipFetchRejectsInvalidValue
+--- PASS: TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource (8.51s)
+=== CONT  TestCompactScriptSkipFetchDefersPush
+--- PASS: TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteFetchFails (8.60s)
+=== CONT  TestPullSQLSoleNonLocalRemoteRequiresAllowFlag
+--- PASS: TestPullSQLSoleNonLocalRemoteRequiresAllowFlag (0.41s)
+=== CONT  TestCompactScriptStillQuarantinesRowDecreaseWithStableHead
+--- PASS: TestCompactScriptWarnsWhenActiveBranchFallbacksToMain (9.75s)
+=== CONT  TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift
+--- PASS: TestCompactScriptRetriesPreflightWhenHeadStabilizes (10.18s)
+=== CONT  TestCompactScriptSkipsHealthyBelowThresholdOldgenWithoutPendingMarker
+--- PASS: TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries (10.62s)
+=== CONT  TestCompactScriptTableNameDoesNotClobberDatabaseName
+--- PASS: TestCompactScriptFailsRetryWhenPendingPushRemoteHeadRemainsUnverified (10.63s)
+=== CONT  TestPullCLIMultipleRemotesRefusesWithoutOverride
+--- PASS: TestCompactScriptToleratesSlowRigListDiscovery (10.74s)
+=== CONT  TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds
+--- PASS: TestPullCLIMultipleRemotesRefusesWithoutOverride (0.06s)
+=== CONT  TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag
+--- PASS: TestCompactScriptRetriesPendingPushWhenRemoteHeadBecomesLocalLogAncestor (10.93s)
+=== CONT  TestCompactScriptDefersWhenWriterDeletesRows
+--- PASS: TestPullSQLMultipleRemotesNonFileOverrideWithAllowFlagProceeds (0.35s)
+=== CONT  TestPullSQLMultipleRemotesOverrideSelectsFileRemote
+--- PASS: TestCompactScriptKeepsRetryDeferredWhenPendingPushAncestryProbeFails (11.05s)
+=== CONT  TestCompactScriptQuarantineReasonChangeReMails
+--- PASS: TestPullSQLMultipleRemotesNonFileOverrideRequiresAllowFlag (0.41s)
+=== CONT  TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase
+--- PASS: TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately (9.66s)
+=== CONT  TestCompactScriptOnlyDBsAllowlistFiltersDatabases
+--- PASS: TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace (9.84s)
+=== CONT  TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker
+--- PASS: TestPullSQLMultipleRemotesOverrideSelectsFileRemote (0.73s)
+=== CONT  TestCompactScriptOnlyDBFlagRequiresValue
+--- PASS: TestCompactScriptQuarantinesPostFlattenTableListDriftBeforeFullGC (10.11s)
+=== CONT  TestCompactScriptQuarantineMailFailureIsRetriedNextCycle
+--- PASS: TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately (10.32s)
+=== CONT  TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear
+--- PASS: TestCompactScriptDryRunSkipsDoltIgnoreVersioning (10.04s)
+=== CONT  TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert
+--- PASS: TestCompactScriptFailsOnRowCountDecreaseBeforeGC (10.33s)
+=== CONT  TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear
+--- PASS: TestCompactScriptProceedsWhenDoltIgnoreCommitFails (10.39s)
+=== CONT  TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort
+--- PASS: TestCompactScriptProceedsWhenDoltIgnoreStagingFails (10.44s)
+=== CONT  TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear
+--- PASS: TestCompactScriptVersionsDirtyDoltIgnoreBeforeFlatten (10.30s)
+=== CONT  TestCompactScriptSkipsNonLocalExternalEndpoint
+--- PASS: TestCompactScriptDefersMixedVerifiedAndFirstCommittedDrift (10.46s)
+=== CONT  TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState
+--- PASS: TestCompactScriptQuarantinesFirstCommittedTableWhenDiffProbeFails (10.38s)
+=== CONT  TestCompactScriptDryRunSkipsMutations
+--- PASS: TestCompactScriptQuarantinesFirstCommittedTableWithNonAdditiveDiff (10.34s)
+=== CONT  TestCompactScriptRejectsRefspecEnvOverrideForDifferentActiveBranch
+--- PASS: TestCompactScriptDefersFirstCommittedProbeTableDbHashDrift (10.19s)
+=== CONT  TestCompactScriptQuarantineAlertRecipientCanBeOverridden
+--- PASS: TestCompactScriptDefersDroppedDoltIgnoredTableDbHashDrift (9.88s)
+=== CONT  TestCompactScriptRejectsUnknownFlag
+--- PASS: TestCompactScriptStillQuarantinesDbHashDriftBeyondVerifiedTables (10.09s)
+=== CONT  TestCompactScriptFreshQuarantineMarkerAlertsDefaultMayor
+--- PASS: TestCompactScriptSkipFetchRejectsInvalidValue (7.88s)
+=== CONT  TestCompactScriptUnreadableQuarantineMarkerIsNotClobbered
+--- PASS: TestCompactScriptDefersAbsorbedWorkingSetDbHashDrift (10.01s)
+=== CONT  TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible
+--- PASS: TestCompactScriptGCOnlyFlagDryRunSkipsMutations (8.46s)
+=== CONT  TestSyncMultiRemotePrefersLocalOverGitHttpsRemote
+--- PASS: TestCompactScriptPinsDatabaseHashToCommittedRoot (10.46s)
+=== CONT  TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease
+--- PASS: TestCompactScriptExcludesDoltIgnoredCommittedTableFromVerification (10.53s)
+=== CONT  TestSyncSQLUnknownRemoteOverrideFailsWithStatedReason
+--- PASS: TestCompactScriptExcludesUnversionedTableChurnFromVerification (10.45s)
+=== CONT  TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace
+--- PASS: TestSyncMultiRemotePrefersLocalOverGitHttpsRemote (0.57s)
+=== CONT  TestCompactScriptRetriesPendingGCAfterWriterRaceDefer
+--- PASS: TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead (10.63s)
+=== CONT  TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails
+--- PASS: TestSyncSQLUnknownRemoteOverrideFailsWithStatedReason (0.76s)
+=== CONT  TestCompactScriptBareGCRejectsInvalidValue
+--- PASS: TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries (18.20s)
+=== CONT  TestCompactScriptDefersProvenWriterRaceSameCountHashDrift
+--- PASS: TestCompactScriptSkipFetchDefersPush (9.84s)
+=== CONT  TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag
+--- PASS: TestCompactScriptStillQuarantinesRowDecreaseWithStableHead (9.59s)
+=== CONT  TestSyncRemoteEnvOverridePinsNonLocalRemote
+--- PASS: TestCompactScriptSkipsHealthyBelowThresholdOldgenWithoutPendingMarker (8.58s)
+=== CONT  TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter
+--- PASS: TestCompactScriptOnlyDBFlagRequiresValue (6.95s)
+=== CONT  TestSyncSoleNonLocalRemoteSkipsAndNeverPushes
+--- PASS: TestCompactScriptDefersWhenWriterCommitsCausingSameCountHashDrift (9.26s)
+=== CONT  TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC
+--- PASS: TestCompactScriptTableNameDoesNotClobberDatabaseName (8.88s)
+=== CONT  TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh
+--- PASS: TestCompactScriptDefersWhenWriterDeletesRows (8.55s)
+=== CONT  TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash
+=== CONT  TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift
+--- PASS: TestSyncRemoteEnvOverridePinsNonLocalRemote (1.05s)
+--- PASS: TestSyncSoleNonLocalRemoteSkipsAndNeverPushes (1.01s)
+=== CONT  TestCompactScriptDefaultThresholdIs2000
+--- PASS: TestCompactScriptOnlyDBsCanTargetUndiscoveredDatabase (9.09s)
+=== CONT  TestCompactScriptGCOnlyQuarantineRefusalStillReports
+--- PASS: TestCompactScriptSkipsNonLocalExternalEndpointWithoutPort (6.51s)
+=== CONT  TestCompactScriptSkipsBelowThresholdWithoutFlattening
+--- PASS: TestCompactScriptQuarantineReasonChangeReMails (9.61s)
+=== CONT  TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC
+--- PASS: TestCompactScriptSkipsNonLocalExternalEndpoint (6.67s)
+=== CONT  TestCompactScriptQuarantineRenotifiesAfterBackstopElapses
+--- PASS: TestCompactScriptOnlyDBsAllowlistFiltersDatabases (9.65s)
+=== CONT  TestCompactScriptBareGCDisabledWhenEnvFalsy
+--- PASS: TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker (10.36s)
+=== CONT  TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle
+--- PASS: TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear (9.33s)
+=== CONT  TestCompactScriptGCOnlyFlagRejectsBareGCEnvCombination
+--- PASS: TestCompactScriptAllowsExplicitLocalExternalEndpointWithoutManagedState (7.54s)
+=== CONT  TestCompactScriptDefersWhenWriterCommitsBeforeFlatten
+--- PASS: TestCompactScriptRejectsUnknownFlag (6.49s)
+=== CONT  TestCompactScriptDefersWhenWriterCommitsDuringVerify
+--- PASS: TestCompactScriptQuarantineMailFailureIsRetriedNextCycle (9.84s)
+=== CONT  TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
+--- PASS: TestCompactScriptDryRunSkipsMutations (7.51s)
+=== CONT  TestSyncRemoteSelectionIsOrderIndependent
+--- PASS: TestCompactScriptHardBlockQuarantineReasonsDoNotAutoClearAndAlert (9.76s)
+=== CONT  TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure
+--- PASS: TestCompactScriptQuarantineAlertRecipientCanBeOverridden (7.49s)
+=== CONT  TestCompactScriptGCOnlyFlagRefusesQuarantinedDatabase
+--- PASS: TestCompactScriptQuarantineDriftOutsideKnownTablesHardBlocksAutoClear (10.10s)
+=== CONT  TestCompactScriptBareGCHonorsOnlyDBsAllowlist
+--- PASS: TestCompactScriptQuarantineProbeFailureHardBlocksAutoClear (9.42s)
+=== CONT  TestCompactScriptFailsOnTableDiscoveryProbeFailure
+--- PASS: TestCompactScriptRejectsRefspecEnvOverrideForDifferentActiveBranch (8.22s)
+=== CONT  TestCompactScriptBareGCSurfacesDoltGCFailureStderr
+--- PASS: TestCompactScriptBareGCRejectsInvalidValue (5.70s)
+=== CONT  TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase
+--- PASS: TestCompactScriptFreshQuarantineMarkerAlertsDefaultMayor (8.42s)
+=== CONT  TestCompactScriptBareGCRefusesQuarantinedDatabase
+--- PASS: TestSyncRemoteSelectionIsOrderIndependent (2.34s)
+=== CONT  TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes
+--- PASS: TestCompactScriptQuarantineAlertSuccessConfirmationIsVisible (8.78s)
+=== CONT  TestCompactScriptBareGCDryRunSkipsMutations
+--- PASS: TestCompactScriptUnreadableQuarantineMarkerIsNotClobbered (8.88s)
+=== CONT  TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC
+--- PASS: TestSyncMultiRemoteAmbiguousNonLocalSkipsAndNeverPushes (1.04s)
+=== CONT  TestCompactScriptSkipsRemotePhaseForNoSyncDatabase
+--- PASS: TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace (8.75s)
+=== CONT  TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC
+--- PASS: TestCompactScriptQuarantineBlocksSecondCycleAfterRowCountDecrease (9.29s)
+=== CONT  TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync
+--- PASS: TestCompactScriptQuarantinesSameCountDriftWhenDiffProofFails (8.72s)
+=== CONT  TestCompactScriptPushesWhenPreflightFetchFailsOnceThenRemoteHeadIsLocal
+--- PASS: TestCompactScriptRetriesPendingGCAfterWriterRaceDefer (9.00s)
+=== CONT  TestCompactScriptAllowsRowCountIncreaseWithStableValueHashes
+--- PASS: TestCompactScriptGCOnlyFlagHonorsOnlyDBFlag (8.22s)
+=== CONT  TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteAheadIsUnknown
+--- PASS: TestCompactScriptDefersProvenWriterRaceSameCountHashDrift (8.39s)
+=== CONT  TestCompactScriptFailsOnCommitCountProbeFailure
+--- PASS: TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter (8.64s)
+=== CONT  TestCompactScriptSurfacesRootCommitProbeFailureStderr
+--- PASS: TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC (8.70s)
+=== CONT  TestCompactScriptFailsBeforeFlattenWhenPendingPushMarkerCannotBeWritten
+--- PASS: TestCompactScriptDefaultThresholdIs2000 (8.56s)
+=== CONT  TestCompactScriptFailsBeforeFlattenWhenQuarantineMarkerCannotBeWritten
+--- PASS: TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash (9.01s)
+=== CONT  TestCompactScriptFailsBeforeFlattenWhenPendingGCMarkerCannotBeWritten
+--- PASS: TestCompactScriptPendingPushMarkerBlocksFlattenEvenWhenFresh (9.10s)
+=== CONT  TestCompactScriptExcludesNonFileRemotesAndAuthoritativeFromBackupReconciliation
+--- PASS: TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift (9.10s)
+=== CONT  TestCompactScriptFlattensAndVerifies
+--- PASS: TestCompactScriptGCOnlyFlagRejectsBareGCEnvCombination (6.57s)
+=== CONT  TestCompactScriptRetriesPendingPushBeforeBelowThresholdSkip
+--- PASS: TestCompactScriptSkipsBelowThresholdWithoutFlattening (8.66s)
+=== CONT  TestCompactScriptKeepsPendingGCWhenPendingPushHandoffCannotBeWritten
+--- PASS: TestCompactScriptGCOnlyFlagReclaimsBelowThresholdWithFullGC (8.32s)
+=== CONT  TestCompactScriptRestoresHeadWhenFlattenCommitFails
+--- PASS: TestCompactScriptGCOnlyQuarantineRefusalStillReports (9.24s)
+=== CONT  TestCompactScriptFailsOnInvalidTableNameBeforeRowCount
+--- PASS: TestCompactScriptBareGCDisabledWhenEnvFalsy (8.95s)
+=== CONT  TestCompactScriptSurfacesRowCountProbeFailureStderr
+--- PASS: TestCompactScriptGCOnlyFlagRefusesQuarantinedDatabase (7.91s)
+=== CONT  TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain
+--- PASS: TestCompactScriptQuarantineRenotifiesAfterBackstopElapses (10.03s)
+=== CONT  TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush
+--- PASS: TestCompactScriptDefersWhenWriterCommitsBeforeFlatten (8.71s)
+=== CONT  TestCompactScriptRefusesToRestoreOverExternalHeadAdvance
+--- PASS: TestCompactScriptGCOnlyFlagSurfacesDoltGCFailure (8.35s)
+=== CONT  TestCompactScriptSurfacesFlattenFailureStderr
+--- PASS: TestCompactScriptDefersWhenWriterCommitsDuringVerify (9.00s)
+=== CONT  TestCompactScriptRecordsPendingPushWhenRemoteHeadChangesAfterCompaction
+--- PASS: TestCompactScriptBareGCHonorsOnlyDBsAllowlist (8.69s)
+=== CONT  TestCompactScriptSurfacesGCFailureStderr
+--- PASS: TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle (10.03s)
+=== CONT  TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases
+--- PASS: TestCompactScriptBareGCRefusesQuarantinedDatabase (7.59s)
+=== CONT  TestCompactScriptQuarantinesEmptyPostflightTableValueHashBeforeFullGC
+--- PASS: TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles (9.79s)
+=== CONT  TestCompactScriptRetriesPendingGCThenPushesRemote
+--- PASS: TestCompactScriptFailsOnTableDiscoveryProbeFailure (8.97s)
+=== CONT  TestPullSQLSoleFileRemoteProceedsWithoutOverride
+--- PASS: TestCompactScriptBareGCSurfacesDoltGCFailureStderr (8.95s)
+=== CONT  TestCompactScriptFailsOnEmptyPreflightValueHash
+--- PASS: TestCompactScriptBareGCDryRunSkipsMutations (7.35s)
+=== CONT  TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC
+--- PASS: TestPullSQLSoleFileRemoteProceedsWithoutOverride (0.91s)
+=== CONT  TestCompactScriptFailsOnEmptyPreflightTableValueHash
+--- PASS: TestCompactScriptDryRunPreservesPendingPushMarkerForNoSyncDatabase (9.96s)
+=== CONT  TestCompactScriptPreservesNoGainReasonForDatabaseHashDrift
+--- PASS: TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC (9.35s)
+=== CONT  TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC
+--- PASS: TestCompactScriptSkipsRemotePhaseForNoSyncDatabase (8.71s)
+=== CONT  TestCompactScriptPreservesPrimaryIntegrityReasonBeforeLaterProbeFailure
+--- PASS: TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC (8.76s)
+=== CONT  TestCompactScriptPreservesRowGainReasonForDatabaseHashDrift
+--- PASS: TestCompactScriptFailsOnCommitCountProbeFailure (8.62s)
+=== CONT  TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure
+--- PASS: TestCompactScriptAllowsRowCountIncreaseWithStableValueHashes (8.95s)
+=== CONT  TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker
+--- PASS: TestCompactScriptPushesWhenPreflightFetchFailsOnceThenRemoteHeadIsLocal (9.07s)
+--- PASS: TestCompactScriptSurfacesRootCommitProbeFailureStderr (8.31s)
+--- PASS: TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteAheadIsUnknown (9.24s)
+--- PASS: TestCompactScriptClearsPendingPushMarkerWhenDatabaseBecomesNoSync (9.95s)
+--- PASS: TestCompactScriptFailsBeforeFlattenWhenPendingPushMarkerCannotBeWritten (8.62s)
+--- PASS: TestCompactScriptFailsBeforeFlattenWhenQuarantineMarkerCannotBeWritten (8.14s)
+--- PASS: TestCompactScriptFailsBeforeFlattenWhenPendingGCMarkerCannotBeWritten (8.22s)
+--- PASS: TestCompactScriptExcludesNonFileRemotesAndAuthoritativeFromBackupReconciliation (9.20s)
+--- PASS: TestCompactScriptFlattensAndVerifies (9.11s)
+--- PASS: TestCompactScriptFailsOnInvalidTableNameBeforeRowCount (9.02s)
+--- PASS: TestCompactScriptRestoresHeadWhenFlattenCommitFails (9.56s)
+--- PASS: TestCompactScriptSurfacesRowCountProbeFailureStderr (8.63s)
+--- PASS: TestCompactScriptRetriesPendingPushBeforeBelowThresholdSkip (10.07s)
+--- PASS: TestCompactScriptKeepsPendingGCWhenPendingPushHandoffCannotBeWritten (10.18s)
+--- PASS: TestCompactScriptRefusesToRestoreOverExternalHeadAdvance (8.83s)
+--- PASS: TestCompactScriptFailsRetryWhenPendingPushRemoteHeadChangesAgain (9.14s)
+--- PASS: TestCompactScriptIsolatesBackupPushFailureFromPrimaryPush (9.36s)
+--- PASS: TestCompactScriptSurfacesFlattenFailureStderr (9.10s)
+--- PASS: TestCompactScriptSurfacesGCFailureStderr (9.21s)
+--- PASS: TestCompactScriptRecordsPendingPushWhenRemoteHeadChangesAfterCompaction (9.76s)
+--- PASS: TestCompactScriptQuarantinesEmptyPostflightTableValueHashBeforeFullGC (9.19s)
+--- PASS: TestCompactScriptDoesNotCarryQuarantineEvidenceAcrossDatabases (9.78s)
+--- PASS: TestCompactScriptFailsOnEmptyPreflightValueHash (9.54s)
+--- PASS: TestCompactScriptFailsOnEmptyPreflightTableValueHash (9.04s)
+--- PASS: TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC (9.87s)
+--- PASS: TestCompactScriptRetriesPendingGCThenPushesRemote (10.33s)
+--- PASS: TestCompactScriptPreservesNoGainReasonForDatabaseHashDrift (9.61s)
+--- PASS: TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC (8.98s)
+--- PASS: TestCompactScriptPreservesPrimaryIntegrityReasonBeforeLaterProbeFailure (9.12s)
+--- PASS: TestCompactScriptPreservesRowGainReasonForDatabaseHashDrift (9.25s)
+--- PASS: TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure (8.90s)
+--- PASS: TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker (9.32s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/bd/dolt	173.992s
