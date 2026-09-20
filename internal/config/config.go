@@ -711,6 +711,8 @@ type AgentOverride struct {
 	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
+	// ClaimBackstop overrides the seat-claim backstop setting.
+	ClaimBackstop *bool `toml:"claim_backstop,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
@@ -3242,6 +3244,11 @@ type Agent struct {
 	// recovery; continuation-claim recovery remains configured-only. Unknown
 	// templates receive no fallback.
 	Nudge string `toml:"nudge,omitempty"`
+	// ClaimBackstop enables the seat-claim backstop. Set false for named seats
+	// whose assigned beads are holds, such as a mayor. Only this lane is
+	// disabled; pool-trigger claim recovery and the execution backstop are
+	// unchanged. Nil (omitted) defaults to true.
+	ClaimBackstop *bool `toml:"claim_backstop,omitempty" jsonschema:"default=true"`
 	// Session overrides the session transport for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).
 	// "acp" uses the Agent Client Protocol (JSON-RPC over stdio).
@@ -3605,6 +3612,7 @@ func (a Agent) Clone() Agent {
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
 	out.Attach = copyBoolPtr(a.Attach)
+	out.ClaimBackstop = copyBoolPtr(a.ClaimBackstop)
 	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
 	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
 	return out

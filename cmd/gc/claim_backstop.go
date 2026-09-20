@@ -523,6 +523,9 @@ type seatClaimBackstop struct {
 // than to serve a work binding, so an open row that merely carries its slot
 // identity is not evidence it was handed anything to start.
 func (p seatClaimBackstop) governs(s beads.Bead) bool {
+	if agent := findAgentByTemplate(p.cfg, normalizedSessionTemplate(s, p.cfg)); agent != nil && agent.ClaimBackstop != nil && !*agent.ClaimBackstop {
+		return false
+	}
 	if isManualSessionBead(s) {
 		return false
 	}

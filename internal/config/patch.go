@@ -69,6 +69,8 @@ type AgentPatch struct {
 	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
+	// ClaimBackstop overrides the seat-claim backstop setting.
+	ClaimBackstop *bool `toml:"claim_backstop,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
 	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
@@ -568,6 +570,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge
+	}
+	if p.ClaimBackstop != nil {
+		a.ClaimBackstop = p.ClaimBackstop
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
