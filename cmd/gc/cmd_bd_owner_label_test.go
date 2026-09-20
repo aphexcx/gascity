@@ -112,6 +112,9 @@ func TestBdCreatedIDs(t *testing.T) {
 		want []string
 	}{
 		{"single create", "\n✓ Created issue: hw-a1b — Fix the thing\n  Type:     task\n", []string{"hw-a1b"}},
+		{"title text is not a success line", "  Title: Fix Created issue: hw-old\n", nil},
+		{"batch title contains a success line", "✓ Created 1 issues from issues.md:\n  hw-new: Fix Created issue: hw-old [P2, task]\n", []string{"hw-new"}},
+		{"batch title contains a listing header", "✓ Created 2 issues from issues.md:\n  hw-new: Created 1 issues from other.md: [P2, task]\n  hw-next: Next [P2, task]\n", []string{"hw-new", "hw-next"}},
 		{"single create without a title", "✓ Created issue: hw-a1b\n", []string{"hw-a1b"}},
 		{"hierarchical child id", "✓ Created issue: ci-root.1 — sub\n", []string{"ci-root.1"}},
 		{"json object", "{\n  \"id\": \"hw-a1b\",\n  \"title\": \"t\"\n}\n", []string{"hw-a1b"}},
@@ -268,13 +271,16 @@ func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("LABELS", "")
-	t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: First [P2, task]\n  demo-2: Second [P1, bug]")
+	t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	calls := strings.Join(fakeBdCalls(t, capture), "\n")
+	if strings.Contains(calls, "demo-old") {
+		t.Fatalf("title redirected owner stamping: %q", calls)
+	}
 	for _, want := range []string{"update --json demo-1 --add-label owner:citadel", "update --json demo-2 --add-label owner:citadel"} {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("calls = %q, want %q", calls, want)
@@ -323,5 +329,72 @@ func TestGcBdCreateStampsWhatBdReportedEvenOnFailure(t *testing.T) {
 	}
 	if calls := strings.Join(fakeBdCalls(t, capture), "\n"); !strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") {
 		t.Fatalf("calls = %q, want the reported bead labeled despite the failure", calls)
+	}
+}
+
+// Database overrides reach bd unchanged, but must never redirect the follow-up
+// owner write into the scope's default store using an unrelated local ID.
+func TestGcBdCreateDatabaseOverrideDoesNotStampDefaultStore(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		envKey string
+	}{
+		{"database before verb", []string{"--database", "other", "create", "t"}, ""},
+		{"database inline", []string{"create", "t", "--database=other"}, ""},
+		{"db before verb", []string{"--db", "other.db", "create", "t"}, ""},
+		{"db inline", []string{"create", "t", "--db=other.db"}, ""},
+		{"BEADS_DB", []string{"create", "t"}, "BEADS_DB"},
+		{"BD_DB", []string{"create", "t"}, "BD_DB"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			// Return a colliding local ID and record any follow-up read or write.
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, `#!/bin/sh
+printf '%s\n' "$*" >> "${CAPTURE_PATH}"
+printf '✓ Created issue: demo-1 — t\n'
+`)
+			t.Setenv("CAPTURE_PATH", capture)
+			if tt.envKey != "" {
+				t.Setenv(tt.envKey, "other.db")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := doBd(tt.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if len(calls) != 1 || calls[0] != strings.Join(tt.args, " ") {
+				t.Fatalf("bd calls = %q, want only the unchanged create argv", calls)
+			}
+			if !strings.Contains(stderr.String(), "owner label not applied") || !strings.Contains(stderr.String(), "database") {
+				t.Fatalf("stderr=%q, want owner-label database-selection notice", stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Created issue: demo-1") {
+				t.Fatalf("create output lost: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestBdOwnerLabelDatabaseOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+		want bool
+	}{
+		{"server database override", []string{"create", "t"}, []string{"BEADS_DOLT_SERVER_DATABASE=other"}, true},
+		{"projected empty override", []string{"create", "t"}, []string{"BEADS_DOLT_SERVER_DATABASE="}, false},
+		{"scope directory is not an override", []string{"create", "t"}, []string{"BEADS_DIR=/city/.beads"}, false},
+		{"description is not a flag", []string{"create", "t", "--description", "--database"}, nil, false},
+		{"positional is not a flag", []string{"create", "--", "--db=other"}, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOwnerLabelDatabaseOverride(tt.args, tt.env); got != tt.want {
+				t.Fatalf("database override = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

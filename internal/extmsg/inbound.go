@@ -163,6 +163,59 @@ func emitInboundDropped(deps InboundDeps, msg ExternalInboundMessage) {
 	})
 }
 
+// resolveAndRepairInboundBinding resolves an active binding and repairs its
+// transcript membership while holding the binding's conversation lock.
+func (s *bindingService) resolveAndRepairInboundBinding(ctx context.Context, ref ConversationRef, now time.Time) (*SessionBindingRecord, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, fmt.Errorf("resolving binding: %w", err)
+	}
+	ref, err := validateConversationRef(ref)
+	if err != nil {
+		return nil, fmt.Errorf("resolving binding: %w", err)
+	}
+
+	var binding *SessionBindingRecord
+	var repairErr error
+	err = withBindingLock(s.locks, ref, func() error {
+		var resolveErr error
+		binding, resolveErr = resolveActiveBindingLocked(ctx, s.store, s.delivery, s.transcript, ref, timeNow())
+		if resolveErr != nil || binding == nil {
+			return resolveErr
+		}
+		if err := overlayLiveSession(s.sessions, binding); err != nil {
+			return newSafeOperationError("resolve binding live session", err)
+		}
+		// An active binding must always have its transcript membership: the
+		// notify layer fans out over memberships, so a conversation whose
+		// membership record was lost (e.g. closed by a cleanup race) would
+		// otherwise accept, transcribe, and event every inbound while
+		// delivering it to nobody, forever (hq-ar4 recurrence). Holding the
+		// binding lock through this repair prevents a concurrent unbind or
+		// handoff from removing the binding and then having this stale repair
+		// recreate its membership.
+		_, err := s.transcript.ensureMembershipLocked(EnsureMembershipInput{
+			Caller:         Caller{Kind: CallerController, ID: "extmsg-inbound-repair"},
+			Conversation:   binding.Conversation,
+			SessionID:      bindingMembershipKey(*binding),
+			BackfillPolicy: MembershipBackfillSinceJoin,
+			Owner:          MembershipOwnerBinding,
+			Now:            now,
+		})
+		if err != nil {
+			repairErr = wrapTranscriptSyncError("ensure transcript membership for bound inbound", err)
+			return repairErr
+		}
+		return nil
+	})
+	if err != nil {
+		if repairErr != nil {
+			return nil, repairErr
+		}
+		return nil, fmt.Errorf("resolving binding: %w", err)
+	}
+	return binding, nil
+}
+
 // resolveInboundTarget resolves the delivery target for an inbound message and
 // records it on result: an existing binding first, then a group route, then the
 // configured default route. result is left unrouted when nothing matches. Both
@@ -175,33 +228,26 @@ func emitInboundDropped(deps InboundDeps, msg ExternalInboundMessage) {
 // there would resolve before group routing and shadow the room on every later
 // message.
 func resolveInboundTarget(ctx context.Context, deps InboundDeps, result *InboundResult, msg ExternalInboundMessage, now time.Time) error {
-	binding, err := deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
+	var binding *SessionBindingRecord
+	var err error
+	if service, ok := deps.Services.Bindings.(*bindingService); ok && service.transcript != nil {
+		binding, err = service.resolveAndRepairInboundBinding(ctx, msg.Conversation, now)
+	} else {
+		// Alternate BindingService implementations expose no shared-lock
+		// contract, so resolving is safe here but a separate repair would
+		// recreate stale membership across a concurrent unbind or handoff.
+		binding, err = deps.Services.Bindings.ResolveByConversation(ctx, msg.Conversation)
+		if err != nil {
+			return fmt.Errorf("resolving binding: %w", err)
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("resolving binding: %w", err)
+		return err
 	}
 	if binding != nil {
 		result.Binding = binding
 		result.TargetSessionID = binding.SessionID
 		result.TargetAgentName = binding.AgentName
-		// An active binding must always have its transcript membership: the
-		// notify layer fans out over memberships, so a conversation whose
-		// membership record was lost (e.g. closed by a cleanup race) would
-		// otherwise accept, transcribe, and event every inbound while
-		// delivering it to nobody, forever (hq-ar4 recurrence). Re-ensuring
-		// here is a no-op when the record is intact and repairs it when it is
-		// not. Failures propagate: transient store faults surface as
-		// retryable to the adapter, and corrupt membership state is already a
-		// permanent rejection on the bind path.
-		if _, err := deps.Services.Transcript.EnsureMembership(ctx, EnsureMembershipInput{
-			Caller:         Caller{Kind: CallerController, ID: "extmsg-inbound-repair"},
-			Conversation:   binding.Conversation,
-			SessionID:      bindingMembershipKey(*binding),
-			BackfillPolicy: MembershipBackfillSinceJoin,
-			Owner:          MembershipOwnerBinding,
-			Now:            now,
-		}); err != nil {
-			return wrapTranscriptSyncError("ensure transcript membership for bound inbound", err)
-		}
 	}
 
 	// No binding — try group routing.
