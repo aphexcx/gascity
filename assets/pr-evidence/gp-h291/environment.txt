@@ -1,0 +1,8 @@
+Fork base: 14270dec96aa9d5434fdab15731dcb9fb25ea0c0
+Upstream base: bb011fa7b48d24482291af02e7e688a9b44d05e4
+go version go1.26.6 darwin/arm64
+gtimeout: /opt/homebrew/bin/gtimeout
+timeout: /opt/homebrew/bin/timeout
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include
+CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+Both affected test functions exactly match upstream before the patch.

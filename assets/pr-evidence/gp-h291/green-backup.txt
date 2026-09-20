@@ -1,0 +1,28 @@
+=== RUN   TestBackupScriptSkipsOldDoltBeforeSync
+--- PASS: TestBackupScriptSkipsOldDoltBeforeSync (0.38s)
+=== RUN   TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite
+--- PASS: TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite (0.43s)
+=== RUN   TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound
+--- PASS: TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound (0.88s)
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/0
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number
+--- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout (1.19s)
+    --- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout/0 (0.60s)
+    --- PASS: TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number (0.58s)
+=== RUN   TestBackupScriptSkipsConcurrentRunBeforeBackupSync
+--- PASS: TestBackupScriptSkipsConcurrentRunBeforeBackupSync (0.30s)
+=== RUN   TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep
+--- PASS: TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep (0.39s)
+=== RUN   TestBackupScriptCountsFailedDatabasesByDatabase
+--- PASS: TestBackupScriptCountsFailedDatabasesByDatabase (0.38s)
+=== RUN   TestBackupScriptAutoConfiguresMissingBackupRemotes
+--- PASS: TestBackupScriptAutoConfiguresMissingBackupRemotes (0.26s)
+=== RUN   TestBackupScriptCountsFailedRemoteAutoConfiguration
+--- PASS: TestBackupScriptCountsFailedRemoteAutoConfiguration (0.41s)
+=== RUN   TestBackupScriptRetriesMarginalSyncFailure
+--- PASS: TestBackupScriptRetriesMarginalSyncFailure (0.23s)
+=== RUN   TestBackupScriptSurfacesSyncDiagnosticInEscalation
+--- PASS: TestBackupScriptSurfacesSyncDiagnosticInEscalation (0.40s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/bd/dolt	6.328s
