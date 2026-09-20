@@ -317,7 +317,8 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+# Mirrors hookClaimAssigneeIdentity (alias, then session id, then session name): bd 1.3.0 refuses a close whose actor differs from the claim's assignee; pool sessions carry an empty GC_ALIAS, so the dog closes as its session id.
+bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
 drain_ack_once # drain-ack before normal exit
 exit
 ```
