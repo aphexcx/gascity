@@ -1,0 +1,77 @@
+diff --git a/examples/gastown/maintenance_scripts_test.go b/examples/gastown/maintenance_scripts_test.go
+index ea769d99f..32523c76d 100644
+--- a/examples/gastown/maintenance_scripts_test.go
++++ b/examples/gastown/maintenance_scripts_test.go
+@@ -6983,0 +6984,2 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++		invalid     bool
++		wantHours   string
+@@ -6991,0 +6994,15 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++		{name: "minus zero", age: "-0", disabled: true},
++		{name: "minus zero hours", age: "-0h", disabled: true},
++		{name: "fractional zero hours", age: "0.0h", disabled: true},
++		{name: "compound zero", age: "0h0m", disabled: true},
++		{name: "zero milliseconds", age: "0ms", disabled: true},
++		{name: "zero microseconds", age: "0us", disabled: true},
++		{name: "zero nanoseconds", age: "0ns", disabled: true},
++		{name: "plus fractional zero hours", age: "+0.0h", disabled: true},
++		{name: "negative hours", age: "-1h", disabled: true, invalid: true},
++		{name: "fractional hours", age: "0.5h", disabled: true, invalid: true},
++		{name: "positive minutes", age: "30m", disabled: true, invalid: true},
++		{name: "compound positive", age: "1h30m", disabled: true, invalid: true},
++		{name: "uppercase zero hours", age: "0H", disabled: true, invalid: true},
++		{name: "invalid word", age: "abc", disabled: true, invalid: true},
++		{name: "days", age: "1d", disabled: true, invalid: true},
+@@ -6997,0 +7015,2 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++		{name: "plus positive hours", age: "+48h", wantHours: "48"},
++		{name: "bare positive hours", age: "48", wantHours: "48"},
+@@ -7038,0 +7058,6 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++			if tc.wantHours != "" {
++				want := "updated_at < DATE_SUB(NOW(), INTERVAL " + tc.wantHours + " HOUR)"
++				if !strings.Contains(string(queries), want) {
++					t.Errorf("want stale age query with %q, got:\n%s", want, queries)
++				}
++			}
+@@ -7042,0 +7068,6 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++			if tc.invalid {
++				want := "reaper: GC_REAPER_STALE_ISSUE_AGE=" + strings.TrimSpace(tc.age) + " is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n"
++				if strings.Count(text, want) != 1 {
++					t.Errorf("want exactly one invalid age warning %q, got:\n%s", want, text)
++				}
++			}
+diff --git a/internal/bootstrap/packs/core/README.md b/internal/bootstrap/packs/core/README.md
+index eeeb8d52e..7f888d261 100644
+--- a/internal/bootstrap/packs/core/README.md
++++ b/internal/bootstrap/packs/core/README.md
+@@ -32,3 +32,4 @@ The **event-driven nudge orders** are documented in detail below.
+-`GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or any zero duration
+-(case-insensitive, with surrounding whitespace ignored) to disable age-based
+-issue closes while retaining wisp cleanup, purge, and `expires_at` closes.
++`GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or any zero duration in Go's grammar
++(`0`, `0h`, `0.0h`, `-0`, `0h0m`, `0ms`) to disable age-based issue closes; a positive whole number of hours
++(`Nh` or `N`) sets the age; any other value disables age-based closes for that run and prints one line naming
++the value, never a guessed threshold. Wisp cleanup, purge, and `expires_at` closes remain active.
+diff --git a/internal/bootstrap/packs/core/assets/scripts/reaper.sh b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+index b7cbeefa9..943aea918 100755
+--- a/internal/bootstrap/packs/core/assets/scripts/reaper.sh
++++ b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+@@ -86,3 +86,3 @@ case "$STALE_ISSUE_AGE" in
+-        STALE_ZERO_VALUE="${STALE_ISSUE_AGE%[hHmMsS]}"
+-        STALE_ZERO_VALUE="${STALE_ZERO_VALUE#+}"
+-        if [[ "$STALE_ZERO_VALUE" =~ ^0+$ ]]; then
++        STALE_ZERO_RE='^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$'
++        STALE_HOURS_RE='^[+]?[0-9]+h?$'
++        if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then
+@@ -89,0 +90,2 @@ case "$STALE_ISSUE_AGE" in
++        elif [[ "$STALE_ISSUE_AGE" =~ $STALE_HOURS_RE ]]; then
++            STALE_AGE_H=$(duration_to_hours "${STALE_ISSUE_AGE#+}")
+@@ -91 +93,2 @@ case "$STALE_ISSUE_AGE" in
+-            STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
++            STALE_CLOSE_DISABLED=1
++            printf 'reaper: GC_REAPER_STALE_ISSUE_AGE=%s is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n' "$STALE_ISSUE_AGE" >&2
+diff --git a/internal/bootstrap/packs/core/orders/reaper.toml b/internal/bootstrap/packs/core/orders/reaper.toml
+index 1394f7d6c..845466792 100644
+--- a/internal/bootstrap/packs/core/orders/reaper.toml
++++ b/internal/bootstrap/packs/core/orders/reaper.toml
+@@ -4 +4 @@
+-# GC_REAPER_STALE_ISSUE_AGE defaults to 720h; off, never, or any zero duration (case-insensitive, trimmed) disables only age-based issue closes.
++# GC_REAPER_STALE_ISSUE_AGE defaults to 720h; set it to off, never, or any zero duration in Go's grammar (0, 0h, 0.0h, -0, 0h0m, 0ms) to disable age-based issue closes; a positive whole number of hours (Nh or N) sets the age; any other value disables age-based closes for that run and prints one line naming the value, never a guessed threshold.

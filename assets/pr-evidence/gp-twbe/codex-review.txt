@@ -1,0 +1,7 @@
+Codex independent QUICK review r1: CLEAN — no findings.
+Reviewed source diff against 9d78b47b7c10110f060b28404480c93805d63d99.
+Parser matches the required grammar and bypasses duration_to_hours for disabled values. Positive and invalid inputs retain the existing conversion path.
+Reviewer fresh checks: Bash 3.2 syntax and 26 parser cases, including +00S, whitespace, empty/invalid values, and 100,000 zeros, passed.
+Regression tests check stale-query suppression and retained TTL queries; four new zero cases failed before the fix and pass after it.
+Documentation and four-file source scope match requirements. Full package and hook results are recorded separately.
+Mayor gate and Fable read pending after handoff.

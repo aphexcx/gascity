@@ -1,0 +1,49 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+$ go test ./examples/gastown/... -run ^TestReaperStaleCloseDisabled$ -count=1 -v
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/zero_hours
+    maintenance_scripts_test.go:7037: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7046: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/zero_minutes
+    maintenance_scripts_test.go:7037: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7046: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0m)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/multiple_zeros
+    maintenance_scripts_test.go:7037: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7046: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=00)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/plus_zero
+    maintenance_scripts_test.go:7037: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7046: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=+0)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/one_hour
+=== RUN   TestReaperStaleCloseDisabled/default_duration
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- FAIL: TestReaperStaleCloseDisabled (13.07s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (1.36s)
+    --- PASS: TestReaperStaleCloseDisabled/never (0.96s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (0.92s)
+    --- FAIL: TestReaperStaleCloseDisabled/zero_hours (0.98s)
+    --- FAIL: TestReaperStaleCloseDisabled/zero_minutes (0.97s)
+    --- FAIL: TestReaperStaleCloseDisabled/multiple_zeros (0.94s)
+    --- FAIL: TestReaperStaleCloseDisabled/plus_zero (0.97s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (0.95s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (0.98s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (0.98s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (0.97s)
+    --- PASS: TestReaperStaleCloseDisabled/one_hour (0.99s)
+    --- PASS: TestReaperStaleCloseDisabled/default_duration (0.95s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.16s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/gastown	15.267s
+FAIL
+Exit: 1
+Wall seconds: 25.808

@@ -1,0 +1,1025 @@
+Base: 80b84951976bacddd6f6f184c47862a630865010 (production unchanged; new regression rows only)
+Command: go test ./examples/gastown/... -run ^TestReaperStaleCloseDisabled$ -count=1 -v
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+dolttest: startup sweep removed orphaned dolt store dir /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/gc-snapshot-dolt-root-1391252738
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/zero_hours
+=== RUN   TestReaperStaleCloseDisabled/zero_minutes
+=== RUN   TestReaperStaleCloseDisabled/multiple_zeros
+=== RUN   TestReaperStaleCloseDisabled/plus_zero
+=== RUN   TestReaperStaleCloseDisabled/minus_zero
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=-0)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/minus_zero_hours
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=-0h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/fractional_zero_hours
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0.0h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/compound_zero
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0h0m)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/zero_milliseconds
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0ms)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/zero_microseconds
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0us)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/zero_nanoseconds
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0ns)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/plus_fractional_zero_hours
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=+0.0h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/negative_hours
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=-1h is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=-1h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/fractional_hours
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=0.5h is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0.5h)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/positive_minutes
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=30m is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=30m)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/compound_positive
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=1h30m is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=1h30m)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/uppercase_zero_hours
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=0H is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0H)
+=== RUN   TestReaperStaleCloseDisabled/invalid_word
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=abc is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=abc)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/days
+    maintenance_scripts_test.go:7056: stale age query present = true, disabled = true
+    maintenance_scripts_test.go:7071: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=1d is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+    maintenance_scripts_test.go:7077: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=1d)", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/one_hour
+=== RUN   TestReaperStaleCloseDisabled/default_duration
+=== RUN   TestReaperStaleCloseDisabled/plus_positive_hours
+    maintenance_scripts_test.go:7061: want stale age query with "updated_at < DATE_SUB(NOW(), INTERVAL 48 HOUR)", got:
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW DATABASES
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW TABLES FROM `citydb` LIKE 'wisps'
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW COLUMNS FROM `citydb`.dependencies
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW COLUMNS FROM `citydb`.wisp_dependencies
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `citydb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type NOT IN ('message')
+                AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_wisp_root_candidates_base(id) AS (
+                    SELECT w.id FROM `citydb`.wisps w
+                    WHERE w.status IN ('open', 'hooked', 'in_progress')
+                    AND w.issue_type NOT IN ('message')
+                    AND COALESCE(w.assignee, '') = ''
+                    AND w.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')), '') IN ('', w.id)
+                ),
+                workflow_wisp_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_wisp_root_candidates_base base
+                    INNER JOIN `citydb`.wisps w ON w.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) = 'citydb'
+                        OR (
+                            'citydb' != ''
+                            AND 'citydb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM workflow_wisp_root_candidates_base base
+                LEFT JOIN workflow_wisp_root_candidates candidate ON candidate.id = base.id
+                WHERE candidate.id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_wisp_root_candidates_base(id) AS (
+                    SELECT w.id FROM `citydb`.wisps w
+                    WHERE w.status IN ('open', 'hooked', 'in_progress')
+                    AND w.issue_type NOT IN ('message')
+                    AND COALESCE(w.assignee, '') = ''
+                    AND w.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')), '') IN ('', w.id)
+                ),
+                workflow_wisp_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_wisp_root_candidates_base base
+                    INNER JOIN `citydb`.wisps w ON w.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) = 'citydb'
+                        OR (
+                            'citydb' != ''
+                            AND 'citydb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM (
+                SELECT DISTINCT root.id
+                FROM workflow_wisp_root_candidates root
+                LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
+                LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
+                WHERE live.root_id IS NULL
+                AND recent.root_id IS NULL
+                ) closeable_workflow_roots
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_issue_root_candidates_base(id) AS (
+                    SELECT i.id FROM `citydb`.issues i
+                    WHERE i.status IN ('open', 'hooked', 'in_progress')
+                    AND i.issue_type NOT IN ('message', 'epic')
+                    AND COALESCE(i.assignee, '') = ''
+                    AND i.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')), '') IN ('', i.id)
+                ),
+                workflow_issue_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_issue_root_candidates_base base
+                    INNER JOIN `citydb`.issues i ON i.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) = 'citydb'
+                        OR (
+                            'citydb' != ''
+                            AND 'citydb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM workflow_issue_root_candidates_base base
+                LEFT JOIN workflow_issue_root_candidates candidate ON candidate.id = base.id
+                WHERE candidate.id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_issue_root_candidates_base(id) AS (
+                    SELECT i.id FROM `citydb`.issues i
+                    WHERE i.status IN ('open', 'hooked', 'in_progress')
+                    AND i.issue_type NOT IN ('message', 'epic')
+                    AND COALESCE(i.assignee, '') = ''
+                    AND i.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')), '') IN ('', i.id)
+                ),
+                workflow_issue_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_issue_root_candidates_base base
+                    INNER JOIN `citydb`.issues i ON i.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) = 'citydb'
+                        OR (
+                            'citydb' != ''
+                            AND 'citydb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `citydb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `citydb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `citydb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT DISTINCT root.id
+                FROM workflow_issue_root_candidates root
+                LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
+                LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
+                WHERE live.root_id IS NULL
+                AND recent.root_id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `citydb`.wisps
+                WHERE status = 'closed'
+                AND closed_at < DATE_SUB(NOW(), INTERVAL 168 HOUR)
+                AND id NOT IN (
+                    SELECT DISTINCT d.depends_on_wisp_id FROM `citydb`.wisp_dependencies d
+                    INNER JOIN `citydb`.wisps child_wisp ON d.issue_id = child_wisp.id
+                    WHERE d.type IN ('parent-child', 'tracks', 'blocks')
+                    AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+                )
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT i.id
+                FROM `citydb`.issues i
+                INNER JOIN `citydb`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+                WHERE i.status IN ('open', 'in_progress')
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+                AND COALESCE(
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+                    STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
+                ) IS NULL
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT i.id
+                FROM `citydb`.issues i
+                INNER JOIN `citydb`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+                WHERE i.status IN ('open', 'in_progress')
+                AND COALESCE(i.assignee, '') = ''
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+                AND COALESCE(
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+                    STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
+                ) < UTC_TIMESTAMP()
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                    SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
+                    FROM `citydb`.issues
+                    WHERE status IN ('open', 'in_progress')
+                    AND updated_at < DATE_SUB(NOW(), INTERVAL +48 HOUR)
+                    AND priority > 1
+                    AND issue_type != 'epic'
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+                        OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+                    )
+                    AND id NOT IN (
+                        SELECT DISTINCT d.issue_id FROM `citydb`.dependencies d
+                        INNER JOIN `citydb`.issues i ON d.depends_on_issue_id = i.id
+                        WHERE i.status IN ('open', 'in_progress')
+                        UNION
+                        SELECT DISTINCT d.depends_on_issue_id FROM `citydb`.dependencies d
+                        INNER JOIN `citydb`.issues i ON d.issue_id = i.id
+                        WHERE i.status IN ('open', 'in_progress')
+                    )
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `citydb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type NOT IN ('message')
+                AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `citydb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type = 'message'
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW TABLES FROM `rigdb` LIKE 'wisps'
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW COLUMNS FROM `rigdb`.dependencies
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q SHOW COLUMNS FROM `rigdb`.wisp_dependencies
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `rigdb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type NOT IN ('message')
+                AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_wisp_root_candidates_base(id) AS (
+                    SELECT w.id FROM `rigdb`.wisps w
+                    WHERE w.status IN ('open', 'hooked', 'in_progress')
+                    AND w.issue_type NOT IN ('message')
+                    AND COALESCE(w.assignee, '') = ''
+                    AND w.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')), '') IN ('', w.id)
+                ),
+                workflow_wisp_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_wisp_root_candidates_base base
+                    INNER JOIN `rigdb`.wisps w ON w.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) = 'rigdb'
+                        OR (
+                            'citydb' != ''
+                            AND 'rigdb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM workflow_wisp_root_candidates_base base
+                LEFT JOIN workflow_wisp_root_candidates candidate ON candidate.id = base.id
+                WHERE candidate.id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_wisp_root_candidates_base(id) AS (
+                    SELECT w.id FROM `rigdb`.wisps w
+                    WHERE w.status IN ('open', 'hooked', 'in_progress')
+                    AND w.issue_type NOT IN ('message')
+                    AND COALESCE(w.assignee, '') = ''
+                    AND w.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_bead_id"')), '') IN ('', w.id)
+                ),
+                workflow_wisp_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_wisp_root_candidates_base base
+                    INNER JOIN `rigdb`.wisps w ON w.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) = 'rigdb'
+                        OR (
+                            'citydb' != ''
+                            AND 'rigdb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_wisp_root_candidates root
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM (
+                SELECT DISTINCT root.id
+                FROM workflow_wisp_root_candidates root
+                LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
+                LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
+                WHERE live.root_id IS NULL
+                AND recent.root_id IS NULL
+                ) closeable_workflow_roots
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_issue_root_candidates_base(id) AS (
+                    SELECT i.id FROM `rigdb`.issues i
+                    WHERE i.status IN ('open', 'hooked', 'in_progress')
+                    AND i.issue_type NOT IN ('message', 'epic')
+                    AND COALESCE(i.assignee, '') = ''
+                    AND i.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')), '') IN ('', i.id)
+                ),
+                workflow_issue_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_issue_root_candidates_base base
+                    INNER JOIN `rigdb`.issues i ON i.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) = 'rigdb'
+                        OR (
+                            'citydb' != ''
+                            AND 'rigdb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT COUNT(*) FROM workflow_issue_root_candidates_base base
+                LEFT JOIN workflow_issue_root_candidates candidate ON candidate.id = base.id
+                WHERE candidate.id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q         WITH RECURSIVE workflow_issue_root_candidates_base(id) AS (
+                    SELECT i.id FROM `rigdb`.issues i
+                    WHERE i.status IN ('open', 'hooked', 'in_progress')
+                    AND i.issue_type NOT IN ('message', 'epic')
+                    AND COALESCE(i.assignee, '') = ''
+                    AND i.created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.kind"')) = 'workflow'
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.formula_contract"')) = 'graph.v2'
+                    )
+                    AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_bead_id"')), '') IN ('', i.id)
+                ),
+                workflow_issue_root_candidates(id) AS (
+                    SELECT base.id
+                    FROM workflow_issue_root_candidates_base base
+                    INNER JOIN `rigdb`.issues i ON i.id = base.id
+                    WHERE (
+                        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')), '') = ''
+                        OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) = 'rigdb'
+                        OR (
+                            'citydb' != ''
+                            AND 'rigdb' = 'citydb'
+                            AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+                        )
+                    )
+                ),
+                workflow_descendants(root_id, id) AS (
+                    SELECT root.id, child_wisp.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.wisps child_wisp
+                        ON child_wisp.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_issue.id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.issues child_issue
+                        ON child_issue.id != root.id
+                        AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT root.id, child_dep.issue_id
+                    FROM workflow_issue_root_candidates root
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
+                        AND child_dep.issue_id != root.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.wisp_dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                    UNION
+                    SELECT parent.root_id, child_dep.issue_id
+                    FROM workflow_descendants parent
+                    INNER JOIN `rigdb`.dependencies child_dep
+                        ON child_dep.type IN ('parent-child', 'tracks', 'blocks')
+                        AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = parent.id
+                        AND child_dep.issue_id != parent.id
+                ),
+                roots_with_live_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')
+                ),
+                roots_with_recent_descendants AS (
+                    SELECT DISTINCT descendant.root_id
+                    FROM workflow_descendants descendant
+                    LEFT JOIN `rigdb`.wisps descendant_wisp ON descendant_wisp.id = descendant.id
+                    LEFT JOIN `rigdb`.issues descendant_issue ON descendant_issue.id = descendant.id
+                    WHERE COALESCE(
+                        descendant_wisp.updated_at,
+                        descendant_wisp.created_at,
+                        descendant_issue.updated_at,
+                        descendant_issue.created_at
+                    ) >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                )
+                SELECT DISTINCT root.id
+                FROM workflow_issue_root_candidates root
+                LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
+                LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
+                WHERE live.root_id IS NULL
+                AND recent.root_id IS NULL
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `rigdb`.wisps
+                WHERE status = 'closed'
+                AND closed_at < DATE_SUB(NOW(), INTERVAL 168 HOUR)
+                AND id NOT IN (
+                    SELECT DISTINCT d.depends_on_wisp_id FROM `rigdb`.wisp_dependencies d
+                    INNER JOIN `rigdb`.wisps child_wisp ON d.issue_id = child_wisp.id
+                    WHERE d.type IN ('parent-child', 'tracks', 'blocks')
+                    AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+                )
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT i.id
+                FROM `rigdb`.issues i
+                INNER JOIN `rigdb`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+                WHERE i.status IN ('open', 'in_progress')
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+                AND COALESCE(
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+                    STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
+                ) IS NULL
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT i.id
+                FROM `rigdb`.issues i
+                INNER JOIN `rigdb`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
+                WHERE i.status IN ('open', 'in_progress')
+                AND COALESCE(i.assignee, '') = ''
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) IS NOT NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')) != ''
+                AND COALESCE(
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%s.%fZ'),
+                    STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
+                    STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
+                ) < UTC_TIMESTAMP()
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                    SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
+                    FROM `rigdb`.issues
+                    WHERE status IN ('open', 'in_progress')
+                    AND updated_at < DATE_SUB(NOW(), INTERVAL +48 HOUR)
+                    AND priority > 1
+                    AND issue_type != 'epic'
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) IS NULL
+                        OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at')) = ''
+                    )
+                    AND id NOT IN (
+                        SELECT DISTINCT d.issue_id FROM `rigdb`.dependencies d
+                        INNER JOIN `rigdb`.issues i ON d.depends_on_issue_id = i.id
+                        WHERE i.status IN ('open', 'in_progress')
+                        UNION
+                        SELECT DISTINCT d.depends_on_issue_id FROM `rigdb`.dependencies d
+                        INNER JOIN `rigdb`.issues i ON d.issue_id = i.id
+                        WHERE i.status IN ('open', 'in_progress')
+                    )
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `rigdb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type NOT IN ('message')
+                AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q
+                SELECT COUNT(*) FROM `rigdb`.wisps
+                WHERE status IN ('open', 'hooked', 'in_progress')
+                AND issue_type = 'message'
+
+        --host 127.0.0.1 --port 3307 --user root --no-tls sql -r csv -q USE `citydb`; SELECT url FROM dolt_backups;
+=== RUN   TestReaperStaleCloseDisabled/bare_positive_hours
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- FAIL: TestReaperStaleCloseDisabled (28.08s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (0.93s)
+    --- PASS: TestReaperStaleCloseDisabled/never (0.87s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (0.88s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_hours (0.92s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_minutes (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/multiple_zeros (0.87s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_zero (0.82s)
+    --- FAIL: TestReaperStaleCloseDisabled/minus_zero (0.83s)
+    --- FAIL: TestReaperStaleCloseDisabled/minus_zero_hours (0.87s)
+    --- FAIL: TestReaperStaleCloseDisabled/fractional_zero_hours (0.98s)
+    --- FAIL: TestReaperStaleCloseDisabled/compound_zero (0.97s)
+    --- FAIL: TestReaperStaleCloseDisabled/zero_milliseconds (0.94s)
+    --- FAIL: TestReaperStaleCloseDisabled/zero_microseconds (0.99s)
+    --- FAIL: TestReaperStaleCloseDisabled/zero_nanoseconds (0.99s)
+    --- FAIL: TestReaperStaleCloseDisabled/plus_fractional_zero_hours (1.01s)
+    --- FAIL: TestReaperStaleCloseDisabled/negative_hours (0.99s)
+    --- FAIL: TestReaperStaleCloseDisabled/fractional_hours (0.96s)
+    --- FAIL: TestReaperStaleCloseDisabled/positive_minutes (0.93s)
+    --- FAIL: TestReaperStaleCloseDisabled/compound_positive (0.90s)
+    --- FAIL: TestReaperStaleCloseDisabled/uppercase_zero_hours (0.95s)
+    --- FAIL: TestReaperStaleCloseDisabled/invalid_word (0.98s)
+    --- FAIL: TestReaperStaleCloseDisabled/days (0.93s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (0.93s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (0.84s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (0.91s)
+    --- PASS: TestReaperStaleCloseDisabled/one_hour (0.94s)
+    --- PASS: TestReaperStaleCloseDisabled/default_duration (0.92s)
+    --- FAIL: TestReaperStaleCloseDisabled/plus_positive_hours (1.01s)
+    --- PASS: TestReaperStaleCloseDisabled/bare_positive_hours (1.04s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.15s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/gastown	31.393s
+FAIL
+Exit: 1; wall seconds: 36.360

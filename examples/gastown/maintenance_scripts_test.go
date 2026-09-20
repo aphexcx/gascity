@@ -6981,14 +6981,39 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
 		dryRun      string
 		disabled    bool
 		noDatabases bool
+		invalid     bool
+		wantHours   string
 	}{
 		{name: "off dry run", age: "off", dryRun: "1", disabled: true},
 		{name: "never", age: "never", disabled: true},
 		{name: "zero", age: "0", disabled: true},
+		{name: "zero hours", age: "0h", disabled: true},
+		{name: "zero minutes", age: "0m", disabled: true},
+		{name: "multiple zeros", age: "00", disabled: true},
+		{name: "plus zero", age: "+0", disabled: true},
+		{name: "minus zero", age: "-0", disabled: true},
+		{name: "minus zero hours", age: "-0h", disabled: true},
+		{name: "fractional zero hours", age: "0.0h", disabled: true},
+		{name: "compound zero", age: "0h0m", disabled: true},
+		{name: "zero milliseconds", age: "0ms", disabled: true},
+		{name: "zero microseconds", age: "0us", disabled: true},
+		{name: "zero nanoseconds", age: "0ns", disabled: true},
+		{name: "plus fractional zero hours", age: "+0.0h", disabled: true},
+		{name: "negative hours", age: "-1h", disabled: true, invalid: true},
+		{name: "fractional hours", age: "0.5h", disabled: true, invalid: true},
+		{name: "positive minutes", age: "30m", disabled: true, invalid: true},
+		{name: "compound positive", age: "1h30m", disabled: true, invalid: true},
+		{name: "uppercase zero hours", age: "0H", disabled: true, invalid: true},
+		{name: "invalid word", age: "abc", disabled: true, invalid: true},
+		{name: "days", age: "1d", disabled: true, invalid: true},
 		{name: "trimmed mixed case off", age: " \tOfF \r\n", disabled: true},
 		{name: "trimmed mixed case never", age: " \tNeVeR \r\n", disabled: true},
 		{name: "trimmed zero", age: " \t0 \r\n", disabled: true},
 		{name: "positive duration", age: "48h"},
+		{name: "one hour", age: "1h"},
+		{name: "default duration", age: "720h"},
+		{name: "plus positive hours", age: "+48h", wantHours: "48"},
+		{name: "bare positive hours", age: "48", wantHours: "48"},
 		{name: "off without databases", age: "off", dryRun: "1", disabled: true, noDatabases: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -7030,10 +7055,22 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
 			if got := strings.Contains(string(queries), "updated_at < DATE_SUB"); got == tc.disabled {
 				t.Errorf("stale age query present = %v, disabled = %v", got, tc.disabled)
 			}
+			if tc.wantHours != "" {
+				want := "updated_at < DATE_SUB(NOW(), INTERVAL " + tc.wantHours + " HOUR)"
+				if !strings.Contains(string(queries), want) {
+					t.Errorf("want stale age query with %q, got:\n%s", want, queries)
+				}
+			}
 			if !tc.noDatabases && !strings.Contains(string(queries), "STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at'))") {
 				t.Error("disabling stale closes must retain the expires_at query")
 			}
 			text := string(out)
+			if tc.invalid {
+				want := "reaper: GC_REAPER_STALE_ISSUE_AGE=" + strings.TrimSpace(tc.age) + " is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n"
+				if strings.Count(text, want) != 1 {
+					t.Errorf("want exactly one invalid age warning %q, got:\n%s", want, text)
+				}
+			}
 			if tc.disabled {
 				want := "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=" + strings.TrimSpace(tc.age) + ")"
 				if strings.Count(text, want) != 1 {

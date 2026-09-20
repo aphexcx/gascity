@@ -1,0 +1,5 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+$ bash -n internal/bootstrap/packs/core/assets/scripts/reaper.sh
+
+Exit: 0
+Wall seconds: 0.005

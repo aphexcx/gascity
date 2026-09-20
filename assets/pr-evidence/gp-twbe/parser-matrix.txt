@@ -1,0 +1,29 @@
+Parser boundary matrix extracted from the actual script; conversion stub marks every call.
+PASS 'off': 1|
+PASS ' NeVeR\t': 1|
+PASS '0': 1|
+PASS '0h': 1|
+PASS '0m': 1|
+PASS '0s': 1|
+PASS '00': 1|
+PASS '+0': 1|
+PASS '+00H': 1|
+PASS ' \t+000M\r\n': 1|
+PASS '+000s': 1|
+PASS '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000': 1|
+PASS '1h': 0|CONVERT:1h
+PASS '720h': 0|CONVERT:720h
+PASS '48h': 0|CONVERT:48h
+PASS '10h': 0|CONVERT:10h
+PASS '01h': 0|CONVERT:01h
+PASS '+01h': 0|CONVERT:+01h
+PASS '0.0h': 0|CONVERT:0.0h
+PASS '-0h': 0|CONVERT:-0h
+PASS '+': 0|CONVERT:+
+PASS 'h': 0|CONVERT:h
+PASS '++0': 0|CONVERT:++0
+PASS '0hh': 0|CONVERT:0hh
+PASS '0ms': 0|CONVERT:0ms
+PASS '0 h': 0|CONVERT:0 h
+PASS '': 0|CONVERT:
+27 cases passed on /bin/bash; GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)

@@ -52,7 +52,7 @@ maintenance_done() {
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
-# off, never, or 0 (case-insensitive, trimmed) disables age-based issue closes.
+# off, never, or any zero duration (case-insensitive, trimmed) disables age-based issue closes.
 STALE_ISSUE_AGE="${STALE_ISSUE_AGE#"${STALE_ISSUE_AGE%%[![:space:]]*}"}"
 STALE_ISSUE_AGE="${STALE_ISSUE_AGE%"${STALE_ISSUE_AGE##*[![:space:]]}"}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
@@ -81,8 +81,19 @@ MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
 PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
 STALE_CLOSE_DISABLED=0
 case "$STALE_ISSUE_AGE" in
-    [oO][fF][fF]|[nN][eE][vV][eE][rR]|0) STALE_CLOSE_DISABLED=1 ;;
-    *) STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE") ;;
+    [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;
+    *)
+        STALE_ZERO_RE='^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$'
+        STALE_HOURS_RE='^[+]?[0-9]+h?$'
+        if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then
+            STALE_CLOSE_DISABLED=1
+        elif [[ "$STALE_ISSUE_AGE" =~ $STALE_HOURS_RE ]]; then
+            STALE_AGE_H=$(duration_to_hours "${STALE_ISSUE_AGE#+}")
+        else
+            STALE_CLOSE_DISABLED=1
+            printf 'reaper: GC_REAPER_STALE_ISSUE_AGE=%s is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n' "$STALE_ISSUE_AGE" >&2
+        fi
+        ;;
 esac
 
 METADATA_DB_RESULT=""
