@@ -1,0 +1,9 @@
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+    maintenance_scripts_test.go:7040: want exactly one disabled summary "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=off)", got:
+    maintenance_scripts_test.go:7043: disabled stale close changed counters:
+--- FAIL: TestReaperStaleCloseDisabled (0.32s)
+    --- FAIL: TestReaperStaleCloseDisabled/off_without_databases (0.32s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/gastown	7.417s
+FAIL
