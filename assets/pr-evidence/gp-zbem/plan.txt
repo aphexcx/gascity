@@ -10,8 +10,8 @@ Base: integration 5a85171d8a61df8a1460b487738bb396494bb94a, PR #30 squash.
 - [x] Add .0h and 0µs doc examples plus the same missing-unit sentence in both docs.
 - [x] Run focused GREEN, 59-case parser matrix on Bash 3.2.57 and 5.3.20, syntax checks, and full gastown package.
 - [x] Obtain independent Codex QUICK review (r1 CLEAN).
-- [ ] Run required commit/push gates.
-- [ ] Publish a draft fork PR against integration, send READY, record metadata, detach, close and drain.
+- [x] Run required commit/push gates (10/10 push jobs, ordinary push succeeded).
+Lifecycle handoff (draft PR, READY, metadata, detach, close and drain) is recorded by the PR and GC bead/mail state.
 
 Spec resolution: Go accepts bare 0 (optional sign), but rejects bare 00, .0, 0.0 and 0.
 The existing reaper accepts repeated bare integer zeros under its bare-hours syntax.

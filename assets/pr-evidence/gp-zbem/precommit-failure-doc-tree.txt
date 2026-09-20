@@ -1,5 +1,5 @@
 CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib git commit -F ../commit-message.txt
-lint-changed: ./assets/pr-evidence/gp-zbem ./examples/gastown 
+lint-changed: ./assets/pr-evidence/gp-zbem ./examples/gastown
 0 issues.
 Generated: docs/reference/cli.md
 Generated:

@@ -32,5 +32,9 @@ Independent Codex QUICK r1: CLEAN. Source commit: fe71f5450b356a40c255e00f5d6127
 Pre-commit: lint, codegen, vet, and doc-sync pass. The first attempt failed only because
 new Markdown evidence made assets an undocumented doc-tree root; evidence now uses .txt
 without changing the doc-tree policy. Both attempt transcripts are retained.
-Push-gate results will be recorded before handoff.
+Required ordinary push gate passed 10/10 jobs on 4cbfb639582d2936744cd15f411d191a3c68dc63, wall 1816.423s.
+LOCAL_TEST_JOBS=2 and PUSH_GATE_MAX_CONCURRENT=2; no gate bypass or retry.
+The subsequent commit records evidence only; reviewed source is unchanged.
 The upstream twin remains held; this branch targets a draft fork PR only.
+
+Captured pre-commit line-end whitespace is normalized for git diff --check; all messages and statuses are retained.
