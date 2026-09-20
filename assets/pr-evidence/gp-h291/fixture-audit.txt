@@ -1,0 +1,43 @@
+Timeout fixture audit — gp-h291
+
+Search: rg -n 'timeout' examples/bd/dolt/
+Full pre-change hit list: timeout-hits-before.txt. Every hit is classified below.
+
+Touched (dog_exec_scripts_test.go only):
+- TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound: replace inline timeout spy with writeRecordingTimeoutSpy.
+- TestBackupScriptRejectsUnusableOffsiteTimeout (0 and not-a-number): same helper.
+- New helper writes the identical original shell body as gtimeout AND timeout. It keeps the timeout log prefix, optional --kill-after=2 removal, seconds removal, and exec forwarding. All existing assertions are unchanged.
+
+Untouched test hits:
+- dog_exec_scripts_test.go: timing-budget comment, backup-order timeout assertion, configured/invalid-bound assertions, and read_timeout_millis assertion are not additional timeout executable fixtures.
+- pull_test.go: writeRecordingGtimeout already shadows runtime.sh's preferred executable. Its users TestPullTimeoutKillsItsServerSideSession and TestPullTimeoutLeadingZerosAreCanonical remain unchanged. Other hits are timeout input/exit-code assertions or explanatory comments.
+- pull_conflicts_test.go: runPullConflictScriptBounded uses writeRecordingGtimeout; remaining hits name retrytimeout scenarios or the log assertion.
+- sync_ffclassify_test.go: TestSyncFetchBoundReachesTheFetch already uses writeRecordingGtimeout. All other hits are input validation, SQL/session-lock timeout values, synthetic Dolt exit 124/137, assertions, or comments, not timeout spies.
+- doctor_test.go: doctorSandbox replaces PATH completely; it symlinks host timeout or gtimeout as timeout, or falls back to python3. An ambient gtimeout cannot enter the sandbox. No recording spy.
+- health_test.go: four capability checks accept either actual timeout executable; tests exercise real wall-clock bounds, not recording spies. The remaining hit explains that bound.
+- runtime_bounded_test.go: deliberately isolated PATH exposes python3 and sh only, exercising the Python fallback. All hits describe that scenario or assert its timeout result; no timeout spy.
+- sync_test.go: timeout input/exit-code assertions and comments; the no-mechanism marker test injects a Dolt exit 124 with marker text and verifies replay. It does not install a timeout spy. Explicitly out of scope.
+
+All non-test hits are out of scope: production runtime/backup/cleanup/compact/health/pull/sync/doctor scripts, agent/order TOML timeout settings, and remote-sync documentation. No production files changed.
+
+Pre-change census:
+- examples/bd/dolt/agents/dog/agent.toml: 1 hits
+- examples/bd/dolt/assets/scripts/mol-dog-backup.sh: 8 hits
+- examples/bd/dolt/assets/scripts/runtime.sh: 18 hits
+- examples/bd/dolt/commands/cleanup/run.sh: 2 hits
+- examples/bd/dolt/commands/compact/run.sh: 13 hits
+- examples/bd/dolt/commands/health/run.sh: 1 hits
+- examples/bd/dolt/commands/pull/run.sh: 14 hits
+- examples/bd/dolt/commands/sync/run.sh: 30 hits
+- examples/bd/dolt/docs/remote-sync-single-flight.md: 1 hits
+- examples/bd/dolt/doctor/check-dolt/run.sh: 9 hits
+- examples/bd/dolt/doctor_test.go: 7 hits
+- examples/bd/dolt/dog_exec_scripts_test.go: 20 hits
+- examples/bd/dolt/health_test.go: 13 hits
+- examples/bd/dolt/orders/mol-dog-backup.toml: 3 hits
+- examples/bd/dolt/orders/mol-dog-compactor.toml: 1 hits
+- examples/bd/dolt/pull_conflicts_test.go: 6 hits
+- examples/bd/dolt/pull_test.go: 16 hits
+- examples/bd/dolt/runtime_bounded_test.go: 9 hits
+- examples/bd/dolt/sync_ffclassify_test.go: 24 hits
+- examples/bd/dolt/sync_test.go: 14 hits

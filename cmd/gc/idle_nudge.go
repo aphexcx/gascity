@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -86,6 +88,7 @@ func nudgeStalledPoolClaims(
 	claimWorkStoreRefs []string,
 	now time.Time,
 	stdout io.Writer,
+	refusals *claimRefusalLog,
 ) {
 	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
@@ -100,7 +103,7 @@ func nudgeStalledPoolClaims(
 	// so this predicate carries its own store-scoped snapshot of the work.
 	runNudgeBackstop(sp, store, sessionBeads, now, stdout, "idle-claim-nudge", poolClaimBackstop{
 		cfg:  cfg,
-		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
+		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs, federationIdentity(cfg), now, refusals),
 	})
 }
 
@@ -126,6 +129,7 @@ func nudgeStalledPoolContinuations(
 	snapshotPartial bool,
 	now time.Time,
 	stdout io.Writer,
+	refusals *claimRefusalLog,
 ) {
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return
@@ -141,6 +145,8 @@ func nudgeStalledPoolContinuations(
 		stdout,
 		"continuation-claim-nudge",
 		poolContinuationBackstop{
+			now:        now,
+			refusals:   refusals,
 			cfg:        cfg,
 			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
 		},
@@ -160,6 +166,8 @@ type poolClaimBackstop struct {
 // step. The snapshot is keyed by the session bead's durable ID, not by a
 // mutable alias or runtime name.
 type poolContinuationBackstop struct {
+	now        time.Time
+	refusals   *claimRefusalLog
 	cfg        *config.City
 	candidates poolContinuationCandidateSnapshot
 }
@@ -236,6 +244,13 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
+	if ok, reason := federation.MayClaim(current.Labels, federationIdentity(p.cfg)); !ok {
+		if p.refusals.shouldLog(p.now, storeScopedBeadKey{StoreRef: target.StoreRef, ID: current.ID}, reason) {
+			log.Printf("continuation-claim-nudge: %s", federation.ClaimRefusalLine(current.ID, reason))
+		}
+		return backstopResolutionClear
+	}
+
 	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
 	// proved for this row, not the leg it was read from: inside a class binding a
 	// rig-scoped workflow's steps carry gc.root_store_ref=rig:<name> (ga-erfca).
@@ -297,6 +312,8 @@ type continuationCandidateIdentity struct {
 	Assignee   string
 }
 
+// newPoolContinuationCandidateSnapshot assigns the already owner-fenced
+// selector output to live sessions. Delivery revalidates labels from the store.
 func newPoolContinuationCandidateSnapshot(
 	sessionBeads []beads.Bead,
 	candidates []ContinuationClaimCandidate,
@@ -454,17 +471,27 @@ type idleClaimWorkSnapshot struct {
 	byID    map[string][]storeScopedBeadKey
 }
 
-func newIdleClaimWorkSnapshot(work []beads.Bead, storeRefs []string) idleClaimWorkSnapshot {
+func newIdleClaimWorkSnapshot(work []beads.Bead, storeRefs []string, identity string, now time.Time, refusals *claimRefusalLog) idleClaimWorkSnapshot {
 	snapshot := idleClaimWorkSnapshot{
 		byScope: make(map[storeScopedBeadKey]beads.Bead, len(work)),
 		byID:    make(map[string][]storeScopedBeadKey, len(work)),
 	}
+	refused := make(map[storeScopedBeadKey]bool)
 	for i, bead := range work {
 		storeRef := ""
 		if i < len(storeRefs) {
 			storeRef = normalizeIdleClaimStoreRef(storeRefs[i])
 		}
 		key := storeScopedBeadKey{StoreRef: storeRef, ID: bead.ID}
+		if ok, reason := federation.MayClaim(bead.Labels, identity); !ok {
+			if !refused[key] {
+				refused[key] = true
+				if refusals.shouldLog(now, key, reason) {
+					log.Printf("idle-claim-nudge: %s", federation.ClaimRefusalLine(bead.ID, reason))
+				}
+			}
+			continue
+		}
 		if _, exists := snapshot.byScope[key]; !exists {
 			snapshot.byID[bead.ID] = append(snapshot.byID[bead.ID], key)
 		}

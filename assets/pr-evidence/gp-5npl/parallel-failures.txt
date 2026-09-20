@@ -1,0 +1,7 @@
+unit-cmd-gc-3-of-6
+--- FAIL: TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey (2.00s)
+    init_provider_readiness_test.go:1797: initRunDoltConfigGet error = dolt config probe timed out after 2s, want missing-key sentinel
+
+unit-cmd-gc-4-of-6
+--- FAIL: TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds (5.42s)
+    supervisor_systemd_delegate_test.go:1766: exitCode = 1, want 0; stdout="Supervisor: pid=36112 exe=/tmp/gc-test-supervisor buildID=old-build-id started=just now\nDrift detected:\n  binary: local=new-build-id supervisor=old-build-id\nRestarting supervisor (systemd-delegated)...\n" stderr="error: supervisor was not replaced by 'systemctl try-restart gascity-prod.service': PID 36112 still serving build old-build-id; it is not managed by delegated unit gascity-prod.service — stop it with 'gc supervisor stop' (GC_SUPERVISOR_SYSTEMD_UNIT unset), or fix the delegation env\n"

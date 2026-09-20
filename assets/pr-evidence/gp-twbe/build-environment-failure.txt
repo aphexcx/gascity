@@ -1,0 +1,7 @@
+$ go test ./examples/gastown/... -run ^TestReaperStaleCloseDisabled$ -count=1 -v
+# github.com/dolthub/go-icu-regex/internal/icu
+file.cpp:3:10: fatal error: 'unicode/regex.h' file not found
+FAIL	github.com/gastownhall/gascity/examples/gastown [build failed]
+FAIL
+Exit: 1
+Wall seconds: 2.271

@@ -1,0 +1,19 @@
+Untouched integration base: 9d78b47b7c10110f060b28404480c93805d63d99
+Command (three separate solo processes): GC_FAST_UNIT=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=<scripts/test-gitconfig-path> go test ./cmd/gc -run ^TestStopManagedCityForcesCleanupAfterTimeout$ -count=1 -v
+Darwin ICU CGO flags supplied. Original test and 500 ms assertion unchanged.
+Base run 1; exit=0; wall seconds=25.729
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.608s
+Base run 2; exit=0; wall seconds=10.775
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.432s
+Base run 3; exit=0; wall seconds=10.788
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.579s
+Base solo outcomes: 3/3 passed; 0 failed.

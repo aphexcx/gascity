@@ -1,0 +1,38 @@
+=== RUN   TestBackupScriptSkipsOldDoltBeforeSync
+--- PASS: TestBackupScriptSkipsOldDoltBeforeSync (0.51s)
+=== RUN   TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite
+--- PASS: TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite (0.47s)
+=== RUN   TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound
+    dog_exec_scripts_test.go:5319: offsite rsync did not use GC_BACKUP_OFFSITE_TIMEOUT=17:
+        timeout 30 gc mail send human -s Dolt backup: offsite publication failed [MEDIUM] -m Local backup succeeded (1/1 databases) but publication to /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound164150868/001/offsite did not.
+        Status: failed. Bound: 17s (raise with GC_BACKUP_OFFSITE_TIMEOUT).
+        Raising it past the run's remaining budget also needs timeout raised in
+        examples/bd/dolt/orders/mol-dog-backup.toml, or the controller kills this run
+        mid-rsync and this escalation never fires.
+        Until this clears, the only copy of these databases is on this host.
+--- FAIL: TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound (0.71s)
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/0
+    dog_exec_scripts_test.go:5379: read timeout log: open /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/TestBackupScriptRejectsUnusableOffsiteTimeout02426392358/002/timeout.log: no such file or directory
+=== RUN   TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number
+    dog_exec_scripts_test.go:5379: read timeout log: open /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/TestBackupScriptRejectsUnusableOffsiteTimeoutnot-a-number3867949964/002/timeout.log: no such file or directory
+--- FAIL: TestBackupScriptRejectsUnusableOffsiteTimeout (0.86s)
+    --- FAIL: TestBackupScriptRejectsUnusableOffsiteTimeout/0 (0.43s)
+    --- FAIL: TestBackupScriptRejectsUnusableOffsiteTimeout/not-a-number (0.43s)
+=== RUN   TestBackupScriptSkipsConcurrentRunBeforeBackupSync
+--- PASS: TestBackupScriptSkipsConcurrentRunBeforeBackupSync (0.41s)
+=== RUN   TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep
+--- PASS: TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep (0.39s)
+=== RUN   TestBackupScriptCountsFailedDatabasesByDatabase
+--- PASS: TestBackupScriptCountsFailedDatabasesByDatabase (0.43s)
+=== RUN   TestBackupScriptAutoConfiguresMissingBackupRemotes
+--- PASS: TestBackupScriptAutoConfiguresMissingBackupRemotes (0.30s)
+=== RUN   TestBackupScriptCountsFailedRemoteAutoConfiguration
+--- PASS: TestBackupScriptCountsFailedRemoteAutoConfiguration (0.43s)
+=== RUN   TestBackupScriptRetriesMarginalSyncFailure
+--- PASS: TestBackupScriptRetriesMarginalSyncFailure (0.26s)
+=== RUN   TestBackupScriptSurfacesSyncDiagnosticInEscalation
+--- PASS: TestBackupScriptSurfacesSyncDiagnosticInEscalation (0.40s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/bd/dolt	6.159s
+FAIL

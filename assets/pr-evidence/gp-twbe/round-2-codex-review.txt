@@ -1,0 +1,7 @@
+Independent Codex QUICK r1 (gpt-6-astra): CLEAN, no blocking findings.
+Reviewed current four-source-file delta against 80b84951976bacddd6f6f184c47862a630865010, before commit.
+The arm uses the exact prescribed regexes with unquoted variable RHS; plus normalization is confined to the stale arm. Invalid values disable and emit the exact stderr warning before queries. Shared duration_to_hours is unchanged.
+All 14 existing rows are unchanged; eight zero, seven invalid, and two positive rows are added. Invalid warnings are counted exactly once, both positive additions assert INTERVAL 48 HOUR, and TTL assertions remain.
+Both doc sentences describe the prescribed syntax and fail-safe behavior. Source scope is correct.
+Reviewer checks: Bash 3.2.57 syntax, 31 extracted-arm cases checking classification and exact stderr, git diff --check: all passed. Reviewer did not run Go suites or assess pending full-suite evidence.
+Mayor gate and Fable read remain pending after READY.

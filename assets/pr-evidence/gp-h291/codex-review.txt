@@ -1,0 +1,8 @@
+Codex QUICK review, round 1: CLEAN
+Reviewer: gpt-5.6-sol, medium; independent read-only subagent review.
+Base: 14270dec96aa9d5434fdab15731dcb9fb25ea0c0
+Reviewed diff: change.diff (only examples/bd/dolt/dog_exec_scripts_test.go).
+
+The helper preserves the original shell body byte-for-byte and writes it as both gtimeout and timeout. runDogScriptCommand prepends binDir to PATH; runtime.sh selects gtimeout first. Both required tests call the helper, with all assertions and other test logic unchanged. No production files changed. Files and logs remain in t.TempDir; helper uses t.Helper. git diff --check passed. Reviewer did not rerun tests because the worker was already executing them.
+
+Mayor gate and Fable read remain pending on the final PR head.

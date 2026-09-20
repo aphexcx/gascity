@@ -187,6 +187,12 @@
               "null"
             ]
           },
+          "ClaimBackstop": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ContextAdvisory": {
             "$ref": "#/components/schemas/ContextAdvisory"
           },
@@ -545,6 +551,7 @@
           "StartCommand",
           "Lifecycle",
           "Nudge",
+          "ClaimBackstop",
           "IdleTimeout",
           "MaxSessionAge",
           "MaxSessionAgeJitter",

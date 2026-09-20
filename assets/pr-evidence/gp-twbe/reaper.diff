@@ -1,0 +1,20 @@
+diff --git a/internal/bootstrap/packs/core/assets/scripts/reaper.sh b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+index 83e5937bb..b7cbeefa9 100755
+--- a/internal/bootstrap/packs/core/assets/scripts/reaper.sh
++++ b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+@@ -55 +55 @@ STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
+-# off, never, or 0 (case-insensitive, trimmed) disables age-based issue closes.
++# off, never, or any zero duration (case-insensitive, trimmed) disables age-based issue closes.
+@@ -84,2 +84,10 @@ case "$STALE_ISSUE_AGE" in
+-    [oO][fF][fF]|[nN][eE][vV][eE][rR]|0) STALE_CLOSE_DISABLED=1 ;;
+-    *) STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE") ;;
++    [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;
++    *)
++        STALE_ZERO_VALUE="${STALE_ISSUE_AGE%[hHmMsS]}"
++        STALE_ZERO_VALUE="${STALE_ZERO_VALUE#+}"
++        if [[ "$STALE_ZERO_VALUE" =~ ^0+$ ]]; then
++            STALE_CLOSE_DISABLED=1
++        else
++            STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
++        fi
++        ;;

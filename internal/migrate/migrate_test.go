@@ -1117,6 +1117,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		PreStart:               []string{"pre-cmd"},
 		PromptTemplate:         "prompts/worker.md",
 		Nudge:                  "nudge text",
+		ClaimBackstop:          &trueVal,
 		Session:                "acp",
 		Provider:               "claude",
 		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: &advisoryMessage, Enabled: &trueVal}}},
@@ -1258,6 +1259,74 @@ func TestAgentConfigFromAgentMaxStartFailuresRoundTrip(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got.MaxStartFailures, tt.want) {
 				t.Fatalf("MaxStartFailures did not survive migration: want %v, got TOML:\n%s", tt.want, data)
+			}
+		})
+	}
+}
+
+func TestAgentConfigFromAgentClaimBackstopRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	trueVal, falseVal := true, false
+	for _, tt := range []struct {
+		name string
+		want *bool
+	}{
+		{name: "unset"},
+		{name: "enabled", want: &trueVal},
+		{name: "disabled", want: &falseVal},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := agentConfigFromAgent(config.Agent{ClaimBackstop: tt.want})
+			if got, want := isZeroAgentConfig(cfg), tt.want == nil; got != want {
+				t.Fatalf("isZeroAgentConfig = %v, want %v", got, want)
+			}
+			data, err := marshalAgentFile(cfg)
+			if err != nil {
+				t.Fatalf("marshalAgentFile: %v", err)
+			}
+			var got config.Agent
+			if _, err := toml.Decode(string(data), &got); err != nil {
+				t.Fatalf("decode agent.toml: %v", err)
+			}
+			if !reflect.DeepEqual(got.ClaimBackstop, tt.want) {
+				t.Fatalf("ClaimBackstop did not survive migration: want %v, got TOML:\n%s", tt.want, data)
+			}
+		})
+	}
+}
+
+// TestIsZeroAgentConfigCoversAllFields prevents migration from dropping an
+// agent.toml whose only setting is a field omitted from the zero check.
+func TestIsZeroAgentConfigCoversAllFields(t *testing.T) {
+	t.Parallel()
+
+	if !isZeroAgentConfig(agentFile{}) {
+		t.Fatal("empty agent config must be zero")
+	}
+	cfgType := reflect.TypeOf(agentFile{})
+	for i := 0; i < cfgType.NumField(); i++ {
+		t.Run(cfgType.Field(i).Name, func(t *testing.T) {
+			var cfg agentFile
+			field := reflect.ValueOf(&cfg).Elem().Field(i)
+			switch field.Kind() {
+			case reflect.String:
+				field.SetString("value")
+			case reflect.Bool:
+				field.SetBool(true)
+			case reflect.Pointer:
+				field.Set(reflect.New(field.Type().Elem()))
+			case reflect.Slice:
+				field.Set(reflect.MakeSlice(field.Type(), 1, 1))
+			case reflect.Map:
+				value := reflect.MakeMap(field.Type())
+				value.SetMapIndex(reflect.Zero(field.Type().Key()), reflect.Zero(field.Type().Elem()))
+				field.Set(value)
+			default:
+				t.Fatalf("add a nonzero fixture for field kind %v", field.Kind())
+			}
+			if isZeroAgentConfig(cfg) {
+				t.Fatalf("isZeroAgentConfig ignores populated field %q", cfgType.Field(i).Name)
 			}
 		})
 	}

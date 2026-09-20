@@ -1,0 +1,7 @@
+Command: go test ./examples/gastown/... -count=1 -json
+Go 1.26.6 darwin/arm64
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+Exit: 0; wall seconds: 172.410
+Top-level: {'pass': 250, 'skip': 1}
+Including subtests: {'pass': 381, 'skip': 1}
+{"Time": "2026-09-20T00:32:41.044774-05:00", "Action": "skip", "Package": "github.com/gastownhall/gascity/examples/gastown", "Test": "TestTmuxKeybindingsAlternateScreenPassthrough", "Elapsed": 0}

@@ -1,0 +1,2 @@
+Command: /bin/bash -n internal/bootstrap/packs/core/assets/scripts/reaper.sh; exit=0
+Command: /Users/tailor512/city/.gc/tools/bash-5.3.20/bin/bash -n internal/bootstrap/packs/core/assets/scripts/reaper.sh; exit=0

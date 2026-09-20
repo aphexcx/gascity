@@ -1,0 +1,27 @@
+Command: git commit -F ../round-2-commit-message.txt (Darwin ICU CGO flags supplied)
+lint-changed: ./examples/gastown
+0 issues.
+Generated: docs/reference/cli.md
+Generated:
+  docs/reference/schema/city-schema.json
+  docs/reference/schema/city-schema.txt
+  docs/reference/schema/pack-schema.json
+  docs/reference/schema/pack-schema.txt
+  docs/reference/config.md
+  docs/reference/cli.md
+GOFLAGS="$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly" go vet ./...
+env -i PATH="$PATH" HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" SHELL="$SHELL" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$(scripts/test-gitconfig-path)" LANG="$LANG" TMPDIR="${TMPDIR:-/var/tmp}" OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" GOPATH="/Users/tailor512/go" GOCACHE="/Users/tailor512/Library/Caches/go-build" GOMODCACHE="/Users/tailor512/go/pkg/mod" GOTMPDIR="" GOROOT="${GOROOT:-/Users/tailor512/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64}" GOENV="${GOENV-}" GOFLAGS="${GOFLAGS-}" GO111MODULE="${GO111MODULE-}" GOEXPERIMENT="${GOEXPERIMENT-}" GOPROXY="${GOPROXY-}" GOPRIVATE="${GOPRIVATE-}" GONOPROXY="${GONOPROXY-}" GONOSUMDB="${GONOSUMDB-}" GOSUMDB="${GOSUMDB-}" GOINSECURE="${GOINSECURE-}" GOVCS="${GOVCS-}" GOWORK="${GOWORK-}" ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}" ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN-}" ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL-}" ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL-}" ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL-}" CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL-}" CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL-}" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" OLLAMA_API_KEY="${OLLAMA_API_KEY-}" XIAOMI_API_KEY="${XIAOMI_API_KEY-}" ZCODE_API_KEY="${ZCODE_API_KEY-}" ZCODE_CJS="${ZCODE_CJS-}" ZCODE_MODEL="${ZCODE_MODEL-}" ZCODE_BASE_URL="${ZCODE_BASE_URL-}" ZCODE_NODE_BIN="${ZCODE_NODE_BIN-}" ZCODE_STORAGE_DIR="${ZCODE_STORAGE_DIR-}" CGO_CPPFLAGS="${CGO_CPPFLAGS-}" CGO_LDFLAGS="${CGO_LDFLAGS-}"  go test ./test/docsync
+ok  	github.com/gastownhall/gascity/test/docsync	5.040s
+[gp-twbe b95e6cd12] fix: fail safe on unsupported reaper stale ages
+ 14 files changed, 2964 insertions(+), 8 deletions(-)
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-codex-review.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-green.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-package-summary.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-package-tests.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-parser-cases.py
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-parser-matrix.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-red.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-shell-syntax.txt
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-source.diff
+ create mode 100644 assets/pr-evidence/gp-twbe/round-2-verification.txt
+Exit: 0; wall seconds: 57.388

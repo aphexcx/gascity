@@ -1,0 +1,8 @@
+=== RUN   TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey
+--- PASS: TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey (0.17s)
+=== RUN   TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey
+--- PASS: TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey (0.13s)
+=== RUN   TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey
+--- PASS: TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey (0.24s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.725s

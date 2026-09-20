@@ -1,0 +1,210 @@
+examples/bd/dolt/health_test.go:143:// timeout. We assert completion well under a minute.
+examples/bd/dolt/health_test.go:148:	if _, errT := exec.LookPath("timeout"); errT != nil {
+examples/bd/dolt/health_test.go:149:		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+examples/bd/dolt/health_test.go:150:			t.Skip("neither timeout nor gtimeout installed; skipping")
+examples/bd/dolt/health_test.go:284:	if _, errT := exec.LookPath("timeout"); errT != nil {
+examples/bd/dolt/health_test.go:285:		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+examples/bd/dolt/health_test.go:286:			t.Skip("neither timeout nor gtimeout installed; skipping")
+examples/bd/dolt/health_test.go:377:	if _, errT := exec.LookPath("timeout"); errT != nil {
+examples/bd/dolt/health_test.go:378:		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+examples/bd/dolt/health_test.go:379:			t.Skip("neither timeout nor gtimeout installed; skipping")
+examples/bd/dolt/health_test.go:1975:	if _, errT := exec.LookPath("timeout"); errT != nil {
+examples/bd/dolt/health_test.go:1976:		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+examples/bd/dolt/health_test.go:1977:			t.Skip("neither timeout nor gtimeout installed; skipping")
+examples/bd/dolt/pull_test.go:253:// writeRecordingGtimeout installs a fake `gtimeout` first on PATH (runtime.sh
+examples/bd/dolt/pull_test.go:256:func writeRecordingGtimeout(t *testing.T, dir string) string {
+examples/bd/dolt/pull_test.go:258:	logPath := filepath.Join(dir, "gtimeout.log")
+examples/bd/dolt/pull_test.go:260:	if err := os.WriteFile(filepath.Join(dir, "gtimeout"), []byte(body), 0o755); err != nil {
+examples/bd/dolt/pull_test.go:261:		t.Fatalf("write fake gtimeout: %v", err)
+examples/bd/dolt/pull_test.go:275:	t.Fatalf("no bounded call under %ss carrying %q.\ngtimeout log:\n%s", secs, needle, tlog)
+examples/bd/dolt/pull_test.go:298:	tlogPath := writeRecordingGtimeout(t, binDir)
+examples/bd/dolt/pull_test.go:317:		t.Fatalf("expected the pull timeout line naming the bound.\nout:\n%s", out)
+examples/bd/dolt/pull_test.go:326:	// metadata queries use), proven by the recorded gtimeout arguments
+examples/bd/dolt/pull_test.go:361:// with exit 2 before any database is touched (GNU `timeout 0` would run the
+examples/bd/dolt/pull_test.go:370:			t.Errorf("pull timeout %q: want exit 2, got err=%v\nout: %s", bad, err, out)
+examples/bd/dolt/pull_test.go:373:			t.Errorf("pull timeout %q: want validation message\nout: %s", bad, out)
+examples/bd/dolt/pull_test.go:381:// GNU timeout's SIGKILL escalation exits 137: the same cleanup as 124.
+examples/bd/dolt/pull_test.go:406:	tlogPath := writeRecordingGtimeout(t, binDir)
+examples/bd/dolt/pull_test.go:464:		t.Fatalf("the timeout must outrank the gate text.\nout:\n%s", out)
+examples/bd/dolt/pull_test.go:485:// The pull's timeout path: the recorded id is gone but another live session
+examples/bd/dolt/docs/remote-sync-single-flight.md:42:137 when GNU timeout had to escalate to SIGKILL) the script `KILL`s exactly that
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:30:# listener.read_timeout_millis ceiling depending on what else is running. A
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:114:# `connection was closed` and `row read wait bigger than connection timeout`
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:116:# listener.read_timeout_millis. That reads like a network fault and is not one:
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:133:        *"connection was closed"*|*"row read wait bigger than connection timeout"*)
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:134:            printf 'exit %s: %s — the managed sql-server ended the operation at its listener.read_timeout_millis ceiling; the backup outran it under live load, so raise that ceiling for this city or reduce contention during the backup window' \
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:310:# roughly 570s need that order's timeout raised too — otherwise the controller
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:313:# Reject 0 and non-numeric: GNU `timeout 0` disables the bound outright,
+examples/bd/dolt/assets/scripts/mol-dog-backup.sh:359:Raising it past the run's remaining budget also needs timeout raised in
+examples/bd/dolt/assets/scripts/runtime.sh:169:sock.settimeout(0.25)
+examples/bd/dolt/assets/scripts/runtime.sh:224:# Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
+examples/bd/dolt/assets/scripts/runtime.sh:225:# macOS), fall back to timeout (coreutils on Linux), then to running
+examples/bd/dolt/assets/scripts/runtime.sh:229:if command -v gtimeout >/dev/null 2>&1; then
+examples/bd/dolt/assets/scripts/runtime.sh:230:  TIMEOUT_BIN="gtimeout"
+examples/bd/dolt/assets/scripts/runtime.sh:231:elif command -v timeout >/dev/null 2>&1; then
+examples/bd/dolt/assets/scripts/runtime.sh:232:  TIMEOUT_BIN="timeout"
+examples/bd/dolt/assets/scripts/runtime.sh:237:_run_bounded_warned_no_timeout=""
+examples/bd/dolt/assets/scripts/runtime.sh:243:# filesystem scan on timeout, which silently drops external rig databases
+examples/bd/dolt/assets/scripts/runtime.sh:247:# run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
+examples/bd/dolt/assets/scripts/runtime.sh:248:# 124 on timeout (coreutils convention). Uses --kill-after=2 so an
+examples/bd/dolt/assets/scripts/runtime.sh:268:    proc.wait(timeout=limit)
+examples/bd/dolt/assets/scripts/runtime.sh:272:        proc.wait(timeout=2)
+examples/bd/dolt/assets/scripts/runtime.sh:280:    printf 'dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command\n' >&2
+examples/bd/dolt/assets/scripts/runtime.sh:493:# lines ("fetch" / "pull"); every line goes to stderr next to the timeout
+examples/bd/dolt/assets/scripts/runtime.sh:611:# bound expired: 124 (GNU timeout, or the python fallback) or 137 (GNU timeout
+examples/bd/dolt/assets/scripts/runtime.sh:628:# user-level lock named for the database with timeout 0. GET_LOCK is
+examples/bd/dolt/assets/scripts/runtime.sh:727:# the timeout path killing (and reporting gone) a session that never held the
+examples/bd/dolt/agents/dog/agent.toml:4:idle_timeout = "2h"
+examples/bd/dolt/sync_ffclassify_test.go:7:// fetch timeout skips without pushing; a first push (remote ref absent) is a
+examples/bd/dolt/sync_ffclassify_test.go:86:// flight, gate refused, processlist failure, timeout, malformed answer) is a
+examples/bd/dolt/sync_ffclassify_test.go:148:// writeSyncFakeDoltFetchTimeout: the DOLT_FETCH call exits 124 (timeout).
+examples/bd/dolt/sync_ffclassify_test.go:238:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:550:// validator (the twin of the push-timeout validator): the bound is checked at
+examples/bd/dolt/sync_ffclassify_test.go:574:			t.Errorf("fetch timeout %q: want exit 2, got err=%v\nout: %s", bad, err, out)
+examples/bd/dolt/sync_ffclassify_test.go:577:			t.Errorf("fetch timeout %q: want validation message\nout: %s", bad, out)
+examples/bd/dolt/sync_ffclassify_test.go:860:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:883:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:892:// recorded gtimeout arguments (codex r7 found the pull side unproven; the sync
+examples/bd/dolt/sync_ffclassify_test.go:896:	tlogPath := writeRecordingGtimeout(t, binDir)
+examples/bd/dolt/sync_ffclassify_test.go:904:		t.Fatalf("expected the timeout line naming the configured bound.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:980:			t.Fatalf("%s: a fetch timeout must NEVER push.\nout:\n%s", tc.name, out)
+examples/bd/dolt/sync_ffclassify_test.go:999:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:1021:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:1038:		t.Fatalf("nothing in flight after the timeout: nothing to KILL.\nlog:\n%s", log)
+examples/bd/dolt/sync_ffclassify_test.go:1068:	// and this run's lock (timeout 0) and prints its own connection id in the
+examples/bd/dolt/sync_ffclassify_test.go:1112:	// server (`app` and `APP` are one database and must be one lock), timeout
+examples/bd/dolt/sync_ffclassify_test.go:1168:// GNU timeout escalates to SIGKILL after --kill-after and then exits 137, not
+examples/bd/dolt/sync_ffclassify_test.go:1194:		t.Fatalf("exit 137 is the bound's SIGKILL escalation and must be reported as a timeout.\nout:\n%s", out)
+examples/bd/dolt/sync_ffclassify_test.go:1233:// text is a timeout — the recorded session is KILLed and nothing is pushed —
+examples/bd/dolt/sync_ffclassify_test.go:1265:			t.Fatalf("exit %d with %q: the timeout must outrank the first-push text.\nout:\n%s", tc.code, tc.text, out)
+examples/bd/dolt/sync_ffclassify_test.go:1283:// otherwise record an id that never held the locks, and the timeout path
+examples/bd/dolt/sync_ffclassify_test.go:1461:		t.Fatalf("a fetch timeout must NEVER push.\nout:\n%s", out)
+examples/bd/dolt/runtime_bounded_test.go:4:// fallback used when neither timeout nor gtimeout is on PATH, which
+examples/bd/dolt/runtime_bounded_test.go:22:// that exposes only python3 (no timeout/gtimeout), so run_bounded is
+examples/bd/dolt/runtime_bounded_test.go:76:// regression guard for gascity#4823: on timeout, the python3 fallback
+examples/bd/dolt/runtime_bounded_test.go:80:// `subprocess.run(..., timeout=...)` implementation (bare
+examples/bd/dolt/runtime_bounded_test.go:84:// own hang-detector timer (TESTING.md: a timeout the test feeds INTO the
+examples/bd/dolt/runtime_bounded_test.go:137:		t.Fatalf("run_bounded exit code = %d, want 124 (timeout)\noutput:\n%s", exitCode, out)
+examples/bd/dolt/runtime_bounded_test.go:171:		t.Fatalf("run_bounded exit code = %d, want 124 (timeout)\noutput:\n%s", exitCode, out)
+examples/bd/dolt/runtime_bounded_test.go:176:	// 1s timeout + up to 2s grace; allow generous scheduling slack
+examples/bd/dolt/runtime_bounded_test.go:184:// non-timeout path: the rewrite swapped buffered capture for inherited
+examples/bd/dolt/orders/mol-dog-compactor.toml:8:timeout = "24h"
+examples/bd/dolt/doctor/check-dolt/run.sh:27:timeout_bin=""
+examples/bd/dolt/doctor/check-dolt/run.sh:28:if command -v gtimeout >/dev/null 2>&1; then
+examples/bd/dolt/doctor/check-dolt/run.sh:29:    timeout_bin="gtimeout"
+examples/bd/dolt/doctor/check-dolt/run.sh:30:elif command -v timeout >/dev/null 2>&1; then
+examples/bd/dolt/doctor/check-dolt/run.sh:31:    timeout_bin="timeout"
+examples/bd/dolt/doctor/check-dolt/run.sh:37:    if [ -n "$timeout_bin" ]; then
+examples/bd/dolt/doctor/check-dolt/run.sh:38:        "$timeout_bin" --kill-after=2 "$limit" "$@"
+examples/bd/dolt/doctor/check-dolt/run.sh:49:    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+examples/bd/dolt/doctor/check-dolt/run.sh:60:    echo "timeout/gtimeout/python3 not found; cannot run bounded command" >&2
+examples/bd/dolt/orders/mol-dog-backup.toml:3:# No LLM judgment needed — runs inline in the controller. The timeout covers a
+examples/bd/dolt/orders/mol-dog-backup.toml:6:# raising this timeout: the run is killed mid-rsync once it exceeds the bound
+examples/bd/dolt/orders/mol-dog-backup.toml:13:timeout = "1800s"
+examples/bd/dolt/sync_test.go:219:// failure case (timeout exit 124, transport exit 7, stderr replay, etc.) rather
+examples/bd/dolt/sync_test.go:1187:// run_bounded timeout convention) is reported as a TIMEOUT naming the ceiling
+examples/bd/dolt/sync_test.go:1188:// and env var, and is NOT collapsed into the generic non-timeout error (R1).
+examples/bd/dolt/sync_test.go:1227:		t.Fatalf("timeout must not be reported as a generic exit-code failure:\n%s", out)
+examples/bd/dolt/sync_test.go:1232:// underlying exit code and is distinguishable from a timeout (R3).
+examples/bd/dolt/sync_test.go:1268:		t.Fatalf("non-124 failure must not be reported as a timeout:\n%s", out)
+examples/bd/dolt/sync_test.go:1504:// that disambiguates a real wall-clock timeout from the no-mechanism
+examples/bd/dolt/sync_test.go:1520:	const marker = "dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command"
+examples/bd/dolt/sync_test.go:1589:// assertSyncRejectsInvalidPushTimeout drives one invalid-timeout scenario: it
+examples/bd/dolt/sync_test.go:1625:		t.Fatalf("expected exit 2 for invalid timeout %q, output:\n%s", bad, out)
+examples/bd/dolt/sync_test.go:1629:		t.Fatalf("expected exit code 2 for invalid timeout %q, got %v:\n%s", bad, err, out)
+examples/bd/dolt/sync_test.go:1635:		t.Fatalf("dolt must not be invoked when the timeout is invalid (%q), log:\n%s", bad, data)
+examples/bd/dolt/sync_test.go:1660:// only the literal "0" lets "00" through, and GNU `timeout` treats a 0 duration
+examples/bd/dolt/sync_test.go:1661:// as "disable the timeout" — running the push UNBOUNDED and re-opening the
+examples/bd/dolt/doctor_test.go:59:// The script invokes head, sed, and a timeout binary
+examples/bd/dolt/doctor_test.go:60:// (timeout/gtimeout) externally. Because the sandbox replaces PATH
+examples/bd/dolt/doctor_test.go:80:	// gtimeout, then timeout. Symlink whichever is on the host as
+examples/bd/dolt/doctor_test.go:81:	// `timeout` in the sandbox so the bounded path is exercised.
+examples/bd/dolt/doctor_test.go:86:	case lookPathInto(t, bin, "timeout", "timeout"):
+examples/bd/dolt/doctor_test.go:87:	case lookPathInto(t, bin, "gtimeout", "timeout"):
+examples/bd/dolt/doctor_test.go:90:		t.Skip("neither timeout, gtimeout, nor python3 installed; cannot exercise run_bounded")
+examples/bd/dolt/dog_exec_scripts_test.go:144:// dolt subprocess timeout budget every test in this file runs under. Keep
+examples/bd/dolt/dog_exec_scripts_test.go:5228:		t.Fatalf("backup order timeout = %s, want at least %s for SQL probe + %d DB syncs + offsite rsync", got, required, intendedDBs)
+examples/bd/dolt/dog_exec_scripts_test.go:5298:	timeoutLogPath := filepath.Join(binDir, "timeout.log")
+examples/bd/dolt/dog_exec_scripts_test.go:5299:	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+examples/bd/dolt/dog_exec_scripts_test.go:5300:printf 'timeout %%s\n' "$*" >> %s
+examples/bd/dolt/dog_exec_scripts_test.go:5304:`, shellQuote(timeoutLogPath)))
+examples/bd/dolt/dog_exec_scripts_test.go:5314:	timeoutLog, err := os.ReadFile(timeoutLogPath)
+examples/bd/dolt/dog_exec_scripts_test.go:5316:		t.Fatalf("read timeout log: %v", err)
+examples/bd/dolt/dog_exec_scripts_test.go:5318:	if !strings.Contains(string(timeoutLog), "--kill-after=2 17 rsync -a --delete") {
+examples/bd/dolt/dog_exec_scripts_test.go:5319:		t.Fatalf("offsite rsync did not use GC_BACKUP_OFFSITE_TIMEOUT=17:\n%s", timeoutLog)
+examples/bd/dolt/dog_exec_scripts_test.go:5338:	// 0 is the dangerous one: GNU `timeout 0` drops the bound entirely while
+examples/bd/dolt/dog_exec_scripts_test.go:5361:			timeoutLogPath := filepath.Join(binDir, "timeout.log")
+examples/bd/dolt/dog_exec_scripts_test.go:5362:			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+examples/bd/dolt/dog_exec_scripts_test.go:5363:printf 'timeout %%s\n' "$*" >> %s
+examples/bd/dolt/dog_exec_scripts_test.go:5367:`, shellQuote(timeoutLogPath)))
+examples/bd/dolt/dog_exec_scripts_test.go:5377:			timeoutLog, err := os.ReadFile(timeoutLogPath)
+examples/bd/dolt/dog_exec_scripts_test.go:5379:				t.Fatalf("read timeout log: %v", err)
+examples/bd/dolt/dog_exec_scripts_test.go:5381:			if !strings.Contains(string(timeoutLog), "--kill-after=2 300 rsync -a --delete") {
+examples/bd/dolt/dog_exec_scripts_test.go:5382:				t.Fatalf("GC_BACKUP_OFFSITE_TIMEOUT=%q should fall back to 300s:\n%s", configured, timeoutLog)
+examples/bd/dolt/dog_exec_scripts_test.go:6679:	if !strings.Contains(body, "read_timeout_millis") {
+examples/bd/dolt/commands/pull/run.sh:34:# timeout 0) in the same batch, so two runners that both read "nothing in
+examples/bd/dolt/commands/pull/run.sh:92:# GNU `timeout 0` disables the timeout, i.e. an unbounded pull, the exact
+examples/bd/dolt/commands/pull/run.sh:94:pull_timeout="${GC_DOLT_PULL_TIMEOUT_SECS-120}"
+examples/bd/dolt/commands/pull/run.sh:95:case "$pull_timeout" in
+examples/bd/dolt/commands/pull/run.sh:96:  ''|*[!0-9]*) pull_timeout_valid=false ;;
+examples/bd/dolt/commands/pull/run.sh:97:  *[1-9]*)     pull_timeout_valid=true ;;
+examples/bd/dolt/commands/pull/run.sh:98:  *)           pull_timeout_valid=false ;;
+examples/bd/dolt/commands/pull/run.sh:100:if [ "$pull_timeout_valid" != true ]; then
+examples/bd/dolt/commands/pull/run.sh:102:    "$pull_timeout" >&2
+examples/bd/dolt/commands/pull/run.sh:107:pull_timeout=$(printf '%s' "$pull_timeout" | sed 's/^0*//')
+examples/bd/dolt/commands/pull/run.sh:358:    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); $sql" "$pull_timeout" "$name" \
+examples/bd/dolt/commands/pull/run.sh:366:      echo "  $name: pull timed out after ${pull_timeout}s while resolving conflicts (GC_DOLT_PULL_TIMEOUT_SECS; client exit $resolve_rc) — the resolving transaction was not confirmed" >&2
+examples/bd/dolt/commands/pull/run.sh:494:  dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_PULL($(remote_op_owned_arg "$name" "$remote_name"), 'main')" "$pull_timeout" "$name" \
+examples/bd/dolt/commands/pull/run.sh:505:    echo "  $name: pull timed out after ${pull_timeout}s (GC_DOLT_PULL_TIMEOUT_SECS; client exit $pull_rc)" >&2
+examples/bd/dolt/commands/sync/run.sh:63:# timeout 0) in the same batch, so two runners that both read "nothing in
+examples/bd/dolt/commands/sync/run.sh:142:# through; GNU `timeout` treats a 0 duration as "disable the timeout", which
+examples/bd/dolt/commands/sync/run.sh:147:push_timeout="${GC_DOLT_SYNC_PUSH_TIMEOUT_SECS-1800}"
+examples/bd/dolt/commands/sync/run.sh:148:case "$push_timeout" in
+examples/bd/dolt/commands/sync/run.sh:149:  ''|*[!0-9]*) push_timeout_valid=false ;;
+examples/bd/dolt/commands/sync/run.sh:150:  *[1-9]*)     push_timeout_valid=true ;;
+examples/bd/dolt/commands/sync/run.sh:151:  *)           push_timeout_valid=false ;;
+examples/bd/dolt/commands/sync/run.sh:153:if [ "$push_timeout_valid" != true ]; then
+examples/bd/dolt/commands/sync/run.sh:155:    "$push_timeout" >&2
+examples/bd/dolt/commands/sync/run.sh:161:# fetch is bounded and a timeout skips that database without pushing. Validated
+examples/bd/dolt/commands/sync/run.sh:162:# with the same rules as the push timeout (reject empty / non-numeric /
+examples/bd/dolt/commands/sync/run.sh:163:# all-zero — GNU `timeout 0` disables the timeout, i.e. unbounded).
+examples/bd/dolt/commands/sync/run.sh:164:fetch_timeout="${GC_DOLT_SYNC_FETCH_TIMEOUT_SECS-60}"
+examples/bd/dolt/commands/sync/run.sh:165:case "$fetch_timeout" in
+examples/bd/dolt/commands/sync/run.sh:166:  ''|*[!0-9]*) fetch_timeout_valid=false ;;
+examples/bd/dolt/commands/sync/run.sh:167:  *[1-9]*)     fetch_timeout_valid=true ;;
+examples/bd/dolt/commands/sync/run.sh:168:  *)           fetch_timeout_valid=false ;;
+examples/bd/dolt/commands/sync/run.sh:170:if [ "$fetch_timeout_valid" != true ]; then
+examples/bd/dolt/commands/sync/run.sh:172:    "$fetch_timeout" >&2
+examples/bd/dolt/commands/sync/run.sh:501:  # timeout or error skips WITHOUT pushing. A patrol never auto-merges (ZFC):
+examples/bd/dolt/commands/sync/run.sh:557:    dolt_sql "USE \`$name\`; $(remote_op_gate_sql "$name"); CALL DOLT_FETCH($(remote_op_owned_arg "$name" "$remote_name"), '$remote_branch')" "$fetch_timeout" "$name" \
+examples/bd/dolt/commands/sync/run.sh:567:      echo "  $name: fetch timed out after ${fetch_timeout}s (client exit $fetch_rc) — skipped (NOT pushed)" >&2
+examples/bd/dolt/commands/sync/run.sh:571:      last_fail_reason="fetch timed out after ${fetch_timeout}s"
+examples/bd/dolt/commands/sync/run.sh:679:  # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
+examples/bd/dolt/commands/sync/run.sh:682:  dolt_sql "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
+examples/bd/dolt/commands/sync/run.sh:691:    # Exit 124 is overloaded: a real wall-clock timeout (run_bounded via
+examples/bd/dolt/commands/sync/run.sh:692:    # timeout/gtimeout, runtime.sh) AND the no-mechanism fall-through where
+examples/bd/dolt/commands/sync/run.sh:693:    # neither timeout/gtimeout nor python3 exists and dolt never ran. A
+examples/bd/dolt/commands/sync/run.sh:697:    echo "  $name: TIMEOUT after ${push_timeout}s — push manually or increase timeout (GC_DOLT_SYNC_PUSH_TIMEOUT_SECS)" >&2
+examples/bd/dolt/commands/sync/run.sh:698:    last_fail_reason="TIMEOUT after ${push_timeout}s"
+examples/bd/dolt/commands/health/run.sh:238:# 0 on timeout, error, or a database without the table (a non-beads DB) — the
+examples/bd/dolt/commands/compact/run.sh:313:call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
+examples/bd/dolt/commands/compact/run.sh:314:push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
+examples/bd/dolt/commands/compact/run.sh:365:case "$call_timeout" in
+examples/bd/dolt/commands/compact/run.sh:368:      "$call_timeout" >&2
+examples/bd/dolt/commands/compact/run.sh:373:case "$push_timeout" in
+examples/bd/dolt/commands/compact/run.sh:376:      "$push_timeout" >&2
+examples/bd/dolt/commands/compact/run.sh:458:# premature timeout silently drops every external rig database from
+examples/bd/dolt/commands/compact/run.sh:461:rig_list_timeout="$GC_DOLT_RIG_LIST_TIMEOUT_SECS"
+examples/bd/dolt/commands/compact/run.sh:465:    if rig_json=$(run_bounded "$rig_list_timeout" gc rig list --json 2>/dev/null); then
+examples/bd/dolt/commands/compact/run.sh:481:        printf 'compact: gc rig list timed out after %ss; falling back to local filesystem metadata scan\n' "$rig_list_timeout" >&2
+examples/bd/dolt/commands/compact/run.sh:637:# per-call timeout. Output is the raw -r result-format-tsv body.
+examples/bd/dolt/commands/compact/run.sh:642:  run_bounded "$call_timeout" \
+examples/bd/dolt/commands/compact/run.sh:1040:  run_bounded "$push_timeout" \
+examples/bd/dolt/commands/cleanup/run.sh:239:  _dolt_sql_q_timeout="$1"; shift
+examples/bd/dolt/commands/cleanup/run.sh:240:  run_bounded "$_dolt_sql_q_timeout" \
+examples/bd/dolt/pull_conflicts_test.go:40:// failed without leaving a merge), "retrytimeout" (the resolving session's
+examples/bd/dolt/pull_conflicts_test.go:66:	case "retrytimeout":
+examples/bd/dolt/pull_conflicts_test.go:157:// recording gtimeout's log too: the bound every dolt call ran under.
+examples/bd/dolt/pull_conflicts_test.go:180:	tlogPath := writeRecordingGtimeout(t, binDir)
+examples/bd/dolt/pull_conflicts_test.go:211:		t.Fatalf("read fake gtimeout log: %v", err)
+examples/bd/dolt/pull_conflicts_test.go:410:	out, log, tlog, code := runPullConflictScriptBounded(t, "retrytimeout", true)

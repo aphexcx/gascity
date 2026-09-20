@@ -113,6 +113,11 @@
           "type": "string",
           "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
+        "claim_backstop": {
+          "type": "boolean",
+          "description": "ClaimBackstop enables the seat-claim backstop. Set false for named seats\nwhose assigned beads are holds, such as a mayor. Only this lane is\ndisabled; pool-trigger claim recovery and the execution backstop are\nunchanged. Nil (omitted) defaults to true.",
+          "default": true
+        },
         "session": {
           "type": "string",
           "enum": [
@@ -535,6 +540,10 @@
           "type": "string",
           "description": "Nudge overrides the nudge text."
         },
+        "claim_backstop": {
+          "type": "boolean",
+          "description": "ClaimBackstop overrides the seat-claim backstop setting."
+        },
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
@@ -835,6 +844,10 @@
         "nudge": {
           "type": "string",
           "description": "Nudge overrides the nudge text."
+        },
+        "claim_backstop": {
+          "type": "boolean",
+          "description": "ClaimBackstop overrides the seat-claim backstop setting."
         },
         "idle_timeout": {
           "type": "string",

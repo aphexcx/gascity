@@ -64,6 +64,7 @@ type agentFile struct {
 	Suspended              bool                    `toml:"suspended,omitempty"`
 	PreStart               []string                `toml:"pre_start,omitempty"`
 	Nudge                  string                  `toml:"nudge,omitempty"`
+	ClaimBackstop          *bool                   `toml:"claim_backstop,omitempty"`
 	Session                string                  `toml:"session,omitempty"`
 	Provider               string                  `toml:"provider,omitempty"`
 	ContextAdvisory        *config.ContextAdvisory `toml:"context_advisory,omitempty"`
@@ -928,6 +929,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Suspended:              agent.Suspended,
 		PreStart:               agent.PreStart,
 		Nudge:                  agent.Nudge,
+		ClaimBackstop:          agent.ClaimBackstop,
 		Session:                agent.Session,
 		Provider:               agent.Provider,
 		ContextAdvisory:        agent.ContextAdvisory,
@@ -984,6 +986,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		!cfg.Suspended &&
 		len(cfg.PreStart) == 0 &&
 		cfg.Nudge == "" &&
+		cfg.ClaimBackstop == nil &&
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
 		cfg.ContextAdvisory == nil &&
@@ -1012,6 +1015,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.MaxSessionAgeJitter == "" &&
 		cfg.SleepAfterIdle == "" &&
 		cfg.MaxStartFailures == nil &&
+		!cfg.AutoReclaimStaleClaims &&
 		cfg.AssignedWorkDeferLimit == nil &&
 		len(cfg.InstallAgentHooks) == 0 &&
 		cfg.HooksInstalled == nil &&

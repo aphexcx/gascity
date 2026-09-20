@@ -1,0 +1,34 @@
+$ LOCAL_TEST_JOBS=2 PUSH_GATE_MAX_CONCURRENT=2 git push -u origin gp-twbe (explicit aphexcx credential helper; hooks active)
+env -i PATH="$PATH" HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" SHELL="$SHELL" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$(scripts/test-gitconfig-path)" LANG="$LANG" TMPDIR="${TMPDIR:-/var/tmp}" OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" GOPATH="/Users/tailor512/go" GOCACHE="/Users/tailor512/Library/Caches/go-build" GOMODCACHE="/Users/tailor512/go/pkg/mod" GOTMPDIR="" GOROOT="${GOROOT:-/Users/tailor512/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64}" GOENV="${GOENV-}" GOFLAGS="${GOFLAGS-}" GO111MODULE="${GO111MODULE-}" GOEXPERIMENT="${GOEXPERIMENT-}" GOPROXY="${GOPROXY-}" GOPRIVATE="${GOPRIVATE-}" GONOPROXY="${GONOPROXY-}" GONOSUMDB="${GONOSUMDB-}" GOSUMDB="${GOSUMDB-}" GOINSECURE="${GOINSECURE-}" GOVCS="${GOVCS-}" GOWORK="${GOWORK-}" ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}" ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN-}" ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL-}" ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL-}" ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL-}" CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL-}" CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL-}" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" OLLAMA_API_KEY="${OLLAMA_API_KEY-}" XIAOMI_API_KEY="${XIAOMI_API_KEY-}" ZCODE_API_KEY="${ZCODE_API_KEY-}" ZCODE_CJS="${ZCODE_CJS-}" ZCODE_MODEL="${ZCODE_MODEL-}" ZCODE_BASE_URL="${ZCODE_BASE_URL-}" ZCODE_NODE_BIN="${ZCODE_NODE_BIN-}" ZCODE_STORAGE_DIR="${ZCODE_STORAGE_DIR-}" CGO_CPPFLAGS="${CGO_CPPFLAGS-}" CGO_LDFLAGS="${CGO_LDFLAGS-}"  GC_PUSH_GATE_NO_CAP="${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="${PUSH_GATE_POLL_SECONDS-}" LOCAL_TEST_JOBS=2 CMD_GC_PROCESS_TOTAL=6 GO_TEST_TIMEOUT= ./scripts/test-local-parallel fast
+Running 10 fast job(s) with LOCAL_TEST_JOBS=2 inner_p=1
+[fsys-darwin-compile] start
+[unit-core] start
+[fsys-darwin-compile] ok
+[push-gate-lock-selftest] start
+[push-gate-lock-selftest] ok
+[local-concurrency-selftest] start
+[local-concurrency-selftest] ok
+[unit-cmd-gc-1-of-6] start
+[unit-cmd-gc-1-of-6] ok
+[unit-cmd-gc-2-of-6] start
+[unit-cmd-gc-2-of-6] ok
+[unit-cmd-gc-3-of-6] start
+[unit-cmd-gc-3-of-6] ok
+[unit-cmd-gc-4-of-6] start
+[unit-cmd-gc-4-of-6] ok
+[unit-cmd-gc-5-of-6] start
+[unit-cmd-gc-5-of-6] ok
+[unit-cmd-gc-6-of-6] start
+[unit-cmd-gc-6-of-6] ok
+[unit-core] ok
+All fast jobs passed
+remote:
+remote: Create a pull request for 'gp-twbe' on GitHub by visiting:
+remote:      https://github.com/aphexcx/gascity/pull/new/gp-twbe
+remote:
+To https://github.com/aphexcx/gascity.git
+ * [new branch]          gp-twbe -> gp-twbe
+branch 'gp-twbe' set up to track 'origin/gp-twbe'.
+
+Exit: 0
+Wall seconds: 2325.459
