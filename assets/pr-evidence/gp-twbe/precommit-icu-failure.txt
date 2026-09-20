@@ -1,5 +1,5 @@
 $ .githooks/pre-commit (staged source changes)
-lint-changed: ./examples/gastown 
+lint-changed: ./examples/gastown
 0 issues.
 # github.com/dolthub/go-icu-regex/internal/icu
 file.cpp:3:10: fatal error: 'unicode/regex.h' file not found
