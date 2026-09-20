@@ -6999,6 +6999,17 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
 		{name: "zero microseconds", age: "0us", disabled: true},
 		{name: "zero nanoseconds", age: "0ns", disabled: true},
 		{name: "plus fractional zero hours", age: "+0.0h", disabled: true},
+		{name: "leading dot zero hours", age: ".0h", disabled: true},
+		{name: "trailing dot zero hours", age: "0.h", disabled: true},
+		{name: "micro sign zero microseconds", age: "0µs", disabled: true},
+		{name: "greek mu zero microseconds", age: "0μs", disabled: true},
+		{name: "compound fractional zero", age: "0h0.0m", disabled: true},
+		{name: "unitless trailing component", age: "0h0", disabled: true, invalid: true},
+		{name: "space between components", age: "0h 0m", disabled: true, invalid: true},
+		{name: "dot without digits", age: ".", disabled: true, invalid: true},
+		{name: "unitless trailing dot", age: "0.", disabled: true, invalid: true},
+		{name: "unitless leading dot", age: ".0", disabled: true, invalid: true},
+		{name: "unitless fractional zero", age: "0.0", disabled: true, invalid: true},
 		{name: "negative hours", age: "-1h", disabled: true, invalid: true},
 		{name: "fractional hours", age: "0.5h", disabled: true, invalid: true},
 		{name: "positive minutes", age: "30m", disabled: true, invalid: true},
@@ -7070,6 +7081,8 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
 				if strings.Count(text, want) != 1 {
 					t.Errorf("want exactly one invalid age warning %q, got:\n%s", want, text)
 				}
+			} else if strings.Contains(text, "reaper: GC_REAPER_STALE_ISSUE_AGE=") {
+				t.Errorf("valid age produced an invalid age warning:\n%s", text)
 			}
 			if tc.disabled {
 				want := "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=" + strings.TrimSpace(tc.age) + ")"

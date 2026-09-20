@@ -1,0 +1,104 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib go test ./examples/gastown/... -run '^TestReaperStaleCloseDisabled$' -count=1 -v
+dolttest: startup sweep removed orphaned dolt store dir /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/gc-snapshot-dolt-root-2242642497
+dolttest: startup sweep removed orphaned dolt store dir /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/gc-snapshot-dolt-root-3541431820
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/zero_hours
+=== RUN   TestReaperStaleCloseDisabled/zero_minutes
+=== RUN   TestReaperStaleCloseDisabled/multiple_zeros
+=== RUN   TestReaperStaleCloseDisabled/plus_zero
+=== RUN   TestReaperStaleCloseDisabled/minus_zero
+=== RUN   TestReaperStaleCloseDisabled/minus_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/fractional_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/compound_zero
+=== RUN   TestReaperStaleCloseDisabled/zero_milliseconds
+=== RUN   TestReaperStaleCloseDisabled/zero_microseconds
+=== RUN   TestReaperStaleCloseDisabled/zero_nanoseconds
+=== RUN   TestReaperStaleCloseDisabled/plus_fractional_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/leading_dot_zero_hours
+    maintenance_scripts_test.go:7083: valid age produced an invalid age warning:
+        reaper: GC_REAPER_STALE_ISSUE_AGE=.0h is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=.0h)
+=== RUN   TestReaperStaleCloseDisabled/trailing_dot_zero_hours
+    maintenance_scripts_test.go:7083: valid age produced an invalid age warning:
+        reaper: GC_REAPER_STALE_ISSUE_AGE=0.h is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0.h)
+=== RUN   TestReaperStaleCloseDisabled/micro_sign_zero_microseconds
+    maintenance_scripts_test.go:7083: valid age produced an invalid age warning:
+        reaper: GC_REAPER_STALE_ISSUE_AGE=0µs is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0µs)
+=== RUN   TestReaperStaleCloseDisabled/greek_mu_zero_microseconds
+    maintenance_scripts_test.go:7083: valid age produced an invalid age warning:
+        reaper: GC_REAPER_STALE_ISSUE_AGE=0μs is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0μs)
+=== RUN   TestReaperStaleCloseDisabled/compound_fractional_zero
+=== RUN   TestReaperStaleCloseDisabled/unitless_trailing_component
+    maintenance_scripts_test.go:7080: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=0h0 is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0h0)
+=== RUN   TestReaperStaleCloseDisabled/space_between_components
+=== RUN   TestReaperStaleCloseDisabled/dot_without_digits
+=== RUN   TestReaperStaleCloseDisabled/unitless_trailing_dot
+=== RUN   TestReaperStaleCloseDisabled/negative_hours
+=== RUN   TestReaperStaleCloseDisabled/fractional_hours
+=== RUN   TestReaperStaleCloseDisabled/positive_minutes
+=== RUN   TestReaperStaleCloseDisabled/compound_positive
+=== RUN   TestReaperStaleCloseDisabled/uppercase_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/invalid_word
+=== RUN   TestReaperStaleCloseDisabled/days
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/one_hour
+=== RUN   TestReaperStaleCloseDisabled/default_duration
+=== RUN   TestReaperStaleCloseDisabled/plus_positive_hours
+=== RUN   TestReaperStaleCloseDisabled/bare_positive_hours
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- FAIL: TestReaperStaleCloseDisabled (122.87s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (3.46s)
+    --- PASS: TestReaperStaleCloseDisabled/never (3.29s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (3.52s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_hours (3.73s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_minutes (3.33s)
+    --- PASS: TestReaperStaleCloseDisabled/multiple_zeros (3.27s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_zero (3.65s)
+    --- PASS: TestReaperStaleCloseDisabled/minus_zero (3.73s)
+    --- PASS: TestReaperStaleCloseDisabled/minus_zero_hours (3.47s)
+    --- PASS: TestReaperStaleCloseDisabled/fractional_zero_hours (4.25s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_zero (3.33s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_milliseconds (2.72s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_microseconds (2.75s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_nanoseconds (3.08s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_fractional_zero_hours (2.98s)
+    --- FAIL: TestReaperStaleCloseDisabled/leading_dot_zero_hours (2.81s)
+    --- FAIL: TestReaperStaleCloseDisabled/trailing_dot_zero_hours (3.66s)
+    --- FAIL: TestReaperStaleCloseDisabled/micro_sign_zero_microseconds (3.07s)
+    --- FAIL: TestReaperStaleCloseDisabled/greek_mu_zero_microseconds (2.85s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_fractional_zero (2.71s)
+    --- FAIL: TestReaperStaleCloseDisabled/unitless_trailing_component (2.90s)
+    --- PASS: TestReaperStaleCloseDisabled/space_between_components (2.79s)
+    --- PASS: TestReaperStaleCloseDisabled/dot_without_digits (2.75s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_trailing_dot (2.88s)
+    --- PASS: TestReaperStaleCloseDisabled/negative_hours (3.01s)
+    --- PASS: TestReaperStaleCloseDisabled/fractional_hours (3.31s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_minutes (3.30s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_positive (2.74s)
+    --- PASS: TestReaperStaleCloseDisabled/uppercase_zero_hours (2.64s)
+    --- PASS: TestReaperStaleCloseDisabled/invalid_word (3.01s)
+    --- PASS: TestReaperStaleCloseDisabled/days (3.05s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (2.83s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (2.80s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (3.09s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (3.03s)
+    --- PASS: TestReaperStaleCloseDisabled/one_hour (2.69s)
+    --- PASS: TestReaperStaleCloseDisabled/default_duration (3.20s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_positive_hours (3.19s)
+    --- PASS: TestReaperStaleCloseDisabled/bare_positive_hours (3.57s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.41s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/gastown	129.825s
+FAIL
+
+Exit: 1; wall seconds: 162.282

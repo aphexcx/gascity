@@ -1,0 +1,14 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib go test ./examples/gastown/... -run '^TestReaperStaleCloseDisabled$/^unitless_(leading_dot|fractional_zero)$' -count=1 -v
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/unitless_leading_dot
+=== RUN   TestReaperStaleCloseDisabled/unitless_fractional_zero
+    maintenance_scripts_test.go:7082: want exactly one invalid age warning "reaper: GC_REAPER_STALE_ISSUE_AGE=0.0 is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n", got:
+        reaper: reaper — stale_wisps:0, closed_wisps:0, workflow_roots:0, skipped_cross_store_workflow_roots:0, skipped_non_city_workflow_issue_roots:0, purged:0, sessions-pruned:0, closed:0, expired:0, expired_skipped:0, skipped_non_city_issues:0, mail_wisps:0, stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=0.0)
+--- FAIL: TestReaperStaleCloseDisabled (5.95s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_leading_dot (3.24s)
+    --- FAIL: TestReaperStaleCloseDisabled/unitless_fractional_zero (2.71s)
+FAIL
+FAIL	github.com/gastownhall/gascity/examples/gastown	8.699s
+FAIL
+
+Exit: 1; wall seconds: 19.094

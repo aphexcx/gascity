@@ -1,0 +1,7 @@
+Source commit: fe71f5450b356a40c255e00f5d6127ef352ba0d9
+Command: go test ./examples/gastown/... -count=1 -json
+Top-level passed: 250
+Passed including subtests: 392
+Failures: 0
+Skipped: ['TestTmuxKeybindingsAlternateScreenPassthrough']
+Exit: 0; wall seconds: 496.269

@@ -1,0 +1,25 @@
+# gp-zbem implementation and verification plan
+
+Approved input: claimed bead gp-zbem, E1–E4 and steps 1–7.
+Base: integration 5a85171d8a61df8a1460b487738bb396494bb94a, PR #30 squash.
+
+- [x] Verify lane boundary, claimed branch, merged predecessor, and fresh integration clone.
+- [x] Add eleven maintenance rows (nine original plus E5 controls) and assert no invalid warning for valid inputs.
+- [x] Record RED on the unchanged reaper, preserving actual failures and passes.
+- [x] Tighten only STALE_ZERO_RE and its grammar comment; keep bare integer zero compatibility.
+- [x] Add .0h and 0µs doc examples plus the same missing-unit sentence in both docs.
+- [x] Run focused GREEN, 59-case parser matrix on Bash 3.2.57 and 5.3.20, syntax checks, and full gastown package.
+- [x] Obtain independent Codex QUICK review (r1 CLEAN).
+- [x] Run required commit/push gates (10/10 push jobs, ordinary push succeeded).
+Lifecycle handoff (draft PR, READY, metadata, detach, close and drain) is recorded by the PR and GC bead/mail state.
+
+Spec resolution: Go accepts bare 0 (optional sign), but rejects bare 00, .0, 0.0 and 0.
+The existing reaper accepts repeated bare integer zeros under its bare-hours syntax.
+Preserve that compatibility so 00 cannot reach the unchanged hours arm and enable stale closes.
+Bare fractions remain invalid per E3. The duration components require units and use Go's zero-number grammar.
+The mayor approved this interpretation as E5 (mail ci-wisp-btqf1dw and bead comment),
+and required .0 and 0.0 invalid rows and the compatibility wording in both docs.
+pc_8b04cb3ce734 records the spec contradiction.
+
+The predecessor matrix already contains four of the nine requested inputs. Retain all 52 inputs,
+correct those four expectations, add the five missing inputs, and add .0 and 0.0 invalid controls: 59 cases.

@@ -1,0 +1,22 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib git commit -F ../commit-message.txt
+lint-changed: ./assets/pr-evidence/gp-zbem ./examples/gastown
+0 issues.
+Generated: docs/reference/cli.md
+Generated:
+  docs/reference/schema/city-schema.json
+  docs/reference/schema/city-schema.txt
+  docs/reference/schema/pack-schema.json
+  docs/reference/schema/pack-schema.txt
+  docs/reference/config.md
+  docs/reference/cli.md
+GOFLAGS="$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly" go vet ./...
+env -i PATH="$PATH" HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" SHELL="$SHELL" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$(scripts/test-gitconfig-path)" LANG="$LANG" TMPDIR="${TMPDIR:-/var/tmp}" OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" GOPATH="/Users/tailor512/go" GOCACHE="/Users/tailor512/Library/Caches/go-build" GOMODCACHE="/Users/tailor512/go/pkg/mod" GOTMPDIR="" GOROOT="${GOROOT:-/Users/tailor512/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64}" GOENV="${GOENV-}" GOFLAGS="${GOFLAGS-}" GO111MODULE="${GO111MODULE-}" GOEXPERIMENT="${GOEXPERIMENT-}" GOPROXY="${GOPROXY-}" GOPRIVATE="${GOPRIVATE-}" GONOPROXY="${GONOPROXY-}" GONOSUMDB="${GONOSUMDB-}" GOSUMDB="${GOSUMDB-}" GOINSECURE="${GOINSECURE-}" GOVCS="${GOVCS-}" GOWORK="${GOWORK-}" ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}" ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN-}" ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL-}" ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL-}" ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL-}" CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL-}" CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL-}" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" OLLAMA_API_KEY="${OLLAMA_API_KEY-}" XIAOMI_API_KEY="${XIAOMI_API_KEY-}" ZCODE_API_KEY="${ZCODE_API_KEY-}" ZCODE_CJS="${ZCODE_CJS-}" ZCODE_MODEL="${ZCODE_MODEL-}" ZCODE_BASE_URL="${ZCODE_BASE_URL-}" ZCODE_NODE_BIN="${ZCODE_NODE_BIN-}" ZCODE_STORAGE_DIR="${ZCODE_STORAGE_DIR-}" CGO_CPPFLAGS="${CGO_CPPFLAGS-}" CGO_LDFLAGS="${CGO_LDFLAGS-}"  go test ./test/docsync
+--- FAIL: TestDocDirCoverage (0.01s)
+    docsync_test.go:872: directories with markdown not in docTreeDirs or docTreeIgnored (add to the appropriate list in docsync_test.go):
+    docsync_test.go:875:   assets
+FAIL
+FAIL	github.com/gastownhall/gascity/test/docsync	10.969s
+FAIL
+make: *** [check-docs] Error 1
+
+Exit: 1; wall seconds: 218.614

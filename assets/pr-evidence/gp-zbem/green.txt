@@ -1,0 +1,91 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib go test ./examples/gastown/... -run '^TestReaperStaleCloseDisabled$' -count=1 -v
+=== RUN   TestReaperStaleCloseDisabled
+=== RUN   TestReaperStaleCloseDisabled/off_dry_run
+=== RUN   TestReaperStaleCloseDisabled/never
+=== RUN   TestReaperStaleCloseDisabled/zero
+=== RUN   TestReaperStaleCloseDisabled/zero_hours
+=== RUN   TestReaperStaleCloseDisabled/zero_minutes
+=== RUN   TestReaperStaleCloseDisabled/multiple_zeros
+=== RUN   TestReaperStaleCloseDisabled/plus_zero
+=== RUN   TestReaperStaleCloseDisabled/minus_zero
+=== RUN   TestReaperStaleCloseDisabled/minus_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/fractional_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/compound_zero
+=== RUN   TestReaperStaleCloseDisabled/zero_milliseconds
+=== RUN   TestReaperStaleCloseDisabled/zero_microseconds
+=== RUN   TestReaperStaleCloseDisabled/zero_nanoseconds
+=== RUN   TestReaperStaleCloseDisabled/plus_fractional_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/leading_dot_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/trailing_dot_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/micro_sign_zero_microseconds
+=== RUN   TestReaperStaleCloseDisabled/greek_mu_zero_microseconds
+=== RUN   TestReaperStaleCloseDisabled/compound_fractional_zero
+=== RUN   TestReaperStaleCloseDisabled/unitless_trailing_component
+=== RUN   TestReaperStaleCloseDisabled/space_between_components
+=== RUN   TestReaperStaleCloseDisabled/dot_without_digits
+=== RUN   TestReaperStaleCloseDisabled/unitless_trailing_dot
+=== RUN   TestReaperStaleCloseDisabled/unitless_leading_dot
+=== RUN   TestReaperStaleCloseDisabled/unitless_fractional_zero
+=== RUN   TestReaperStaleCloseDisabled/negative_hours
+=== RUN   TestReaperStaleCloseDisabled/fractional_hours
+=== RUN   TestReaperStaleCloseDisabled/positive_minutes
+=== RUN   TestReaperStaleCloseDisabled/compound_positive
+=== RUN   TestReaperStaleCloseDisabled/uppercase_zero_hours
+=== RUN   TestReaperStaleCloseDisabled/invalid_word
+=== RUN   TestReaperStaleCloseDisabled/days
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_off
+=== RUN   TestReaperStaleCloseDisabled/trimmed_mixed_case_never
+=== RUN   TestReaperStaleCloseDisabled/trimmed_zero
+=== RUN   TestReaperStaleCloseDisabled/positive_duration
+=== RUN   TestReaperStaleCloseDisabled/one_hour
+=== RUN   TestReaperStaleCloseDisabled/default_duration
+=== RUN   TestReaperStaleCloseDisabled/plus_positive_hours
+=== RUN   TestReaperStaleCloseDisabled/bare_positive_hours
+=== RUN   TestReaperStaleCloseDisabled/off_without_databases
+--- PASS: TestReaperStaleCloseDisabled (131.23s)
+    --- PASS: TestReaperStaleCloseDisabled/off_dry_run (3.26s)
+    --- PASS: TestReaperStaleCloseDisabled/never (3.41s)
+    --- PASS: TestReaperStaleCloseDisabled/zero (3.22s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_hours (2.99s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_minutes (3.18s)
+    --- PASS: TestReaperStaleCloseDisabled/multiple_zeros (3.35s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_zero (3.23s)
+    --- PASS: TestReaperStaleCloseDisabled/minus_zero (3.23s)
+    --- PASS: TestReaperStaleCloseDisabled/minus_zero_hours (3.03s)
+    --- PASS: TestReaperStaleCloseDisabled/fractional_zero_hours (3.42s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_zero (3.16s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_milliseconds (2.74s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_microseconds (3.32s)
+    --- PASS: TestReaperStaleCloseDisabled/zero_nanoseconds (3.68s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_fractional_zero_hours (3.05s)
+    --- PASS: TestReaperStaleCloseDisabled/leading_dot_zero_hours (2.78s)
+    --- PASS: TestReaperStaleCloseDisabled/trailing_dot_zero_hours (3.12s)
+    --- PASS: TestReaperStaleCloseDisabled/micro_sign_zero_microseconds (3.03s)
+    --- PASS: TestReaperStaleCloseDisabled/greek_mu_zero_microseconds (2.83s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_fractional_zero (2.88s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_trailing_component (3.19s)
+    --- PASS: TestReaperStaleCloseDisabled/space_between_components (2.93s)
+    --- PASS: TestReaperStaleCloseDisabled/dot_without_digits (3.11s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_trailing_dot (2.70s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_leading_dot (2.96s)
+    --- PASS: TestReaperStaleCloseDisabled/unitless_fractional_zero (3.23s)
+    --- PASS: TestReaperStaleCloseDisabled/negative_hours (3.85s)
+    --- PASS: TestReaperStaleCloseDisabled/fractional_hours (3.26s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_minutes (3.64s)
+    --- PASS: TestReaperStaleCloseDisabled/compound_positive (3.26s)
+    --- PASS: TestReaperStaleCloseDisabled/uppercase_zero_hours (2.62s)
+    --- PASS: TestReaperStaleCloseDisabled/invalid_word (2.94s)
+    --- PASS: TestReaperStaleCloseDisabled/days (3.09s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_off (2.79s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_mixed_case_never (3.25s)
+    --- PASS: TestReaperStaleCloseDisabled/trimmed_zero (3.70s)
+    --- PASS: TestReaperStaleCloseDisabled/positive_duration (4.21s)
+    --- PASS: TestReaperStaleCloseDisabled/one_hour (3.42s)
+    --- PASS: TestReaperStaleCloseDisabled/default_duration (3.16s)
+    --- PASS: TestReaperStaleCloseDisabled/plus_positive_hours (3.32s)
+    --- PASS: TestReaperStaleCloseDisabled/bare_positive_hours (3.40s)
+    --- PASS: TestReaperStaleCloseDisabled/off_without_databases (0.29s)
+PASS
+ok  	github.com/gastownhall/gascity/examples/gastown	134.052s
+
+Exit: 0; wall seconds: 144.286

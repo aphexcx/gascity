@@ -83,7 +83,9 @@ STALE_CLOSE_DISABLED=0
 case "$STALE_ISSUE_AGE" in
     [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;
     *)
-        STALE_ZERO_RE='^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$'
+        # Optional sign, then bare zero digits or zero-valued Go duration components.
+        # Each component needs a unit; a decimal needs digits on at least one side.
+        STALE_ZERO_RE='^[+-]?(0+|((0+([.]0*)?|[.]0+)(ns|us|µs|μs|ms|s|m|h))+)$'
         STALE_HOURS_RE='^[+]?[0-9]+h?$'
         if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then
             STALE_CLOSE_DISABLED=1

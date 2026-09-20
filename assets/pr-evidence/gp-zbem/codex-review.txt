@@ -1,0 +1,19 @@
+Independent Codex QUICK r1 — CLEAN.
+Reviewer: /root/quick_review (read-only review; no mutations).
+Base: 5a85171d8a61df8a1460b487738bb396494bb94a; reviewed working-tree source diff captured in source.diff.
+
+No Critical, Important, or Minor findings.
+Scope: exactly four source files. Reaper changes only STALE_ZERO_RE and two comments;
+hours handling, warning text, thresholds, and cleanup are unchanged.
+Grammar matches E5: signed bare zero digits disable; duration components require units;
+literal µs and μs alternatives work. Bare fractions, missing units, internal spaces,
+and nonzero digits are rejected by the zero arm.
+Exactly 11 table rows added (42 total); valid inputs also assert no warning.
+
+Reviewer fresh verification:
+- 59/59 parser cases on Bash 3.2.57 and Bash 5.3.20.
+- 3,472 independently generated grammar cases on each interpreter under inherited and C locales.
+- Shell syntax checks on both interpreters; git diff --check.
+- All 52 predecessor inputs retained, exactly four expectations corrected, seven cases added.
+- RED evidence confirmed: 35 pass/5 fail plus E5 1 pass/1 fail; 0h0.0m already passes on base.
+Full Go source-test execution belongs to the parent and is recorded separately.

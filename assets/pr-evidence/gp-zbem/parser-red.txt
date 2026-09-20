@@ -1,0 +1,52 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib python3 assets/pr-evidence/gp-zbem/parser-cases.py /bin/bash /Users/tailor512/city/.gc/tools/bash-5.3.20/bin/bash
+Interpreter: /bin/bash; GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+PASS 'off': 1|; stderr lines=0
+PASS ' NeVeR\t': 1|; stderr lines=0
+PASS '0': 1|; stderr lines=0
+PASS '0h': 1|; stderr lines=0
+PASS '0m': 1|; stderr lines=0
+PASS '0s': 1|; stderr lines=0
+PASS '00': 1|; stderr lines=0
+PASS '+0': 1|; stderr lines=0
+PASS '+00H': 1|; stderr lines=1
+PASS ' \t+000M\r\n': 1|; stderr lines=1
+PASS '+000s': 1|; stderr lines=0
+PASS '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000': 1|; stderr lines=0
+PASS '1h': 0|1; stderr lines=0
+PASS '720h': 0|720; stderr lines=0
+PASS '48h': 0|48; stderr lines=0
+PASS '10h': 0|10; stderr lines=0
+PASS '01h': 0|01; stderr lines=0
+PASS '+01h': 0|01; stderr lines=0
+PASS '0.0h': 1|; stderr lines=0
+PASS '-0h': 1|; stderr lines=0
+PASS '+': 1|; stderr lines=1
+PASS 'h': 1|; stderr lines=1
+PASS '++0': 1|; stderr lines=1
+PASS '0hh': 1|; stderr lines=1
+PASS '0ms': 1|; stderr lines=0
+PASS '0 h': 1|; stderr lines=1
+PASS '': 1|; stderr lines=1
+PASS '-0': 1|; stderr lines=0
+PASS '0h0m': 1|; stderr lines=0
+PASS '0us': 1|; stderr lines=0
+PASS '0ns': 1|; stderr lines=0
+PASS '+0.0h': 1|; stderr lines=0
+PASS '-1h': 1|; stderr lines=1
+PASS '0.5h': 1|; stderr lines=1
+PASS '30m': 1|; stderr lines=1
+PASS '1h30m': 1|; stderr lines=1
+PASS '0H': 1|; stderr lines=1
+PASS 'abc': 1|; stderr lines=1
+PASS '1d': 1|; stderr lines=1
+PASS '+48h': 0|48; stderr lines=0
+PASS '48': 0|48; stderr lines=0
+PASS '0.000s': 1|; stderr lines=0
+PASS '0h0m0s': 1|; stderr lines=0
+Traceback (most recent call last):
+  File "/Users/tailor512/city/.worktrees/gascity-packs/lane-implementation-worker-codex/.tasks/gp-zbem/core/assets/pr-evidence/gp-zbem/parser-cases.py", line 88, in <module>
+    assert (result.returncode, result.stdout, result.stderr) == (0, expected + "\n", warning), (value, result)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('0µs', CompletedProcess(args=['/bin/bash', '-c', 'set -euo pipefail\nSTALE_ISSUE_AGE="$1"\nSTALE_ISSUE_AGE="${STALE_ISSUE_AGE#"${STALE_ISSUE_AGE%%[![:space:]]*}"}"\nSTALE_ISSUE_AGE="${STALE_ISSUE_AGE%"${STALE_ISSUE_AGE##*[![:space:]]}"}"\nduration_to_hours() {\n    local dur="$1"\n    # Strip trailing \'h\' and return as integer.\n    echo "${dur%h}"\n}\nSTALE_CLOSE_DISABLED=0\ncase "$STALE_ISSUE_AGE" in\n    [oO][fF][fF]|[nN][eE][vV][eE][rR]) STALE_CLOSE_DISABLED=1 ;;\n    *)\n        STALE_ZERO_RE=\'^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$\'\n        STALE_HOURS_RE=\'^[+]?[0-9]+h?$\'\n        if [[ "$STALE_ISSUE_AGE" =~ $STALE_ZERO_RE ]]; then\n            STALE_CLOSE_DISABLED=1\n        elif [[ "$STALE_ISSUE_AGE" =~ $STALE_HOURS_RE ]]; then\n            STALE_AGE_H=$(duration_to_hours "${STALE_ISSUE_AGE#+}")\n        else\n            STALE_CLOSE_DISABLED=1\n            printf \'reaper: GC_REAPER_STALE_ISSUE_AGE=%s is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\\n\' "$STALE_ISSUE_AGE" >&2\n        fi\n        ;;\nesac\nprintf "%s|%s\\n" "$STALE_CLOSE_DISABLED" "${STALE_AGE_H-}"\n', 'reaper-parser', '0µs'], returncode=0, stdout='1|\n', stderr='reaper: GC_REAPER_STALE_ISSUE_AGE=0µs is not off, never, a zero, or a positive whole number of hours (Nh or N); age-based issue closes are disabled for this run\n'))
+
+Exit: 1; wall seconds: 1.193
