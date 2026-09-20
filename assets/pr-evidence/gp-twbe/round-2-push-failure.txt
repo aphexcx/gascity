@@ -1,0 +1,18 @@
+Push gate first-attempt failure on source commit b95e6cd127c98458cd8bcbd279d822baea5af7ad
+Job: unit-cmd-gc-5-of-6; original log: /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/gc-local-tests.W8ZD7Y/unit-cmd-gc-5-of-6.log
+--- FAIL: TestStopManagedCityForcesCleanupAfterTimeout (0.67s)
+    cmd_supervisor_test.go:4944: stopManagedCity took 671.155625ms, want bounded timeout
+The failure is in unchanged cmd/gc/cmd_supervisor_test.go (not a reaper test). Full gate is finishing before the required three solo diagnostics. The failed gate result is retained; no bypass or retry into green.
+
+Completed initial gate: 9/10 jobs passed; unit-cmd-gc-5-of-6 failed; push exit 1; wall seconds 1526.287.
+Mayor ruling recorded on gp-xgbp at 2026-09-20 06:02, mail ci-wisp-jxsa2ta; source /Users/tailor512/city/assets/ops/beads/gp-xgbp-ruling-push-gate-deadline-flake-20260920-219th.txt. All six solo passes authorize one ordinary gate retry on b95e6cd; no bypass and no test edits.
+head b95e6cd127c98458cd8bcbd279d822baea5af7ad, solo 1: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 13.250s (not the 500 ms subject).
+head b95e6cd127c98458cd8bcbd279d822baea5af7ad, solo 2: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 10.638s (not the 500 ms subject).
+head b95e6cd127c98458cd8bcbd279d822baea5af7ad, solo 3: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 10.941s (not the 500 ms subject).
+untouched base 9d78b47b7c10110f060b28404480c93805d63d99, solo 1: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 25.729s (not the 500 ms subject).
+untouched base 9d78b47b7c10110f060b28404480c93805d63d99, solo 2: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 10.775s (not the 500 ms subject).
+untouched base 9d78b47b7c10110f060b28404480c93805d63d99, solo 3: test wall time reported by Go = 0.30s (300 ms), below the unchanged 500 ms assertion; PASS. Whole go-command wall time including compilation/TestMain = 10.788s (not the 500 ms subject).
+Timing note: Go reports test duration rounded to two decimals; each passing test also executes the unchanged internal 500 ms assertion.
+Classification under the mayor ruling: load-induced. Original failure retained; one authorized retry follows on the identical source commit.
+
+Authorized retry result: all 10/10 jobs passed, push exit 0, wall seconds 1554.290; same source commit b95e6cd127c98458cd8bcbd279d822baea5af7ad advanced fork gp-twbe. First-attempt failure remains recorded above and in round-2-prepush-suite.txt.

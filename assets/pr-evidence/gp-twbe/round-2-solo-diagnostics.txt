@@ -1,0 +1,19 @@
+Diagnostic only: retain failed first-attempt push gate. No suite retry or bypass.
+Command (three separate processes after all gate jobs exited): GC_FAST_UNIT=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=<scripts/test-gitconfig-path> go test ./cmd/gc -run ^TestStopManagedCityForcesCleanupAfterTimeout$ -count=1 -v
+Darwin ICU CGO flags supplied.
+Run 1; exit=0; wall seconds=13.250
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.494s
+Run 2; exit=0; wall seconds=10.638
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.532s
+Run 3; exit=0; wall seconds=10.941
+=== RUN   TestStopManagedCityForcesCleanupAfterTimeout
+--- PASS: TestStopManagedCityForcesCleanupAfterTimeout (0.30s)
+PASS
+ok  	github.com/gastownhall/gascity/cmd/gc	2.520s
+Solo outcomes: 3/3 passed; 0 failed. Push gate remains FAILED.
