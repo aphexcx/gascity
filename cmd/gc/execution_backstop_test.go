@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 // that a working agent never sees a keystroke.
 
 type executionBackstopFixture struct {
+	refusals claimRefusalLog
 	cfg      *config.City
 	store    beads.Store
 	sp       *runtime.Fake
@@ -91,6 +93,30 @@ func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
 	return f
 }
 
+// claimWork seeds a step bead and claims it for the seat the way the hook does,
+// so the row under test is a real in-progress assignment rather than a
+// hand-built status string.
+func (f *executionBackstopFixture) claimWork(t *testing.T, title string) beads.Bead {
+	t.Helper()
+	work, err := f.store.Create(beads.Bead{
+		Title:    title,
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-1"},
+	})
+	if err != nil {
+		t.Fatalf("seeding the work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming the work bead: %v", err)
+	}
+	claimed, err := f.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("re-reading the claimed work bead: %v", err)
+	}
+	return claimed
+}
+
 // tick runs one reconcile tick of the backstop at the fixture's current clock.
 func (f *executionBackstopFixture) tick(t *testing.T) {
 	t.Helper()
@@ -111,7 +137,7 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
-		}, &f.stdout)
+		}, &f.stdout, &f.refusals)
 }
 
 // idleFor backdates the runtime's last-activity so the predicate observes an
@@ -361,5 +387,83 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 	if stalled != 1 {
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+}
+
+// A peer's claim under the same bare seat identity cannot hold the local
+// execution lane in its multiple-claims ambiguity state.
+func TestExecutionClaimOwnerFenceLocalBesideForeign(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Federation.Identity = "jadegate"
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"alias": "mayor"}); err != nil {
+		t.Fatal(err)
+	}
+	assignee := "mayor"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Assignee: &assignee, Labels: []string{"owner:jadegate"}}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := f.claimWork(t, "foreign claim")
+	if err := f.store.Update(foreign.ID, beads.UpdateOpts{Assignee: &assignee, Labels: []string{"owner:citadel"}}); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+		t.Errorf("governing work=%q, want local %q", got, f.work.ID)
+	}
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgeCount(); got != 1 {
+		t.Errorf("nudges=%d, want 1 for only the local claim; %s", got, f.stdout.String())
+	}
+	if got := strings.Count(logs.String(), "execution-claim-nudge: cross-city-fence refused bead="+foreign.ID+" owner=citadel this_identity=jadegate missing=handoff:jadegate"); got != 1 {
+		t.Errorf("refusal lines=%d, want 1 across ticks; %s", got, logs.String())
+	}
+}
+
+func TestExecutionClaimOwnerFence(t *testing.T) {
+	for _, tc := range []struct {
+		name, identity string
+		labels         []string
+		want           int
+	}{
+		{"foreign", "jadegate", []string{"owner:citadel"}, 0},
+		{"local", "jadegate", []string{"owner:jadegate"}, 1},
+		{"unowned", "jadegate", nil, 1},
+		{"handoff", "jadegate", []string{"owner:citadel", "handoff:jadegate"}, 1},
+		{"unfederated", "", []string{"owner:citadel"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Federation.Identity = tc.identity
+			if err := f.store.Update(f.work.ID, beads.UpdateOpts{Labels: tc.labels}); err != nil {
+				t.Fatal(err)
+			}
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+			f.idleFor(t, 10*time.Minute)
+			f.tick(t)
+			if got := f.nudgeCount(); got != tc.want {
+				t.Errorf("nudges=%d, want %d; %s", got, tc.want, f.stdout.String())
+			}
+		})
+	}
+}
+
+func TestExecutionClaimOwnerFenceRevalidate(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Federation.Identity = "jadegate"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Labels: []string{"owner:citadel"}}); err != nil {
+		t.Fatal(err)
+	}
+	p := poolExecutionBackstop{cfg: f.cfg, now: f.now}
+	if got := p.revalidate(backstopTarget{ID: f.work.ID, Assignee: f.sessName, Store: f.store}); got != backstopResolutionClear {
+		t.Errorf("revalidation=%v, want clear for changed foreign owner", got)
 	}
 }

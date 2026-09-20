@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,7 +82,7 @@ func continuationCandidateFixture(
 		[]beads.Bead{step},
 		[]beads.Store{backing},
 		[]string{actualStoreRef},
-		readyAssigned,
+		readyAssigned, "", time.Time{}, nil,
 	)
 }
 
@@ -262,7 +264,7 @@ func TestSelectReadyContinuationClaimCandidates_RejectsMisalignedSnapshots(t *te
 		[]beads.Bead{step},
 		[]beads.Store{backing},
 		nil,
-		ready,
+		ready, "", time.Time{}, nil,
 	)
 	if len(got) != 0 || !partial {
 		t.Fatalf("misaligned snapshot = {%#v partial:%v}, want no candidates and partial", got, partial)
@@ -273,7 +275,7 @@ func TestSelectReadyContinuationClaimCandidates_RejectsMisalignedSnapshots(t *te
 		nil,
 		[]beads.Store{backing},
 		nil,
-		ready,
+		ready, "", time.Time{}, nil,
 	)
 	if len(got) != 0 || !partial {
 		t.Fatalf("empty-work misalignment = {%#v partial:%v}, want no candidates and partial", got, partial)
@@ -297,7 +299,7 @@ func TestSelectReadyContinuationClaimCandidates_RootReadFailureIsPartial(t *test
 		[]beads.Bead{step},
 		[]beads.Store{unreadable},
 		[]string{actualStoreRef},
-		ready,
+		ready, "", time.Time{}, nil,
 	)
 	if len(got) != 0 || !partial {
 		t.Fatalf("root read failure = {%#v partial:%v}, want no candidate and partial", got, partial)
@@ -321,7 +323,7 @@ func TestSelectReadyContinuationClaimCandidates_DuplicateAgreementRequired(t *te
 			[]beads.Bead{step, step},
 			[]beads.Store{backing, backing},
 			[]string{actualStoreRef, actualStoreRef},
-			ready,
+			ready, "", time.Time{}, nil,
 		)
 		if partial || len(got) != 1 {
 			t.Fatalf("identical duplicate = {%#v partial:%v}, want one exact candidate", got, partial)
@@ -337,7 +339,7 @@ func TestSelectReadyContinuationClaimCandidates_DuplicateAgreementRequired(t *te
 			[]beads.Bead{step, ineligible},
 			[]beads.Store{backing, backing},
 			[]string{actualStoreRef, actualStoreRef},
-			ready,
+			ready, "", time.Time{}, nil,
 		)
 		if len(got) != 0 || !partial {
 			t.Fatalf("disagreeing duplicate = {%#v partial:%v}, want no candidate and partial", got, partial)
@@ -357,7 +359,7 @@ func TestSelectReadyContinuationClaimCandidates_DuplicateAgreementRequired(t *te
 			[]beads.Bead{step, otherStep},
 			[]beads.Store{divergentStore, divergentStore},
 			[]string{actualStoreRef, actualStoreRef},
-			ready,
+			ready, "", time.Time{}, nil,
 		)
 		if len(got) != 0 || !partial {
 			t.Fatalf("divergent valid duplicate = {%#v partial:%v}, want no candidate and partial", got, partial)
@@ -371,7 +373,7 @@ func TestSelectReadyContinuationClaimCandidates_DuplicateAgreementRequired(t *te
 			[]beads.Bead{step, step},
 			[]beads.Store{backing, unreadable},
 			[]string{actualStoreRef, actualStoreRef},
-			ready,
+			ready, "", time.Time{}, nil,
 		)
 		if len(got) != 0 || !partial {
 			t.Fatalf("unreadable duplicate = {%#v partial:%v}, want no candidate and partial", got, partial)
@@ -511,7 +513,7 @@ func TestEvaluateReadyContinuationClaimCandidate_BindingLegTakesOwnerFromRootRef
 				binding,
 				tt.rawStoreRef,
 				canonicalStoreRef,
-				readyAssigned,
+				readyAssigned, "", time.Time{}, nil,
 			)
 			if resolution != tt.wantResolution {
 				t.Fatalf("resolution = %v, want %v (candidate %#v)", resolution, tt.wantResolution, got)
@@ -578,7 +580,7 @@ func TestSelectReadyContinuationClaimCandidates_CoResidentForeignCopyDoesNotHold
 			map[storeScopedBeadKey]bool{
 				{StoreRef: "", ID: step.ID}:       true,
 				{StoreRef: classLeg, ID: step.ID}: true,
-			},
+			}, "", time.Time{}, nil,
 		)
 		if partial || len(got) != 1 {
 			t.Fatalf("co-resident rig-rooted = {%#v partial:%v}, want one candidate and no partial", got, partial)
@@ -606,7 +608,7 @@ func TestSelectReadyContinuationClaimCandidates_CoResidentForeignCopyDoesNotHold
 			[]beads.Bead{step, step},
 			[]beads.Store{workLeg, binding},
 			[]string{"", classLeg},
-			map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true},
+			map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true}, "", time.Time{}, nil,
 		)
 		if partial || len(got) != 1 {
 			t.Fatalf("half-ready co-resident = {%#v partial:%v}, want one candidate and no partial", got, partial)
@@ -635,7 +637,7 @@ func TestSelectReadyContinuationClaimCandidates_CoResidentForeignCopyDoesNotHold
 				{StoreRef: "", ID: step.ID}:       true,
 				{StoreRef: classLeg, ID: step.ID}: true,
 				{StoreRef: "", ID: otherStep.ID}:  true,
-			},
+			}, "", time.Time{}, nil,
 		)
 		if partial || len(got) != 2 {
 			t.Fatalf("mixed snapshot = {%#v partial:%v}, want both candidates and no partial", got, partial)
@@ -658,7 +660,7 @@ func TestNudgeStalledPoolContinuations_BindingRigRootedCandidateIsNudged(t *test
 		[]beads.Bead{step},
 		[]beads.Store{binding},
 		[]string{classLeg},
-		map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true},
+		map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true}, "", time.Time{}, nil,
 	)
 	if partial || len(candidates) != 1 {
 		t.Fatalf("binding candidates = {%#v partial:%v}, want exactly one candidate", candidates, partial)
@@ -678,7 +680,7 @@ func TestNudgeStalledPoolContinuations_BindingRigRootedCandidateIsNudged(t *test
 		candidates,
 		false,
 		now,
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("Nudge calls = %d, want 1 for a rig-rooted row inside the binding", got)
@@ -824,7 +826,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil)
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 		t.Fatalf("first tick Nudge calls = %d, want 0 inside grace", got)
 	}
@@ -834,7 +836,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("post-grace Nudge calls = %d, want 1", got)
 	}
@@ -843,7 +845,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	// controller restart. The attempt remains inside backoff and must not replay.
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(time.Minute)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("restart-inside-backoff Nudge calls = %d, want 1", got)
 	}
@@ -851,7 +853,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	for want := 2; want <= idleClaimNudgeMaxAttempts; want++ {
 		session = mustGetTestBead(t, backing, session.ID)
 		clk.Advance(idleClaimNudgeBackoff + time.Second)
-		nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+		nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil)
 		if got := sp.CountCalls("Nudge", sessionName); got != want {
 			t.Fatalf("attempt %d Nudge calls = %d, want %d", want, got, want)
 		}
@@ -860,7 +862,7 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	session = mustGetTestBead(t, backing, session.ID)
 	writesAtCap := store.metadataWrites
 	clk.Advance(time.Hour)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil)
 	if got := sp.CountCalls("Nudge", sessionName); got != idleClaimNudgeMaxAttempts {
 		t.Fatalf("past-cap Nudge calls = %d, want %d", got, idleClaimNudgeMaxAttempts)
 	}
@@ -889,7 +891,7 @@ func TestNudgeStalledPoolContinuations_WriteAheadFailurePreventsDelivery(t *test
 		[]ContinuationClaimCandidate{candidate},
 		false,
 		now,
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
@@ -935,7 +937,7 @@ func TestNudgeStalledPoolContinuations_ReservesBeforeSuccessfulDelivery(t *testi
 		[]ContinuationClaimCandidate{candidate},
 		false,
 		now,
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if reservationObserved != 1 {
 		t.Fatalf("reservation callbacks = %d, want 1", reservationObserved)
@@ -969,7 +971,7 @@ func TestNudgeStalledPoolContinuations_DeliveryFailureConsumesAttempt(t *testing
 		[]ContinuationClaimCandidate{candidate},
 		false,
 		now,
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if sp.nudgeCalls != 1 {
 		t.Fatalf("delivery calls = %d, want 1 failed attempt", sp.nudgeCalls)
@@ -990,7 +992,7 @@ func TestNudgeStalledPoolContinuations_DeliveryFailureConsumesAttempt(t *testing
 		[]ContinuationClaimCandidate{candidate},
 		false,
 		now.Add(time.Second),
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if sp.nudgeCalls != 1 || store.metadataWrites != 1 {
 		t.Fatalf("inside backoff = {delivery:%d writes:%d}, want unchanged {1 1}", sp.nudgeCalls, store.metadataWrites)
@@ -1016,7 +1018,7 @@ func TestNudgeStalledPoolContinuations_PartialSnapshotPreservesMarker(t *testing
 		nil,
 		true,
 		now,
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if store.metadataWrites != 0 {
 		t.Fatalf("metadata writes = %d, want 0 for partial snapshot hold", store.metadataWrites)
@@ -1049,7 +1051,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 			[]ContinuationClaimCandidate{first, second},
 			false,
 			now,
-			&bytes.Buffer{},
+			&bytes.Buffer{}, nil,
 		)
 		if store.metadataWrites != 0 {
 			t.Fatalf("metadata writes = %d, want 0 while candidate set is ambiguous", store.metadataWrites)
@@ -1081,7 +1083,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 			[]ContinuationClaimCandidate{candidate},
 			false,
 			now,
-			&bytes.Buffer{},
+			&bytes.Buffer{}, nil,
 		)
 		if store.metadataWrites != 0 {
 			t.Fatalf("metadata writes = %d, want 0 while identity ownership is ambiguous", store.metadataWrites)
@@ -1110,7 +1112,7 @@ func TestNudgeStalledPoolContinuations_AmbiguityPreservesMarker(t *testing.T) {
 			[]ContinuationClaimCandidate{candidate},
 			false,
 			now,
-			&bytes.Buffer{},
+			&bytes.Buffer{}, nil,
 		)
 		if store.metadataWrites != 0 {
 			t.Fatalf("metadata writes = %d, want 0 without exact generation", store.metadataWrites)
@@ -1155,7 +1157,7 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 				[]ContinuationClaimCandidate{candidate},
 				false,
 				now,
-				&bytes.Buffer{},
+				&bytes.Buffer{}, nil,
 			)
 			if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 				t.Fatalf("Nudge calls = %d, want 0 after live target transition", got)
@@ -1188,7 +1190,7 @@ func TestNudgeStalledPoolContinuations_RevalidatesImmediatelyBeforeDelivery(t *t
 			[]ContinuationClaimCandidate{candidate},
 			false,
 			now,
-			&bytes.Buffer{},
+			&bytes.Buffer{}, nil,
 		)
 		if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 			t.Fatalf("Nudge calls = %d, want 0 on root read failure", got)
@@ -1243,7 +1245,7 @@ func TestNudgeStalledPoolContinuations_RevalidationIgnoresRootSessionStamp(t *te
 				[]ContinuationClaimCandidate{candidate},
 				false,
 				now,
-				&bytes.Buffer{},
+				&bytes.Buffer{}, nil,
 			)
 			if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 				t.Fatalf("Nudge calls = %d, want 1 — the root stamp must not gate delivery", got)
@@ -1317,7 +1319,7 @@ func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testin
 				[]ContinuationClaimCandidate{candidate},
 				false,
 				now,
-				&bytes.Buffer{},
+				&bytes.Buffer{}, nil,
 			)
 			if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 				t.Fatalf("Nudge calls = %d, want 0 after authoritative live transition", got)
@@ -1370,7 +1372,7 @@ func TestNudgeStalledPoolContinuations_RevalidationBypassesPrimedCache(t *testin
 			[]ContinuationClaimCandidate{candidate},
 			false,
 			now,
-			&bytes.Buffer{},
+			&bytes.Buffer{}, nil,
 		)
 		if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 			t.Fatalf("Nudge calls = %d, want 0 on authoritative root read failure", got)
@@ -1398,12 +1400,12 @@ func TestNudgeStalledPoolContinuations_ClaimClearsMarker(t *testing.T) {
 	nudgeStalledPoolContinuations(
 		sp, cfg, store, []beads.Bead{session},
 		[]ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)},
-		false, now, &out,
+		false, now, &out, nil,
 	)
 	session = mustGetTestBead(t, backing, session.ID)
 	// The next desired-state snapshot excludes the now-in_progress successor,
 	// so the absence of an open candidate clears its exact persisted marker.
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, nil, false, now.Add(time.Second), &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, nil, false, now.Add(time.Second), &out, nil)
 
 	session = mustGetTestBead(t, backing, session.ID)
 	for _, key := range []string{
@@ -1432,7 +1434,7 @@ func TestNudgeStalledPoolContinuations_RecycledGenerationRestartsGrace(t *testin
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
 	var out bytes.Buffer
 
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, now, &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, now, &out, nil)
 	if store.metadataWrites != 1 {
 		t.Fatalf("generation 1 writes = %d, want one observation", store.metadataWrites)
 	}
@@ -1441,7 +1443,7 @@ func TestNudgeStalledPoolContinuations_RecycledGenerationRestartsGrace(t *testin
 	}
 	session = mustGetTestBead(t, backing, session.ID)
 	recycledAt := now.Add(idleClaimNudgeGrace + time.Second)
-	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, recycledAt, &out)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, recycledAt, &out, nil)
 
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 		t.Fatalf("recycled generation Nudge calls = %d, want 0 during fresh grace", got)
@@ -1473,7 +1475,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 	// The predecessor has closed, but the unassigned scope-control bead has not
 	// yet produced a ready successor. This phase must be completely write-free.
 	nudgeStalledPoolContinuations(
-		sp, continuationNudgeCfg(), store, []beads.Bead{session}, nil, false, clk.Now(), &out,
+		sp, continuationNudgeCfg(), store, []beads.Bead{session}, nil, false, clk.Now(), &out, nil,
 	)
 	clk.Advance(10 * time.Minute)
 	if store.metadataWrites != 0 {
@@ -1482,7 +1484,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 
 	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
 	nudgeStalledPoolContinuations(
-		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out,
+		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil,
 	)
 	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 		t.Fatalf("successor appearance Nudge calls = %d, want 0 during grace", got)
@@ -1494,7 +1496,7 @@ func TestNudgeStalledPoolContinuations_DelayedScopeControlStartsGraceAtSuccessor
 	session = mustGetTestBead(t, backing, session.ID)
 	clk.Advance(idleClaimNudgeGrace + time.Second)
 	nudgeStalledPoolContinuations(
-		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out,
+		sp, continuationNudgeCfg(), store, []beads.Bead{session}, candidates, false, clk.Now(), &out, nil,
 	)
 	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
 		t.Fatalf("post-successor-grace Nudge calls = %d, want 1", got)
@@ -1510,7 +1512,7 @@ func TestNudgeStalledPoolContinuations_NoCandidateDoesNotWrite(t *testing.T) {
 
 	nudgeStalledPoolContinuations(
 		sp, continuationNudgeCfg(), store, []beads.Bead{session}, nil,
-		false, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), &bytes.Buffer{},
+		false, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), &bytes.Buffer{}, nil,
 	)
 	if store.metadataWrites != 0 {
 		t.Fatalf("metadata writes = %d, want 0 without a candidate or marker", store.metadataWrites)
@@ -1537,7 +1539,7 @@ func TestNudgeStalledPoolContinuations_AcceptsCurrentSessionIdentities(t *testin
 				[]ContinuationClaimCandidate{validContinuationCandidate("step-a", assignee)},
 				false,
 				now,
-				&bytes.Buffer{},
+				&bytes.Buffer{}, nil,
 			)
 			if store.metadataWrites != 1 {
 				t.Fatalf("metadata writes = %d, want one observation for current identity %q", store.metadataWrites, assignee)
@@ -1562,7 +1564,7 @@ func TestNudgeStalledPoolContinuations_RejectsHistoricalAlias(t *testing.T) {
 		[]ContinuationClaimCandidate{validContinuationCandidate("step-a", "old-alias")},
 		false,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		&bytes.Buffer{},
+		&bytes.Buffer{}, nil,
 	)
 	if store.metadataWrites != 0 {
 		t.Fatalf("metadata writes = %d, want 0 for historical alias", store.metadataWrites)
@@ -1659,7 +1661,7 @@ func TestNudgeStalledPoolContinuations_FailsClosed(t *testing.T) {
 			store := &continuationMetadataCountingStore{Store: backing}
 
 			nudgeStalledPoolContinuations(
-				sp, continuationNudgeCfg(), store, sessions, tt.candidates, false, now, &bytes.Buffer{},
+				sp, continuationNudgeCfg(), store, sessions, tt.candidates, false, now, &bytes.Buffer{}, nil,
 			)
 			if got := sp.CountCalls("Nudge", sessionName); got != 0 {
 				t.Fatalf("Nudge calls = %d, want 0", got)
@@ -1668,5 +1670,65 @@ func TestNudgeStalledPoolContinuations_FailsClosed(t *testing.T) {
 				t.Fatalf("metadata writes = %d, want 0 for fail-closed case", store.metadataWrites)
 			}
 		})
+	}
+}
+
+// The continuation selector must exclude work the city's claim hook refuses.
+func TestContinuationClaimOwnerFenceCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name, identity string
+		labels         []string
+		want           int
+	}{
+		{"foreign", "jadegate", []string{"owner:citadel"}, 0},
+		{"local", "jadegate", []string{"owner:jadegate"}, 1},
+		{"unowned", "jadegate", nil, 1},
+		{"handoff", "jadegate", []string{"owner:citadel", "handoff:jadegate"}, 1},
+		{"unfederated", "", []string{"owner:citadel"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := continuationNudgeCfg()
+			cfg.Workspace.Name = "test-city"
+			cfg.Federation.Identity = tc.identity
+			root := continuationRoot("rig:fixture")
+			step := continuationStep(root.ID, "rig:fixture")
+			step.Labels = tc.labels
+			store := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+			ready := map[storeScopedBeadKey]bool{{StoreRef: "fixture", ID: step.ID}: true}
+			var logs bytes.Buffer
+			var refusals claimRefusalLog
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			now := time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)
+			for tick := 0; tick < 2; tick++ {
+				candidates, partial := selectReadyContinuationClaimCandidates(cfg.Workspace.Name, []beads.Bead{step, step}, []beads.Store{store, store}, []string{"fixture", "fixture"}, ready, federationIdentity(cfg), now.Add(time.Duration(tick)*time.Minute), &refusals)
+				if partial || len(candidates) != tc.want {
+					t.Errorf("candidates=%v partial=%v, want %d candidates", candidates, partial, tc.want)
+				}
+				wantLogs := 0
+				if tc.want == 0 {
+					wantLogs = 1
+				}
+				if got := strings.Count(logs.String(), "continuation-claim-nudge: cross-city-fence refused bead=step-a owner=citadel this_identity=jadegate missing=handoff:jadegate"); got != wantLogs {
+					t.Errorf("tick %d: refusal lines=%d, want %d; %s", tick, got, wantLogs, logs.String())
+				}
+			}
+		})
+	}
+}
+
+// A label change after selection must be checked on the authoritative re-read.
+func TestContinuationClaimOwnerFenceRevalidate(t *testing.T) {
+	cfg := continuationNudgeCfg()
+	cfg.Federation.Identity = "jadegate"
+	candidate := validContinuationCandidate("step-a", "session-a")
+	if err := candidate.Store.Update(candidate.WorkBeadID, beads.UpdateOpts{Labels: []string{"owner:citadel"}}); err != nil {
+		t.Fatal(err)
+	}
+	p := poolContinuationBackstop{cfg: cfg}
+	target := backstopTarget{ID: candidate.WorkBeadID, RootID: candidate.RootBeadID, StoreRef: candidate.StoreRef, Assignee: candidate.Assignee, Store: candidate.Store}
+	if got := p.revalidate(target); got != backstopResolutionClear {
+		t.Errorf("revalidation=%v, want clear for changed foreign owner", got)
 	}
 }

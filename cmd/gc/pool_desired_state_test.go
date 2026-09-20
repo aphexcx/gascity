@@ -2128,6 +2128,7 @@ func TestBuildDesiredState_PostCreateProtectionUsesInjectedDecisionTime(t *testi
 		snapshot,
 		nil,
 		io.Discard,
+		nil,
 	)
 
 	if got := result.ScaleCheckCounts["claude"]; got != 1 {
@@ -2176,6 +2177,7 @@ func TestBuildDesiredState_PostCreateProtectionExpiresAgainstDecisionTimeNotBeac
 		newSessionBeadSnapshot(sessions),
 		nil,
 		io.Discard,
+		nil,
 	)
 
 	workerCount := 0
@@ -2228,6 +2230,7 @@ func TestBuildDesiredState_PostCreateProtectionPreservesPersistedProvenance(t *t
 		snapshot,
 		nil,
 		io.Discard,
+		nil,
 	)
 
 	if _, ok := result.BaseState[protected.Metadata["session_name"]]; !ok {
@@ -2301,6 +2304,7 @@ func TestBuildDesiredState_BlockedFreshSessionMaterializesRunnableReplacement(t 
 				snapshot,
 				nil,
 				io.Discard,
+				nil,
 			)
 
 			var replacement *sessionpkg.Info
@@ -2417,6 +2421,7 @@ func TestBuildDesiredState_RealDemandPromotesDependencyOnlySession(t *testing.T)
 		snapshot,
 		nil,
 		io.Discard,
+		nil,
 	)
 
 	if got := result.ScaleCheckCounts["claude"]; got != 1 {

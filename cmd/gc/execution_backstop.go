@@ -46,6 +46,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -95,6 +97,7 @@ func nudgeStalledPoolExecution(
 	rec events.Recorder,
 	requestDrain func(sessionBead beads.Bead) error,
 	stdout io.Writer,
+	refusals *claimRefusalLog,
 ) {
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return // hot reconcile path: never panic on a half-built dependency
@@ -103,12 +106,13 @@ func nudgeStalledPoolExecution(
 		return
 	}
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "execution-claim-nudge", poolExecutionBackstop{
+		refusals:     refusals,
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
 		rec:          rec,
 		requestDrain: requestDrain,
-		claims:       newExecutionClaimSnapshot(work, workStores, workStoreRefs),
+		claims:       newExecutionClaimSnapshot(work, workStores, workStoreRefs, federationIdentity(cfg), now, refusals),
 	})
 }
 
@@ -130,8 +134,18 @@ type executionClaimSnapshot struct {
 	byAssignee map[string][]executionClaim
 }
 
-func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRefs []string) executionClaimSnapshot {
+// storeRefAt reads the index-aligned store ref for a work row, normalized the
+// way the idle-claim snapshot keys it; a short slice reads as the city scope.
+func storeRefAt(storeRefs []string, i int) string {
+	if i < len(storeRefs) {
+		return normalizeIdleClaimStoreRef(storeRefs[i])
+	}
+	return normalizeIdleClaimStoreRef("")
+}
+
+func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRefs []string, identity string, now time.Time, refusals *claimRefusalLog) executionClaimSnapshot {
 	snapshot := executionClaimSnapshot{byAssignee: make(map[string][]executionClaim)}
+	refused := make(map[storeScopedBeadKey]bool)
 	for i, wb := range work {
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" || !strings.EqualFold(strings.TrimSpace(wb.Status), "in_progress") {
@@ -140,6 +154,17 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 		if strings.TrimSpace(wb.ID) == "" {
 			continue
 		}
+		if ok, reason := federation.MayClaim(wb.Labels, identity); !ok {
+			key := storeScopedBeadKey{StoreRef: storeRefAt(storeRefs, i), ID: strings.TrimSpace(wb.ID)}
+			if !refused[key] {
+				refused[key] = true
+				if refusals.shouldLog(now, key, reason) {
+					log.Printf("execution-claim-nudge: %s", federation.ClaimRefusalLine(wb.ID, reason))
+				}
+			}
+			continue
+		}
+
 		claim := executionClaim{
 			BeadID:   wb.ID,
 			RootID:   strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
@@ -184,6 +209,7 @@ func (s executionClaimSnapshot) forIdentities(identities []string) []executionCl
 // poolExecutionBackstop is the backstopPredicate for a pool slot that claimed a
 // bead and never executed it.
 type poolExecutionBackstop struct {
+	refusals     *claimRefusalLog
 	cfg          *config.City
 	sp           runtime.Provider
 	now          time.Time
@@ -265,6 +291,13 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
+	if ok, reason := federation.MayClaim(current.Labels, federationIdentity(p.cfg)); !ok {
+		if p.refusals.shouldLog(p.now, storeScopedBeadKey{StoreRef: target.StoreRef, ID: current.ID}, reason) {
+			log.Printf("execution-claim-nudge: %s", federation.ClaimRefusalLine(current.ID, reason))
+		}
+		return backstopResolutionClear
+	}
+
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee {
 		return backstopResolutionClear
