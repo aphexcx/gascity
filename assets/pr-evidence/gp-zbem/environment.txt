@@ -1,0 +1,29 @@
+$ git log --oneline -3
+5a85171d8 fix(core): disable stale issue closes for any zero duration (#30)
+9d78b47b7 feat: allow agents to opt out of the seat-claim backstop (#25)
+d532968c3 fix: preserve binding and owner-label routing invariants (#23)
+exit 0
+$ git rev-parse HEAD
+5a85171d8a61df8a1460b487738bb396494bb94a
+exit 0
+$ go version
+go version go1.26.6 darwin/arm64
+exit 0
+$ /bin/bash --version
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+Copyright (C) 2007 Free Software Foundation, Inc.
+exit 0
+$ /Users/tailor512/city/.gc/tools/bash-5.3.20/bin/bash --version
+GNU bash, version 5.3.20(1)-release (aarch64-apple-darwin25.6.0)
+Copyright (C) 2025 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+exit 0
+$ make check-hooks
+core.hooksPath OK: .githooks gates are active.
+exit 0
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include
+CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib
+No Node tests apply to this Go/Bash change. No unsupported-engine warning occurred.

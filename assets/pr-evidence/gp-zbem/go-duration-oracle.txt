@@ -1,0 +1,19 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib go run assets/pr-evidence/gp-zbem/parse-duration.go
+"0": duration=0s error=<nil>
+"-0": duration=0s error=<nil>
+"+0": duration=0s error=<nil>
+"00": duration=0s error=time: missing unit in duration "00"
+"-00": duration=0s error=time: missing unit in duration "-00"
+"0.0": duration=0s error=time: missing unit in duration "0.0"
+".0": duration=0s error=time: missing unit in duration ".0"
+"0.": duration=0s error=time: missing unit in duration "0."
+".0h": duration=0s error=<nil>
+"0.h": duration=0s error=<nil>
+"0µs": duration=0s error=<nil>
+"0μs": duration=0s error=<nil>
+"0h0.0m": duration=0s error=<nil>
+"0h0": duration=0s error=time: missing unit in duration "0h0"
+"0h 0m": duration=0s error=time: unknown unit "h " in duration "0h 0m"
+".": duration=0s error=time: invalid duration "."
+
+Exit: 0; wall seconds: 0.537

@@ -1,0 +1,47 @@
+diff --git a/examples/gastown/maintenance_scripts_test.go b/examples/gastown/maintenance_scripts_test.go
+index 32523c76d..8f74a1eed 100644
+--- a/examples/gastown/maintenance_scripts_test.go
++++ b/examples/gastown/maintenance_scripts_test.go
+@@ -7001,0 +7002,11 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++		{name: "leading dot zero hours", age: ".0h", disabled: true},
++		{name: "trailing dot zero hours", age: "0.h", disabled: true},
++		{name: "micro sign zero microseconds", age: "0µs", disabled: true},
++		{name: "greek mu zero microseconds", age: "0μs", disabled: true},
++		{name: "compound fractional zero", age: "0h0.0m", disabled: true},
++		{name: "unitless trailing component", age: "0h0", disabled: true, invalid: true},
++		{name: "space between components", age: "0h 0m", disabled: true, invalid: true},
++		{name: "dot without digits", age: ".", disabled: true, invalid: true},
++		{name: "unitless trailing dot", age: "0.", disabled: true, invalid: true},
++		{name: "unitless leading dot", age: ".0", disabled: true, invalid: true},
++		{name: "unitless fractional zero", age: "0.0", disabled: true, invalid: true},
+@@ -7072,0 +7084,2 @@ func TestReaperStaleCloseDisabled(t *testing.T) {
++			} else if strings.Contains(text, "reaper: GC_REAPER_STALE_ISSUE_AGE=") {
++				t.Errorf("valid age produced an invalid age warning:\n%s", text)
+diff --git a/internal/bootstrap/packs/core/README.md b/internal/bootstrap/packs/core/README.md
+index 7f888d261..9df6d36d4 100644
+--- a/internal/bootstrap/packs/core/README.md
++++ b/internal/bootstrap/packs/core/README.md
+@@ -33 +33 @@ The **event-driven nudge orders** are documented in detail below.
+-(`0`, `0h`, `0.0h`, `-0`, `0h0m`, `0ms`) to disable age-based issue closes; a positive whole number of hours
++(`0`, `0h`, `0.0h`, `.0h`, `0µs`, `-0`, `0h0m`, `0ms`) to disable age-based issue closes; a positive whole number of hours
+@@ -35 +35,2 @@ The **event-driven nudge orders** are documented in detail below.
+-the value, never a guessed threshold. Wisp cleanup, purge, and `expires_at` closes remain active.
++the value, never a guessed threshold. For zero values, a duration follows Go's grammar, every component with a unit; a bare run of zero digits, optionally signed, also disables; a component without a unit beside another component is not a duration.
++Wisp cleanup, purge, and `expires_at` closes remain active.
+diff --git a/internal/bootstrap/packs/core/assets/scripts/reaper.sh b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+index 943aea918..a4ff0c961 100755
+--- a/internal/bootstrap/packs/core/assets/scripts/reaper.sh
++++ b/internal/bootstrap/packs/core/assets/scripts/reaper.sh
+@@ -86 +86,3 @@ case "$STALE_ISSUE_AGE" in
+-        STALE_ZERO_RE='^[+-]?(0+([.]0+)?(ns|us|ms|s|m|h)?)+$'
++        # Optional sign, then bare zero digits or zero-valued Go duration components.
++        # Each component needs a unit; a decimal needs digits on at least one side.
++        STALE_ZERO_RE='^[+-]?(0+|((0+([.]0*)?|[.]0+)(ns|us|µs|μs|ms|s|m|h))+)$'
+diff --git a/internal/bootstrap/packs/core/orders/reaper.toml b/internal/bootstrap/packs/core/orders/reaper.toml
+index 845466792..90a2ed87a 100644
+--- a/internal/bootstrap/packs/core/orders/reaper.toml
++++ b/internal/bootstrap/packs/core/orders/reaper.toml
+@@ -4 +4,2 @@
+-# GC_REAPER_STALE_ISSUE_AGE defaults to 720h; set it to off, never, or any zero duration in Go's grammar (0, 0h, 0.0h, -0, 0h0m, 0ms) to disable age-based issue closes; a positive whole number of hours (Nh or N) sets the age; any other value disables age-based closes for that run and prints one line naming the value, never a guessed threshold.
++# GC_REAPER_STALE_ISSUE_AGE defaults to 720h; set it to off, never, or any zero duration in Go's grammar (0, 0h, 0.0h, .0h, 0µs, -0, 0h0m, 0ms) to disable age-based issue closes; a positive whole number of hours (Nh or N) sets the age; any other value disables age-based closes for that run and prints one line naming the value, never a guessed threshold.
++# For zero values, a duration follows Go's grammar, every component with a unit; a bare run of zero digits, optionally signed, also disables; a component without a unit beside another component is not a duration.

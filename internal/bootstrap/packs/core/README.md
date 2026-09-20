@@ -30,9 +30,10 @@ The **event-driven nudge orders** are documented in detail below.
 ## Reaper thresholds
 
 `GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or any zero duration in Go's grammar
-(`0`, `0h`, `0.0h`, `-0`, `0h0m`, `0ms`) to disable age-based issue closes; a positive whole number of hours
+(`0`, `0h`, `0.0h`, `.0h`, `0µs`, `-0`, `0h0m`, `0ms`) to disable age-based issue closes; a positive whole number of hours
 (`Nh` or `N`) sets the age; any other value disables age-based closes for that run and prints one line naming
-the value, never a guessed threshold. Wisp cleanup, purge, and `expires_at` closes remain active.
+the value, never a guessed threshold. For zero values, a duration follows Go's grammar, every component with a unit; a bare run of zero digits, optionally signed, also disables; a component without a unit beside another component is not a duration.
+Wisp cleanup, purge, and `expires_at` closes remain active.
 
 ## `nudge-on-route`
 

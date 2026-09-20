@@ -1,0 +1,3 @@
+PASS: complete reaper.sh equals the integration base with only STALE_ZERO_RE replaced and its two-line grammar comment added.
+PASS: unchanged hours arm, warning line, MAX_AGE, PURGE_AGE and SESSION_PURGE_AGE code.
+PASS: E5 compatibility sentence appears verbatim in both docs.
