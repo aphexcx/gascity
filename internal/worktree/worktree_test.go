@@ -25,7 +25,18 @@ func runGit(t *testing.T, dir string, args ...string) string {
 // the name of its initial branch.
 func initTestRepo(t *testing.T) (string, string) {
 	t.Helper()
-	return testutil.InitGitRepo(t)
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	// Configure this before the seed commit: gp-z3sq caught its detached Git
+	// maintenance removing objects/maintenance.lock during a dry-run snapshot.
+	// Setting these after InitGitRepo returns is too late to stop that writer.
+	runGit(t, dir, "config", "gc.auto", "0")
+	runGit(t, dir, "config", "maintenance.auto", "false")
+	runGit(t, dir, "config", "core.fsmonitor", "false")
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "commit", "--allow-empty", "-m", "init")
+	return dir, runGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
 func managedSpec(repo, root, path, branch, base string) Spec {
