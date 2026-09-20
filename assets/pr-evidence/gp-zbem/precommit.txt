@@ -1,0 +1,47 @@
+CGO_CPPFLAGS=-I/opt/homebrew/opt/icu4c@78/include CGO_LDFLAGS=-L/opt/homebrew/opt/icu4c@78/lib git commit -F ../commit-message.txt
+lint-changed: ./assets/pr-evidence/gp-zbem ./examples/gastown 
+0 issues.
+Generated: docs/reference/cli.md
+Generated:
+  docs/reference/schema/city-schema.json
+  docs/reference/schema/city-schema.txt
+  docs/reference/schema/pack-schema.json
+  docs/reference/schema/pack-schema.txt
+  docs/reference/config.md
+  docs/reference/cli.md
+GOFLAGS="$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly" go vet ./...
+env -i PATH="$PATH" HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" SHELL="$SHELL" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$(scripts/test-gitconfig-path)" LANG="$LANG" TMPDIR="${TMPDIR:-/var/tmp}" OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" GOPATH="/Users/tailor512/go" GOCACHE="/Users/tailor512/Library/Caches/go-build" GOMODCACHE="/Users/tailor512/go/pkg/mod" GOTMPDIR="" GOROOT="${GOROOT:-/Users/tailor512/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.6.darwin-arm64}" GOENV="${GOENV-}" GOFLAGS="${GOFLAGS-}" GO111MODULE="${GO111MODULE-}" GOEXPERIMENT="${GOEXPERIMENT-}" GOPROXY="${GOPROXY-}" GOPRIVATE="${GOPRIVATE-}" GONOPROXY="${GONOPROXY-}" GONOSUMDB="${GONOSUMDB-}" GOSUMDB="${GOSUMDB-}" GOINSECURE="${GOINSECURE-}" GOVCS="${GOVCS-}" GOWORK="${GOWORK-}" ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}" ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN-}" ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL-}" ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL-}" ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL-}" CLAUDE_CODE_SUBAGENT_MODEL="${CLAUDE_CODE_SUBAGENT_MODEL-}" CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL-}" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-}" OLLAMA_API_KEY="${OLLAMA_API_KEY-}" XIAOMI_API_KEY="${XIAOMI_API_KEY-}" ZCODE_API_KEY="${ZCODE_API_KEY-}" ZCODE_CJS="${ZCODE_CJS-}" ZCODE_MODEL="${ZCODE_MODEL-}" ZCODE_BASE_URL="${ZCODE_BASE_URL-}" ZCODE_NODE_BIN="${ZCODE_NODE_BIN-}" ZCODE_STORAGE_DIR="${ZCODE_STORAGE_DIR-}" CGO_CPPFLAGS="${CGO_CPPFLAGS-}" CGO_LDFLAGS="${CGO_LDFLAGS-}"  go test ./test/docsync
+ok  	github.com/gastownhall/gascity/test/docsync	9.808s
+[gp-zbem fe71f5450] fix(core): align reaper zero-duration grammar edges
+ Committer: tailor512 <tailor512@tailor512g8s-mac-studio.magpie-egret.ts.net>
+Your name and email address were configured automatically based
+on your username and hostname. Please check that they are accurate.
+You can suppress this message by setting them explicitly:
+
+    git config --global user.name "Your Name"
+    git config --global user.email you@example.com
+
+After doing this, you may fix the identity used for this commit with:
+
+    git commit --amend --reset-author
+
+ 21 files changed, 711 insertions(+), 4 deletions(-)
+ create mode 100644 assets/pr-evidence/gp-zbem/README.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/codex-review.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/environment.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/go-duration-oracle.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/green.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/parse-duration.go
+ create mode 100644 assets/pr-evidence/gp-zbem/parser-cases.py
+ create mode 100644 assets/pr-evidence/gp-zbem/parser-matrix.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/parser-red.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/plan.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/red-e5.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/red.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/ruling-e5.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/run.py
+ create mode 100644 assets/pr-evidence/gp-zbem/scope-check.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/shell-syntax.txt
+ create mode 100644 assets/pr-evidence/gp-zbem/source.diff
+
+Exit: 0; wall seconds: 66.343

@@ -8,7 +8,7 @@ Base: integration 5a85171d8a61df8a1460b487738bb396494bb94a, PR #30 squash.
 - [x] Record RED on the unchanged reaper, preserving actual failures and passes.
 - [x] Tighten only STALE_ZERO_RE and its grammar comment; keep bare integer zero compatibility.
 - [x] Add .0h and 0µs doc examples plus the same missing-unit sentence in both docs.
-- [ ] Run focused GREEN, 59-case parser matrix on Bash 3.2.57 and 5.3.20, syntax checks, and full gastown package.
+- [x] Run focused GREEN, 59-case parser matrix on Bash 3.2.57 and 5.3.20, syntax checks, and full gastown package.
 - [x] Obtain independent Codex QUICK review (r1 CLEAN).
 - [ ] Run required commit/push gates.
 - [ ] Publish a draft fork PR against integration, send READY, record metadata, detach, close and drain.

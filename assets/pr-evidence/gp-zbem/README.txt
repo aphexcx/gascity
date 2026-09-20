@@ -26,5 +26,11 @@ requested inputs, and adds the E5 `.0`/`0.0` controls: 59 distinct cases per int
 - `go-duration-oracle.txt` and `parse-duration.go`: the local Go parser's actual edge behavior.
 - `shell-syntax.txt`, `source.diff`, and `scope-check.txt`: syntax and exact scope checks.
 
-Green/package/review/gate results are recorded in their named transcripts and summarized before handoff.
+Focused GREEN: 42/42 rows pass; parser matrix: 59/59 on each Bash; syntax: both pass.
+Full package: 250 top-level / 392 including subtests pass, with one existing tmux skip.
+Independent Codex QUICK r1: CLEAN. Source commit: fe71f5450b356a40c255e00f5d6127ef352ba0d9.
+Pre-commit: lint, codegen, vet, and doc-sync pass. The first attempt failed only because
+new Markdown evidence made assets an undocumented doc-tree root; evidence now uses .txt
+without changing the doc-tree policy. Both attempt transcripts are retained.
+Push-gate results will be recorded before handoff.
 The upstream twin remains held; this branch targets a draft fork PR only.
