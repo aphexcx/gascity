@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -447,6 +448,24 @@ func TestCurrentClaimBeadIDReadsTheStampedValue(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("CurrentClaimBeadID (unstamped) = %q, want empty", got)
+	}
+}
+
+func TestCurrentClaimBeadIDSeesExternalClaimAndClearBeforeCacheReconcile(t *testing.T) {
+	backing := beads.NewMemStoreFrom(1, []beads.Bead{sessionBeadFixture("s-1", "open", nil)}, nil)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(beads.SessionStore{Store: cache})
+	for _, claim := range []string{"work-claimed", ""} {
+		if err := backing.SetMetadata("s-1", beadmeta.CurrentClaimBeadIDMetadataKey, claim); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.CurrentClaimBeadID("s-1")
+		if err != nil || got != claim {
+			t.Fatalf("CurrentClaimBeadID = %q, %v; want %q before cache reconciliation", got, err, claim)
+		}
 	}
 }
 

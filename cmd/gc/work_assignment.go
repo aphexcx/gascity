@@ -68,6 +68,40 @@ func (w workAssignment) OpenAssignedTo(assignee, status string, tierMode beads.T
 	return excludeMailMessageBeads(items), nil
 }
 
+// HasOpenForSession checks live work in both tiers by assignment identity or
+// claim-time session ID. A binding to another session excludes a reused lane
+// alias, so the successor's claim cannot keep its predecessor alive.
+func (w workAssignment) HasOpenForSession(identifiers []string, sessionID, status string) (bool, error) {
+	if w.unwrapped() == nil || strings.TrimSpace(sessionID) == "" {
+		return false, nil
+	}
+	live := beads.HandlesFor(w.unwrapped()).Live
+	for _, assignee := range identifiers {
+		if assignee == "" {
+			continue
+		}
+		for _, tier := range []beads.TierMode{beads.TierIssues, beads.TierWisps} {
+			items, err := w.OpenAssignedTo(assignee, status, tier, true)
+			if err != nil {
+				return false, err
+			}
+			for _, item := range items {
+				bound := strings.TrimSpace(item.Metadata[beadmeta.SessionIDMetadataKey])
+				if (bound == "" || bound == sessionID) && !sessionpkg.IsSessionBeadOrRepairable(item) {
+					return true, nil
+				}
+			}
+		}
+	}
+	items, err := live.List(beads.ListQuery{
+		Status: status, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: sessionID},
+	})
+	if err != nil {
+		return false, err
+	}
+	return w.HasNonSessionWork(excludeMailMessageBeads(items)), nil
+}
+
 // CachedOpenAssignedWisps returns cached open-assigned wisp-tier WORK beads when
 // the underlying store exposes the CachedList fast-path, plus whether the cache
 // answered. It is the typed form of the positive-only cache probe in

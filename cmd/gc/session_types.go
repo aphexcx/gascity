@@ -75,7 +75,7 @@ type drainTracker struct {
 	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
 	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
 	zombieCrashes    map[string]bool            // session bead ID -> zombie-process session.crashed event emitted
-	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	suspendDeferrals map[string]int             // session bead ID -> consecutive demand-absence confirmations for named or working pool sessions
 	idleProbeCursor  int
 }
 
@@ -109,11 +109,9 @@ func (dt *drainTracker) remove(beadID string) {
 }
 
 // bumpSuspendDeferral increments and returns the consecutive-tick count for a
-// named session that is suspend-drain-eligible because its configured spec is
-// absent this tick. The reconciler requires namedSuspendConfirmTicks confirming
-// ticks before actually draining, so a transient namedSessionSpecs enumeration
-// collapse during boot (the spec vanishes for one tick and reappears) does not
-// spuriously drain a named session and lose its in-session context (#3630).
+// named or working pool session eligible for a drain because demand is absent.
+// The reconciler waits for namedSuspendConfirmTicks confirming ticks so a
+// transient census gap does not interrupt the session.
 func (dt *drainTracker) bumpSuspendDeferral(beadID string) int {
 	if dt == nil {
 		return 0
@@ -127,9 +125,8 @@ func (dt *drainTracker) bumpSuspendDeferral(beadID string) int {
 	return dt.suspendDeferrals[beadID]
 }
 
-// clearSuspendDeferral resets the deferral counter once a named session's spec
-// is present again (preserved or desired), so a later genuine removal starts a
-// fresh confirmation window rather than draining on its first absent tick.
+// clearSuspendDeferral resets the counter when demand returns or an observation
+// fails, so a later absence gets a fresh confirmation window.
 func (dt *drainTracker) clearSuspendDeferral(beadID string) {
 	if dt == nil {
 		return

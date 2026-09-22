@@ -228,14 +228,15 @@ func (s *Store) SetCurrentClaim(id, beadID string) (bool, error) {
 
 // CurrentClaimBeadID returns the id of the work bead this session most recently
 // claimed through `gc hook --claim` ("" when unset). It is the read half of
-// SetCurrentClaim and the front door for `gc hook current`.
+// SetCurrentClaim and the front door for `gc hook current`. It reads live so a
+// claim stamped by another process is visible before cache reconciliation.
 //
 // It shares Get's validation and error contract (both route through
-// validatedBead): a present-but-non-session bead is ErrSessionNotFound and an
+// validatedBeadRead): a present-but-non-session bead is ErrSessionNotFound and an
 // absent id is the wrapped store not-found error, so a caller can tell "this is
 // not my session" from "nothing is claimed".
 func (s *Store) CurrentClaimBeadID(id string) (string, error) {
-	b, err := s.validatedBead(id)
+	b, err := s.validatedBeadRead(id, true)
 	if err != nil {
 		return "", err
 	}

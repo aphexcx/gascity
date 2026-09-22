@@ -1548,7 +1548,10 @@ func collectAssignedWorkBeadsWithStores(
 			// unassigned pool work that needs to be reopened. This pass runs
 			// across every store before any ready handoff probes, so already
 			// active work never waits behind unrelated ready scans.
-			if inProgress, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "in_progress"}); err == nil {
+			// A claim can move an open row out of live Ready before the cache
+			// sees its in_progress state. Read that state live as well, or a
+			// coherent stale row disappears from every demand bucket for a tick.
+			if inProgress, err := beads.HandlesFor(source.store).Live.List(beads.ListQuery{Status: "in_progress"}); err == nil {
 				appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, inProgress, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(in_progress): %w", err))

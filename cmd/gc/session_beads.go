@@ -969,6 +969,32 @@ func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
 	}
 }
 
+// sessionDrainAssignmentIdentifiersForConfig adds the canonical pool lane to the
+// drain guard's identifiers. Keep this out of the shared assignment identifiers:
+// release/reassign callers require a concrete owner, and a lane name can rebind.
+func sessionDrainAssignmentIdentifiersForConfig(b beads.Bead, cfg *config.City) []string {
+	return compactSessionAssignmentIdentifiers(append(sessionAssignmentIdentifiersForConfig(b, cfg),
+		poolLaneAssignmentIdentity(b.Metadata["template"], b.Metadata["alias"], b.Metadata["agent_name"], isPoolManagedSessionBead(b))))
+}
+
+// sessionDrainAssignmentIdentifiersForConfigInfo is the typed equivalent of
+// sessionDrainAssignmentIdentifiersForConfig, with the same lane identity rules.
+func sessionDrainAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
+	return compactSessionAssignmentIdentifiers(append(sessionAssignmentIdentifiersForConfigInfo(info, cfg),
+		poolLaneAssignmentIdentity(info.Template, info.Alias, info.AgentName, isPoolManagedSessionInfo(info))))
+}
+
+// poolLaneAssignmentIdentity includes the qualified pool identity carried by
+// a canonical lane. Numbered pool slots and historical aliases are reusable
+// names, so they must not identify the work of their next holder.
+func poolLaneAssignmentIdentity(template, alias, agentName string, poolManaged bool) string {
+	template = strings.TrimSpace(template)
+	if poolManaged && template != "" && (strings.TrimSpace(alias) == template || strings.TrimSpace(agentName) == template) {
+		return template
+	}
+	return ""
+}
+
 // sessionAssignmentIdentifiersInfo is the session.Info form of
 // sessionAssignmentIdentifiers (no configured-named fallback): the deduped
 // {ID, session_name, configured_named_identity} identifier set read off Info,
