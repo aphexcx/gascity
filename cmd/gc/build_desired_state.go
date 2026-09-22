@@ -981,7 +981,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		bp.poolStartDeferredTriggers = startDeferral.deferred
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, startDeferral.deferred, trace, poolDecisionTime)
+		poolDesiredStates := ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, startDeferral.deferred, trace, poolDecisionTime)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)

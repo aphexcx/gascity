@@ -30,7 +30,7 @@ func TestComputePoolDesiredStates_AssignedRigMintsTriggerStoreRef(t *testing.T) 
 	pass := newWorkStartDeferralPass(now, nil)
 	pass.filterWithRefs([]beads.Bead{work}, []string{"riga"}, true)
 	owned, rows, refs := poolDemandAssignedWork(cfg, "", nil, nil, []beads.Bead{work}, []string{"riga"}, pass.deferred)
-	states := ComputePoolDesiredStatesDeferring(cfg, rows, refs, nil, nil, nil, pass.deferred, nil)
+	states := ComputePoolDesiredStatesDeferring(cfg, rows, refs, owned, nil, nil, nil, pass.deferred, nil)
 	if len(states) != 1 || len(states[0].Requests) != 1 || states[0].Requests[0].Tier != "wake-known-identity" {
 		t.Fatalf("desired states = %#v, want one replacement request", states)
 	}

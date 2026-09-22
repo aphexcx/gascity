@@ -315,8 +315,8 @@ func TestPoolStartBackoff_SurvivingSessionForParkedBeadIsNeitherReusedNorWoken(t
 		}
 		ds := buildDesiredStateWithSessionBeads("gc", cityPath, clk.Now(), cfg, sp, store, nil, snap, nil, &stderr)
 		openInfos := snap.OpenInfos()
-		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, nil, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, ds.PoolStartDeferredTriggers)
-		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, openInfos, ds.ScaleCheckCounts, nil, ds.PoolStartDeferredTriggers, nil))
+		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, nil, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, ds.PoolStartDeferredTriggers)
+		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, ds.ScaleCheckCounts, nil, ds.PoolStartDeferredTriggers, nil))
 		if !ds.PoolStartDeferredTriggers.contains(work.ID, "city") {
 			t.Fatalf("tick %d: the parked bead was not deferred by the gate (assigned rows %d)", tick, len(ds.AssignedWorkBeads))
 		}

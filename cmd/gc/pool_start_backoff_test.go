@@ -675,8 +675,9 @@ func TestPoolDemandInputsGoThroughStartDeferral(t *testing.T) {
 		{"session_lifecycle_parallel.go", "recordWorkStartSuccessFor(workStartFailures, info.TriggerBeadID, info.TriggerBeadStoreRef, stderr)"},
 		{"../../internal/sling/sling_core.go", "for _, key := range ParkReleaseMetadataKeys {"},
 		{"../../internal/sling/sling_core.go", "if err := reopenForReassign(child.ID, deps); err != nil {"},
-		{"pool_desired_state.go", "poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers, decisionTime)"},
+		{"pool_desired_state.go", "poolNewDemandRequests(cfg, sessionInfos, ownedWorkBeads, resumeSessionBeadIDs, deferredTriggers, decisionTime)"},
 		{"pool_desired_state.go", "if deferredTriggers.contains(sb.TriggerBeadID, sb.TriggerBeadStoreRef) {"},
+		{"pool_desired_state.go", "sessionBeadHasAssignedWorkByAnyIdentityInfo(ownedWorkBeads, sb)"},
 		{"pool_desired_state.go", "if deferredSessionBeadIDs[sessionBeadID] {"},
 		// Round 4, family A (the operator-verb write path): the conditional
 		// writer resolves through the policy wrapper; a partial read charges
@@ -946,11 +947,11 @@ func TestPoolStartBackoff_InFlightSessionForDeferredTriggerIsNotReused(t *testin
 	sessions := sessionInfosFromBeads([]beads.Bead{inFlight})
 	counts := map[string]int{"claude": 1}
 
-	reused := ComputePoolDesiredStatesDeferring(cfg, nil, nil, sessions, counts, nil, nil, nil)
+	reused := ComputePoolDesiredStatesDeferring(cfg, nil, nil, nil, sessions, counts, nil, nil, nil)
 	if len(reused) != 1 || len(reused[0].Requests) != 1 || reused[0].Requests[0].SessionBeadID != "sess-parked" {
 		t.Fatalf("control: without a deferred set the in-flight session is reused: %#v", reused)
 	}
-	gated := ComputePoolDesiredStatesDeferring(cfg, nil, nil, sessions, counts, nil, workStartDeferrals{{StoreRef: "city", ID: "W"}: {}}, nil)
+	gated := ComputePoolDesiredStatesDeferring(cfg, nil, nil, nil, sessions, counts, nil, workStartDeferrals{{StoreRef: "city", ID: "W"}: {}}, nil)
 	if len(gated) != 1 || len(gated[0].Requests) != 1 {
 		t.Fatalf("gated result = %#v, want one request", gated)
 	}

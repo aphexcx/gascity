@@ -170,8 +170,8 @@ func (f *deferredSurvivorFixture) tick() {
 		f.t.Fatal(err)
 	}
 	ds := buildDesiredStateWithSessionBeadsAt("gc", f.path, f.clk.Now(), f.clk.Now(), f.cfg, f.sp, f.store, f.rigs, snap, nil, &f.stderr, nil)
-	_, demand, refs := poolDemandAssignedWork(f.cfg, f.path, f.store, snap.OpenInfos(), ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, ds.PoolStartDeferredTriggers)
-	counts := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(f.cfg, demand, refs, snap.OpenInfos(), ds.ScaleCheckCounts, nil, ds.PoolStartDeferredTriggers, nil, ds.PoolStartDecisionTime))
+	owned, demand, refs := poolDemandAssignedWork(f.cfg, f.path, f.store, snap.OpenInfos(), ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, ds.PoolStartDeferredTriggers)
+	counts := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(f.cfg, demand, refs, owned, snap.OpenInfos(), ds.ScaleCheckCounts, nil, ds.PoolStartDeferredTriggers, nil, ds.PoolStartDecisionTime))
 	var stdout bytes.Buffer
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), f.path, snap.OpenForReconcile(), snap, ds.State,
@@ -323,7 +323,7 @@ func TestPoolStartBackoff_LegacyAliasOwnerIsNotRebound(t *testing.T) {
 		t.Run(tc.field+"/"+tc.state, func(t *testing.T) {
 			f := newDeferredSurvivorFixture(t)
 			w := f.work(f.store, "W", "helper", "helper.actor", true)
-			f.work(f.store, "V", "helper", "", false)
+			v := f.work(f.store, "V", "helper", "", false)
 			s := f.session("helper-1", "helper", "1", "", "", false)
 			if err := f.store.Update(s.ID, beads.UpdateOpts{Metadata: map[string]string{tc.field: "helper.actor", "state": tc.state}}); err != nil {
 				t.Fatal(err)
@@ -331,6 +331,34 @@ func TestPoolStartBackoff_LegacyAliasOwnerIsNotRebound(t *testing.T) {
 			for range 3 {
 				f.tick()
 				f.requireTrigger(s, "")
+			}
+			legacyStarts, eligibleStarts := 0, 0
+			for _, call := range f.sp.SnapshotCalls() {
+				if call.Method != "Start" {
+					continue
+				}
+				trigger := call.Config.Env["GC_TRIGGER_BEAD_ID"]
+				switch call.Name {
+				case "helper-1":
+					legacyStarts++
+					if trigger != "" {
+						t.Fatalf("legacy owner started for %q, want its unchanged empty trigger", trigger)
+					}
+				case "helper-2-pool":
+					eligibleStarts++
+					if trigger != v.ID {
+						t.Fatalf("new session started for %q, want eligible work %s", trigger, v.ID)
+					}
+				default:
+					t.Fatalf("unexpected session start: %+v", call)
+				}
+			}
+			wantLegacyStarts := 0
+			if tc.state == "creating" {
+				wantLegacyStarts = 1
+			}
+			if eligibleStarts != 1 || legacyStarts != wantLegacyStarts {
+				t.Fatalf("starts: eligible=%d legacy=%d, want eligible=1 legacy=%d\n%s", eligibleStarts, legacyStarts, wantLegacyStarts, f.stderr.String())
 			}
 			got, err := f.store.Get(w.ID)
 			if err != nil || got.Assignee != "helper.actor" || got.Status != "in_progress" {

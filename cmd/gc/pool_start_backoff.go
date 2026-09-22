@@ -206,9 +206,10 @@ func earliestRecheck(a, b time.Time) time.Time {
 // the assigned work the pool's sessions hold (the raw pool-demand projection,
 // what a session OWNS, unfiltered so a session minted for a parked or
 // backed-off bead stays owned by it and is never reused for other work);
-// demand is owned minus the rows the start gate holds back, the only slice a
-// ComputePoolDesiredStates call may take (codex r3 finding 4). demandStoreRefs
-// is index-aligned with demand and uses the assigned-work census shorthand.
+// demand is owned minus the rows the start gate holds back and supplies resume
+// demand. The unfiltered owned slice separately protects new-demand allocation
+// from reusing an assigned session. demandStoreRefs is index-aligned with demand
+// and uses the assigned-work census shorthand.
 func poolDemandAssignedWork(
 	cfg *config.City,
 	cityPath string,

@@ -241,7 +241,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -265,7 +265,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -285,11 +285,13 @@ func ComputePoolDesiredStatesWithDemandTraced(
 // workStartDeferralPass.deferred) keeps a session already minted for such a
 // bead out of the in-flight tier, so it is neither reused as spent new demand
 // nor started for the bead (pool_start_backoff.go). The other entries pass nil
-// and are the test surface.
+// and are the test surface. ownedWorkBeads retains the unfiltered ownership
+// slice so sessions holding deferred work cannot consume new-demand slots.
 func ComputePoolDesiredStatesDeferring(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
+	ownedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -301,7 +303,7 @@ func ComputePoolDesiredStatesDeferring(
 	if len(decisionTimes) > 0 {
 		decisionTime = decisionTimes[0]
 	}
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, ownedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, decisionTime, trace)
 }
 
 // ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
@@ -315,7 +317,7 @@ func ComputePoolDesiredStatesWithDemandTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, decisionTime, trace)
 }
 
 func computePoolDesiredStates(
@@ -327,13 +329,14 @@ func computePoolDesiredStates(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, time.Time{}, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, time.Time{}, trace)
 }
 
 func computePoolDesiredStatesAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
+	ownedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -540,7 +543,7 @@ func computePoolDesiredStatesAt(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, deferredTriggers, decisionTime)
+	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, ownedWorkBeads, resumeSessionBeadIDs, deferredTriggers, decisionTime)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
 		if info.ID == "" {
@@ -814,6 +817,7 @@ func canonicalSingletonAliasHeldTemplates(cfg *config.City, sessionInfos []sessi
 func poolNewDemandRequests(
 	cfg *config.City,
 	sessionInfos []sessionpkg.Info,
+	ownedWorkBeads []beads.Bead,
 	resumeSessionBeadIDs map[string]struct{},
 	deferredTriggers workStartDeferrals,
 	decisionTime time.Time,
@@ -850,6 +854,9 @@ func poolNewDemandRequests(
 				continue
 			}
 			if deferredTriggers.contains(sb.TriggerBeadID, sb.TriggerBeadStoreRef) {
+				continue
+			}
+			if sessionBeadHasAssignedWorkByAnyIdentityInfo(ownedWorkBeads, sb) {
 				continue
 			}
 			req := SessionRequest{
