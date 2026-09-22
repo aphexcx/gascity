@@ -222,6 +222,28 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	}
 }
 
+func TestPreCommitLoadsCGOEnvBeforeCodegen(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join(repoRoot(t), ".githooks", "pre-commit"))
+	if err != nil {
+		t.Fatalf("read pre-commit hook: %v", err)
+	}
+	content := string(script)
+	loadIdx := strings.Index(content, `cgo_env=$(make -s --no-print-directory -C "$repo_root" print-cgo-env)`)
+	filterIdx := strings.Index(content, `sed -n -E '/^CGO_(CPPFLAGS|LDFLAGS)=/p'`)
+	evalIdx := strings.Index(content, `eval "$cgo_env"`)
+	codegenIdx := strings.Index(content, "go run ./cmd/genspec")
+	if loadIdx < 0 || filterIdx < loadIdx || evalIdx < filterIdx || codegenIdx < evalIdx {
+		t.Fatal("pre-commit must load, filter and evaluate the Makefile CGO environment before codegen, with make failure checked separately from eval")
+	}
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if !strings.Contains(string(makefile), "\nprint-cgo-env:\n") {
+		t.Fatal("Makefile must expose the exported CGO environment through print-cgo-env")
+	}
+}
+
 func TestPreCommitRegeneratesDashboardClientOnSpecChange(t *testing.T) {
 	repoRoot := repoRoot(t)
 	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-commit"))
@@ -579,7 +601,7 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	// sh+env are required for beads-chain.sh's `#!/usr/bin/env sh` shebang
 	// under a restricted PATH (env is absolute in the shebang, but then looks
 	// up `sh` on PATH). timeout is optional; without it the chain still runs.
-	for _, name := range []string{"bash", "sh", "env", "git", "xargs"} {
+	for _, name := range []string{"bash", "sh", "env", "git", "xargs", "sed"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)
