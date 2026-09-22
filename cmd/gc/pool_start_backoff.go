@@ -83,26 +83,26 @@ type workStartDeferralPass struct {
 	now       time.Time
 	trace     *sessionReconcilerTraceCycle
 	recheckAt time.Time
-	deferred  map[string]struct{}
+	deferred  workStartDeferrals
 }
 
 func newWorkStartDeferralPass(now time.Time, trace *sessionReconcilerTraceCycle) *workStartDeferralPass {
-	return &workStartDeferralPass{now: now, trace: trace, deferred: make(map[string]struct{})}
+	return &workStartDeferralPass{now: now, trace: trace, deferred: make(workStartDeferrals)}
 }
 
 // skip reports whether b is held back from pool demand for template, recording
 // the trace decision and the recheck deadline when it is.
-func (p *workStartDeferralPass) skip(b beads.Bead, template string) bool {
+func (p *workStartDeferralPass) skip(b beads.Bead, template, storeRef string) bool {
 	reason, until, deferred := workStartDeferral(b, p.now)
 	if !deferred {
 		return false
 	}
-	p.deferred[b.ID] = struct{}{}
+	p.deferred[poolStartBeadKey(b.ID, poolStartStoreRef(storeRef, false))] = struct{}{}
 	if !until.IsZero() && (p.recheckAt.IsZero() || until.Before(p.recheckAt)) {
 		p.recheckAt = until
 	}
 	if p.trace != nil {
-		payload := traceRecordPayload{"work_bead": b.ID, "reason": string(reason)}
+		payload := traceRecordPayload{"work_bead": b.ID, "store_ref": poolStartStoreRef(storeRef, false), "reason": string(reason)}
 		if !until.IsZero() {
 			payload["until"] = until.UTC().Format(time.RFC3339)
 		}
@@ -111,26 +111,79 @@ func (p *workStartDeferralPass) skip(b beads.Bead, template string) bool {
 	return true
 }
 
-// filter returns rows minus the deferred ones; filterWithRefs and
-// filterWithFlags do the same over an index-aligned companion slice.
-func (p *workStartDeferralPass) filter(rows []beads.Bead) []beads.Bead {
-	kept, _ := filterDeferredAligned(p, rows, []struct{}(nil))
-	return kept
+// filterWithRefs collects deferrals with their owning stores and returns demand.
+func (p *workStartDeferralPass) filterWithRefs(rows []beads.Bead, refs []string, censusShorthand bool) ([]beads.Bead, []string) {
+	for i, b := range rows {
+		ref := ""
+		if i < len(refs) {
+			ref = refs[i]
+		}
+		p.skip(b, routedToOrLegacyWorkflowTarget(b), poolStartStoreRef(ref, censusShorthand))
+	}
+	return filterDeferredAligned(p.deferred, rows, refs, refs, censusShorthand)
 }
 
-func (p *workStartDeferralPass) filterWithRefs(rows []beads.Bead, refs []string) ([]beads.Bead, []string) {
-	return filterDeferredAligned(p, rows, refs)
+// poolStartStoreRef translates collector shorthand without guessing a session's
+// owner from its template. Empty census entries mean city; canonical refs retain
+// their scope. The census uses a bare rig name (even "city"), whereas scale
+// probes and session triggers use "city" for the city store. The caller declares
+// which vocabulary it supplies. Ref-less session triggers are handled below.
+func poolStartStoreRef(ref string, censusShorthand bool) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || (!censusShorthand && ref == "city") {
+		return "city"
+	}
+	if strings.Contains(ref, ":") {
+		return ref
+	}
+	return "rig:" + ref
 }
 
-func (p *workStartDeferralPass) filterWithFlags(rows []beads.Bead, flags []bool) ([]beads.Bead, []bool) {
-	return filterDeferredAligned(p, rows, flags)
+func poolStartBeadKey(id, ref string) storeScopedBeadKey {
+	// Demand already treats city and city:<local-name> as the same scope.
+	return storeScopedBeadKey{ID: strings.TrimSpace(id), StoreRef: normalizeDemandStoreRef(ref)}
 }
 
-func filterDeferredAligned[T any](p *workStartDeferralPass, rows []beads.Bead, aligned []T) ([]beads.Bead, []T) {
+// workStartDeferrals is the immutable eligibility result of one demand snapshot.
+// Every consumer uses the same membership rule and decision time.
+type workStartDeferrals map[storeScopedBeadKey]struct{}
+
+func (d workStartDeferrals) contains(id, ref string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" || len(d) == 0 {
+		return false
+	}
+	if strings.TrimSpace(ref) == "" {
+		// Legacy triggers have unknown provenance. A known deferral for this
+		// ID excludes them conservatively; explicit refs never take this path.
+		for key := range d {
+			if key.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	_, deferred := d[poolStartBeadKey(id, poolStartStoreRef(ref, false))]
+	return deferred
+}
+
+func (d workStartDeferrals) filterWithRefs(rows []beads.Bead, refs []string) ([]beads.Bead, []string) {
+	return filterDeferredAligned(d, rows, refs, refs, true)
+}
+
+func (d workStartDeferrals) filterWithFlags(rows []beads.Bead, refs []string, flags []bool) ([]beads.Bead, []bool) {
+	return filterDeferredAligned(d, rows, refs, flags, true)
+}
+
+func filterDeferredAligned[T any](d workStartDeferrals, rows []beads.Bead, refs []string, aligned []T, censusShorthand bool) ([]beads.Bead, []T) {
 	keptRows := rows[:0:0]
 	keptAligned := aligned[:0:0]
 	for i, b := range rows {
-		if p.skip(b, routedToOrLegacyWorkflowTarget(b)) {
+		ref := ""
+		if i < len(refs) {
+			ref = refs[i]
+		}
+		if d.contains(b.ID, poolStartStoreRef(ref, censusShorthand)) {
 			continue
 		}
 		keptRows = append(keptRows, b)
@@ -163,11 +216,11 @@ func poolDemandAssignedWork(
 	sessionInfos []sessionpkg.Info,
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
-	pass *workStartDeferralPass,
+	deferred workStartDeferrals,
 ) (owned, demand []beads.Bead, demandStoreRefs []string) {
 	var ownedStoreRefs []string
 	owned, ownedStoreRefs = filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, leading, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs)
-	demand, demandStoreRefs = pass.filterWithRefs(owned, ownedStoreRefs)
+	demand, demandStoreRefs = deferred.filterWithRefs(owned, ownedStoreRefs)
 	return owned, demand, demandStoreRefs
 }
 

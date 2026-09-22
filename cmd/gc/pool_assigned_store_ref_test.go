@@ -28,7 +28,8 @@ func TestComputePoolDesiredStates_AssignedRigMintsTriggerStoreRef(t *testing.T) 
 	}
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	pass := newWorkStartDeferralPass(now, nil)
-	owned, rows, refs := poolDemandAssignedWork(cfg, "", nil, nil, []beads.Bead{work}, []string{"riga"}, pass)
+	pass.filterWithRefs([]beads.Bead{work}, []string{"riga"}, true)
+	owned, rows, refs := poolDemandAssignedWork(cfg, "", nil, nil, []beads.Bead{work}, []string{"riga"}, pass.deferred)
 	states := ComputePoolDesiredStatesDeferring(cfg, rows, refs, nil, nil, nil, pass.deferred, nil)
 	if len(states) != 1 || len(states[0].Requests) != 1 || states[0].Requests[0].Tier != "wake-known-identity" {
 		t.Fatalf("desired states = %#v, want one replacement request", states)
@@ -76,7 +77,8 @@ func TestPoolDemandInputsStoreRefsStayAligned(t *testing.T) {
 	}
 	refs := []string{"rigb", "riga", "riga"}
 	pass := newWorkStartDeferralPass(time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC), nil)
-	owned, demand, demandRefs := poolDemandAssignedWork(cfg, "", nil, nil, rows, refs, pass)
+	pass.filterWithRefs(rows, refs, true)
+	owned, demand, demandRefs := poolDemandAssignedWork(cfg, "", nil, nil, rows, refs, pass.deferred)
 	if len(owned) != 2 || owned[0].ID != "parked" || owned[1].ID != "same" {
 		t.Fatalf("owned = %#v, want parked and surviving same-id row", owned)
 	}

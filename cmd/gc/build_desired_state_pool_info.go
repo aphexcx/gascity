@@ -186,7 +186,7 @@ func claimDesiredPoolSlotInfo(cfg *config.City, cfgAgent *config.Agent, info ses
 
 // reusablePoolSessionInfo is the session.Info sibling of reusablePoolSessionBead.
 // The SESSION side reads projected Info fields; the assigned-work slice stays raw
-// (ClassWork — beads.Bead is its domain object) via sessionBeadHasAssignedWorkInfo.
+// (ClassWork — beads.Bead is its domain object) via the any-identity ownership check.
 func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, template string, info session.Info, used map[string]bool) bool {
 	if bp == nil {
 		return false
@@ -249,7 +249,10 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if isNamedSessionInfo(info) {
 		return false
 	}
-	if sessionBeadHasAssignedWorkInfo(bp.assignedWorkBeads, info) {
+	if bp.poolStartDeferredTriggers.contains(info.TriggerBeadID, info.TriggerBeadStoreRef) {
+		return false
+	}
+	if sessionBeadHasAssignedWorkByAnyIdentityInfo(bp.assignedWorkBeads, info) {
 		return false
 	}
 	if used != nil && used[info.ID] {

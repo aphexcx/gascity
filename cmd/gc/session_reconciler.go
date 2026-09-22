@@ -3850,20 +3850,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	for i := range orderedIDs {
 		sessionInfos[i] = infoByID[orderedIDs[i]]
 	}
-	// The awake input alone sees the assigned work minus the rows the pool
-	// start gate holds back (parked, or backed off at this clock): a bead the
-	// pool must not start is not wake demand for its holder either. Every other
-	// consumer of assignedWorkBeads keeps the full slice (pool_start_backoff.go).
-	// The same pass's deferred set rides on the awake input as a SESSION
-	// exclusion: a surviving session minted for a held-back bead is neither
-	// scaled demand nor a work-query wake (codex r3 finding 5).
-	awakeDeferral := newWorkStartDeferralPass(clk.Now(), trace)
-	awakeWorkBeads, awakeReadyFlags := awakeDeferral.filterWithFlags(assignedWorkBeads, reconcileOpts.readyAssignedFlags)
+	// Wake demand uses the same eligibility snapshot as materialization,
+	// including parked unassigned triggers found by the scale probe.
+	awakeWorkBeads, awakeReadyFlags := reconcileOpts.poolStartDeferredTriggers.filterWithFlags(
+		assignedWorkBeads, reconcileOpts.assignedWorkStoreRefs, reconcileOpts.readyAssignedFlags)
 	awakeInput, runtimeObservationErrors := buildAwakeInputFromReconcilerWithObservationErrors(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		awakeWorkBeads, awakeReadyFlags, wakeTargets, sp, clk.Now(),
 	)
-	awakeInput.DeferredTriggers = awakeDeferral.deferred
+	awakeInput.DeferredTriggers = reconcileOpts.poolStartDeferredTriggers
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 
@@ -3987,7 +3982,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// and the respawn arm's own quarantine/circuit-breaker/provider-health
 		// gates still apply. See TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns.
 		if !shouldWake && !target.alive && !eval.ConfigSuppressed &&
-			decision.HasAssignedWork && info.SleepIntent == "" &&
+			decision.HasAssignedWork && !decision.DeferredTrigger && info.SleepIntent == "" &&
 			lifecycleTimerBlockerInfo(info, clk.Now()) == "user_hold" {
 			shouldWake = true
 		}

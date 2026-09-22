@@ -293,7 +293,7 @@ func ComputePoolDesiredStatesDeferring(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
-	deferredTriggers map[string]struct{},
+	deferredTriggers workStartDeferrals,
 	trace *sessionReconcilerTraceCycle,
 	decisionTimes ...time.Time,
 ) []PoolDesiredState {
@@ -337,7 +337,7 @@ func computePoolDesiredStatesAt(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
-	deferredTriggers map[string]struct{},
+	deferredTriggers workStartDeferrals,
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
@@ -350,6 +350,7 @@ func computePoolDesiredStatesAt(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
+	deferredSessionBeadIDs := make(map[string]bool)
 	// asleepSessionBeadIDs marks non-closed sessions whose runtime state is
 	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
 	// wake_mode="fresh" agent must not resume one of these stale rows — see the
@@ -365,6 +366,9 @@ func computePoolDesiredStatesAt(
 		template := strings.TrimSpace(normalizedSessionTemplateInfo(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
+		}
+		if !isManualSessionInfoForAgent(sb, findAgentByTemplate(cfg, template)) && deferredTriggers.contains(sb.TriggerBeadID, sb.TriggerBeadStoreRef) {
+			deferredSessionBeadIDs[sb.ID] = true
 		}
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
@@ -404,6 +408,11 @@ func computePoolDesiredStatesAt(
 				continue
 			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
+			// A concrete deferred owner cannot reserve a resume slot or be
+			// rebound to other work. Keep its assignments intact until eligible.
+			if deferredSessionBeadIDs[sessionBeadID] {
+				continue
+			}
 			if routedTo == "" && sessionBeadID != "" {
 				routedTo = sessionBeadTemplate[sessionBeadID]
 				if routedTo == "" && len(cfg.Agents) == 1 {
@@ -684,14 +693,7 @@ func assignedWorkRequestStoreRef(refs []string, index int) string {
 	if index >= len(refs) {
 		return ""
 	}
-	ref := strings.TrimSpace(refs[index])
-	if ref == "" {
-		return "city"
-	}
-	if strings.Contains(ref, ":") {
-		return ref
-	}
-	return "rig:" + ref
+	return poolStartStoreRef(refs[index], true)
 }
 
 // allocateScaleDemandToConcrete matches concrete reused capacity against scale
@@ -813,7 +815,7 @@ func poolNewDemandRequests(
 	cfg *config.City,
 	sessionInfos []sessionpkg.Info,
 	resumeSessionBeadIDs map[string]struct{},
-	deferredTriggers map[string]struct{},
+	deferredTriggers workStartDeferrals,
 	decisionTime time.Time,
 ) (map[string][]SessionRequest, map[string][]SessionRequest) {
 	protected := make(map[string][]SessionRequest)
@@ -847,7 +849,7 @@ func poolNewDemandRequests(
 			if normalizedSessionTemplateInfo(sb, cfg) != template {
 				continue
 			}
-			if _, deferred := deferredTriggers[strings.TrimSpace(sb.TriggerBeadID)]; deferred {
+			if deferredTriggers.contains(sb.TriggerBeadID, sb.TriggerBeadStoreRef) {
 				continue
 			}
 			req := SessionRequest{

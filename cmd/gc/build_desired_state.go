@@ -97,6 +97,10 @@ type DesiredStateResult struct {
 	// demand snapshot must be rebuilt at that instant, because the deadline
 	// passing writes nothing a fingerprint could notice (pool_start_backoff.go).
 	PoolStartRecheckAt time.Time
+	// PoolStartDeferredTriggers carries the complete store-scoped eligibility
+	// result from scale and assigned demand into materialization and wake.
+	PoolStartDeferredTriggers workStartDeferrals
+	PoolStartDecisionTime     time.Time
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
@@ -879,7 +883,8 @@ func buildDesiredStateWithSessionBeadsAt(
 		demandReadyCache := newReadyDemandCache()
 		// The dispatcher flag reads the same gate as the two demand tiers: a
 		// parked or backed-off control bead is not demand for a dispatcher seat.
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, startDeferral.filter(unassignedRoutedBeads))
+		eligibleUnassigned, _ := startDeferral.filterWithRefs(unassignedRoutedBeads, unassignedRoutedStoreRefs, false)
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, eligibleUnassigned)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -970,8 +975,10 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, startDeferral)
+		startDeferral.filterWithRefs(assignedWorkBeads, assignedWorkStoreRefs, true)
+		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, startDeferral.deferred)
 		bp.assignedWorkBeads = poolOwnedWorkBeads
+		bp.poolStartDeferredTriggers = startDeferral.deferred
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		poolDesiredStates := ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, startDeferral.deferred, trace, poolDecisionTime)
@@ -1209,6 +1216,8 @@ func buildDesiredStateWithSessionBeadsAt(
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
 		PoolStartRecheckAt:                 startDeferral.recheckAt,
+		PoolStartDeferredTriggers:          startDeferral.deferred,
+		PoolStartDecisionTime:              poolDecisionTime,
 		OpenRoutedWorkBeads:                unassignedRoutedBeads,
 		OpenRoutedWorkStores:               unassignedRoutedStores,
 		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
@@ -1992,7 +2001,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 			// A parked or backed-off row is not demand this tick: neither counted
 			// nor listed, so no seat is minted for it (pool_start_backoff.go).
-			if startDeferral.skip(b, template) {
+			if startDeferral.skip(b, template, group.storeKey) {
 				continue
 			}
 			seen := countedBeads[template]
@@ -4402,6 +4411,12 @@ func selectOrPlanPoolSessionBead(
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
+		if !isManualSessionInfoForAgent(*preferred, cfgAgent) && bp.poolStartDeferredTriggers.contains(preferred.TriggerBeadID, preferred.TriggerBeadStoreRef) {
+			return session.Info{}, 0, nil, fmt.Errorf("pool session %s trigger is deferred", preferred.ID)
+		}
+		if request.Tier == "new" && sessionBeadHasAssignedWorkByAnyIdentityInfo(bp.assignedWorkBeads, *preferred) {
+			return session.Info{}, 0, nil, fmt.Errorf("pool session %s still owns assigned work", preferred.ID)
+		}
 		preserveAboveCapacity := poolRequestResumesAssignedWorkInfo(
 			request,
 			bp.assignedWorkBeads,
@@ -4970,12 +4985,8 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 // BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
 // does not consider, so it can miss live assigned work entirely.
 //
-// It exists as a separate function (not a change to the pinned
-// sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
-// that need it — currently only the one_shot asleep-freeable wake-reuse
-// guard in reusablePoolSessionInfo, where under-detecting assigned work lets
-// the ordinary wake path "reuse" an identity that still holds an unfinished
-// step, orphaning it a tick later with the step pinned in_progress forever.
+// Reuse and in-flight selection use this wider match so an identity with
+// unfinished work cannot be rebound to another request.
 func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info session.Info) bool {
 	identities := make(map[string]bool, 5)
 	for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
