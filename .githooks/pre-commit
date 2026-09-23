@@ -24,6 +24,16 @@ if [ -n "$staged_go_files" ]; then
   make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
   printf '%s\n' "$staged_go_files" | xargs git add
 
+  # Direct Go commands need the same CGO environment as Makefile recipes.
+  # Keep assignment separate from eval so a make failure stops the hook.
+  cgo_env=$(make -s --no-print-directory -C "$repo_root" print-cgo-env)
+  # Makefile platform diagnostics may share stdout with the assignments.
+  cgo_env=$(printf '%s\n' "$cgo_env" | sed -n -E '/^CGO_(CPPFLAGS|LDFLAGS)=/p')
+  if [ -n "$cgo_env" ]; then
+    eval "$cgo_env"
+    export CGO_CPPFLAGS CGO_LDFLAGS
+  fi
+
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
   # Mintlify schema in lockstep with whatever the server actually
