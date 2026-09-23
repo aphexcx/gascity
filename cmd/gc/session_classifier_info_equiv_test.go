@@ -39,6 +39,13 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	clk := &clock.Fake{Time: time.Now()}
 
 	beadsByShape := map[string]beads.Bead{
+		"canonical-pool-lane": {
+			ID: "lane-session", Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template": "repo/worker", "alias": "repo/worker", "agent_name": "repo/worker",
+				"session_name": "repo--worker", "pool_managed": "true", "state": "awake",
+			},
+		},
 		"bare": {
 			ID:     "ga-bare",
 			Type:   session.BeadType,
@@ -1215,6 +1222,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		bead func(beads.Bead) []string
 		info func(session.Info) []string
 	}{
+		"sessionDrainAssignmentIdentifiersForConfig": {
+			func(b beads.Bead) []string { return sessionDrainAssignmentIdentifiersForConfig(b, assigneeCfg) },
+			func(i session.Info) []string { return sessionDrainAssignmentIdentifiersForConfigInfo(i, assigneeCfg) },
+		},
 		"sessionAssignmentIdentifiersForConfig": {
 			func(b beads.Bead) []string { return sessionAssignmentIdentifiersForConfig(b, assigneeCfg) },
 			func(i session.Info) []string { return sessionAssignmentIdentifiersForConfigInfo(i, assigneeCfg) },

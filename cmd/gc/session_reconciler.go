@@ -1941,7 +1941,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// A configured named spec is positive control-plane evidence even
 				// while runtime state is unknown. Reset its consecutive-absence
 				// window, but leave persisted lifecycle state untouched.
-				if preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
+				if preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) || isPoolManagedSessionInfo(info) {
 					dt.clearSuspendDeferral(id)
 				}
 				fmt.Fprintf(stderr, "session reconciler: skipping close of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
@@ -2345,6 +2345,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Draining would send Ctrl-C and interrupt the
 					// running agent mid-tool-call.
 					if storeQueryPartial {
+						dt.clearSuspendDeferral(id)
 						fmt.Fprintf(stdout, "Skipping drain for '%s': store query partial (transient failure)\n", name) //nolint:errcheck
 						continue
 					}
@@ -2352,12 +2353,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
+					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkBeforeDrainForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
 					if assignedErr != nil {
+						dt.clearSuspendDeferral(id)
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
 						continue
 					}
 					if hasAssignedWork {
+						dt.clearSuspendDeferral(id)
 						if trace != nil {
 							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 							if template == "" {
@@ -2383,7 +2386,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// cleared above once the spec reappears. Scoped to live sessions:
 					// a dead bead with no spec still releases its alias immediately
 					// (ga-ue1r).
-					if isNamedSessionInfo(infoPostHeal) {
+					confirmDrain := isNamedSessionInfo(infoPostHeal)
+					if isPoolManagedSessionInfo(infoPostHeal) {
+						// A trigger or claim marks a working pool session whose
+						// demand census can briefly lag another process's writes.
+						if strings.TrimSpace(infoPostHeal.TriggerBeadID) != "" {
+							confirmDrain = true
+						} else {
+							claimID, err := sessFront.CurrentClaimBeadID(id)
+							if err != nil {
+								dt.clearSuspendDeferral(id)
+								fmt.Fprintf(stderr, "session reconciler: checking current claim before %s drain for %s: %v\n", reason, name, err) //nolint:errcheck
+								continue
+							}
+							confirmDrain = confirmDrain || claimID != ""
+						}
+					}
+					if confirmDrain {
 						if n := dt.bumpSuspendDeferral(id); n < namedSuspendConfirmTicks {
 							if trace != nil {
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -2396,7 +2415,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									"provider_alive":   providerAlive,
 								})
 							}
-							fmt.Fprintf(stdout, "Deferring drain for named session '%s': awaiting spec-absence confirmation (%d/%d) — transient enumeration-collapse guard (#3630)\n", name, n, namedSuspendConfirmTicks) //nolint:errcheck
+							fmt.Fprintf(stdout, "Deferring drain for session '%s': awaiting demand-absence confirmation (%d/%d)\n", name, n, namedSuspendConfirmTicks) //nolint:errcheck
 							continue
 						}
 					}
@@ -4506,11 +4525,26 @@ func sessionHasOpenAssignedWorkForConfigInfo(cityPath string, cfg *config.City, 
 	return sessionHasOpenAssignedWorkInStores(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg))
 }
 
+// sessionHasOpenAssignedWorkBeforeDrainForConfig recognizes canonical lane
+// aliases and claim-time session bindings before interrupting a live runtime.
+// Close/release gates keep their existing assignment semantics separately.
+func sessionHasOpenAssignedWorkBeforeDrainForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, b beads.Bead) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores,
+		sessionDrainAssignmentIdentifiersForConfig(b, cfg), []string{"open", "in_progress"}, b.ID)
+}
+
+// sessionHasOpenAssignedWorkBeforeDrainForConfigInfo is the typed equivalent of
+// sessionHasOpenAssignedWorkBeforeDrainForConfig for the live drain branch.
+func sessionHasOpenAssignedWorkBeforeDrainForConfigInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores,
+		sessionDrainAssignmentIdentifiersForConfigInfo(info, cfg), []string{"open", "in_progress"}, info.ID)
+}
+
 // sessionHasInProgressAssignedWorkForConfig reports only claimed work for
 // progress-stall recycle. Open assigned work has not been claimed yet and must
 // not suppress claim-less parked-session recovery.
 func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"}, "")
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
@@ -5496,23 +5530,39 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 }
 
 func sessionHasOpenAssignedWorkInStores(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, identifiers, []string{"open", "in_progress"})
+	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, identifiers, []string{"open", "in_progress"}, "")
 }
 
 // sessionHasAssignedWorkInStoresForStatuses is the cross-store existence probe:
 // the whole city's assigned-work leg set, read in plan order, stopping at the
 // first leg that answers. It fails CLOSED on a leg that went dark for the same
 // reason assignedWorkExistsForSession does — the callers are close decisions.
-func sessionHasAssignedWorkInStoresForStatuses(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string) (bool, error) {
+func sessionHasAssignedWorkInStoresForStatuses(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string, sessionID string) (bool, error) {
 	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
 	if err != nil {
 		return false, err
 	}
 	var found bool
 	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(leg.Store, identifiers, statuses)
-		if err != nil {
-			return false, err
+		var has bool
+		if sessionID == "" {
+			var err error
+			has, err = sessionHasAssignedWorkInStoreByIdentifiersForStatuses(leg.Store, identifiers, statuses)
+			if err != nil {
+				return false, err
+			}
+		} else {
+			wa := workAssignmentForStore(beads.WorkStore{Store: leg.Store})
+			for _, status := range statuses {
+				var err error
+				has, err = wa.HasOpenForSession(identifiers, sessionID, status)
+				if err != nil {
+					return false, err
+				}
+				if has {
+					break
+				}
+			}
 		}
 		found = has
 		return has, nil
