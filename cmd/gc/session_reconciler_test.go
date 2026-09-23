@@ -11028,6 +11028,18 @@ func TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns(t *testing.T) {
 		}
 	})
 
+	t.Run("deferred trigger keeps heartbeat-held session down", func(t *testing.T) {
+		env, session, work := buildDeadHeldSessionWithWork("")
+		env.setSessionMetadata(&session, map[string]string{
+			beadmeta.TriggerBeadIDMetadataKey: "parked-trigger", beadmeta.TriggerBeadStoreRefMetadataKey: "city",
+		})
+		env.startOptions = append(env.startOptions, withPoolStartDeferrals(
+			workStartDeferrals{{StoreRef: "city", ID: "parked-trigger"}: {}}, []string{""}))
+		if woken := runTick(env, session, work); woken != 0 || env.sp.IsRunning("worker") {
+			t.Fatalf("deferred heartbeat-held session woke: count=%d; stderr=%s", woken, env.stderr.String())
+		}
+	})
+
 	t.Run("suspend hold keeps dead session down", func(t *testing.T) {
 		env, session, work := buildDeadHeldSessionWithWork("user-hold")
 		woken := runTick(env, session, work)

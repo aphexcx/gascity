@@ -358,8 +358,10 @@ type startExecutionOptions struct {
 	// heavy-session city (gastownhall/gascity#3288). The first steady-state tick
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
-	deferSessionClosesOnBoot bool
-	readyAssignedFlags       []bool
+	deferSessionClosesOnBoot  bool
+	readyAssignedFlags        []bool
+	poolStartDeferredTriggers workStartDeferrals
+	assignedWorkStoreRefs     []string
 	// workStartFailures charges/clears the WORK bead a start was for (pool
 	// start-failure backoff and park, pool_start_backoff.go). nil = no charge.
 	workStartFailures *workStartFailurePolicy
@@ -481,6 +483,15 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+// withPoolStartDeferrals carries the demand snapshot and the aligned wake-work
+// provenance into reconciliation. It does not recompute eligibility.
+func withPoolStartDeferrals(deferred workStartDeferrals, refs []string) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.poolStartDeferredTriggers = deferred
+		opts.assignedWorkStoreRefs = refs
 	}
 }
 

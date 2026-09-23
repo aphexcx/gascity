@@ -208,7 +208,7 @@ func TestComputeAwakeSet_DeferredTriggerSessionIsNotWoken(t *testing.T) {
 	if got := ComputeAwakeSet(scaled); !got["helper-1"].ShouldWake {
 		t.Fatalf("control: without a deferred set the older creating session is scaled demand: %+v", got)
 	}
-	scaled.DeferredTriggers = map[string]struct{}{"W": {}}
+	scaled.DeferredTriggers = workStartDeferrals{{StoreRef: "city", ID: "W"}: {}}
 	got := ComputeAwakeSet(scaled)
 	if got["helper-1"].ShouldWake {
 		t.Fatalf("the session for the deferred trigger was woken as scaled demand: %+v", got["helper-1"])
@@ -218,7 +218,7 @@ func TestComputeAwakeSet_DeferredTriggerSessionIsNotWoken(t *testing.T) {
 	}
 	workQuery := base
 	workQuery.WorkSet = map[string]bool{"helper": true}
-	workQuery.DeferredTriggers = map[string]struct{}{"W": {}}
+	workQuery.DeferredTriggers = workStartDeferrals{{StoreRef: "city", ID: "W"}: {}}
 	got = ComputeAwakeSet(workQuery)
 	if got["helper-1"].ShouldWake || !got["helper-2"].ShouldWake {
 		t.Fatalf("work-query wake picked the deferred session over its sibling: S=%+v T=%+v", got["helper-1"], got["helper-2"])
@@ -228,7 +228,7 @@ func TestComputeAwakeSet_DeferredTriggerSessionIsNotWoken(t *testing.T) {
 		SessionBeads: []AwakeSessionBead{
 			{ID: "S", SessionName: "helper-1", Template: "helper", State: "asleep", SleepReason: string(sessionpkg.SleepReasonCityStop), TriggerBeadID: "W", CreatedAt: older},
 		},
-		DeferredTriggers: map[string]struct{}{"W": {}},
+		DeferredTriggers: workStartDeferrals{{StoreRef: "city", ID: "W"}: {}},
 		Now:              older.Add(time.Hour),
 	}
 	if got := ComputeAwakeSet(minActive); got["helper-1"].ShouldWake {
@@ -315,10 +315,9 @@ func TestPoolStartBackoff_SurvivingSessionForParkedBeadIsNeitherReusedNorWoken(t
 		}
 		ds := buildDesiredStateWithSessionBeads("gc", cityPath, clk.Now(), cfg, sp, store, nil, snap, nil, &stderr)
 		openInfos := snap.OpenInfos()
-		pass := newWorkStartDeferralPass(clk.Now(), nil)
-		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, nil, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, pass)
-		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, openInfos, ds.ScaleCheckCounts, nil, pass.deferred, nil))
-		if _, deferred := pass.deferred[work.ID]; !deferred {
+		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, nil, openInfos, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs, ds.PoolStartDeferredTriggers)
+		poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, ds.ScaleCheckCounts, nil, ds.PoolStartDeferredTriggers, nil))
+		if !ds.PoolStartDeferredTriggers.contains(work.ID, "city") {
 			t.Fatalf("tick %d: the parked bead was not deferred by the gate (assigned rows %d)", tick, len(ds.AssignedWorkBeads))
 		}
 		cfgNames := configuredSessionNamesWithSnapshot(cfg, "gc", snap)
@@ -330,6 +329,7 @@ func TestPoolStartBackoff_SurvivingSessionForParkedBeadIsNeitherReusedNorWoken(t
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 			withReadyAssignedFlags(readyAssignedFlagsForBeads(ds.ReadyAssigned, ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs)),
+			withPoolStartDeferrals(ds.PoolStartDeferredTriggers, ds.AssignedWorkStoreRefs),
 			withWorkStartFailurePolicy(policy),
 		)
 		clk.Time = clk.Time.Add(time.Minute)
