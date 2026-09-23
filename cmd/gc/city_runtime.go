@@ -2616,14 +2616,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		phaseStart = time.Now()
-		openInfos := sessionBeads.OpenInfos()
-		poolDecisionTime := time.Now()
-		tickDeferral := newWorkStartDeferralPass(poolDecisionTime, trace)
-		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, store, openInfos, assignedWorkBeads, assignedWorkStoreRefs, tickDeferral)
+		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, result.PoolStartDeferredTriggers)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesDeferringAt(
-				cr.cfg, poolWorkBeads, poolWorkStoreRefs, openInfos, result.ScaleCheckCounts, nil, tickDeferral.deferred, poolDecisionTime, trace)),
+			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, nil, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -2728,6 +2725,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withMaxSessionAgeTracker(cr.mat),
 		withAssignedWorkDeferTracker(cr.adt),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withPoolStartDeferrals(result.PoolStartDeferredTriggers, awakeAssignedStoreRefs),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
 		// instead of re-deriving a work ledger from gc.routed_to, which on a
@@ -3505,13 +3503,11 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	filteredRows := filterReconcileRowsByName(updated, reconcileNames)
 	filteredSnap := newSessionBeadSnapshotFromReconcileRows(filteredRows)
 	openInfos := filterSessionInfosByName(updated, reconcileNames)
-	poolDecisionTime := time.Now()
-	dispatcherDeferral := newWorkStartDeferralPass(poolDecisionTime, nil)
-	_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, dispatcherDeferral)
+	poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(filteredCfg, cr.cityPath, cr.cityBeadStore(), openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs, wfcResult.PoolStartDeferredTriggers)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesDeferringAt(
-			filteredCfg, poolWorkBeads, poolWorkStoreRefs, openInfos, wfcResult.ScaleCheckCounts, nil, dispatcherDeferral.deferred, poolDecisionTime, nil)),
+		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
+			filteredCfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, wfcResult.PoolStartDeferredTriggers, nil, wfcResult.PoolStartDecisionTime)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -3548,6 +3544,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout,
 		cr.stderr,
+		withPoolStartDeferrals(wfcResult.PoolStartDeferredTriggers, nil),
 		withWorkStartFailurePolicy(cr.workStartFailurePolicy(cr.cityBeadStore(), cr.rigBeadStores())), // residency:allow explicit-ref lookup index only; gp-d7my reads the request's named store without probing others.
 	)
 	cr.requestDeferredDrainFollowUpTick()
@@ -3791,13 +3788,11 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		if sessionBeads != nil {
 			openSessionInfos = sessionBeads.OpenInfos()
 		}
-		poolDecisionTime := time.Now()
-		snapshotDeferral := newWorkStartDeferralPass(poolDecisionTime, trace)
-		_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, snapshotDeferral)
+		poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cr.cfg, cr.cityPath, cr.cityBeadStore(), openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs, result.PoolStartDeferredTriggers)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
-			PoolDesiredCounts(ComputePoolDesiredStatesDeferringAt(
-				cr.cfg, poolWorkBeads, poolWorkStoreRefs, openSessionInfos, result.ScaleCheckCounts, nil, snapshotDeferral.deferred, poolDecisionTime, trace)),
+			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3811,7 +3806,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			sessionFingerprint:     sessionFingerprint,
 			readyDemandFingerprint: readyDemandFingerprint,
 			result:                 result,
-			recheckAt:              earliestRecheck(result.PoolStartRecheckAt, snapshotDeferral.recheckAt),
+			recheckAt:              result.PoolStartRecheckAt,
 		}
 	}
 	if cr.demandSnapshot == nil {

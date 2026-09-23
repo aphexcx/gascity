@@ -1062,13 +1062,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolDecisionTime := time.Now()
-	startDeferral := newWorkStartDeferralPass(poolDecisionTime, nil)
-	_, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, startDeferral)
+	poolOwnedWorkBeads, poolWorkBeads, poolWorkStoreRefs := poolDemandAssignedWork(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.PoolStartDeferredTriggers)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesDeferringAt(
-			cfg, poolWorkBeads, poolWorkStoreRefs, openInfos, dsResult.ScaleCheckCounts, nil, startDeferral.deferred, poolDecisionTime, nil)),
+		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
+			cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, dsResult.PoolStartDeferredTriggers, nil, dsResult.PoolStartDecisionTime)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1087,6 +1085,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withPoolStartDeferrals(dsResult.PoolStartDeferredTriggers, awakeAssignedStoreRefs),
 		withAssignedWorkStores(awakeAssignedStores),
 		withWorkStartFailurePolicy(newWorkStartFailurePolicy(cfg, oneShotStore, rigStores, defaultMailProvider(cityPath), cfg.Session.ParkAlertTo)),
 	)

@@ -363,8 +363,10 @@ type startExecutionOptions struct {
 	// heavy-session city (gastownhall/gascity#3288). The first steady-state tick
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
-	deferSessionClosesOnBoot bool
-	readyAssignedFlags       []bool
+	deferSessionClosesOnBoot  bool
+	readyAssignedFlags        []bool
+	poolStartDeferredTriggers workStartDeferrals
+	assignedWorkStoreRefs     []string
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -486,6 +488,15 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
+// withPoolStartDeferrals carries the demand snapshot and the aligned wake-work
+// provenance into reconciliation. It does not recompute eligibility.
+func withPoolStartDeferrals(deferred workStartDeferrals, refs []string) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.poolStartDeferredTriggers = deferred
+		opts.assignedWorkStoreRefs = refs
 	}
 }
 

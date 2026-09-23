@@ -170,8 +170,9 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 			ContinuationResetPending: strings.TrimSpace(info.ContinuationResetPending) == "true" &&
 				strings.TrimSpace(info.ResetCommittedAt) != "",
 			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
-			PostCreateProtected:       poolSessionWithinPostCreateProtection(info, clk),
 			TriggerBeadID:             strings.TrimSpace(info.TriggerBeadID),
+			TriggerBeadStoreRef:       strings.TrimSpace(info.TriggerBeadStoreRef),
+			PostCreateProtected:       poolSessionWithinPostCreateProtection(info, clk),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
