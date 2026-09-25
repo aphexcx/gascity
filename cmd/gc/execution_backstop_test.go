@@ -123,6 +123,35 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 		}, &f.stdout, &f.refusals)
 }
 
+// tickWithAssignedWorkSnapshot runs the backstop from an intentionally supplied
+// assigned-work snapshot while still loading the session bead live. It lets
+// rows model the real cached-work race: session metadata is current, but the
+// claim snapshot can lag the authoritative work bead.
+func (f *executionBackstopFixture) tickWithAssignedWorkSnapshot(t *testing.T, work []beads.Bead) {
+	t.Helper()
+	sessions, err := loadSessionBeads(f.store)
+	if err != nil {
+		t.Fatalf("loading session beads: %v", err)
+	}
+	stores := make([]beads.Store, len(work))
+	refs := make([]string, len(work))
+	for i := range work {
+		stores[i] = f.store
+	}
+	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+		func(sessionBead beads.Bead) error {
+			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
+			return nil
+		}, &f.stdout, &f.refusals)
+}
+
+func (f *executionBackstopFixture) pin(t *testing.T) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"pin_awake": "true"}); err != nil {
+		t.Fatalf("pinning the session bead: %v", err)
+	}
+}
+
 // idleFor backdates the runtime's last-activity so the predicate observes an
 // agent that has done nothing for d.
 func (f *executionBackstopFixture) idleFor(t *testing.T, d time.Duration) {
@@ -590,6 +619,181 @@ func TestExecutionBackstopHoldsWhileAHumanIsAttached(t *testing.T) {
 	f.tick(t)
 	if got := f.nudgeCount(); got != 1 {
 		t.Fatalf("nudges after the human detached = %d, want exactly 1 (the cadence resumes); stdout=%s", got, f.stdout.String())
+	}
+}
+
+func TestExecutionBackstopSkipsPinnedHumanCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		pinned     bool
+		checkpoint bool
+		wantNudges int
+	}{
+		{
+			name:       "pinned checkpoint hold",
+			pinned:     true,
+			checkpoint: true,
+			wantNudges: 0,
+		},
+		{
+			name:       "checkpoint without pin still recovers",
+			checkpoint: true,
+			wantNudges: 1,
+		},
+		{
+			name:       "pin without checkpoint still recovers",
+			pinned:     true,
+			wantNudges: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.pinned {
+				if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"pin_awake": "true"}); err != nil {
+					t.Fatalf("pinning the session bead: %v", err)
+				}
+			}
+			if tc.checkpoint {
+				if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+					beadmeta.CheckpointMetadataKey: "round2-v2-explainer-v1 sent 2026-09-24T06:3xZ",
+					"gc.checkpoint_reminder":       "next 04:12Z Fri",
+				}); err != nil {
+					t.Fatalf("marking the work bead as a checkpoint hold: %v", err)
+				}
+			}
+			f.idleFor(t, 10*time.Minute)
+
+			ticks := 2
+			if tc.pinned && tc.checkpoint {
+				ticks = idleClaimNudgeMaxAttempts + 3
+			}
+			for i := 0; i < ticks; i++ {
+				f.tick(t)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+				f.idleFor(t, 10*time.Minute)
+			}
+
+			if got := f.nudgeCount(); got != tc.wantNudges {
+				t.Fatalf("nudges = %d, want %d; stdout=%s", got, tc.wantNudges, f.stdout.String())
+			}
+			if tc.wantNudges == 0 {
+				if len(f.drained) != 0 {
+					t.Fatalf("drain requests for a pinned checkpoint hold = %v, want none", f.drained)
+				}
+				if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+					t.Fatalf("persisted work marker = %q, want no pacing write while a pinned checkpoint is held", got)
+				}
+			}
+		})
+	}
+}
+
+func TestExecutionBackstopHoldsOnLivePinnedCheckpointWhenSnapshotIsStale(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.pin(t)
+	staleWork := f.work
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.CheckpointMetadataKey: "afik-review",
+	}); err != nil {
+		t.Fatalf("marking the live work bead as a checkpoint hold: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.tickWithAssignedWorkSnapshot(t, []beads.Bead{staleWork})
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+	}
+
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges with a live pinned checkpoint = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests with a live pinned checkpoint = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+		t.Fatalf("persisted work marker = %q, want no pacing write while the live checkpoint is held", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != "" {
+		t.Fatalf("stalled latch = %q, want none while the live checkpoint is held", got)
+	}
+}
+
+func TestExecutionBackstopResumesWhenLiveCheckpointClearsDespiteStaleSnapshot(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.pin(t)
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.CheckpointMetadataKey: "afik-review",
+	}); err != nil {
+		t.Fatalf("marking the work bead as a checkpoint hold: %v", err)
+	}
+	staleWork, err := f.store.Get(f.work.ID)
+	if err != nil {
+		t.Fatalf("reading the checkpointed snapshot: %v", err)
+	}
+	if err := f.store.SetMetadata(f.work.ID, beadmeta.CheckpointMetadataKey, ""); err != nil {
+		t.Fatalf("clearing the live checkpoint: %v", err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		executionClaimNudgeWorkKey:     f.work.ID,
+		executionClaimNudgeRootKey:     f.work.Metadata[beadmeta.RootBeadIDMetadataKey],
+		executionClaimNudgeStoreRefKey: "city",
+		executionClaimNudgeCountKey:    "0",
+		executionClaimNudgeDecayKey:    "0",
+		executionClaimNudgeAtKey:       f.now.Add(-idleClaimNudgeGrace - time.Second).UTC().Format(time.RFC3339),
+		executionClaimNudgeStalledKey:  "",
+	}); err != nil {
+		t.Fatalf("seeding the existing execution marker: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+
+	f.tickWithAssignedWorkSnapshot(t, []beads.Bead{staleWork})
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after the live checkpoint cleared = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after the live checkpoint cleared = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("persisted attempt count = %q, want 1 after the ordinary cadence resumes", got)
+	}
+}
+
+func TestExecutionBackstopDoesNotDrainExhaustedPinnedLiveCheckpoint(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.pin(t)
+	staleWork := f.work
+	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+		beadmeta.CheckpointMetadataKey: "afik-review",
+	}); err != nil {
+		t.Fatalf("marking the live work bead as a checkpoint hold: %v", err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		executionClaimNudgeWorkKey:     f.work.ID,
+		executionClaimNudgeRootKey:     f.work.Metadata[beadmeta.RootBeadIDMetadataKey],
+		executionClaimNudgeStoreRefKey: "city",
+		executionClaimNudgeCountKey:    strconv.Itoa(idleClaimNudgeMaxAttempts),
+		executionClaimNudgeDecayKey:    "0",
+		executionClaimNudgeAtKey:       f.now.Add(-idleClaimNudgeBackoff - time.Second).UTC().Format(time.RFC3339),
+		executionClaimNudgeStalledKey:  "",
+	}); err != nil {
+		t.Fatalf("seeding an exhausted execution marker: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+
+	f.tickWithAssignedWorkSnapshot(t, []beads.Bead{staleWork})
+
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for an exhausted live pinned checkpoint = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledKey); got != "" {
+		t.Fatalf("stalled latch = %q, want none while the live checkpoint is held", got)
+	}
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			t.Fatalf("execution.step_stalled event was emitted while the live checkpoint is held: %+v", e)
+		}
 	}
 }
 

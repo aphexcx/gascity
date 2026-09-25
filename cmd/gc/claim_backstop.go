@@ -805,7 +805,7 @@ func (p seatClaimBackstop) reserve(store beads.Store, s *beads.Bead, target back
 // once, and the seat needs to keep being asked. Latching both — the shape that
 // makes a backstop go permanently quiet after three tries — is what left the
 // ga-evxqd row sitting for three hours.
-func (p seatClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
+func (p seatClaimBackstop) exhausted(store beads.Store, s *beads.Bead, _ backstopTarget, stdout io.Writer) {
 	beadID := strings.TrimSpace(s.Metadata[seatClaimNudgeWorkKey])
 	if beadID == "" {
 		return
