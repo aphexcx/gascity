@@ -49,7 +49,7 @@ type backstopPredicate interface {
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
-	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
+	exhausted(store beads.Store, s *beads.Bead, target backstopTarget, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding.
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
@@ -69,6 +69,9 @@ type backstopTarget struct {
 	Generation string
 	Assignee   string
 	Store      beads.Store
+	// SessionPinned is set by the execution-claim predicate for sessions that
+	// must honor live human-checkpoint metadata before nudging or draining.
+	SessionPinned bool
 }
 
 // backstopResolution distinguishes definite completion from uncertainty.
@@ -175,7 +178,7 @@ func runNudgeBackstop(
 		case backstopActionWait:
 			continue
 		case backstopActionExhausted:
-			pred.exhausted(store, s, stdout)
+			pred.exhausted(store, s, target, stdout)
 			continue
 		case backstopActionNudge:
 			switch pred.revalidate(target) {
@@ -191,18 +194,22 @@ func runNudgeBackstop(
 			}
 			content := pred.content(*s)
 			if content == "" {
-				// Nothing is deliverable for this session. `agent.Nudge` is
-				// optional and pool templates routinely leave it unset, so this
-				// is the common case, not the exotic one. Skipping silently
-				// parks the state machine on its observe marker forever: no
-				// attempt is ever reserved, the cap is never reached, and the
-				// predicate's terminal action never runs — which for the
-				// execution backstop is the drain that is the only thing that
-				// releases the claim. The bounded attempts exist to give the
-				// agent a chance to ANSWER a nudge; with no nudge to send there
-				// is nothing to wait for, so go straight to the terminal action
-				// after the same grace window.
-				pred.exhausted(store, s, stdout)
+				// Nothing is deliverable for this session — an ordinary path
+				// rather than an exotic one in every lane, though for different
+				// reasons. The lanes that resolve content through the
+				// default-nudge fallback (the claim and execution backstops)
+				// reach it only when the template or agent cannot be resolved
+				// at all; the continuation lane reads the configured nudge
+				// directly, and `agent.Nudge` is optional and routinely unset.
+				// Skipping silently parks the state machine on its observe
+				// marker forever: no attempt is ever reserved, the cap is never
+				// reached, and the predicate's terminal action never runs —
+				// which for the execution backstop is the drain that is the only
+				// thing that releases the claim. The bounded attempts exist to
+				// give the agent a chance to ANSWER a nudge; with no nudge to
+				// send there is nothing to wait for, so go straight to the
+				// terminal action after the same grace window.
+				pred.exhausted(store, s, target, stdout)
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes
