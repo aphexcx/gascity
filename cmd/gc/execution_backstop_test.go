@@ -593,6 +593,72 @@ func TestExecutionBackstopHoldsWhileAHumanIsAttached(t *testing.T) {
 	}
 }
 
+func TestExecutionBackstopSkipsPinnedHumanCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		pinned     bool
+		checkpoint bool
+		wantNudges int
+	}{
+		{
+			name:       "pinned checkpoint hold",
+			pinned:     true,
+			checkpoint: true,
+			wantNudges: 0,
+		},
+		{
+			name:       "checkpoint without pin still recovers",
+			checkpoint: true,
+			wantNudges: 1,
+		},
+		{
+			name:       "pin without checkpoint still recovers",
+			pinned:     true,
+			wantNudges: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.pinned {
+				if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"pin_awake": "true"}); err != nil {
+					t.Fatalf("pinning the session bead: %v", err)
+				}
+			}
+			if tc.checkpoint {
+				if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+					beadmeta.CheckpointMetadataKey: "round2-v2-explainer-v1 sent 2026-09-24T06:3xZ",
+					"gc.checkpoint_reminder":       "next 04:12Z Fri",
+				}); err != nil {
+					t.Fatalf("marking the work bead as a checkpoint hold: %v", err)
+				}
+			}
+			f.idleFor(t, 10*time.Minute)
+
+			ticks := 2
+			if tc.pinned && tc.checkpoint {
+				ticks = idleClaimNudgeMaxAttempts + 3
+			}
+			for i := 0; i < ticks; i++ {
+				f.tick(t)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+				f.idleFor(t, 10*time.Minute)
+			}
+
+			if got := f.nudgeCount(); got != tc.wantNudges {
+				t.Fatalf("nudges = %d, want %d; stdout=%s", got, tc.wantNudges, f.stdout.String())
+			}
+			if tc.wantNudges == 0 {
+				if len(f.drained) != 0 {
+					t.Fatalf("drain requests for a pinned checkpoint hold = %v, want none", f.drained)
+				}
+				if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+					t.Fatalf("persisted work marker = %q, want no pacing write while a pinned checkpoint is held", got)
+				}
+			}
+		})
+	}
+}
+
 // TestExecutionBackstopDoesNotDrainAnIntermittentlyWorkingSeat is the
 // activity-decay row (ga-lez12). A human-paced interactive seat works in bursts:
 // it answers a nudge, runs for a bit, then pauses to read or think. Each pause

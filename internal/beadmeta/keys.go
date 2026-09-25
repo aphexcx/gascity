@@ -56,7 +56,11 @@ const (
 	CheckModeMetadataKey           = "gc.check_mode"
 	CheckPathMetadataKey           = "gc.check_path"
 	CheckTimeoutMetadataKey        = "gc.check_timeout"
-	CityPathMetadataKey            = "gc.city_path"
+	// CheckpointMetadataKey marks work parked at an explicit human checkpoint.
+	// The value is operator-authored context; presence is the machine-readable
+	// signal.
+	CheckpointMetadataKey = "gc.checkpoint"
+	CityPathMetadataKey   = "gc.city_path"
 	// ClaimedAtMetadataKey records the RFC3339 UTC instant a bead was first
 	// claimed through `gc hook --claim`. It is write-once: the claim hook
 	// stamps it only when absent from the bead's current metadata and never
@@ -448,6 +452,7 @@ var KnownMetadataKeys = []string{
 	CheckModeMetadataKey,
 	CheckPathMetadataKey,
 	CheckTimeoutMetadataKey,
+	CheckpointMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
 	ClaimGenerationMetadataKey,

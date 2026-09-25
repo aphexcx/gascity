@@ -142,11 +142,12 @@ func nudgeStalledPoolExecution(
 // executionClaim is one in-progress claim from the assigned-work snapshot, kept
 // with the store handle its live re-read must use.
 type executionClaim struct {
-	BeadID   string
-	RootID   string
-	StoreRef string
-	Assignee string
-	Store    beads.Store
+	BeadID          string
+	RootID          string
+	StoreRef        string
+	Assignee        string
+	Store           beads.Store
+	HumanCheckpoint bool
 }
 
 // executionClaimSnapshot indexes in-progress claims by their exact assignee
@@ -180,9 +181,10 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 		}
 
 		claim := executionClaim{
-			BeadID:   wb.ID,
-			RootID:   strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee: assignee,
+			BeadID:          wb.ID,
+			RootID:          strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:        assignee,
+			HumanCheckpoint: executionClaimHasHumanCheckpoint(wb),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = normalizeIdleClaimStoreRef(storeRefs[i])
@@ -297,6 +299,9 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, sessName string) (backstopT
 	if p.sp.IsAttached(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
+	if executionClaimIsPinnedHumanCheckpoint(s, claims[0]) {
+		return backstopTarget{}, backstopResolutionHold
+	}
 	if !p.sessionIsQuiet(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
@@ -308,6 +313,14 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, sessName string) (backstopT
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
 	}, backstopResolutionOutstanding
+}
+
+func executionClaimHasHumanCheckpoint(claim beads.Bead) bool {
+	return strings.TrimSpace(claim.Metadata[beadmeta.CheckpointMetadataKey]) != ""
+}
+
+func executionClaimIsPinnedHumanCheckpoint(session beads.Bead, claim executionClaim) bool {
+	return strings.TrimSpace(session.Metadata["pin_awake"]) == "true" && claim.HumanCheckpoint
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
