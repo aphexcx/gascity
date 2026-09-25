@@ -299,28 +299,47 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, sessName string) (backstopT
 	if p.sp.IsAttached(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
-	if executionClaimIsPinnedHumanCheckpoint(s, claims[0]) {
-		return backstopTarget{}, backstopResolutionHold
+	claim := claims[0]
+	target := executionClaimTarget(s, claim)
+	if target.SessionPinned {
+		if claim.HumanCheckpoint && !executionClaimMarkerMatches(s, target) {
+			return backstopTarget{}, backstopResolutionHold
+		}
+		switch p.revalidate(target) {
+		case backstopResolutionHold:
+			return backstopTarget{}, backstopResolutionHold
+		case backstopResolutionClear:
+			return backstopTarget{}, backstopResolutionClear
+		case backstopResolutionOutstanding:
+			// Continue below.
+		default:
+			return backstopTarget{}, backstopResolutionHold
+		}
 	}
 	if !p.sessionIsQuiet(sessName) {
 		return backstopTarget{}, backstopResolutionHold
 	}
-	claim := claims[0]
-	return backstopTarget{
-		ID:       claim.BeadID,
-		RootID:   claim.RootID,
-		StoreRef: claim.StoreRef,
-		Assignee: claim.Assignee,
-		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	return target, backstopResolutionOutstanding
 }
 
 func executionClaimHasHumanCheckpoint(claim beads.Bead) bool {
 	return strings.TrimSpace(claim.Metadata[beadmeta.CheckpointMetadataKey]) != ""
 }
 
-func executionClaimIsPinnedHumanCheckpoint(session beads.Bead, claim executionClaim) bool {
-	return strings.TrimSpace(session.Metadata["pin_awake"]) == "true" && claim.HumanCheckpoint
+func executionClaimTarget(session beads.Bead, claim executionClaim) backstopTarget {
+	return backstopTarget{
+		ID:            claim.BeadID,
+		RootID:        claim.RootID,
+		StoreRef:      claim.StoreRef,
+		Assignee:      claim.Assignee,
+		Store:         claim.Store,
+		SessionPinned: strings.TrimSpace(session.Metadata["pin_awake"]) == "true",
+	}
+}
+
+func executionClaimMarkerMatches(session beads.Bead, target backstopTarget) bool {
+	return strings.TrimSpace(session.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
+		strings.TrimSpace(session.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
@@ -417,29 +436,40 @@ func (p poolExecutionBackstop) renewedSince(sessName string, last time.Time) boo
 // CachingStore-backed, so a plain read can still show a claim the agent finished
 // seconds ago. A failed read HOLDS: it is not proof the claim went away.
 func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolution {
-	if target.Store == nil {
+	current, resolution := p.revalidateLiveTarget(target)
+	if resolution != backstopResolutionOutstanding {
+		return resolution
+	}
+	if target.SessionPinned && executionClaimHasHumanCheckpoint(current) {
 		return backstopResolutionHold
+	}
+	return backstopResolutionOutstanding
+}
+
+func (p poolExecutionBackstop) revalidateLiveTarget(target backstopTarget) (beads.Bead, backstopResolution) {
+	if target.Store == nil {
+		return beads.Bead{}, backstopResolutionHold
 	}
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return beads.Bead{}, backstopResolutionHold
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return beads.Bead{}, backstopResolutionHold
 	}
 	if ok, reason := federation.MayClaim(current.Labels, federationIdentity(p.cfg)); !ok {
 		if p.refusals.shouldLog(p.now, storeScopedBeadKey{StoreRef: target.StoreRef, ID: current.ID}, reason) {
 			log.Printf("execution-claim-nudge: %s", federation.ClaimRefusalLine(current.ID, reason))
 		}
-		return backstopResolutionClear
+		return current, backstopResolutionClear
 	}
 
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee {
-		return backstopResolutionClear
+		return current, backstopResolutionClear
 	}
-	return backstopResolutionOutstanding
+	return current, backstopResolutionOutstanding
 }
 
 // observe starts a new assignment's window: a fresh grace clock AND a fresh
@@ -457,12 +487,23 @@ func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target 
 // exhausted turns a spent attempt budget into one observable fact and one drain
 // request, latched so both happen exactly once for this claim however many ticks
 // the session survives.
-func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
+func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, target backstopTarget, stdout io.Writer) {
 	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" {
 		return
 	}
 	beadID := strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey])
 	if beadID == "" {
+		return
+	}
+	switch p.revalidate(target) {
+	case backstopResolutionHold:
+		return
+	case backstopResolutionClear:
+		p.clear(store, s, stdout)
+		return
+	case backstopResolutionOutstanding:
+		// Escalate below.
+	default:
 		return
 	}
 	sessName := strings.TrimSpace(s.Metadata["session_name"])

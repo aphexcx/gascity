@@ -49,7 +49,7 @@ type backstopPredicate interface {
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
-	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
+	exhausted(store beads.Store, s *beads.Bead, target backstopTarget, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding.
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
@@ -89,6 +89,9 @@ type backstopTarget struct {
 	Generation string
 	Assignee   string
 	Store      beads.Store
+	// SessionPinned is set by the execution-claim predicate for sessions that
+	// must honor live human-checkpoint metadata before nudging or draining.
+	SessionPinned bool
 }
 
 // backstopResolution distinguishes definite completion from uncertainty.
@@ -224,7 +227,7 @@ func runNudgeBackstop(
 		case backstopActionWait:
 			continue
 		case backstopActionExhausted:
-			pred.exhausted(store, s, stdout)
+			pred.exhausted(store, s, target, stdout)
 			continue
 		case backstopActionNudge:
 			switch pred.revalidate(target) {
@@ -255,7 +258,7 @@ func runNudgeBackstop(
 				// give the agent a chance to ANSWER a nudge; with no nudge to
 				// send there is nothing to wait for, so go straight to the
 				// terminal action after the same grace window.
-				pred.exhausted(store, s, stdout)
+				pred.exhausted(store, s, target, stdout)
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes

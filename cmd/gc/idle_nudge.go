@@ -293,7 +293,7 @@ func (p poolContinuationBackstop) reserve(store beads.Store, s *beads.Bead, targ
 	return writeContinuationClaimMarker(store, s, target, attempts, now, stdout)
 }
 
-func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
+func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ backstopTarget, _ io.Writer) {
 }
 
 func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
@@ -459,7 +459,7 @@ func (p poolClaimBackstop) reserve(store beads.Store, s *beads.Bead, target back
 // exhausted is a deliberate no-op: manual re-nudge remains the pool escape
 // hatch, and leaving the marker untouched at the cap (rather than clearing or
 // rewriting it) is what keeps this predicate silent on every subsequent tick.
-func (p poolClaimBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
+func (p poolClaimBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ backstopTarget, _ io.Writer) {
 }
 
 func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
