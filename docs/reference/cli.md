@@ -295,7 +295,9 @@ unaffected.
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which runs bd's native
 "heartbeat &lt;issue-id&gt;" (renewing the claim lease so the bead never goes
-stale-lease while its worker is alive) and then stamps
+stale-lease while its worker is alive; when the bead is assigned to one of
+the caller's own identities — session bead id, alias, session name,
+BEADS_ACTOR — the renewal runs as that identity) and then stamps
 "gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;" metadata so long-running workers
 can signal liveness to the dashboard, and
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an

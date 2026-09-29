@@ -118,7 +118,9 @@ unaffected.
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat <issue-id>" subcommand, which runs bd's native
 "heartbeat <issue-id>" (renewing the claim lease so the bead never goes
-stale-lease while its worker is alive) and then stamps
+stale-lease while its worker is alive; when the bead is assigned to one of
+the caller's own identities — session bead id, alias, session name,
+BEADS_ACTOR — the renewal runs as that identity) and then stamps
 "gc.last_heartbeat_at=<RFC3339 UTC now>" metadata so long-running workers
 can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
@@ -246,6 +248,37 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, string, error) {
 	}
 	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
 	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, rest[0], nil
+}
+
+// bdHeartbeatCallerIdentities lists every identity the calling session answers
+// to, as the environment gc hands bd presents them: the session bead id first
+// (what `gc hook --claim` records an unaliased pool worker's claim under), then
+// the alias, the runtime session name and BEADS_ACTOR (the actor bd would use
+// anyway). GC_AGENT is deliberately not one: it is a compatibility mirror that
+// can carry the bare pool template, which `gc hook` keeps out of the identities
+// a session adopts work under (ga-80pen8). Empty and repeated values are
+// dropped.
+func bdHeartbeatCallerIdentities(env []string) []string {
+	var out []string
+	for _, key := range []string{"GC_SESSION_ID", "GC_ALIAS", "GC_SESSION_NAME", "BEADS_ACTOR"} {
+		if value := strings.TrimSpace(envListValue(env, key)); value != "" && !slices.Contains(out, value) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// describeBdHeartbeatCaller renders the caller's identities for a heartbeat
+// refusal, so the message names who asked as well as who holds the claim.
+func describeBdHeartbeatCaller(callers []string) string {
+	if len(callers) == 0 {
+		return "a caller with no session identity in its environment (bd's default actor)"
+	}
+	quoted := make([]string, len(callers))
+	for i, c := range callers {
+		quoted[i] = fmt.Sprintf("%q", c)
+	}
+	return strings.Join(quoted, " / ")
 }
 
 // bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
@@ -613,8 +646,29 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// leads so a worker whose claim is gone (reclaimed, closed, or taken by
 	// another assignee) fails loudly here and never stamps liveness metadata
 	// on a bead it no longer owns.
+	//
+	// bd renews a lease only for an actor that IS the assignee, and one
+	// session answers to several identities: `gc hook --claim` records an
+	// unaliased pool worker's claim under its session bead id
+	// (hookClaimAssigneeIdentity) while the session's BEADS_ACTOR is the
+	// slot's runtime name. Handed the ambient actor, bd refused the claimant
+	// itself ("issue already claimed by <own session id>", hq-0kbmd). So when
+	// the bead the exact-ID guard above read is assigned to one of this
+	// caller's own identities, the native heartbeat runs as that exact
+	// spelling. Any other assignee is left to bd's own refusal, which gc
+	// completes by naming the caller as well as the claimant.
 	if heartbeatID != "" {
-		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, cityPath, target, env, stdout, stderr); code != 0 {
+		heartbeatEnv := env
+		claimant := strings.TrimSpace(guardBeads[heartbeatID].Assignee)
+		callers := bdHeartbeatCallerIdentities(env)
+		ownClaim := claimant != "" && slices.Contains(callers, claimant)
+		if ownClaim {
+			heartbeatEnv = append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+claimant)
+		}
+		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, cityPath, target, heartbeatEnv, stdout, stderr); code != 0 {
+			if claimant != "" && !ownClaim {
+				fmt.Fprintf(stderr, "gc bd: heartbeat %s: the claim is held by %q; this caller is %s, not the claimant\n", heartbeatID, claimant, describeBdHeartbeatCaller(callers)) //nolint:errcheck // best-effort stderr
+			}
 			return code
 		}
 	}
