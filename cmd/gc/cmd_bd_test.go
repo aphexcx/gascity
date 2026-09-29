@@ -2466,7 +2466,9 @@ func readHeartbeatActors(t *testing.T, path string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Only the final newline is dropped: an actor's own whitespace is part of
+	// what the verbatim test asserts.
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
 // TestGcBdHeartbeatRenewsAClaimRecordedUnderTheSessionID pins hq-0kbmd.
@@ -2512,10 +2514,30 @@ func TestGcBdHeartbeatFromANonClaimantIsRefusedNamingBoth(t *testing.T) {
 	if len(calls) != 1 || calls[0] != "heartbeat demo-abc" {
 		t.Fatalf("write calls = %q, want only the refused native heartbeat (no liveness stamp)", calls)
 	}
-	for _, want := range []string{"hq-wisp-someoneelse", "hq-wisp-l8toe0q", "claude-opus-1-pool"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr = %q, want the refusal to name %q", stderr.String(), want)
-		}
+	// bd's own refusal comes through, and gc's line names both sides without
+	// claiming to know why bd failed (a transport error fails the same way).
+	if !strings.Contains(stderr.String(), "issue already claimed by hq-wisp-someoneelse") {
+		t.Fatalf("stderr = %q, want bd's own refusal passed through", stderr.String())
+	}
+	const gcLine = `gc bd: heartbeat demo-abc failed; the bead is assigned to "hq-wisp-someoneelse" and this caller answers to "hq-wisp-l8toe0q" / "claude-opus-1-pool"`
+	if !strings.Contains(stderr.String(), gcLine) {
+		t.Fatalf("stderr = %q, want gc's line %q naming the assignee and the caller", stderr.String(), gcLine)
+	}
+}
+
+// TestGcBdHeartbeatRunsAsTheAssigneeVerbatim pins that the claimant's
+// heartbeat hands bd the assignee exactly as stored: ownership is recognised
+// on trimmed identities, but bd matches the lease holder byte for byte, so a
+// trimmed spelling would turn a renewable claim into a refusal.
+func TestGcBdHeartbeatRunsAsTheAssigneeVerbatim(t *testing.T) {
+	_, actors := setupClaimantCheckingHeartbeat(t, " hq-wisp-l8toe0q")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if got := readHeartbeatActors(t, actors); len(got) != 1 || got[0] != " hq-wisp-l8toe0q" {
+		t.Fatalf("native heartbeat ran as %q, want the stored assignee verbatim %q", got, " hq-wisp-l8toe0q")
 	}
 }
 

@@ -268,11 +268,11 @@ func bdHeartbeatCallerIdentities(env []string) []string {
 	return out
 }
 
-// describeBdHeartbeatCaller renders the caller's identities for a heartbeat
-// refusal, so the message names who asked as well as who holds the claim.
+// describeBdHeartbeatCaller renders the caller's identities for a failed
+// heartbeat, so the message names who asked as well as who holds the bead.
 func describeBdHeartbeatCaller(callers []string) string {
 	if len(callers) == 0 {
-		return "a caller with no session identity in its environment (bd's default actor)"
+		return "no session identity (bd's default actor)"
 	}
 	quoted := make([]string, len(callers))
 	for i, c := range callers {
@@ -654,20 +654,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// slot's runtime name. Handed the ambient actor, bd refused the claimant
 	// itself ("issue already claimed by <own session id>", hq-0kbmd). So when
 	// the bead the exact-ID guard above read is assigned to one of this
-	// caller's own identities, the native heartbeat runs as that exact
-	// spelling. Any other assignee is left to bd's own refusal, which gc
-	// completes by naming the caller as well as the claimant.
+	// caller's own identities, the native heartbeat runs as the assignee
+	// string verbatim — bd matches the lease holder byte for byte. Any other
+	// assignee is left to bd, which stays the authority (it also equates
+	// separator spellings gc does not); when that heartbeat fails, gc names
+	// the assignee and the caller's identities alongside bd's own error.
 	if heartbeatID != "" {
 		heartbeatEnv := env
-		claimant := strings.TrimSpace(guardBeads[heartbeatID].Assignee)
+		assignee := guardBeads[heartbeatID].Assignee
 		callers := bdHeartbeatCallerIdentities(env)
-		ownClaim := claimant != "" && slices.Contains(callers, claimant)
+		ownClaim := strings.TrimSpace(assignee) != "" && slices.Contains(callers, strings.TrimSpace(assignee))
 		if ownClaim {
-			heartbeatEnv = append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+claimant)
+			heartbeatEnv = append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+assignee)
 		}
 		if code := runBdSubprocess(bdPath, []string{"heartbeat", heartbeatID}, cityPath, target, heartbeatEnv, stdout, stderr); code != 0 {
-			if claimant != "" && !ownClaim {
-				fmt.Fprintf(stderr, "gc bd: heartbeat %s: the claim is held by %q; this caller is %s, not the claimant\n", heartbeatID, claimant, describeBdHeartbeatCaller(callers)) //nolint:errcheck // best-effort stderr
+			if strings.TrimSpace(assignee) != "" && !ownClaim {
+				fmt.Fprintf(stderr, "gc bd: heartbeat %s failed; the bead is assigned to %q and this caller answers to %s\n", heartbeatID, assignee, describeBdHeartbeatCaller(callers)) //nolint:errcheck // best-effort stderr
 			}
 			return code
 		}
