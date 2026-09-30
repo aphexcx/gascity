@@ -2417,6 +2417,154 @@ func TestGcBdHeartbeatLeaseFailureSkipsMetadataStamp(t *testing.T) {
 	}
 }
 
+// claimantCheckingFakeBd is a fake bd that answers the exact-ID guard's
+// `show` with a bead assigned to $FAKE_ASSIGNEE and enforces bd's own lease
+// rule on `heartbeat` (issueops.HeartbeatIssueInTx): only an actor that IS the
+// assignee renews; anyone else gets bd's "issue already claimed by" refusal.
+// Every invocation's args go to $CAPTURE_PATH and each heartbeat's actor to
+// $ACTOR_PATH.
+const claimantCheckingFakeBd = "#!/bin/sh\n" +
+	"printf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\n" +
+	"case \"$1\" in\n" +
+	"show)\n" +
+	"  printf '[{\"id\":\"demo-abc\",\"title\":\"work\",\"status\":\"in_progress\",\"assignee\":\"%s\"}]\\n' \"${FAKE_ASSIGNEE}\"\n" +
+	"  ;;\n" +
+	"heartbeat)\n" +
+	"  printf '%s\\n' \"${BEADS_ACTOR}\" >> \"${ACTOR_PATH}\"\n" +
+	"  if [ \"${BEADS_ACTOR}\" != \"${FAKE_ASSIGNEE}\" ]; then\n" +
+	"    printf 'Error: heartbeat %s: issue already claimed by %s\\n' \"$2\" \"${FAKE_ASSIGNEE}\" >&2\n" +
+	"    exit 1\n" +
+	"  fi\n" +
+	"  ;;\n" +
+	"esac\n"
+
+// setupClaimantCheckingHeartbeat installs claimantCheckingFakeBd with the bead
+// assigned to assignee, gives the caller the identity a pool worker session
+// carries (hq-0kbmd: the session bead id, plus the slot's runtime name as
+// GC_SESSION_NAME and BEADS_ACTOR), and returns the args and actor capture
+// paths.
+func setupClaimantCheckingHeartbeat(t *testing.T, assignee string) (capture, actors string) {
+	t.Helper()
+	dir := t.TempDir()
+	capture = filepath.Join(dir, "gc-bd-args.txt")
+	actors = filepath.Join(dir, "gc-bd-heartbeat-actors.txt")
+	silentFallbackTestSetup(t, claimantCheckingFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("ACTOR_PATH", actors)
+	t.Setenv("FAKE_ASSIGNEE", assignee)
+	t.Setenv("GC_SESSION_ID", "hq-wisp-l8toe0q")
+	t.Setenv("GC_SESSION_NAME", "claude-opus-1-pool")
+	t.Setenv("BEADS_ACTOR", "claude-opus-1-pool")
+	t.Setenv("GC_AGENT", "claude-opus-1-pool")
+	t.Setenv("GC_ALIAS", "")
+	return capture, actors
+}
+
+func readHeartbeatActors(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the final newline is dropped: an actor's own whitespace is part of
+	// what the verbatim test asserts.
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+// TestGcBdHeartbeatRenewsAClaimRecordedUnderTheSessionID pins hq-0kbmd.
+// `gc hook --claim` records an unaliased pool worker's claim under its session
+// bead id (hookClaimAssigneeIdentity), while the session's BEADS_ACTOR is the
+// slot's runtime name. bd renews a lease only for an actor that IS the
+// assignee, so a heartbeat handed the ambient BEADS_ACTOR was refused with
+// "issue already claimed by <the caller's own session id>" and the live lane's
+// lease ran out. The claimant's heartbeat must run as the identity the claim
+// is recorded under, and then stamp the liveness metadata.
+func TestGcBdHeartbeatRenewsAClaimRecordedUnderTheSessionID(t *testing.T) {
+	capture, actors := setupClaimantCheckingHeartbeat(t, "hq-wisp-l8toe0q")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0 for the claimant's own heartbeat; stderr=%q", got, stderr.String())
+	}
+	if got := readHeartbeatActors(t, actors); len(got) != 1 || got[0] != "hq-wisp-l8toe0q" {
+		t.Fatalf("native heartbeat ran as %q, want the claim's own identity %q", got, "hq-wisp-l8toe0q")
+	}
+	calls := heartbeatWriteCalls(t, capture)
+	if len(calls) != 2 || calls[0] != "heartbeat demo-abc" ||
+		!strings.HasPrefix(calls[1], "update demo-abc --set-metadata "+heartbeatMetadataKey+"=") {
+		t.Fatalf("heartbeat write calls = %q, want [heartbeat, update --set-metadata]", calls)
+	}
+}
+
+// TestGcBdHeartbeatFromANonClaimantIsRefusedNamingBoth pins the other half of
+// hq-0kbmd: a caller that is not the claimant under any of its identities must
+// not have its heartbeat run as the claimant. It stays refused, stamps no
+// liveness metadata, and the refusal names both the claimant and the caller.
+func TestGcBdHeartbeatFromANonClaimantIsRefusedNamingBoth(t *testing.T) {
+	capture, actors := setupClaimantCheckingHeartbeat(t, "hq-wisp-someoneelse")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd(heartbeat) = 0, want a refusal for a bead claimed by another session; stderr=%q", stderr.String())
+	}
+	if got := readHeartbeatActors(t, actors); len(got) != 1 || got[0] != "claude-opus-1-pool" {
+		t.Fatalf("native heartbeat ran as %q, want the caller's own actor %q (never the claimant's)", got, "claude-opus-1-pool")
+	}
+	calls := heartbeatWriteCalls(t, capture)
+	if len(calls) != 1 || calls[0] != "heartbeat demo-abc" {
+		t.Fatalf("write calls = %q, want only the refused native heartbeat (no liveness stamp)", calls)
+	}
+	// bd's own refusal comes through, and gc's line names both sides without
+	// claiming to know why bd failed (a transport error fails the same way).
+	if !strings.Contains(stderr.String(), "issue already claimed by hq-wisp-someoneelse") {
+		t.Fatalf("stderr = %q, want bd's own refusal passed through", stderr.String())
+	}
+	const gcLine = `gc bd: heartbeat demo-abc failed; the bead is assigned to "hq-wisp-someoneelse" and this caller answers to "hq-wisp-l8toe0q" / "claude-opus-1-pool"`
+	if !strings.Contains(stderr.String(), gcLine) {
+		t.Fatalf("stderr = %q, want gc's line %q naming the assignee and the caller", stderr.String(), gcLine)
+	}
+}
+
+// TestGcBdHeartbeatRunsAsTheAssigneeVerbatim pins that the claimant's
+// heartbeat hands bd the assignee exactly as stored: ownership is recognised
+// on trimmed identities, but bd matches the lease holder byte for byte, so a
+// trimmed spelling would turn a renewable claim into a refusal.
+func TestGcBdHeartbeatRunsAsTheAssigneeVerbatim(t *testing.T) {
+	_, actors := setupClaimantCheckingHeartbeat(t, " hq-wisp-l8toe0q")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if got := readHeartbeatActors(t, actors); len(got) != 1 || got[0] != " hq-wisp-l8toe0q" {
+		t.Fatalf("native heartbeat ran as %q, want the stored assignee verbatim %q", got, " hq-wisp-l8toe0q")
+	}
+}
+
+// TestBdHeartbeatCallerIdentities pins the identity set a heartbeat may renew
+// a claim under: the session bead id first, then alias, runtime session name
+// and BEADS_ACTOR, trimmed, with empty and repeated values dropped. GC_AGENT
+// is not an identity: it can carry the bare pool template (ga-80pen8), and a
+// claim recorded under the template is not this session's.
+func TestBdHeartbeatCallerIdentities(t *testing.T) {
+	env := []string{
+		"PATH=/usr/bin",
+		"GC_SESSION_ID= hq-wisp-l8toe0q ",
+		"GC_ALIAS=",
+		"GC_SESSION_NAME=claude-opus-1-pool",
+		"BEADS_ACTOR=claude-opus-1-pool",
+		"GC_AGENT=claude-opus",
+	}
+	got := bdHeartbeatCallerIdentities(env)
+	want := []string{"hq-wisp-l8toe0q", "claude-opus-1-pool"}
+	if !bdTestSlicesEqual(got, want) {
+		t.Fatalf("bdHeartbeatCallerIdentities = %q, want %q", got, want)
+	}
+	if got := bdHeartbeatCallerIdentities([]string{"PATH=/usr/bin"}); len(got) != 0 {
+		t.Fatalf("bdHeartbeatCallerIdentities(no identity) = %q, want none", got)
+	}
+}
+
 // heartbeatWriteCalls reads the fake bd's captured invocations and returns
 // only the heartbeat write pair (native heartbeat + metadata update),
 // filtering out incidental read calls (e.g. the exact-ID guard's lookup).
