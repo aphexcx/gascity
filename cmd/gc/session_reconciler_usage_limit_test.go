@@ -251,3 +251,134 @@ func TestComputePoolDesiredStates_UnclaimedUsageLimitRetainsDemandSlot(t *testin
 		})
 	}
 }
+
+func TestComputePoolDesiredStates_UsageLimitOccupiesMinimumCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		min, max, scaleCount     int
+		omitScale, drained       bool
+		work                     string
+		elapsed                  time.Duration
+		wantCount, wantRetained  int
+		wantFloor, checkSelected bool
+	}{
+		{name: "minimum with omitted scale", min: 1, max: 2, omitScale: true, wantCount: 1, wantRetained: 1, wantFloor: true, checkSelected: true},
+		{name: "minimum with zero scale", min: 1, max: 2, wantCount: 1, wantRetained: 1, wantFloor: true},
+		{name: "minimum at maximum", min: 1, max: 1, wantCount: 1, wantRetained: 1, wantFloor: true},
+		{name: "minimum zero creates no demand", max: 2},
+		{name: "maximum zero creates no demand"},
+		{name: "remaining minimum gets one fresh slot", min: 2, max: 2, wantCount: 2, wantRetained: 1, wantFloor: true},
+		{name: "unassigned demand fulfills minimum", min: 1, max: 2, work: "unassigned", scaleCount: 1, wantCount: 1, wantRetained: 1},
+		{name: "assigned demand fulfills minimum", min: 1, max: 2, work: "assigned", wantCount: 1, wantRetained: 1},
+		{name: "selected demand cannot occupy minimum twice", min: 2, max: 2, work: "unassigned", scaleCount: 1, wantCount: 2, wantRetained: 1},
+		{name: "expired hold allows minimum replacement", min: 1, max: 2, elapsed: 30 * time.Minute, wantCount: 1},
+		{name: "drained hold allows minimum replacement", min: 1, max: 2, drained: true, wantCount: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, seat := newLivePoolUsageLimitEnv(t)
+			env.cfg.Agents[0].WakeMode = "fresh"
+			env.cfg.Agents[0].MinActiveSessions = intPtr(tc.min)
+			env.cfg.Agents[0].MaxActiveSessions = intPtr(tc.max)
+			var owned, assigned []beads.Bead
+			demand := map[string]scaleCheckDemand{}
+			if tc.work != "" {
+				work, err := env.store.Create(beads.Bead{
+					Title: "routed work", Type: "task",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.work == "assigned" {
+					if err := env.store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: &seat.ID}); err != nil {
+						t.Fatal(err)
+					}
+					work, err = env.store.Get(work.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					assigned = []beads.Bead{work}
+				} else {
+					demand["worker"] = scaleCheckDemand{Count: tc.scaleCount, WorkBeadIDs: []string{work.ID}}
+				}
+				owned = []beads.Bead{work}
+				env.setSessionMetadata(&seat, map[string]string{beadmeta.TriggerBeadIDMetadataKey: work.ID})
+			}
+			env.reconcile([]beads.Bead{seat})
+			env.clk.Advance(tc.elapsed)
+			held := env.sessionInfo(seat.ID)
+			if tc.drained {
+				var err error
+				held, err = sessionFrontDoor(env.store).ApplyPatchInfo(held, sessionpkg.AcknowledgeDrainPatch(env.clk.Now(), true))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			scale := map[string]int{}
+			if !tc.omitScale {
+				scale["worker"] = tc.scaleCount
+			}
+			states := computePoolDesiredStatesAt(env.cfg, assigned, nil, owned, []sessionpkg.Info{held}, scale, demand, nil, env.clk.Now(), nil)
+			count, retained := 0, 0
+			for _, state := range states {
+				for _, req := range state.Requests {
+					count++
+					if req.SessionBeadID != seat.ID {
+						continue
+					}
+					retained++
+					if req.FloorGuarantee != tc.wantFloor {
+						t.Fatalf("retained request floor = %v, want %v", req.FloorGuarantee, tc.wantFloor)
+					}
+					if tc.checkSelected {
+						bp := &agentBuildParams{city: env.cfg, agents: env.cfg.Agents, beadStore: env.store}
+						selected, _, plan, err := selectOrPlanPoolSessionBead(bp, &env.cfg.Agents[0], "worker", &held, req, env.clk.Now(), map[string]bool{}, map[int]bool{})
+						if err != nil || plan != nil || selected.ID != seat.ID {
+							t.Fatalf("minimum request planned a replacement: selected=%q plan=%+v err=%v", selected.ID, plan, err)
+						}
+						seat, err = env.store.Get(selected.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if woken := env.reconcile([]beads.Bead{seat}); woken != 0 || env.sp.IsRunning("worker") {
+							t.Fatalf("minimum request restarted held lane: woken=%d", woken)
+						}
+					}
+				}
+			}
+			if count != tc.wantCount || retained != tc.wantRetained {
+				t.Fatalf("requests=%+v: count=%d retained=%d, want count=%d retained=%d", states, count, retained, tc.wantCount, tc.wantRetained)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_MinimumSelectsDistinctUsageLimitedSessions(t *testing.T) {
+	for _, minimum := range []int{1, 2} {
+		env := newReconcilerTestEnv()
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", WakeMode: "fresh", MinActiveSessions: intPtr(minimum), MaxActiveSessions: intPtr(3)}}}
+		var infos []sessionpkg.Info
+		candidates := make(map[string]bool)
+		for _, slot := range []string{"1", "2", "3"} {
+			seat := env.createSessionBead("worker-"+slot, "worker")
+			env.setSessionMetadata(&seat, map[string]string{
+				"pool_managed": "true", "pool_slot": slot,
+				"state": "asleep", "sleep_reason": "rate_limit",
+				"quarantined_until": env.clk.Now().Add(30 * time.Minute).Format(time.RFC3339),
+			})
+			infos = append(infos, env.sessionInfo(seat.ID))
+			candidates[seat.ID] = true
+		}
+		states := computePoolDesiredStatesAt(env.cfg, nil, nil, nil, infos, nil, nil, nil, env.clk.Now(), nil)
+		if len(states) != 1 || len(states[0].Requests) != minimum {
+			t.Fatalf("minimum %d requested extra capacity: %+v", minimum, states)
+		}
+		used := make(map[string]bool)
+		for _, req := range states[0].Requests {
+			if !candidates[req.SessionBeadID] || used[req.SessionBeadID] || !req.FloorGuarantee {
+				t.Fatalf("minimum %d reused or replaced a quarantined candidate: %+v", minimum, states)
+			}
+			used[req.SessionBeadID] = true
+		}
+	}
+}
