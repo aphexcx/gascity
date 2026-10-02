@@ -830,36 +830,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
-	t.Run("ReadyExcludesShippedOpenWorkAndAllowsExplicitReset", func(t *testing.T) {
-		s := newStore()
-		work, err := s.Create(beads.Bead{Title: "ready for review", Type: "task"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.SetMetadataBatch(work.ID, map[string]string{
-			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
-			beadmeta.RoutedToMetadataKey:    "builder",
-		}); err != nil {
-			t.Fatal(err)
-		}
-		ready, err := s.Ready()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(ready) != 0 {
-			t.Fatalf("Ready() = %v, want no duplicate execution of shipped open work", titlesOf(ready))
-		}
-		if err := s.SetMetadataBatch(work.ID, map[string]string{beadmeta.WorkOutcomeMetadataKey: ""}); err != nil {
-			t.Fatal(err)
-		}
-		ready, err = s.Ready()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(ready) != 1 || ready[0].ID != work.ID {
-			t.Fatalf("Ready() = %v, want explicitly reset work %s", titlesOf(ready), work.ID)
-		}
-	})
+	RunShippedReadyConformance(t, newStore)
 
 	t.Run("ReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()

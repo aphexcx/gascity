@@ -2221,10 +2221,6 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 	if err := validateReassignState(beadID, b); err != nil {
 		return err
 	}
-	writer, ok := beads.ConditionalWriterFor(store)
-	if !ok {
-		return fmt.Errorf("reassigning %s requires an atomic assignment release: %w", beadID, beads.ErrConditionalWriteUnsupported)
-	}
 	var update beads.UpdateOpts
 	if strings.TrimSpace(b.Assignee) != "" {
 		empty := ""
@@ -2249,7 +2245,7 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 	}
 	update.Metadata[beadmeta.WorkOutcomeMetadataKey] = ""
 	update.Metadata[beadmeta.WorkCommitMetadataKey] = ""
-	err := writer.UpdateIfMatch(beadID, b.Revision, update)
+	err := updateReassignment(store, beadID, b, update)
 	var conflict *beads.PreconditionFailedError
 	if !errors.As(err, &conflict) {
 		return err
@@ -2267,7 +2263,37 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 	if current.Status != b.Status || current.Assignee != b.Assignee {
 		return fmt.Errorf("bead %s changed status or assignee during reassignment (now %s, assigned to %q): %w", beadID, current.Status, current.Assignee, err)
 	}
-	return writer.UpdateIfMatch(beadID, current.Revision, update)
+	return updateReassignment(store, beadID, current, update)
+}
+
+func updateReassignment(store beads.Store, beadID string, expected beads.Bead, update beads.UpdateOpts) error {
+	if writer, ok := beads.ConditionalWriterFor(store); ok {
+		err := writer.UpdateIfMatch(beadID, expected.Revision, update)
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			return err
+		}
+	}
+	if writer, ok := beads.AssignmentConditionalWriterFor(store); ok {
+		current, err := writer.ReadAssignment(beadID)
+		if err != nil {
+			return fmt.Errorf("reading authoritative assignment of %s: %w", beadID, err)
+		}
+		if err := validateReassignState(beadID, current); err != nil {
+			return err
+		}
+		if current.Status != expected.Status || current.Assignee != expected.Assignee {
+			return fmt.Errorf("bead %s changed status or assignee during reassignment (now %s, assigned to %q)", beadID, current.Status, current.Assignee)
+		}
+		updated, err := writer.UpdateIfAssignmentMatches(beadID, current, update)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return fmt.Errorf("bead %s changed assignment or hold state during reassignment; retry after checking its current owner", beadID)
+		}
+		return nil
+	}
+	return fmt.Errorf("reassigning %s requires an atomic assignment release: %w", beadID, beads.ErrConditionalWriteUnsupported)
 }
 
 // ParkReleaseMetadataKeys are the pool start-failure park and counter keys a
