@@ -834,10 +834,13 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248).
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
+	cs.mu.RLock()
+	identity := convoyAutocloseIdentity(cs.cfg)
 	rec := events.Discard
 	if cs.eventProv != nil {
 		rec = cs.eventProv
 	}
+	cs.mu.RUnlock()
 	// The just-closed bead is read from its owning store (store), but its
 	// molecule and wisp GRAPH parents live in the graph-class store, so the
 	// graph-root walks resolve through graphBeadStore() rather than assuming
@@ -845,7 +848,7 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
-		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+		doConvoyAutocloseWith(store, identity, rec, beadID, os.Stderr, os.Stderr)
 		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
 		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
