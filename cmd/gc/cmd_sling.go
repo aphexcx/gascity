@@ -689,7 +689,7 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	if deps.SessionLookup == nil {
-		deps.SessionLookup = func(id string) (session.Info, error) {
+		deps.SessionLookup = func(identifier string) (session.Info, error) {
 			// Rig work can be owned by a city session. Consult the city's
 			// session class before the legacy colocated rig store.
 			if strings.HasPrefix(deps.StoreRef, "rig:") && deps.CityPath != "" {
@@ -697,13 +697,12 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 				if err != nil {
 					return session.Info{}, fmt.Errorf("opening city session store: %w", err)
 				}
-				info, _, err := session.ResolveSessionRecordByExactID(cliSessionStore(cityStore, deps.Cfg, deps.CityPath), id)
+				info, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(cityStore, deps.Cfg, deps.CityPath)}).ResolveAddress(identifier, false)
 				if err == nil || !errors.Is(err, session.ErrSessionNotFound) {
 					return info, err
 				}
 			}
-			info, _, err := session.ResolveSessionRecordByExactID(cliSessionStore(deps.Store, deps.Cfg, deps.CityPath), id)
-			return info, err
+			return session.NewStore(beads.SessionStore{Store: cliSessionStore(deps.Store, deps.Cfg, deps.CityPath)}).ResolveAddress(identifier, false)
 		}
 	}
 	deps.Router = cliBeadRouter{deps: deps}

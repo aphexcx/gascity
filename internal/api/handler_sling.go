@@ -125,9 +125,8 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		GraphStore: s.state.GraphBeadStore().Store,
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
-		SessionLookup: func(id string) (session.Info, error) {
-			info, _, err := session.ResolveSessionRecordByExactID(s.state.SessionsBeadStore().Store, id)
-			return info, err
+		SessionLookup: func(identifier string) (session.Info, error) {
+			return session.NewStore(s.state.SessionsBeadStore()).ResolveAddress(identifier, false)
 		},
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil

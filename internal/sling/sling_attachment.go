@@ -685,8 +685,8 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 }
 
-// beadAssignedToTarget recognizes both configured identities and durable
-// session IDs. Route intent alone cannot prove a foreign session's ownership.
+// beadAssignedToTarget recognizes configured identities and current session
+// identifiers. Route intent alone cannot prove a foreign session's ownership.
 func beadAssignedToTarget(b beads.Bead, a config.Agent, deps SlingDeps) (bool, error) {
 	assignee := strings.TrimSpace(b.Assignee)
 	target := agentutil.RoutedToIdentity(&a)
@@ -705,7 +705,7 @@ func beadAssignedToTarget(b beads.Bead, a config.Agent, deps SlingDeps) (bool, e
 	case deps.SessionLookup != nil:
 		info, err = deps.SessionLookup(assignee)
 	case deps.Store != nil:
-		info, _, err = session.ResolveSessionRecordByExactID(deps.Store, assignee)
+		info, err = session.NewStore(beads.SessionStore{Store: deps.Store}).ResolveAddress(assignee, false)
 	default:
 		return false, nil
 	}
@@ -715,7 +715,11 @@ func beadAssignedToTarget(b beads.Bead, a config.Agent, deps SlingDeps) (bool, e
 	if err != nil {
 		return false, fmt.Errorf("checking session assignee %q for bead %s: %w", assignee, b.ID, err)
 	}
-	return info.ID == assignee && !info.Closed && session.IsSessionBeadOrRepairableInfo(info) &&
+	// Verify the persisted spelling even when a backing Get resolves a fuzzy
+	// ID, or an alias changes between identifier resolution and record load.
+	identifierMatches := assignee == info.ID || assignee == strings.TrimSpace(info.Alias) ||
+		assignee == strings.TrimSpace(info.SessionNameMetadata)
+	return identifierMatches && strings.TrimSpace(info.ID) != "" && !info.Closed && session.IsSessionBeadOrRepairableInfo(info) &&
 		strings.TrimSpace(info.Template) != "" && strings.TrimSpace(info.Template) == target, nil
 }
 

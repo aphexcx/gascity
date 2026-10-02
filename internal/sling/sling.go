@@ -162,8 +162,9 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
-	// SessionLookup reads a durable session by exact ID to verify claim
-	// ownership. Nil resolves sessions from Store for colocated deployments.
+	// SessionLookup resolves a session ID, current alias, or runtime session
+	// name without materializing a session. Ambiguity and read errors must be
+	// returned. Nil resolves sessions from Store for colocated deployments.
 	SessionLookup func(string) (session.Info, error)
 }
 

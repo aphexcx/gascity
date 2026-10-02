@@ -16,13 +16,17 @@ import (
 
 func TestSlingDurablePoolOwnerInSessionBinding(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		template string
-		missing  bool
-		readErr  error
-		wantCode int
+		name       string
+		template   string
+		missing    bool
+		readErr    error
+		wantCode   int
+		identifier string
 	}{
 		{name: "own session", template: "myrig/worker", wantCode: http.StatusOK},
+		{name: "own alias", identifier: "named-seat", template: "myrig/worker", wantCode: http.StatusOK},
+		{name: "own runtime", identifier: "runtime-seat", template: "myrig/worker", wantCode: http.StatusOK},
+		{name: "foreign alias", identifier: "named-seat", template: "myrig/other", wantCode: http.StatusBadRequest},
 		{name: "foreign template", template: "myrig/other", wantCode: http.StatusBadRequest},
 		{name: "missing session", missing: true, wantCode: http.StatusBadRequest},
 		{name: "session read failure", template: "myrig/worker", readErr: errors.New("session binding unavailable"), wantCode: http.StatusBadRequest},
@@ -35,11 +39,15 @@ func TestSlingDurablePoolOwnerInSessionBinding(t *testing.T) {
 			sessions.HonorExplicitIDs = true
 			state.sessionsBeadStore = sessions
 			const ownerID = "gc-session-owner"
+			identifier := tc.identifier
+			if identifier == "" {
+				identifier = ownerID
+			}
 			work := state.stores["myrig"]
 			before, err := work.Create(beads.Bead{
 				Title:    "already claimed task",
 				Type:     "task",
-				Assignee: ownerID,
+				Assignee: identifier,
 				Metadata: map[string]string{
 					beadmeta.RoutedToMetadataKey:  "myrig/worker",
 					beadmeta.SessionIDMetadataKey: ownerID,
@@ -65,7 +73,8 @@ func TestSlingDurablePoolOwnerInSessionBinding(t *testing.T) {
 					Metadata: map[string]string{
 						"template":                             tc.template,
 						"state":                                "active",
-						"session_name":                         "worker-alpha",
+						"session_name":                         "runtime-seat",
+						"alias":                                "named-seat",
 						beadmeta.CurrentClaimBeadIDMetadataKey: before.ID,
 					},
 				})
