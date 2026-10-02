@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -161,6 +162,9 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// SessionLookup reads a durable session by exact ID to verify claim
+	// ownership. Nil resolves sessions from Store for colocated deployments.
+	SessionLookup func(string) (session.Info, error)
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
@@ -1665,6 +1669,7 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	Err        error // ownership lookup failed; routing must not proceed
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

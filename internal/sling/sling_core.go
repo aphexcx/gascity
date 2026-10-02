@@ -139,8 +139,8 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
-			return result, nil
+		if stop, err := resolveIdempotentShortCircuit(opts, a, deps, querier, &result); stop || err != nil {
+			return result, err
 		}
 	}
 
@@ -172,10 +172,13 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 // formula still attaches. If the molecule-attachment probe cannot complete, the
 // fail-closed idempotent state is preserved and the probe failure is surfaced
 // as a bead warning rather than silently flipping into a mutating attach path.
-func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) bool {
+func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) (bool, error) {
 	check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
 		NoConvoy: opts.NoConvoy,
 	})
+	if check.Err != nil {
+		return false, check.Err
+	}
 	if check.Idempotent {
 		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
@@ -213,7 +216,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	}
 	if !check.Idempotent {
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
-		return false
+		return false, nil
 	}
 	result.Idempotent = true
 	result.DryRun = opts.DryRun
@@ -229,7 +232,7 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	if opts.Nudge && !opts.DryRun {
 		result.NudgeAgent = &a
 	}
-	return true
+	return true, nil
 }
 
 // rigSuspended reports whether the named rig is marked suspended in config.
@@ -274,7 +277,7 @@ func shouldCheckBeadState(opts SlingOpts) bool {
 }
 
 func validatePoolAssignment(beadID string, a config.Agent, deps SlingDeps, querier BeadQuerier) error {
-	if !agentutil.IsMultiSessionAgent(&a) {
+	if !a.SupportsInstanceExpansion() {
 		return nil
 	}
 	if deps.ValidationQuerier != nil {
@@ -290,16 +293,17 @@ func validatePoolAssignment(beadID string, a config.Agent, deps SlingDeps, queri
 	if err != nil {
 		return fmt.Errorf("checking assignment of %s: %w", beadID, err)
 	}
-	assignee := strings.TrimSpace(b.Assignee)
-	target := agentutil.RoutedToIdentity(&a)
-	if assignee == "" || assignee == target ||
-		(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target && strings.HasPrefix(assignee, target+"-")) {
+	owned, err := beadAssignedToTarget(b, a, deps)
+	if err != nil {
+		return err
+	}
+	if owned {
 		return nil
 	}
 	if b.Status == "in_progress" {
 		return activeClaimReassignError(beadID, b)
 	}
-	return fmt.Errorf("bead %s is assigned to %q; use --reassign to release the hold before routing to %q", beadID, assignee, target)
+	return fmt.Errorf("bead %s is assigned to %q; use --reassign to release the hold before routing to %q", beadID, b.Assignee, agentutil.RoutedToIdentity(&a))
 }
 
 // attachmentDecision is the result of onFormulaNeedsAttachment: whether an
@@ -1971,6 +1975,14 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})
+			if check.Err != nil {
+				childResult.Failed = true
+				childResult.FailReason = check.Err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, check.Err)
+				failed++
+				continue
+			}
 			if check.Idempotent && !shouldReopenForReassign(opts) {
 				childResult.Skipped = true
 				batchResult.Children = append(batchResult.Children, childResult)

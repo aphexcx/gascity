@@ -883,7 +883,7 @@ func poolNewDemandRequests(
 			// demand that created this lane. Retain its concrete identity so
 			// an anonymous replacement cannot bypass the retry deadline. This
 			// consumes existing demand without establishing a demand floor.
-			rateLimited := sb.SleepReason == string(sessionpkg.SleepReasonRateLimit) && metadataTimeInFuture(sb.QuarantinedUntil, decisionTime)
+			rateLimited := !isDrainedSessionInfo(sb) && sb.SleepReason == string(sessionpkg.SleepReasonRateLimit) && metadataTimeInFuture(sb.QuarantinedUntil, decisionTime)
 			if poolSessionConsumesNewDemandInfo(sb) || rateLimited {
 				inFlight[template] = append(inFlight[template], req)
 			}

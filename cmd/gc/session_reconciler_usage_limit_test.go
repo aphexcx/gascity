@@ -143,16 +143,48 @@ func TestReconcileSessionBeads_LivePoolUsageLimitReplacesCrashBackoff(t *testing
 	}
 }
 
+func TestReconcileSessionBeads_LivePoolUsageLimitHonorsExplicitRestart(t *testing.T) {
+	for _, source := range []string{"bead", "provider"} {
+		t.Run(source, func(t *testing.T) {
+			env, seat := newLivePoolUsageLimitEnv(t)
+			dops := newFakeDrainOps()
+			if source == "bead" {
+				env.setSessionMetadata(&seat, map[string]string{"restart_requested": "true"})
+			} else {
+				dops.restartRequested["worker"] = true
+			}
+			env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{seat}, map[string]int{"worker": 1}, dops)
+			got := env.sessionInfo(seat.ID)
+			if got.SleepReason == "rate_limit" || got.QuarantinedUntil != "" {
+				t.Fatalf("explicit restart was parked behind provider-limit backoff: reason=%q until=%q", got.SleepReason, got.QuarantinedUntil)
+			}
+			if got.RestartRequested != "" || got.SessionKey != "" || got.StartedConfigHash != "" || env.sp.IsRunning("worker") {
+				t.Fatalf("explicit restart did not perform its fresh-session handoff: %+v", got)
+			}
+			var err error
+			seat, err = env.store.Get(seat.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{seat}, map[string]int{"worker": 1}, dops); woken != 1 {
+				t.Fatalf("explicit restart woke %d sessions on next tick, want 1 without a rate-limit delay", woken)
+			}
+		})
+	}
+}
+
 func TestComputePoolDesiredStates_UnclaimedUsageLimitRetainsDemandSlot(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		scaleCount int
 		elapsed    time.Duration
 		retained   bool
+		drained    bool
 	}{
 		{name: "pending claim retains quarantined lane", scaleCount: 1, retained: true},
 		{name: "zero demand creates no request", scaleCount: 0},
 		{name: "expired quarantine permits fresh lane", scaleCount: 1, elapsed: 30 * time.Minute},
+		{name: "drained lane releases demand despite stale quarantine", scaleCount: 1, drained: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, seat := newLivePoolUsageLimitEnv(t)
@@ -171,6 +203,12 @@ func TestComputePoolDesiredStates_UnclaimedUsageLimitRetainsDemandSlot(t *testin
 			}
 			env.clk.Advance(tc.elapsed)
 			held := env.sessionInfo(seat.ID)
+			if tc.drained {
+				held, err = sessionFrontDoor(env.store).ApplyPatchInfo(held, sessionpkg.AcknowledgeDrainPatch(env.clk.Now(), true))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			states := computePoolDesiredStatesAt(env.cfg, nil, nil, []beads.Bead{work}, []sessionpkg.Info{held},
 				map[string]int{"worker": tc.scaleCount},
 				map[string]scaleCheckDemand{"worker": {Count: tc.scaleCount, WorkBeadIDs: []string{work.ID}}},

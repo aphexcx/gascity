@@ -2848,11 +2848,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// Explicit restart intent takes precedence over autonomous usage-limit
+		// and progress handling. Gather the provider flag once for both gates.
+		providerRestartRequested := false
+		if (running || alive) && dops != nil {
+			providerRestartRequested, _ = dops.isRestartRequested(name)
+		}
+		restartRequested := providerRestartRequested || infoByID[id].RestartRequested == "true"
+
 		// A provider may refuse turns while its process remains alive. Park
 		// an unattended pool session before progress recycling can turn that
 		// refusal into repeated fresh starts. Persist the hold before stopping
 		// so a failed stop is retried without losing the backoff or work claim.
-		if alive && isPoolManagedSessionInfo(infoByID[id]) && dt.get(id) == nil && !pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
+		if !restartRequested && alive && isPoolManagedSessionInfo(infoByID[id]) && dt.get(id) == nil && !pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
 			limited := infoByID[id].SleepReason == string(sessionpkg.SleepReasonRateLimit) && sessionIsQuarantinedInfo(infoByID[id], clk)
 			if !limited {
 				output, err := peek(rateLimitPeekLines)
@@ -3001,10 +3009,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// tmux/container session is still stopped before the next wake.
 		{
 			runtimeRunning := running || alive
-			tmuxRequested := false
-			if runtimeRunning && dops != nil {
-				tmuxRequested, _ = dops.isRestartRequested(name)
-			}
+			tmuxRequested := providerRestartRequested
 			beadRequested := infoByID[id].RestartRequested == "true"
 			if tmuxRequested || beadRequested {
 				// A pinned configured named session is an operator-declared

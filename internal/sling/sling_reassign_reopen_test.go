@@ -10,7 +10,100 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestDoSling_SingletonPoolRefusesHumanAssignee(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "human")
+	opts.Target.MaxActiveSessions = intPtr(1)
+	opts.Target.MinActiveSessions = intPtr(0)
+	router := &fakeBeadRouter{}
+	deps.Router = router
+	_, err := DoSling(opts, deps, store)
+	if err == nil || !strings.Contains(err.Error(), "human") || !strings.Contains(err.Error(), "--reassign") {
+		t.Errorf("singleton pool error = %v, want named ownership refusal", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, bead) || len(router.routed) != 0 {
+		t.Errorf("singleton pool mutated or routed human-held work: before=%+v after=%+v routes=%v", bead, got, router.routed)
+	}
+}
+
+func TestDoSling_DurablePoolSessionOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		template  string
+		wantOwn   bool
+		split     bool
+		readErr   error
+		afterRead bool
+	}{
+		{name: "own", template: "myrig/polecat", wantOwn: true},
+		{name: "foreign", template: "myrig/other"},
+		{name: "split-own", template: "myrig/polecat", wantOwn: true, split: true},
+		{name: "split-foreign", template: "myrig/other", split: true},
+		{name: "split-read-error", split: true, readErr: errors.New("session store unavailable")},
+		{name: "split-recheck-error", template: "myrig/polecat", split: true, readErr: errors.New("session store became unavailable"), afterRead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, deps, store, bead := reassignTestSetup(t, "")
+			ownerStore := store
+			if tc.split {
+				separate := beads.NewMemStore()
+				separate.IDPrefix = "session"
+				ownerStore = separate
+				reads := 0
+				deps.SessionLookup = func(id string) (session.Info, error) {
+					reads++
+					if tc.readErr != nil && (!tc.afterRead || reads > 1) {
+						return session.Info{}, tc.readErr
+					}
+					info, _, err := session.ResolveSessionRecordByExactID(ownerStore, id)
+					return info, err
+				}
+			}
+			owner, err := ownerStore.Create(beads.Bead{Title: "session", Type: "session", Metadata: map[string]string{"template": tc.template}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := "in_progress"
+			if err := store.Update(bead.ID, beads.UpdateOpts{Status: &status, Assignee: &owner.ID, Metadata: map[string]string{
+				"gc.routed_to": "myrig/polecat", "gc.session_id": owner.ID,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts.NoConvoy = true
+			opts.Nudge = true
+			router := &fakeBeadRouter{}
+			deps.Router = router
+			result, err := DoSling(opts, deps, store)
+			if tc.readErr != nil && !errors.Is(err, tc.readErr) {
+				t.Errorf("lookup error = %v, want preserved session-store failure", err)
+			}
+			if tc.wantOwn {
+				if err != nil || !result.Idempotent || result.NudgeAgent == nil {
+					t.Errorf("own durable session sling = %+v, %v; want idempotent nudge", result, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), owner.ID) || result.NudgeAgent != nil {
+				t.Errorf("foreign durable session sling = %+v, %v; want named ownership refusal without nudge", result, err)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, before) || len(router.routed) != 0 {
+				t.Errorf("durable claim mutated or routed: before=%+v after=%+v routes=%v", before, got, router.routed)
+			}
+		})
+	}
+}
 
 func TestDoSling_Reassign_RefusesClosedWork(t *testing.T) {
 	opts, deps, store, bead := reassignTestSetup(t, "human")
