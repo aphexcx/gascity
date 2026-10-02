@@ -39,7 +39,8 @@ var executableResolutions sync.Map
 
 // ResolveExecutable verifies Git on PATH, falling back to Command Line Tools
 // on macOS only when the selected Git reports an Xcode license failure. Each
-// candidate's result and fallback warning are cached for the process.
+// successful resolution and fallback warning are cached for the process;
+// failed resolutions are retried so repaired installations can recover.
 func ResolveExecutable() (Executable, error) {
 	path, err := exec.LookPath("git")
 	if err != nil {
@@ -56,13 +57,24 @@ func ResolveExecutable() (Executable, error) {
 }
 
 func cachedExecutableResolution(goos, primary, fallback string, probe func(string) (string, int, error), warn func(string)) func() (Executable, error) {
-	return sync.OnceValues(func() (Executable, error) {
+	var mu sync.Mutex
+	var cached Executable
+	return func() (Executable, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if cached.Path != "" {
+			return cached, nil
+		}
 		result, err := resolveExecutable(goos, primary, fallback, probe)
+		if err != nil {
+			return result, err
+		}
+		cached = result
 		if result.Warning != "" {
 			warn(result.Warning)
 		}
-		return result, err
-	})
+		return result, nil
+	}
 }
 
 func resolveExecutable(goos, primary, fallback string, probe func(string) (string, int, error)) (Executable, error) {
@@ -71,7 +83,8 @@ func resolveExecutable(goos, primary, fallback string, probe func(string) (strin
 		return Executable{Path: primary, Version: oneLine(version)}, nil
 	}
 	diagnostic := fmt.Sprintf("%s: %s", primary, probeFailure(version, err))
-	licenseFailure := code == 69 || strings.Contains(strings.ToLower(version), "xcode license")
+	lowerVersion := strings.ToLower(version)
+	licenseFailure := code == 69 || strings.Contains(lowerVersion, "xcode license") || strings.Contains(lowerVersion, "xcode/ios license")
 	if goos != "darwin" || !licenseFailure {
 		return Executable{}, &ExecutableError{message: "git itself is unusable: " + diagnostic, cause: err}
 	}
@@ -108,7 +121,7 @@ func probeExecutable(path string) (string, int, error) {
 func probeExecutableContext(ctx context.Context, path string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = HermeticEnv()
-	configureExecutableProbe(cmd)
+	cleanup := configureExecutableProbe(cmd)
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.CombinedOutput()
 	code := -1
@@ -116,7 +129,7 @@ func probeExecutableContext(ctx context.Context, path string) (string, int, erro
 		code = cmd.ProcessState.ExitCode()
 	}
 	if ctx.Err() != nil {
-		err = ctx.Err()
+		err = fmt.Errorf("git --version probe %q: %w", path, ctx.Err())
 	}
-	return string(out), code, err
+	return string(out), code, errors.Join(err, cleanup())
 }

@@ -1,1 +1,0 @@
-ok  	github.com/gastownhall/gascity/internal/git	0.498s

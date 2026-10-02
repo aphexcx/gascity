@@ -1,4 +1,0 @@
-# github.com/gastownhall/gascity/internal/git [github.com/gastownhall/gascity/internal/git.test]
-internal/git/executable_test.go:14:13: undefined: cachedExecutableResolution
-FAIL	github.com/gastownhall/gascity/internal/git [build failed]
-FAIL

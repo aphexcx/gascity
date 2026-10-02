@@ -10,48 +10,79 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
-// Cancellation must stop a wrapper's descendants, including ones that still
-// own the output pipes; returning after WaitDelay alone leaves them running.
-func TestExecutableProbeCancelsDescendants(t *testing.T) {
-	dir := t.TempDir()
-	path, pid, heartbeat := filepath.Join(dir, "git"), filepath.Join(dir, "child.pid"), filepath.Join(dir, "heartbeat")
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
+// Probes must stop descendants both on cancellation and when a wrapper exits
+// while a child still owns the output pipes.
+func TestExecutableProbeCleansDescendants(t *testing.T) {
+	for _, tc := range []struct {
+		name, finalCommand string
+		cancel             bool
+	}{
+		{"cancellation", "wait", true},
+		{"wrapper exits", "exit 0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, pid, heartbeat := filepath.Join(dir, "git"), filepath.Join(dir, "child.pid"), filepath.Join(dir, "heartbeat")
+			ready := filepath.Join(dir, "ready")
+			if err := syscall.Mkfifo(ready, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sleep, err := exec.LookPath("sleep")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The wrapper must not exit until its child has written a heartbeat.
+			script := fmt.Sprintf("#!/bin/sh\n{ echo . >> %q; echo ready > %q; while :; do echo . >> %q; %q 0.05; done; } &\necho $! > %q\nread -r ready < %q\necho 'git version 2.49'\n%s\n", heartbeat, ready, heartbeat, sleep, pid, ready, tc.finalCommand)
+			if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, pid) })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := probeExecutableContext(ctx, path)
+				done <- err
+			}()
+			processgrouptest.WaitForFileSize(t, heartbeat)
+			wantErr := exec.ErrWaitDelay
+			if tc.cancel {
+				cancel()
+				wantErr = context.Canceled
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, wantErr) {
+					t.Fatalf("probe error = %v, want %v", err, wantErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("probe did not return after wrapper exit or cancellation")
+			}
+			info, err := os.Stat(heartbeat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			processgrouptest.AssertFileSizeStable(t, heartbeat, info.Size(), 300*time.Millisecond)
+		})
 	}
-	script := fmt.Sprintf("#!/bin/sh\n{ while :; do echo . >> %q; %q 0.05; done; } &\necho $! > %q\nwait\n", heartbeat, sleep, pid)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, pid) })
-	ctx, cancel := context.WithCancel(t.Context())
+}
+
+// Deadline diagnostics must name the probe and executable while preserving
+// errors.Is so callers can still recognize a timeout.
+func TestExecutableProbeDeadlineDiagnostic(t *testing.T) {
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := probeExecutableContext(ctx, path)
-		done <- err
-	}()
-	processgrouptest.WaitForFileSize(t, heartbeat)
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("probe error = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("probe did not return after cancellation")
+	_, _, err := probeExecutableContext(ctx, "/probe/git")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "/probe/git") || !strings.Contains(err.Error(), "--version") {
+		t.Fatalf("probe deadline diagnostic = %v", err)
 	}
-	info, err := os.Stat(heartbeat)
-	if err != nil {
-		t.Fatal(err)
-	}
-	processgrouptest.AssertFileSizeStable(t, heartbeat, info.Size(), 300*time.Millisecond)
 }
 
 // A real exit-69 executable must be replaced by a verified fallback, and a

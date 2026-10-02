@@ -1,5 +1,0 @@
---- FAIL: TestExecutableProbeCancelsDescendants (3.47s)
-    executable_integration_test.go:54: heartbeat file /var/folders/n0/yx26c20j4y5b0597zqpc5kzh0000gn/T/TestExecutableProbeCancelsDescendants970222642/001/heartbeat kept growing after timeout cleanup; latest size 82
-FAIL
-FAIL	github.com/gastownhall/gascity/internal/git	3.579s
-FAIL
