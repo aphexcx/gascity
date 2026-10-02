@@ -1,0 +1,17 @@
+Captured using the repository Makefile TEST_ENV and ICU flags.
+Invocation: go test -json -count=1 ./cmd/gc -run '^(TestDoImportListWithRigShowsOnlyRigScopedClosure|TestDoImportListTreeShowsDependencyGraph|TestDoImportWhyExplainsTransitiveImport)$'
+
+[
+  {
+    "package": "github.com/gastownhall/gascity/cmd/gc",
+    "cases": {
+      "pass": 3
+    },
+    "top_level": {
+      "pass": 3
+    },
+    "skips": [],
+    "result": "pass",
+    "elapsed": 3.545
+  }
+]

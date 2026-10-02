@@ -1,0 +1,2 @@
+lint-changed: ./cmd/gc ./internal/config ./internal/doctor ./internal/git ./internal/packman 
+0 issues.

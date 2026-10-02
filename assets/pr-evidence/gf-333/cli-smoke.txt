@@ -1,0 +1,20 @@
+COMMAND gc config show --validate EXIT 0
+Config valid.
+warning: git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to add the missing import(s)
+COMMAND gc session list EXIT 0
+No sessions found.
+warning: git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+COMMAND gc mail inbox EXIT 0
+No unread messages for human
+warning: git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+COMMAND gc doctor --check git-binary EXIT 0
+  ⚠ git-binary — git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+
+1 warnings
+warning: git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to add the missing import(s)
+COMMAND gc config show --validate EXIT 1
+warning: git on PATH is unusable (/var/tmp/gf-333-smoke-eh5exgga/badbin/git: You have not agreed to the Xcode license agreements. (exit status 69)); using Command Line Tools fallback /Library/Developer/CommandLineTools/usr/bin/git; a human can run sudo xcodebuild -license accept
+gc config show: city import "fixture": cached import https://example.invalid/license-fixture.git is checked out at 522c22622841fb45a13bb869fd93980ec3e982a1, expected ff74e0e9737b955f6858a5d9d95b3f13d4048152; run "gc import install"
+PASS: session list and mail inbox succeed; exactly one warning each; doctor warns; wrong commit rejected.

@@ -298,7 +298,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
 	// check-dolt.sh) which also verify versions and service health.
 	register(doctor.NewBinaryCheck("tmux", "", exec.LookPath))
-	register(doctor.NewBinaryCheck("git", "", exec.LookPath))
+	register(doctor.NewGitExecutableCheck())
 	register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
 	register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
 	register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))

@@ -1,0 +1,28 @@
+Bead: gf-333
+Base: 589dcf929 (fetched integration before edits)
+Platform: Go 1.26.6 darwin/arm64. pnpm exec node --version: v24.21.0.
+No JavaScript tests apply; no unsupported-engine warning.
+
+All Go package commands run with the checked-in Makefile's TEST_ENV and CGO
+flags through an additional makefile supplied on stdin.
+
+Focused command: go test -json -count=1 ./internal/git ./internal/config ./internal/packman ./internal/doctor
+Result: all four packages pass; counts and skip names in focused-final.txt.
+Tagged boundary command: go test -json -tags integration -count=1 -run '^(TestExecutableLicenseProcess|TestExecutableProbeCancelsDescendants|TestLockedCacheWithXcodeLicenseFailure)$' ./internal/git ./internal/config
+Result: three tests pass; real exit-69 fake, missing fallback, process cleanup,
+and intact HEAD/status gates. final-boundary.txt carries counts/timings.
+Race command: go test -json -race -count=1 ./internal/git
+Result: package passes; final-boundary.txt.
+Policy command: go test -json -count=1 ./internal/testpolicy/resourcecensus ./internal/testenv
+Result: both packages pass; policy.txt.
+Import fixture regression command: go test -json -count=1 ./cmd/gc -run '^(TestDoImportListWithRigShowsOnlyRigScopedClosure|TestDoImportListTreeShowsDependencyGraph|TestDoImportWhyExplainsTransitiveImport)$'
+Result: 3/3 pass with GC_FAST_UNIT=1; import-regressions.txt.
+
+make build passed. The disposable-city smoke script uses only temporary HOME,
+GC_HOME, a file bead store, fake sessions and a local committed import fixture.
+With a fake exit-69 Git first on PATH, config validation, session list and mail
+inbox pass, and the latter two each print exactly one fallback warning. Doctor
+reports the fallback. After moving the cache HEAD, config validation fails
+with actual/expected commit diagnostics. See cli-smoke.py and cli-smoke.txt.
+
+make check-hooks passed. Staged-package lint passed with 0 issues.
