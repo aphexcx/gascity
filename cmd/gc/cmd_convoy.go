@@ -485,9 +485,10 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 }
 
 type convoyStoreView struct {
-	path  string
-	store beads.Store
-	role  convoyViewRole
+	path     string
+	store    beads.Store
+	role     convoyViewRole
+	identity string
 }
 
 // convoyViewRole says how a view's rows relate to the other views' rows. It is
@@ -599,6 +600,11 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 	}
 
 	merged := make([]convoyStoreView, 0, len(views)+1)
+	var identity string
+	if len(views) > 0 {
+		// Every directory view carries the same configured city identity.
+		identity = views[0].identity
+	}
 	for _, view := range views {
 		if samePath(view.path, cityPath) {
 			view.role = convoyViewMigrationSource
@@ -606,9 +612,10 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 		merged = append(merged, view)
 	}
 	return append(merged, convoyStoreView{
-		path:  convoyBindingViewPath,
-		store: binding,
-		role:  convoyViewClassBinding,
+		path:     convoyBindingViewPath,
+		store:    binding,
+		role:     convoyViewClassBinding,
+		identity: identity,
 	}), nil
 }
 
@@ -1045,12 +1052,16 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	warnSkippedConvoyStores(stderr, cmdName, skipped)
+	for i := range stores {
+		stores[i].identity = convoyAutocloseIdentity(cfg)
+	}
 	return stores, 0
 }
 
 type convoyWithStore struct {
-	store beads.Store
-	bead  beads.Bead
+	store    beads.Store
+	bead     beads.Bead
+	identity string
 }
 
 type convoyProgressJSON struct {
@@ -1128,7 +1139,7 @@ func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, []storePro
 		}
 		readable++
 		for _, b := range all {
-			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
+			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b, identity: candidate.identity})
 		}
 	}
 	if readable == 0 && len(skipped) > 0 {
@@ -1918,7 +1929,13 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 
 	closed := 0
 	for _, item := range convoys {
-		if hasLabel(item.bead.Labels, "owned") {
+		fresh, err := beads.HandlesFor(item.store).Live.Get(item.bead.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc convoy check: reading %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		item.bead = fresh
+		if convoycore.IsTerminalStatus(item.bead.Status) || hasLabel(item.bead.Labels, "owned") || !convoyAutocloseOwnerMatches(item.bead.Labels, item.identity) {
 			continue
 		}
 		children, err := listConvoyChildren(item.store, item.bead.ID, true)
@@ -2267,6 +2284,15 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 	rec := openCityRecorderAt(cityPath, stderr)
+	cfg, _, configErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if configErr != nil {
+		// An unknown identity may still close an unlabeled standalone convoy.
+		if !errors.Is(configErr, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "gc convoy autoclose: reading city identity: %v\n", configErr) //nolint:errcheck // best-effort stderr
+		}
+		cfg = nil
+	}
+	identity := convoyAutocloseIdentity(cfg)
 
 	// The bd on_close hook is spawned from the supervisor and inherits its
 	// cwd/env, so storeRoot resolves to the supervisor's (city) store even
@@ -2276,7 +2302,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// no-op'ing (#3411).
 	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
 	case autocloseResolved:
-		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+		doConvoyAutocloseWith(store, identity, rec, beadID, stdout, stderr)
 		return
 	case autocloseVetoed:
 		return
@@ -2291,7 +2317,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+	doConvoyAutocloseWith(store, identity, rec, beadID, stdout, stderr)
 }
 
 // autocloseOutcome is what autocloseOwningStore decided.
@@ -2435,7 +2461,7 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 // tracks dependents are convoys with all children closed, and if so closes
 // them. All errors are silently swallowed — this is best-effort
 // infrastructure called from a bd hook script.
-func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) {
+func doConvoyAutocloseWith(store beads.Store, identity string, rec events.Recorder, beadID string, stdout, _ io.Writer) {
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return
@@ -2446,7 +2472,7 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 		parent, err := store.Get(bead.ParentID)
 		if err == nil {
 			seen[parent.ID] = true
-			autocloseConvoyIfComplete(store, rec, parent, stdout)
+			autocloseConvoyIfComplete(store, identity, rec, parent, stdout)
 		}
 	}
 
@@ -2459,12 +2485,17 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfComplete(store, rec, convoy, stdout)
+		autocloseConvoyIfComplete(store, identity, rec, convoy, stdout)
 	}
 }
 
-func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+func autocloseConvoyIfComplete(store beads.Store, identity string, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
+	// Cache scans may omit labels; ownership must come from the current row.
+	convoy, err := beads.HandlesFor(store).Live.Get(convoy.ID)
+	if err != nil {
+		return
+	}
+	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") || !convoyAutocloseOwnerMatches(convoy.Labels, identity) {
 		return
 	}
 

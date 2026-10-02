@@ -302,6 +302,7 @@ func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
 }
 
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, items []Bead) []Bead {
+	var notifications []cacheNotification
 	refreshedParents := make(map[string]Bead)
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
@@ -333,11 +334,22 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		return items
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		c.notifyChanges(notifications)
+	}()
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
 	now := time.Now()
+	// A live read can observe an external close before the watchdog does.
+	// Notify while replacing the active snapshot, otherwise reconciliation
+	// later evicts an already-closed row without emitting its close event.
+	noteClose := func(fresh Bead) {
+		if cached, ok := c.beads[fresh.ID]; ok && cached.Status != "closed" && fresh.Status == "closed" {
+			notifications = append(notifications, cacheNotification{eventType: "bead.closed", bead: cloneBead(fresh)})
+		}
+	}
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
@@ -362,6 +374,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		noteClose(item)
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
@@ -378,6 +391,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
+		noteClose(bead)
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
@@ -400,6 +414,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
+		noteClose(bead)
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
 			seqMode:    seqClearGuarded,
