@@ -2526,7 +2526,7 @@ func TestGcBdHeartbeatFromANonClaimantIsRefusedNamingBoth(t *testing.T) {
 }
 
 // TestGcBdHeartbeatRunsAsTheAssigneeVerbatim pins that the claimant's
-// heartbeat hands bd the assignee exactly as stored: ownership is recognised
+// heartbeat hands bd the assignee exactly as stored: ownership is recognized
 // on trimmed identities, but bd matches the lease holder byte for byte, so a
 // trimmed spelling would turn a renewable claim into a refusal.
 func TestGcBdHeartbeatRunsAsTheAssigneeVerbatim(t *testing.T) {
