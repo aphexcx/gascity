@@ -2848,6 +2848,45 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// A provider may refuse turns while its process remains alive. Park
+		// an unattended pool session before progress recycling can turn that
+		// refusal into repeated fresh starts. Persist the hold before stopping
+		// so a failed stop is retried without losing the backoff or work claim.
+		if alive && isPoolManagedSessionInfo(infoByID[id]) && dt.get(id) == nil && !pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) {
+			limited := infoByID[id].SleepReason == string(sessionpkg.SleepReasonRateLimit) && sessionIsQuarantinedInfo(infoByID[id], clk)
+			if !limited {
+				output, err := peek(rateLimitPeekLines)
+				if err != nil {
+					fmt.Fprintf(stderr, "session reconciler: checking provider usage limit for %s: %v\n", name, err) //nolint:errcheck
+				} else {
+					limited = runtime.ContainsActiveProviderRateLimitScreen(output)
+				}
+			}
+			if limited {
+				attached, err := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
+				if err != nil {
+					fmt.Fprintf(stderr, "session reconciler: checking attachment before provider-limit stop for %s: %v\n", name, err) //nolint:errcheck
+					continue
+				}
+				if attached {
+					continue
+				}
+				if infoByID[id].SleepReason != string(sessionpkg.SleepReasonRateLimit) || !sessionIsQuarantinedInfo(infoByID[id], clk) {
+					next, err := recordRateLimitQuarantine(infoByID[id], sessFront, clk)
+					if err != nil {
+						continue
+					}
+					tick.set(id, next)
+				}
+				if err := verifiedStop(infoByID[id], store, sp, cfg); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: stopping provider-limited session %s: %v\n", name, err) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stdout, "Parked provider-limited session '%s' until %s\n", name, infoByID[id].QuarantinedUntil) //nolint:errcheck
+				}
+				continue
+			}
+		}
+
 		// Progress-aware recycle (ADR-0013 Amendment A1, move 3b): a desired,
 		// alive session that has stopped progressing has likely parked (e.g. its
 		// turn ended on a provider auth error) and will not self-recover. Opt-in

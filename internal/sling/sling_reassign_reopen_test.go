@@ -1,99 +1,342 @@
 package sling
 
 import (
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// orderClaimedPoolHandoffSetup builds a sling against a worker pool for a bead
-// an order has already claimed (status=in_progress, assignee=order:<name>),
-// reproducing the gastownhall/gascity#3231 starting state. The agent is a
-// multi-session pool in a rig so the bead is routed to the pool's claim queue
-// rather than a single named session. MemStore.Create forces status=open, so
-// the in_progress/assignee state is applied via a follow-up Update.
-func orderClaimedPoolHandoffSetup(t *testing.T) (SlingOpts, SlingDeps, beads.Bead) {
-	t.Helper()
-	runner := newFakeRunner()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test"},
-		Rigs: []config.Rig{
-			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
-		},
+func TestDoSling_Reassign_RefusesClosedWork(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "human")
+	closed := "closed"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{
+		"gc.work_outcome": "blocked", "gc.work_commit": "abc123",
+	}}); err != nil {
+		t.Fatal(err)
 	}
-	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
-	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	bead, err := deps.Store.Create(beads.Bead{Title: "hotspot work", Type: "task"})
+	before, err := store.Get(bead.ID)
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatal(err)
 	}
-	inProgress, orderActor := "in_progress", "order:mol-dog-jsonl"
-	if err := deps.Store.Update(bead.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &orderActor}); err != nil {
-		t.Fatalf("Update to order-claimed state: %v", err)
+	opts.Reassign = true
+	router := &fakeBeadRouter{}
+	deps.Router = router
+	_, err = DoSling(opts, deps, store)
+	if err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Errorf("DoSling --reassign error = %v, want closed-work refusal", err)
 	}
-	opts := SlingOpts{Target: a, BeadOrFormula: bead.ID, NoFormula: true, Reassign: true}
-	return opts, deps, bead
-}
-
-// TestDoSling_Reassign_ReopensOrderClaimedBead is the regression test for
-// gastownhall/gascity#3231. An order runs `bd update --claim` on a bead
-// (status=in_progress, assignee=order:<name>) and then slings it to a worker
-// pool with --reassign. Clearing the assignee alone is not enough: the bead
-// stays in_progress, and IsReadyCandidate (which requires status=open) filters
-// it out, so no pool worker ever claims it — "work looks in progress, but no
-// polecat actually owns it." --reassign must reopen the bead so the target
-// pool can claim it.
-func TestDoSling_Reassign_ReopensOrderClaimedBead(t *testing.T) {
-	opts, deps, bead := orderClaimedPoolHandoffSetup(t)
-	if _, err := DoSling(opts, deps, nil); err != nil {
-		t.Fatalf("DoSling --reassign: %v", err)
-	}
-	got, err := deps.Store.Get(bead.ID)
+	got, err := store.Get(bead.ID)
 	if err != nil {
-		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+		t.Fatal(err)
 	}
-	if got.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty after --reassign (order actor must not retain pool work)", got.Assignee)
+	if beads.DependencySatisfied(got.Status, got.Metadata["gc.work_outcome"]) {
+		t.Error("reassignment made a blocked closed bead satisfy dependent work")
 	}
-	if got.Status != "open" {
-		t.Errorf("Status = %q, want open after --reassign (an in_progress bead handed to a pool must be reopened so it is claimable)", got.Status)
+	if !reflect.DeepEqual(got, before) || len(router.routed) != 0 {
+		t.Errorf("closed work was mutated or routed: before=%+v after=%+v routes=%v", before, got, router.routed)
 	}
 }
 
-// TestDoSling_Reassign_PreservesNonInProgressStatus guards the reopen from
-// over-reaching: --reassign only reopens in_progress beads. A bead in another
-// status (here, blocked) keeps its status; only the assignee is cleared.
-func TestDoSling_Reassign_PreservesNonInProgressStatus(t *testing.T) {
-	runner := newFakeRunner()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test"},
-		Rigs:      []config.Rig{{Name: "myrig", Path: "/myrig", Prefix: "gc"}},
-	}
-	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
-	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	bead, err := deps.Store.Create(beads.Bead{Title: "blocked work", Type: "task"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	blocked, orderActor := "blocked", "order:mol-dog-jsonl"
-	if err := deps.Store.Update(bead.ID, beads.UpdateOpts{Status: &blocked, Assignee: &orderActor}); err != nil {
-		t.Fatalf("Update to blocked state: %v", err)
-	}
-	opts := SlingOpts{Target: a, BeadOrFormula: bead.ID, NoFormula: true, Reassign: true}
-	if _, err := DoSling(opts, deps, nil); err != nil {
+func TestDoSling_Reassign_ReopensNormalizedDeferredHold(t *testing.T) {
+	opts, deps, _, bead := reassignTestSetup(t, "human")
+	bead.IndefinitelyDeferred = true
+	store := beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)
+	deps.Store = store
+	opts.Reassign = true
+	if _, err := DoSling(opts, deps, store); err != nil {
 		t.Fatalf("DoSling --reassign: %v", err)
 	}
-	got, err := deps.Store.Get(bead.ID)
+	got, err := store.Get(bead.ID)
 	if err != nil {
-		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+		t.Fatal(err)
 	}
-	if got.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty after --reassign", got.Assignee)
+	if got.Assignee != "" || !beads.IsReadyCandidate(got, time.Unix(0, 0)) {
+		t.Errorf("normalized deferred hold remains unclaimable: %+v", got)
 	}
-	if got.Status != "blocked" {
-		t.Errorf("Status = %q, want blocked (reopen must only apply to in_progress beads)", got.Status)
+}
+
+func TestDoSling_Reassign_ScheduledDeferral(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Time
+		refuse   bool
+	}{
+		{"future", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), true},
+		{"expired", time.Unix(1, 0), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, deps, _, bead := reassignTestSetup(t, "human")
+			bead.DeferUntil = &tc.deadline
+			store := beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)
+			deps.Store = store
+			router := &fakeBeadRouter{}
+			deps.Router = router
+			opts.Reassign = true
+			_, err := DoSling(opts, deps, store)
+			if tc.refuse {
+				if err == nil || !strings.Contains(err.Error(), tc.deadline.Format(time.RFC3339)) || !strings.Contains(err.Error(), "clear the scheduled deferral") {
+					t.Errorf("reassign error = %v, want deadline and instruction to clear scheduled deferral", err)
+				}
+			} else if err != nil {
+				t.Fatalf("expired deferral refused: %v", err)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refuse {
+				if !reflect.DeepEqual(got, bead) || len(router.routed) != 0 {
+					t.Errorf("scheduled hold mutated or routed: before=%+v after=%+v routes=%v", bead, got, router.routed)
+				}
+			} else if got.Assignee != "" || !beads.IsReadyCandidate(got, time.Unix(2, 0)) || len(router.routed) != 1 {
+				t.Errorf("expired hold was not released and routed: bead=%+v routes=%v", got, router.routed)
+			}
+		})
+	}
+}
+
+// A session can claim a bead after sling reads it but before the release write.
+type claimBeforeReassignStore struct {
+	*beads.MemStore
+	claim func() error
+}
+
+func (s *claimBeforeReassignStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.claim(); err != nil {
+		return err
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *claimBeforeReassignStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if err := s.claim(); err != nil {
+		return err
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func TestReopenForReassign_PreservesConcurrentClaim(t *testing.T) {
+	mem := beads.NewMemStore()
+	bead, err := mem.Create(beads.Bead{Title: "held work", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := false
+	store := &claimBeforeReassignStore{MemStore: mem, claim: func() error {
+		if claimed {
+			return nil
+		}
+		claimed = true
+		status, owner := "in_progress", "worker-session-1"
+		return mem.Update(bead.ID, beads.UpdateOpts{Status: &status, Assignee: &owner, Metadata: map[string]string{"gc.keep": "yes"}})
+	}}
+	err = reopenForReassignInStore(store, bead.ID, bead)
+	if err == nil {
+		t.Error("reassign overwrote a concurrent session claim")
+	}
+	got, err := mem.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session-1" || len(got.Metadata) != 1 || got.Metadata["gc.keep"] != "yes" {
+		t.Errorf("concurrent claim was changed by reassign: %+v", got)
+	}
+}
+
+func TestReopenForReassign_RequiresConditionalWriter(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: "held work", Type: "task", Assignee: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expose only the base Store contract, as a backend without atomic writes.
+	legacy := struct{ beads.Store }{store}
+	err = reopenForReassignInStore(legacy, bead.ID, bead)
+	if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Errorf("reassign error = %v, want explicit conditional-write refusal", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, bead) {
+		t.Errorf("unsupported release mutated bead: before=%+v after=%+v", bead, got)
+	}
+}
+
+func TestDoSlingBatch_Reassign_ReopensHeldChildren(t *testing.T) {
+	opts, deps, store, _ := reassignTestSetup(t, "")
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var heldIDs []string
+	for _, status := range []string{"deferred", "blocked"} {
+		child, err := store.Create(beads.Bead{Title: status, Type: "task", ParentID: convoy.ID, Assignee: "human"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Update(child.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatal(err)
+		}
+		heldIDs = append(heldIDs, child.ID)
+	}
+	opts.BeadOrFormula = convoy.ID
+	opts.Reassign = true
+	result, err := DoSlingBatch(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch --reassign: %v", err)
+	}
+	if result.Routed != 2 {
+		t.Errorf("routed = %d, want both held children", result.Routed)
+	}
+	for _, id := range heldIDs {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" || got.Assignee != "" {
+			t.Errorf("held child %s was not released: status=%s assignee=%q", id, got.Status, got.Assignee)
+		}
+	}
+}
+
+func TestDoSlingBatch_RefusesHumanAssigneeWithoutFlag(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "human")
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(bead.ID, beads.UpdateOpts{ParentID: &convoy.ID}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := &fakeBeadRouter{}
+	deps.Router = router
+	opts.BeadOrFormula = convoy.ID
+	_, err = DoSlingBatch(opts, deps, store)
+	if err == nil || !strings.Contains(err.Error(), "human") || !strings.Contains(err.Error(), "--reassign") {
+		t.Errorf("batch error = %v, want ownership refusal", err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, before) || len(router.routed) != 0 {
+		t.Errorf("refused child mutated or routed: before=%+v after=%+v routes=%v", before, got, router.routed)
+	}
+}
+
+func TestDoSling_ActivePoolOwnerIsIdempotent(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "myrig/polecat-session-1")
+	status := "in_progress"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &status, Metadata: map[string]string{"gc.routed_to": "myrig/polecat"}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.NoConvoy = true
+	result, err := DoSling(opts, deps, store)
+	if err != nil || !result.Idempotent {
+		t.Fatalf("DoSling = %+v, %v; want idempotent current-owner sling", result, err)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, before) {
+		t.Errorf("idempotent sling mutated the active claim: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestDoSling_RefusesHumanHoldInSourceStore(t *testing.T) {
+	opts, deps, rigStore, bead := reassignTestSetup(t, "human")
+	deps.Store = beads.NewMemStore()
+	deps.ValidationQuerier = rigStore
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+	}
+	_, err := DoSling(opts, deps, nil)
+	if err == nil || !strings.Contains(err.Error(), "human") || !strings.Contains(err.Error(), "--reassign") {
+		t.Errorf("DoSling error = %v, want refusal naming the rig bead's assignee", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, bead) {
+		t.Errorf("refused rig bead changed: before=%+v after=%+v", bead, got)
+	}
+}
+
+// Explicit reassignment releases held work without stealing active claims.
+func TestDoSling_Reassign_ReopensHeldBead(t *testing.T) {
+	for _, status := range []string{"deferred", "blocked"} {
+		t.Run(status, func(t *testing.T) {
+			opts, deps, store, bead := reassignTestSetup(t, "human")
+			if err := store.Update(bead.ID, beads.UpdateOpts{Status: &status, Metadata: map[string]string{
+				"gc.work_outcome": "shipped", "gc.work_commit": "abc123", "gc.keep": "yes",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			opts.Reassign = true
+			if _, err := DoSling(opts, deps, store); err != nil {
+				t.Fatalf("DoSling --reassign: %v", err)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Assignee != "" || got.Status != "open" {
+				t.Errorf("bead = %s / %q, want open / unassigned", got.Status, got.Assignee)
+			}
+			if got.Metadata["gc.work_outcome"] != "" || got.Metadata["gc.work_commit"] != "" || got.Metadata["gc.keep"] != "yes" {
+				t.Errorf("reassign did not clear the previous work outcome independently of unrelated metadata: %v", got.Metadata)
+			}
+		})
+	}
+}
+
+func TestDoSling_Reassign_RefusesActiveClaim(t *testing.T) {
+	for _, assignee := range []string{"human", "order:batch", "myrig/polecat-session-1"} {
+		t.Run(assignee, func(t *testing.T) {
+			opts, deps, store, bead := reassignTestSetup(t, assignee)
+			status := "in_progress"
+			if err := store.Update(bead.ID, beads.UpdateOpts{Status: &status, Metadata: map[string]string{
+				"gc.routed_to": "myrig/polecat", "gc.keep": "yes", "gc.work_outcome": "shipped",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts.Reassign = true
+			router := &fakeBeadRouter{}
+			deps.Router = router
+			_, err = DoSling(opts, deps, store)
+			if err == nil || !strings.Contains(err.Error(), assignee) || !strings.Contains(err.Error(), "in_progress") {
+				t.Errorf("DoSling --reassign error = %v, want active claim refusal naming %q", err, assignee)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, before) || len(router.routed) != 0 {
+				t.Errorf("refused claim was mutated or routed: before=%+v after=%+v routes=%v", before, got, router.routed)
+			}
+		})
 	}
 }
 

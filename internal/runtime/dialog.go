@@ -1637,9 +1637,31 @@ func ContainsProviderRateLimitScreen(content string) bool {
 	if containsClaudeSpendLimitModal(content) {
 		return true
 	}
+	if ContainsActiveProviderRateLimitScreen(content) {
+		return true
+	}
 	return strings.Contains(strings.ToLower(content), "rate limit") &&
 		strings.Contains(content, "Keep trying") &&
 		strings.Contains(content, "Stop")
+}
+
+// ContainsActiveProviderRateLimitScreen recognizes a current provider refusal
+// suitable for stopping a live runtime. Codex's error-row marker distinguishes
+// its usage wall from ordinary prose; a later response or error supersedes it.
+// Other providers' historical screen fragments are only used for exit
+// classification by ContainsProviderRateLimitScreen.
+func ContainsActiveProviderRateLimitScreen(content string) bool {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "■ ") {
+			return strings.HasPrefix(line, "■ You've hit your usage limit.")
+		}
+		if strings.HasPrefix(line, "• ") {
+			return false
+		}
+	}
+	return false
 }
 
 // spendLimitModalWindowLines bounds how many consecutive lines the Claude

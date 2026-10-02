@@ -359,6 +359,7 @@ func computePoolDesiredStatesAt(
 	// wake_mode="fresh" agent must not resume one of these stale rows — see the
 	// resume-tier guard below.
 	asleepSessionBeadIDs := make(map[string]bool)
+	quarantinedSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -381,6 +382,9 @@ func computePoolDesiredStatesAt(
 		}
 		if sb.State == sessionpkg.StateAsleep {
 			asleepSessionBeadIDs[sb.ID] = true
+		}
+		if metadataTimeInFuture(sb.QuarantinedUntil, decisionTime) {
+			quarantinedSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -452,7 +456,9 @@ func computePoolDesiredStatesAt(
 				// already uses. A live (non-asleep) session still resumes;
 				// agents with unset or wake_mode="resume" are unaffected.
 				// (gastownhall/gascity#4849)
-				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+				// Keep the owner during backoff so a fresh identity cannot bypass
+				// its quarantine. The reconciler gates the retained session's wake.
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] && !quarantinedSessionBeadIDs[sessionBeadID] {
 					if _, ok := wakeRequestedTemplates[template]; ok {
 						continue
 					}
@@ -873,7 +879,12 @@ func poolNewDemandRequests(
 				protected[template] = append(protected[template], req)
 				continue
 			}
-			if poolSessionConsumesNewDemandInfo(sb) {
+			// A provider refusal before the first claim still occupies the
+			// demand that created this lane. Retain its concrete identity so
+			// an anonymous replacement cannot bypass the retry deadline. This
+			// consumes existing demand without establishing a demand floor.
+			rateLimited := sb.SleepReason == string(sessionpkg.SleepReasonRateLimit) && metadataTimeInFuture(sb.QuarantinedUntil, decisionTime)
+			if poolSessionConsumesNewDemandInfo(sb) || rateLimited {
 				inFlight[template] = append(inFlight[template], req)
 			}
 		}
@@ -964,6 +975,9 @@ func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City,
 // creating sessions still represent already-spent new demand; lifecycle code
 // owns stale-creating recovery with its clock-aware predicate.
 func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
+	if info.Closed || isDrainedSessionInfo(info) || sessionHasProviderTerminalErrorInfo(info) {
+		return false
+	}
 	if info.PendingCreateClaim {
 		return true
 	}

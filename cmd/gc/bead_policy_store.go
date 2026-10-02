@@ -39,6 +39,7 @@ type beadPolicyGraphStore struct {
 
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
+	_ beads.ConditionalWriterHandleProvider  = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
 )
 
@@ -51,6 +52,12 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// ConditionalWriterHandle preserves the backing store's atomic-write capability
+// for operations that require it independently of the optional rollout mode.
+func (s *beadPolicyStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	return beads.ConditionalWriterFor(s.Store)
+}
 
 var (
 	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)

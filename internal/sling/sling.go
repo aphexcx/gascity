@@ -57,11 +57,9 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	// Reassign clears any existing human assignee on the bead before
-	// routing so the target pool/agent can claim it. Without this, a
-	// bead claimed by a human (`bd update --claim`) stays invisible
-	// to the pool's claim filter even after sling sets gc.routed_to.
-	// See gastownhall/gascity#1007.
+	// Reassign releases held work before routing: it clears the assignee,
+	// reopens deferred or blocked beads, and clears prior work outcomes.
+	// An in_progress claim must be released by its owner first.
 	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
@@ -258,10 +256,8 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee on the bead before routing,
-	// so a sling can hand a bead claimed via `bd update --claim` to a new
-	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
-	// RouteBead nor the API sling path can express --reassign. See #1007.
+	// Reassign releases held work for the target pool without overriding
+	// active claims. See SlingOpts.Reassign for the release semantics.
 	Reassign bool
 	Nudge    bool
 	Force    bool

@@ -122,15 +122,15 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
-	// Reassign: make the bead claimable by the target pool/agent before
-	// routing — clear any existing assignee and reopen it if a prior actor
-	// left it in_progress. Without this, a bead claimed by `bd update --claim`
-	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
-	// claim filter even after sling sets gc.routed_to: clearing the assignee
-	// alone is not enough because IsReadyCandidate requires status=open. See
-	// gastownhall/gascity#1007 (assignee) and #3231 (status). It runs BEFORE the
-	// idempotency short-circuit: a bead already routed to this target (the
-	// re-dispatch of a parked bead to its own pool) must still be released.
+	if !opts.IsFormula && !opts.Reassign && (!opts.DryRun || !opts.InlineText) {
+		if err := validatePoolAssignment(opts.BeadOrFormula, a, deps, querier); err != nil {
+			return result, err
+		}
+	}
+
+	// Explicit reassignment releases held work before the idempotency check,
+	// including a parked bead already routed to this pool. Active claims are
+	// refused by the release without changing their assignee or metadata.
 	if shouldReopenForReassign(opts) {
 		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
 			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
@@ -271,6 +271,35 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 
 func shouldCheckBeadState(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+}
+
+func validatePoolAssignment(beadID string, a config.Agent, deps SlingDeps, querier BeadQuerier) error {
+	if !agentutil.IsMultiSessionAgent(&a) {
+		return nil
+	}
+	if deps.ValidationQuerier != nil {
+		querier = deps.ValidationQuerier
+	}
+	if querier == nil {
+		querier = deps.Store
+	}
+	b, err := querier.Get(beadID)
+	if errors.Is(err, beads.ErrNotFound) {
+		_, b, err = beadStoreForAssignment(beadID, deps)
+	}
+	if err != nil {
+		return fmt.Errorf("checking assignment of %s: %w", beadID, err)
+	}
+	assignee := strings.TrimSpace(b.Assignee)
+	target := agentutil.RoutedToIdentity(&a)
+	if assignee == "" || assignee == target ||
+		(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target && strings.HasPrefix(assignee, target+"-")) {
+		return nil
+	}
+	if b.Status == "in_progress" {
+		return activeClaimReassignError(beadID, b)
+	}
+	return fmt.Errorf("bead %s is assigned to %q; use --reassign to release the hold before routing to %q", beadID, assignee, target)
 }
 
 // attachmentDecision is the result of onFormulaNeedsAttachment: whether an
@@ -1841,7 +1870,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	var open, skipped []beads.Bead
 	for _, c := range children {
-		if c.Status == "open" {
+		if c.Status == "open" || (opts.Reassign && (c.Status == "deferred" || c.Status == "blocked")) {
 			open = append(open, c)
 		} else {
 			skipped = append(skipped, c)
@@ -1922,6 +1951,16 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	var childErrors []error
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
+		if !opts.Reassign {
+			if err := validatePoolAssignment(child.ID, a, deps, querier); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				failed++
+				continue
+			}
+		}
 
 		// --reassign defers a child's idempotent skip until after the release
 		// below: a parked child already routed to this target must be released,
@@ -2095,24 +2134,26 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// reopenForReassign makes a bead claimable by a target pool before routing:
-// it clears any assignee and reopens the bead if a prior actor left it
-// in_progress. It checks the city primary store (deps.Store) first; if the
-// bead is not there it sweeps the source-workflow stores
-// (deps.SourceWorkflowStores) so rig-prefixed beads — whose record lives in a
-// rig store, not deps.Store — are still reopened. No-op when the bead is
-// already open and unassigned, no store is available, or the bead is absent
-// from every store. Errors on a real primary-store read failure, a store-Update
-// failure, or a SourceWorkflowStores listing/read failure. See
-// SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
+// reopenForReassign releases an open, deferred, or blocked bead for routing,
+// preserving active claims. It resolves the owning store before updating it.
 func reopenForReassign(beadID string, deps SlingDeps) error {
+	store, b, err := beadStoreForAssignment(beadID, deps)
+	if err != nil || store == nil {
+		return err
+	}
+	return reopenForReassignInStore(store, beadID, b)
+}
+
+// beadStoreForAssignment finds the bead in the primary or source-workflow
+// stores. Missing beads are left to the existing route validation policy.
+func beadStoreForAssignment(beadID string, deps SlingDeps) (beads.Store, beads.Bead, error) {
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return reopenForReassignInStore(deps.Store, beadID, b)
+			return deps.Store, b, nil
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
+			return nil, beads.Bead{}, fmt.Errorf("reading %s from primary store to check assignment: %w", beadID, err)
 		}
 		// ErrNotFound: the record is not in the city primary store. For
 		// rig-prefixed beads it lives in a rig store, so fall through to the
@@ -2123,11 +2164,11 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 	// which likewise consults the workflow stores when deps.Store lacks (or
 	// omits) the bead.
 	if deps.SourceWorkflowStores == nil {
-		return nil
+		return nil, beads.Bead{}, nil
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
+		return nil, beads.Bead{}, fmt.Errorf("listing source-workflow stores to check assignment of %s: %w", beadID, err)
 	}
 	for _, info := range stores {
 		if info.Store == nil {
@@ -2138,27 +2179,48 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+			return nil, beads.Bead{}, fmt.Errorf("reading %s from store %q to check assignment: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return reopenForReassignInStore(info.Store, beadID, b)
+		return info.Store, b, nil
+	}
+	return nil, beads.Bead{}, nil
+}
+
+func activeClaimReassignError(beadID string, b beads.Bead) error {
+	return fmt.Errorf("bead %s is in_progress and assigned to %q; release the active claim before reassignment", beadID, b.Assignee)
+}
+
+func validateReassignState(beadID string, b beads.Bead) error {
+	if b.Status == "closed" {
+		return fmt.Errorf("bead %s is closed; reopen it explicitly before reassignment", beadID)
+	}
+	if b.Status == "in_progress" {
+		return activeClaimReassignError(beadID, b)
+	}
+	if b.DeferUntil != nil && b.DeferUntil.After(time.Now()) {
+		return fmt.Errorf("bead %s is deferred until %s; clear the scheduled deferral before reassignment", beadID, b.DeferUntil.Format(time.RFC3339))
 	}
 	return nil
 }
 
-// reopenForReassignInStore clears b's assignee and resets an in_progress
-// status back to open in a single update, returning nil without writing when
-// the bead is already open and unassigned so no spurious store write occurs.
-// The status reset is what makes a bead that an order or human previously
-// claimed (status=in_progress) claimable again — IsReadyCandidate requires
-// status=open, so clearing the assignee alone leaves it routed-but-unclaimable
-// (gastownhall/gascity#3231).
+// reopenForReassignInStore clears holds and prior work outcomes in one update.
+// An in_progress bead must be released by its owner before it can be reassigned.
 func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) error {
+	if err := validateReassignState(beadID, b); err != nil {
+		return err
+	}
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		return fmt.Errorf("reassigning %s requires an atomic assignment release: %w", beadID, beads.ErrConditionalWriteUnsupported)
+	}
 	var update beads.UpdateOpts
 	if strings.TrimSpace(b.Assignee) != "" {
 		empty := ""
 		update.Assignee = &empty
 	}
-	if b.Status == "in_progress" {
+	// Native stores normalize richer hold statuses to open on read. Write
+	// open explicitly so those underlying holds are released as well.
+	if b.Status == "open" || b.Status == "deferred" || b.Status == "blocked" {
 		open := "open"
 		update.Status = &open
 	}
@@ -2173,7 +2235,27 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 	for _, key := range ParkReleaseMetadataKeys {
 		update.Metadata[key] = ""
 	}
-	return store.Update(beadID, update)
+	update.Metadata[beadmeta.WorkOutcomeMetadataKey] = ""
+	update.Metadata[beadmeta.WorkCommitMetadataKey] = ""
+	err := writer.UpdateIfMatch(beadID, b.Revision, update)
+	var conflict *beads.PreconditionFailedError
+	if !errors.As(err, &conflict) {
+		return err
+	}
+	// A concurrent park update may be released with the same handoff. Reread
+	// once and retry only while status and ownership still match; another
+	// claimant must never lose its assignment to this release.
+	current, readErr := store.Get(beadID)
+	if readErr != nil {
+		return fmt.Errorf("rereading %s after reassignment conflict: %w", beadID, readErr)
+	}
+	if err := validateReassignState(beadID, current); err != nil {
+		return err
+	}
+	if current.Status != b.Status || current.Assignee != b.Assignee {
+		return fmt.Errorf("bead %s changed status or assignee during reassignment (now %s, assigned to %q): %w", beadID, current.Status, current.Assignee, err)
+	}
+	return writer.UpdateIfMatch(beadID, current.Revision, update)
 }
 
 // ParkReleaseMetadataKeys are the pool start-failure park and counter keys a

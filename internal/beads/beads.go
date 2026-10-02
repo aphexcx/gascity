@@ -621,7 +621,7 @@ func IsReadyExcludedType(t string) bool {
 }
 
 // IsReadyCandidate reports whether a bead passes the store-independent default
-// Ready filters: open status, main tier, actionable type, and no future
+// Ready filters: open status, unshipped work, main tier, actionable type, and no future
 // defer_until. Dependency and assignee checks are store-specific and happen
 // separately.
 func IsReadyCandidate(b Bead, now time.Time) bool {
@@ -644,6 +644,7 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 		}
 	}
 	return b.Status == "open" &&
+		b.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeShipped &&
 		!IsReadyExcludedBead(b) &&
 		!IsDeferred(b, now)
 }
