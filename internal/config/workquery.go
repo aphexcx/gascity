@@ -223,8 +223,36 @@ func (r PoolDemandServeRules) ShellArgs() string {
 	return args
 }
 
-func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json ` + limitFlag
+func bdReadyPoolDemandShell(limit int, topo QueryTopology) string {
+	command := readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json`
+	return poolDemandReadyReadShell(command, limit, topo)
+}
+
+func excludeShippedPoolDemandJQClause() string {
+	return ` | select(` + jqMeta(beadmeta.WorkOutcomeMetadataKey) + ` != "` + beadmeta.WorkOutcomeShipped + `")`
+}
+
+// poolDemandReadyReadShell filters the single-store reader's full ready set
+// before limiting it, so shipped rows cannot hide pending demand. Capture the
+// reader first to preserve its exit status instead of masking it in a pipeline.
+// Preserve malformed payloads for the hook's existing rejection path and the
+// count form's final JSON aggregation, which must fail instead of reporting zero.
+// The federated reader already applies the shared Ready predicate.
+func poolDemandReadyReadShell(command string, limit int, topo QueryTopology) string {
+	limitFlag := ` --limit 0`
+	if limit > 0 {
+		limitFlag = ` --limit=` + strconv.Itoa(limit)
+	}
+	if topo.FederatedReady {
+		return command + limitFlag
+	}
+	filter := `[.[]` + excludeShippedPoolDemandJQClause() + `]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `{ gc_ready_json=$(` + command + ` --limit 0) || exit $?; ` +
+		`gc_unshipped_ready_json=$(printf "%s" "$gc_ready_json" | ` + shellquote.Join([]string{"jq", filter}) + `) || gc_unshipped_ready_json="$gc_ready_json"; ` +
+		`printf "%s" "$gc_unshipped_ready_json"; }`
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -235,8 +263,9 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // visible once a root carries gc.routed_to. This retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest ` + limitFlag
+func bdReadyPoolDemandMigrationShell(limit int, topo QueryTopology) string {
+	command := readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest`
+	return poolDemandReadyReadShell(command, limit, topo)
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -335,9 +364,13 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 	if topo.includeEphemeralReady() {
 		return `printf "[]"`
 	}
+	selector := `select((.assignee // "") == "")` +
+		` | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $target) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $target) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `")))`
+	if !topo.FederatedReady {
+		selector += excludeShippedPoolDemandJQClause()
+	}
 	filter := legacyEphemeralReadyFilterJQ(
-		`select((.assignee // "") == "")`+
-			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
+		selector,
 		limit,
 		true,
 	)
@@ -364,7 +397,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell(20, topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
@@ -404,7 +437,7 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	return bdReadyPoolDemandShell(20, topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -422,8 +455,8 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // the shape readyReaderFailurePropagation gives the worker-side tiers.
 func poolDemandCountShell(target string, topo QueryTopology) string {
 	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
+		`ready_json=$(` + bdReadyPoolDemandShell(0, topo) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell(0, topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
@@ -890,8 +923,8 @@ func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
 	readyCommand := readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
 		` --metadata-field "` + beadmeta.RootBeadIDMetadataKey + `=$graph_anchor_id"` +
 		` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` +
-		PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest --limit=20` +
-		readyReaderStderrSink(fed)
+		PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest`
+	readyCommand = poolDemandReadyReadShell(readyCommand, 20, topo) + readyReaderStderrSink(fed)
 	return `probe_assigned_graph_anchor_ready() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +

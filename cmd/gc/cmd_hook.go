@@ -1113,7 +1113,8 @@ func workQueryHasReadyWork(output string) bool {
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: future defer_until, any open blocking dep in the row's
 // blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
-// canonical dispatch hold label. The work_query is expected to gate these, but
+// canonical dispatch hold label, or shipped work released to open/unassigned.
+// The work_query is expected to gate these, but
 // defensive filtering here prevents a single broken query from cascading into
 // agent action on a bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
@@ -1139,6 +1140,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if isClosedHookCandidate(obj) {
 			continue
 		}
+		if isShippedReleasedHookCandidate(obj) {
+			continue
+		}
 		if isFutureDeferredHookCandidate(obj, now) {
 			continue
 		}
@@ -1158,6 +1162,21 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		return output
 	}
 	return string(reencoded)
+}
+
+// isShippedReleasedHookCandidate excludes completed work from fresh claims.
+// Existing assignments remain visible so their owner can finish or close them.
+func isShippedReleasedHookCandidate(item map[string]any) bool {
+	status, _ := item["status"].(string)
+	if !strings.EqualFold(strings.TrimSpace(status), "open") {
+		return false
+	}
+	assignee, isString := item["assignee"].(string)
+	if (!isString && item["assignee"] != nil) || strings.TrimSpace(assignee) != "" {
+		return false
+	}
+	metadata, ok := item["metadata"].(map[string]any)
+	return ok && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeShipped
 }
 
 // filterForeignHookCandidates drops work_query candidates that belong to a

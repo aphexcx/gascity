@@ -14,7 +14,7 @@ import (
 // probe (Tier 1/2) stays hold-transparent.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
+	got := bdReadyPoolDemandShell(0, QueryTopology{})
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -24,7 +24,7 @@ func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 }
 
 func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
+	got := bdReadyPoolDemandMigrationShell(20, QueryTopology{})
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
