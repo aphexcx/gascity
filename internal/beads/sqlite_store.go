@@ -1500,10 +1500,14 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 // filtering is partly residual: wisp-tier reads decide tier membership after
 // decode, so the source-side LIMIT is only safe for the other tier modes.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
-	args := []any{}
+	args := []any{beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeShipped}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
+		`NOT EXISTS (
+			SELECT 1 FROM metadata m
+			WHERE m.bead_id=b.id AND m.meta_key=? AND m.meta_value=?
+		)`,
 		fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM deps d
 			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
