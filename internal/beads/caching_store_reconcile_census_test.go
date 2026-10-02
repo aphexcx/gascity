@@ -92,6 +92,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"stats": true, // stats compared field-wise below
 	}
 	excludedStore := map[string]bool{
+		// Close owns this transient reservation; merge only reads it. The
+		// concurrent-close behavior is covered by TestCachingStoreLocalCloseRacingRefresh.
+		"pendingCloses": true,
 		// observationRevision is a process-local publication fence, orthogonal to
 		// the merge oracle's durable cache-state comparison.
 		"observationRevision": true,

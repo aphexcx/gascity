@@ -36,6 +36,7 @@ type CachingStore struct {
 	dirty               map[string]struct{}
 	beadSeq             map[string]uint64
 	localBeadAt         map[string]time.Time
+	pendingCloses       map[string]int // local Close calls own the close transition until their refresh completes
 	deletedSeq          map[string]uint64
 	state               cacheState
 	lastFreshAt         time.Time
@@ -324,6 +325,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		dirty:               make(map[string]struct{}),
 		beadSeq:             make(map[string]uint64),
 		localBeadAt:         make(map[string]time.Time),
+		pendingCloses:       make(map[string]int),
 		deletedSeq:          make(map[string]uint64),
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
