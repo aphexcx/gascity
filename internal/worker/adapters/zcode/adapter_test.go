@@ -307,10 +307,12 @@ func (s *session) signal(sig syscall.Signal) {
 	}
 }
 
-// adapterWaitBudget bounds every lifecycle wait in this suite. Generous on
-// purpose: it is a deadlock guard, not a timing assertion, and a loaded machine
-// must not turn a slow turn into a failure.
-const adapterWaitBudget = 20 * time.Second
+// adapterWaitBudget bounds lifecycle observations used only as deadlock guards.
+// The local gate beside lint exhausted 20s at load 31–38 (pc_d73848725b17).
+// Use a fixed 60s guard for scheduling margin: the runner's GOFLAGS=-p limits
+// package concurrency, not host load or this suite's parallel turns. Successful
+// waits still return as soon as their marker appears.
+const adapterWaitBudget = 60 * time.Second
 
 // waitForTurns blocks until the adapter has completed n turns, counted by its
 // ready markers (startup prints one, then one per finished turn). This is the
