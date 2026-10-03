@@ -3510,6 +3510,10 @@ func stubCmdCachedPackGit(t *testing.T) {
 	binDir := t.TempDir()
 	gitPath := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'git version 2.49\n'
+  exit 0
+fi
 set -eu
 dir="$PWD"
 while [ "$#" -gt 0 ]; do

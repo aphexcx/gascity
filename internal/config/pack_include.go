@@ -513,6 +513,10 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	head, err := runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
 	if err != nil {
+		var executableErr *gitutil.ExecutableError
+		if errors.As(err, &executableErr) {
+			return executableErr
+		}
 		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
 	}
 	if !gitutil.SameCommit(head, commit) {
@@ -534,12 +538,16 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
+	git, err := gitutil.ResolveExecutable()
+	if err != nil {
+		return "", err
+	}
 	cmdArgs := append([]string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.untrackedCache=false",
 	}, args...)
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.Command(git.Path, cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = gitutil.HermeticEnv()
 	out, err := cmd.CombinedOutput()

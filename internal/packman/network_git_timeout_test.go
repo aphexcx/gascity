@@ -80,6 +80,7 @@ func wedgedGit(t *testing.T) wedgedRemote {
 	// (internal/orders, cmd/gc): it has to be well under the caller's stability
 	// window, or a live child idling between writes reads as a dead one.
 	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then echo 'git version 2.49'; exit 0; fi\n" +
 		"echo . >> " + w.HeartbeatPath + "\n" +
 		"{ while : ; do echo . >> " + w.HeartbeatPath + " ; " + sleep + " 0.05 ; done ; } &\n" +
 		"echo $! > " + w.PIDPath + "\n" +
@@ -112,7 +113,7 @@ func TestDefaultRunNetworkGitErrorsCarryNoCredential(t *testing.T) {
 
 	dir := t.TempDir()
 	// Echo the remote back the way git does, then fail as git does.
-	script := "#!/bin/sh\necho \"fatal: could not read from remote repository $*\" >&2\nexit 128\n"
+	script := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version 2.49'; exit 0; fi\necho \"fatal: could not read from remote repository $*\" >&2\nexit 128\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing git shim: %v", err)
 	}

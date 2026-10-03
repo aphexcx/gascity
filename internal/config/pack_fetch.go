@@ -225,7 +225,11 @@ func packDirHash(dir string) string {
 // variables from a parent repository or a pre-commit hook cannot redirect it
 // away from dir. If dir is non-empty, the command runs in that directory.
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	executable, err := git.ResolveExecutable()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(executable.Path, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
