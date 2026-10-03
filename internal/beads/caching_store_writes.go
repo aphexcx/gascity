@@ -199,6 +199,20 @@ func (c *CachingStore) Close(id string) error {
 	if c.closeAlreadyMatchesCached(id) {
 		return nil
 	}
+	// Reserve the transition before the backing write becomes visible. Live
+	// reads and reconciliation leave it for this call to publish, even when
+	// the post-close refresh takes longer than the local-mutation grace period.
+	c.mu.Lock()
+	c.pendingCloses[id]++
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.pendingCloses[id]--
+		if c.pendingCloses[id] == 0 {
+			delete(c.pendingCloses, id)
+		}
+		c.mu.Unlock()
+	}()
 	if err := c.backing.Close(id); err != nil {
 		return err
 	}

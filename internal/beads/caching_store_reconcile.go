@@ -569,6 +569,9 @@ func (c *CachingStore) mergeSnapshotLocked(
 	// 2. Eviction loop — over c.beads \ freshByID. Deleting the current key
 	//    inside range c.beads is safe per the Go spec.
 	for id, cached := range c.beads {
+		if c.pendingCloses[id] > 0 {
+			continue
+		}
 		if _, exists := freshByID[id]; exists {
 			continue
 		}

@@ -849,8 +849,8 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	graphStore := cs.GraphBeadStore()
 	beadCloseAutocloseDispatch(func() {
 		doConvoyAutocloseWith(store, identity, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
+		doWispAutocloseWith(store, identity, beadID, os.Stderr, graphStore)
+		doMoleculeAutocloseWith(store, identity, storeRef, rec, beadID, os.Stderr, graphStore)
 	})
 }
 
