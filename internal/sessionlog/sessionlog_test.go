@@ -2166,12 +2166,8 @@ func TestFindCodexSessionFileInTimeWindowDedupsSymlinkAliasRoots(t *testing.T) {
 }
 
 func TestFindCodexSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS /private/tmp path aliases only apply on darwin")
-	}
+	workDir, aliasedWorkDir := equivalentResolvedWorkDirs(t)
 	sessDir := t.TempDir()
-	workDir := filepath.Join(os.TempDir(), "gascity-codex-live")
-	aliasedWorkDir := "/private" + workDir
 	dayDir := filepath.Join(sessDir, "2026", "06", "21")
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2311,14 +2307,9 @@ func TestFindGeminiSessionFileUsesJSONL(t *testing.T) {
 }
 
 func TestFindGeminiSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS-only /tmp <-> /private/tmp Gemini project path alias")
-	}
-
+	storedWorkDir, providerWorkDir := equivalentResolvedWorkDirs(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "tmp")
-	storedWorkDir := "/tmp/gc-live-structured.test/city"
-	providerWorkDir := "/private/tmp/gc-live-structured.test/city"
 	projectDir := filepath.Join(root, "city")
 	if err := os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2336,6 +2327,27 @@ func TestFindGeminiSessionFileMatchesEquivalentResolvedWorkDir(t *testing.T) {
 	if got != want {
 		t.Fatalf("FindGeminiSessionFile() = %q, want %q", got, want)
 	}
+}
+
+func equivalentResolvedWorkDirs(t *testing.T) (string, string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS temporary-directory aliases only apply on darwin")
+	}
+	tempDir := filepath.Clean(os.TempDir())
+	resolvedTempDir, err := filepath.EvalSymlinks(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedTempDir == tempDir {
+		t.Skipf("TMPDIR %q has no symlink alias to test", tempDir)
+	}
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return workDir, resolvedWorkDir
 }
 
 func TestFindGeminiSessionFileByIDUsesJSONLSessionHeader(t *testing.T) {

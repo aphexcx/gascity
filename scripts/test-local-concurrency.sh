@@ -177,6 +177,12 @@ else
     record_fail "wiring.full_case_calls_selftest" "could not locate the full) case block in $LOCAL_PARALLEL"
 fi
 
+if bash "$TEST_DIR/test-local-environment.sh"; then
+    record_pass "environment.runner_and_make_boundary"
+else
+    record_fail "environment.runner_and_make_boundary" "local environment regression tests failed"
+fi
+
 echo
 echo "local-concurrency tests: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]
