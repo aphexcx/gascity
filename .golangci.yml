@@ -14,6 +14,9 @@ formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      - '(^|/)node_modules(/|$)'
 
 linters:
   # Keep govet explicit in configured lint. The changed-scope target bounds
@@ -35,6 +38,8 @@ linters:
       locale: US
 
   exclusions:
+    paths:
+      - '(^|/)node_modules(/|$)'
     rules:
       # runtime shadows stdlib but is isolated to internal/.
       - path: internal/runtime/

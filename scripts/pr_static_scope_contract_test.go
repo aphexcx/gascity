@@ -10,6 +10,78 @@ import (
 )
 
 func TestChangedStaticTargetsScopeLintAndFormattingToTheDiff(t *testing.T) {
+	t.Run("full lint includes tagged-only repository packages", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"plain/plain.go":      "package plain\n",
+			"tagged/tagged.go":    "//go:build integration\n\npackage tagged\n",
+			"node_modules/dep.go": "//go:build integration\n\npackage dependency\n",
+		})
+		for _, target := range []string{"lint-full", "lint-new"} {
+			for _, flags := range []string{"--build-tags=integration", "--build-tags integration", "--build-tags=custom --build-tags=integration"} {
+				fixture.resetCalls(t)
+				cmd := makeCommand("--no-print-directory", "-f", fixture.productionMakefile,
+					"GOLANGCI_LINT="+fixture.fakeLint, "LINT_FLAGS="+flags, target)
+				cmd.Dir = fixture.repoRoot
+				cmd.Env = fixture.commandEnv()
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s with %q: %v\n%s", target, flags, err, output)
+				}
+				calls := fixture.calls(t)
+				if len(calls) != 1 || !slices.Contains(calls[0], "./tagged") || slices.Contains(calls[0], "./node_modules") {
+					t.Fatalf("%s with %q omitted tagged package: %v", target, flags, calls)
+				}
+			}
+		}
+	})
+
+	t.Run("full targets exclude installed dependency packages", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go":                 "package alpha\n",
+			"node_modules_extra/own.go":      "package own\n",
+			"node_modules/root.go":           "package root\n",
+			"node_modules/dependency/bad.go": "package dependency\nimport \"fmt\"\nfunc Bad() { fmt.Printf(\"%d\", \"wrong\") }\n",
+			"web/node_modules/nested/bad.go": "package nested\nimport \"fmt\"\nfunc Bad() { fmt.Printf(\"%d\", \"wrong\") }\n",
+		})
+		for _, target := range []string{"lint-full", "lint-new", "vet"} {
+			t.Run(target, func(t *testing.T) {
+				fixture.resetCalls(t)
+				if output, err := fixture.runMakeTarget(target); err != nil {
+					t.Fatalf("%s failed with installed dependencies: %v\n%s", target, err, output)
+				}
+				if target == "vet" {
+					return // Real go vet rejects either dependency's invalid Printf.
+				}
+				calls := fixture.calls(t)
+				if len(calls) != 1 {
+					t.Fatalf("lint/formatter calls = %v, want one", calls)
+				}
+				call := calls[0]
+				want := []string{"./alpha", "./node_modules_extra"}
+				if len(call) < len(want) || !slices.Equal(call[len(call)-len(want):], want) {
+					t.Fatalf("%s arguments = %v, want package suffix %v", target, call, want)
+				}
+			})
+		}
+
+		// An error in our own package must still fail the bounded vet walk.
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"),
+			"package alpha\nimport \"fmt\"\nfunc Bad() { fmt.Printf(\"%d\", \"wrong\") }\n")
+		if output, err := fixture.runMakeTarget("vet"); err == nil {
+			t.Fatalf("vet accepted an invalid repository package:\n%s", output)
+		}
+
+		// Partial go list output must not turn into a successful partial gate.
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"),
+			"package alpha\nimport _ \"example.com/static-scope/missing\"\n")
+		for _, target := range []string{"lint-full", "lint-new", "vet"} {
+			fixture.resetCalls(t)
+			if output, err := fixture.runMakeTarget(target); err == nil {
+				t.Fatalf("%s accepted incomplete package discovery:\n%s", target, output)
+			}
+			fixture.requireNoCalls(t)
+		}
+	})
+
 	t.Run("Go build-input suffix contract", func(t *testing.T) {
 		want := []string{
 			".go", ".c", ".cc", ".cpp", ".cxx", ".m", ".h", ".hh", ".hpp", ".hxx",
