@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -76,6 +77,7 @@ func (s *DoltliteReadStore) doltliteReadyIssueWhere(tables doltliteTableSet) (st
 
 func doltliteReadyIssueWhere(tables doltliteTableSet, includeWispTargets bool) (string, []any) {
 	typePredicate, args := doltliteIssueTypeNotInPredicate("i")
+	args = append(args, beadmeta.WorkOutcomeShipped)
 	blockingTypes := make([]string, 0, len(readyBlockingDependencyTypes))
 	for typ := range readyBlockingDependencyTypes {
 		blockingTypes = append(blockingTypes, typ)
@@ -98,6 +100,7 @@ func doltliteReadyIssueWhere(tables doltliteTableSet, includeWispTargets bool) (
 
 	return strings.Join([]string{
 		typePredicate,
+		`COALESCE(json_extract(NULLIF(i.metadata, ''), '$."gc.work_outcome"'), '') != ?`,
 		`NOT EXISTS (
 				SELECT 1 FROM ` + tables.deps + ` d
 				` + blockerJoins + `

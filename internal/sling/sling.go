@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -57,11 +58,9 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	// Reassign clears any existing human assignee on the bead before
-	// routing so the target pool/agent can claim it. Without this, a
-	// bead claimed by a human (`bd update --claim`) stays invisible
-	// to the pool's claim filter even after sling sets gc.routed_to.
-	// See gastownhall/gascity#1007.
+	// Reassign releases held work before routing: it clears the assignee,
+	// reopens deferred or blocked beads, and clears prior work outcomes.
+	// An in_progress claim must be released by its owner first.
 	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
@@ -163,6 +162,10 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// SessionLookup resolves a session ID, current alias, or runtime session
+	// name without materializing a session. Ambiguity and read errors must be
+	// returned. Nil resolves sessions from Store for colocated deployments.
+	SessionLookup func(string) (session.Info, error)
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
@@ -258,10 +261,8 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee on the bead before routing,
-	// so a sling can hand a bead claimed via `bd update --claim` to a new
-	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
-	// RouteBead nor the API sling path can express --reassign. See #1007.
+	// Reassign releases held work for the target pool without overriding
+	// active claims. See SlingOpts.Reassign for the release semantics.
 	Reassign bool
 	Nudge    bool
 	Force    bool
@@ -1669,6 +1670,7 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	Err        error // ownership lookup failed; routing must not proceed
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

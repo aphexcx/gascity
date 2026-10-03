@@ -655,17 +655,11 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	target := agentutil.RoutedToIdentity(&a)
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		// A pool session claims routed work under its own session identity
-		// (its session bead ID since #6324; "<target>-<suffix>" session_name
-		// on older claims), not under the bare pool target, so bare equality
-		// reads already-claimed pool work as un-slung and mints a second
-		// attempt for it. The original keeps gc.routed_to once wrapped, so
-		// both it and its do-work step satisfy the pool work_query: one unit
-		// of work, two dispatchable rows, two sessions. Treat a claim by any of
-		// this pool's own sessions as idempotent (assigneeIsOwnPoolSession); a
-		// claim by a different pool still falls through to the warning below.
-		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
-		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
+		owned, err := beadAssignedToTarget(b, a, deps)
+		if err != nil {
+			return BeadCheckResult{Err: err, Warnings: []string{err.Error()}}
+		}
+		if owned {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
@@ -713,6 +707,47 @@ func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) b
 		return false
 	}
 	return session.IsOpenSessionOfTemplate(sb, target)
+}
+
+// beadAssignedToTarget recognizes configured identities and current session
+// identifiers. Route intent alone cannot prove a foreign session's ownership.
+func beadAssignedToTarget(b beads.Bead, a config.Agent, deps SlingDeps) (bool, error) {
+	assignee := strings.TrimSpace(b.Assignee)
+	target := agentutil.RoutedToIdentity(&a)
+	if assignee == "" || assignee == target {
+		return true, nil
+	}
+	// A legacy pool claim is recorded under "<target>-<suffix>" (the session
+	// name form from before #6324); it is this pool's own whatever the route
+	// says, as upstream's assigneeIsOwnPoolSession reads it (#6640).
+	if agentutil.IsMultiSessionAgent(&a) && strings.HasPrefix(assignee, target+"-") {
+		return true, nil
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != target {
+		return false, nil
+	}
+	var info session.Info
+	var err error
+	switch {
+	case deps.SessionLookup != nil:
+		info, err = deps.SessionLookup(assignee)
+	case deps.Store != nil:
+		info, err = session.NewStore(beads.SessionStore{Store: deps.Store}).ResolveAddress(assignee, false)
+	default:
+		return false, nil
+	}
+	if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking session assignee %q for bead %s: %w", assignee, b.ID, err)
+	}
+	// Verify the persisted spelling even when a backing Get resolves a fuzzy
+	// ID, or an alias changes between identifier resolution and record load.
+	identifierMatches := assignee == info.ID || assignee == strings.TrimSpace(info.Alias) ||
+		assignee == strings.TrimSpace(info.SessionNameMetadata)
+	return identifierMatches && strings.TrimSpace(info.ID) != "" && !info.Closed && session.IsSessionBeadOrRepairableInfo(info) &&
+		strings.TrimSpace(info.Template) != "" && strings.TrimSpace(info.Template) == target, nil
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing

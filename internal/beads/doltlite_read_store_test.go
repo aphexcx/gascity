@@ -117,6 +117,26 @@ func TestDoltliteReadStoreReadyUsesDoltlite(t *testing.T) {
 	}
 }
 
+func TestDoltliteReadStoreReadyExcludesShippedBeforeLimit(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	if _, err := writer.Exec(`UPDATE issues SET metadata = '{"gc.work_outcome":"shipped"}'`); err != nil {
+		t.Fatal(err)
+	}
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{
+		ID: "gc-pending", Title: "pending work", Priority: 4,
+	})
+	rows, err := store.Ready(ReadyQuery{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "gc-pending" {
+		t.Fatalf("Ready(limit=1) = %#v, want pending work beyond the shipped rows", rows)
+	}
+}
+
 func TestDoltliteReadStoreReadyBlocksWorkflowDependencyTypes(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

@@ -362,10 +362,10 @@ func singleStoreReadCount(command string) int {
 
 // renormalizeFederatedCommand maps a federated command back onto the
 // single-store one by undoing ONLY the differences the swap is allowed to make:
-// the reader words, their failure clauses, and the crash-recovery tier's
-// presence-key prelude.
+// the reader words, their failure clauses, the crash-recovery tier's
+// presence-key prelude, and single-store shipped-demand filtering.
 //
-// The last one is undone by generating both forms from the production function
+// The latter two are undone by generating both forms from the production function
 // itself rather than by pasting its text here. That keeps the guard honest as
 // the enrichment evolves: a change INSIDE the enrichment renormalizes away (it
 // is by definition part of the sanctioned difference), while any change outside
@@ -392,6 +392,19 @@ func renormalizeFederatedCommand(federated string) string {
 		federated = replaceFragment(federated,
 			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
+	}
+	for _, beads := range []BeadsConfig{{}, {BDCompatibility: BeadsBDCompatibility105}} {
+		singleTopo := QueryTopology{Beads: beads}
+		federatedTopo := QueryTopology{Beads: beads, FederatedReady: true}
+		federated = replaceFragment(federated,
+			assignedGraphWorkflowAnchorReadyFunctionScript(federatedTopo),
+			assignedGraphWorkflowAnchorReadyFunctionScript(singleTopo))
+		for _, build := range []func(int, QueryTopology) string{bdReadyPoolDemandShell, bdReadyPoolDemandMigrationShell} {
+			federated = replaceFragment(federated,
+				build(20, federatedTopo)+`) || exit $?`,
+				build(20, singleTopo)+` 2>/dev/null)`)
+			federated = replaceFragment(federated, build(0, federatedTopo), build(0, singleTopo))
+		}
 	}
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
@@ -423,11 +436,12 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			if strings.Contains(federated, bdListInProgressCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so a session stays blind to its OWN claim in a relocated binding: %q", shape.name, v.name, bdListInProgressCommand, federated)
 			}
-			// Everything outside the reader words, their failure handling, and the
-			// crash-recovery presence key must be untouched. Normalizing the
-			// federated form back onto the single-store one is what proves it.
+			// Everything outside the reader words, their failure handling, the
+			// crash-recovery presence key, and single-store shipped filter must
+			// be untouched. Normalizing the federated form back onto the
+			// single-store one is what proves it.
 			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
-				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
+				t.Errorf("%s/%s: the federated command differs from the single-store one outside the reader, failure handling, crash-recovery presence key, and shipped-demand filtering\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}
 		}
 	}

@@ -33,8 +33,11 @@ import (
 func TestPoolStartBackoff_ConditionalWriteResolvesThroughThePolicyWrapper(t *testing.T) {
 	h := newPoolStartBackoffHarness(t, intPtr(5))
 	wrapped := &beadPolicyStore{Store: h.store, cfg: h.cfg}
-	if _, ok := beads.ConditionalWriterFor(wrapped); ok {
-		t.Fatal("fixture: the policy wrapper must not promote UpdateIfMatch (that is the production shape the finding is about)")
+	if _, ok := any(wrapped).(beads.ConditionalWriter); ok {
+		t.Fatal("fixture: the policy wrapper must not directly promote UpdateIfMatch")
+	}
+	if _, ok := beads.ConditionalWriterFor(wrapped); !ok {
+		t.Fatal("fixture: the policy wrapper's explicit handle must preserve conditional writes")
 	}
 	if _, ok := ownerBackfillConditionalWriter(wrapped); !ok {
 		t.Fatal("fixture: the resolve-target walk must reach the MemStore's conditional writer")

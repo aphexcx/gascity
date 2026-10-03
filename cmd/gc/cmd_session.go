@@ -259,6 +259,13 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	if configuredOwner != "" && requestedAlias == "" {
 		alias = configuredOwner
 		explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, configuredOwner)
+	} else if !found.SupportsMultipleSessions() && requestedAlias == "" {
+		// Singleton templates share the canonical route identity even when
+		// they have no configured named session.
+		alias = canonicalTemplate
+		if explicitName == "" {
+			explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, canonicalTemplate)
+		}
 	}
 
 	reservationIDs := []string{alias, explicitName}

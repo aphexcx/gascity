@@ -4394,6 +4394,7 @@ func reassignTestSetup(t *testing.T, assignee string) (SlingOpts, SlingDeps, bea
 	}
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.StoreRef = "rig:myrig"
 	bead, err := deps.Store.Create(beads.Bead{Title: "task", Type: "task", Assignee: assignee})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -4418,17 +4419,26 @@ func TestDoSling_Reassign_ClearsHumanAssignee(t *testing.T) {
 	}
 }
 
-// TestDoSling_Reassign_PreservesAssigneeWithoutFlag: without --reassign
-// the existing human assignee is preserved (current warn-only behavior).
-// Locks in backward compatibility for the existing two-step flow.
-func TestDoSling_Reassign_PreservesAssigneeWithoutFlag(t *testing.T) {
-	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
-	if _, err := DoSling(opts, deps, nil); err != nil {
-		t.Fatalf("DoSling: %v", err)
-	}
-	got, _ := store.Get(bead.ID)
-	if got.Assignee != "stephanie" {
-		t.Fatalf("Assignee = %q, want %q (preserved without --reassign)", got.Assignee, "stephanie")
+// Human ownership requires an explicit handoff before pool routing.
+func TestDoSling_Reassign_RefusesHumanAssigneeWithoutFlag(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%t", force), func(t *testing.T) {
+			opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+			opts.Force = force
+			router := &fakeBeadRouter{}
+			deps.Router = router
+			_, err := DoSling(opts, deps, nil)
+			if err == nil || !strings.Contains(err.Error(), "stephanie") || !strings.Contains(err.Error(), "--reassign") {
+				t.Errorf("DoSling error = %v, want refusal naming assignee and --reassign", err)
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Assignee != "stephanie" || got.Status != "open" || len(got.Metadata) != 0 || len(router.routed) != 0 {
+				t.Fatalf("refused bead mutated or routed: %+v routes=%v", got, router.routed)
+			}
+		})
 	}
 }
 

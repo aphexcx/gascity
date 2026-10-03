@@ -14,7 +14,7 @@ import (
 // between the read and the release is cleared too.
 func TestReassignReleaseClearsAParkCommittedAfterTheRead(t *testing.T) {
 	store := beads.NewMemStore()
-	bead, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "helper-1", Metadata: map[string]string{
+	bead, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open", Assignee: "helper-1", Metadata: map[string]string{
 		beadmeta.StartFailuresMetadataKey: "4",
 		"gc.keep":                         "yes",
 	}})
