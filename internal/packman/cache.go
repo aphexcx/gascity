@@ -316,6 +316,10 @@ func normalizeRemoteSource(source string) remoteSource {
 }
 
 func defaultRunGit(dir string, args ...string) (string, error) {
+	git, err := gitutil.ResolveExecutable()
+	if err != nil {
+		return "", err
+	}
 	// The pack source URL can be attacker-influenced on the API import path, and
 	// this runner drives the network fetch/clone/ls-remote for it. Harden every
 	// invocation against redirect-based SSRF and transport abuse; the flags are
@@ -323,7 +327,7 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	// also flow through here. The remaining DNS-rebinding residual is documented
 	// at the pack SSRF fence (internal/api/pack_source_policy.go).
 	cmdArgs := append(baseHardeningGitArgs(), args...)
-	cmd := exec.Command("git", cmdArgs...)
+	cmd := exec.Command(git.Path, cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -384,6 +388,10 @@ func redactNetworkGitArgs(args []string) string {
 // URL credential resolution matches on; cityRoot scopes the per-city rule
 // layer.
 func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (string, error) {
+	git, err := gitutil.ResolveExecutable()
+	if err != nil {
+		return "", err
+	}
 	inj, err := gitcred.CredentialedNetworkArgs("", cityRoot, remoteURL)
 	if err != nil {
 		return "", fmt.Errorf("loading git credentials for %s: %w", gitcred.RedactUserinfo(remoteURL), err)
@@ -391,7 +399,7 @@ func defaultRunNetworkGit(cityRoot, remoteURL, dir string, args ...string) (stri
 	cmdArgs := buildNetworkGitArgs(inj, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := exec.CommandContext(ctx, git.Path, cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
