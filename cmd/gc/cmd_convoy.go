@@ -1927,12 +1927,13 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 	}
 	warnSkippedConvoyStores(stderr, "gc convoy check", skipped)
 
-	closed := 0
+	closed, unreadable := 0, 0
 	for _, item := range convoys {
 		fresh, err := beads.HandlesFor(item.store).Live.Get(item.bead.ID)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: reading %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
+			fmt.Fprintf(stderr, "gc convoy check: warning: skipped unreadable convoy %s: %s\n", item.bead.ID, firstErrorLine(err)) //nolint:errcheck // best-effort stderr
+			unreadable++
+			continue
 		}
 		item.bead = fresh
 		if convoycore.IsTerminalStatus(item.bead.Status) || hasLabel(item.bead.Labels, "owned") || !convoyAutocloseOwnerMatches(item.bead.Labels, item.identity) {
@@ -1970,6 +1971,12 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 		}
 	}
 
+	if unreadable > 0 {
+		fmt.Fprintf(stderr, "gc convoy check: skipped %d unreadable convoy(s)\n", unreadable) //nolint:errcheck // best-effort stderr
+		if unreadable == len(convoys) {
+			return 1
+		}
+	}
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.check", Action: "check", Closed: intRef(closed)}); err != nil {
 			fmt.Fprintf(stderr, "gc convoy check: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr

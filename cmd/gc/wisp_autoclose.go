@@ -54,7 +54,7 @@ func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	switch store, _, outcome := autocloseOwningStore(beadID, cityPath, storeRoot, stderr); outcome {
 	case autocloseResolved:
-		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		doWispAutocloseWith(store, convoyAutocloseIdentity(routeCfg), beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 		return
 	case autocloseVetoed:
 		return
@@ -65,7 +65,7 @@ func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+	doWispAutocloseWith(store, convoyAutocloseIdentity(routeCfg), beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and
@@ -84,7 +84,7 @@ func doWispAutoclose(beadID string, stdout, stderr io.Writer) {
 // parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
 // graph store. It is required rather than variadic: as a variadic with a
 // collapse-to-store default, both hook-path callers silently omitted it.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+func doWispAutocloseWith(store beads.Store, identity, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
 	// Unwrapped for internal use: the helpers below assert optional store
 	// capabilities, which do not promote through the class wrapper.
 	graphStore := graphClassStore.Store
@@ -103,6 +103,12 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
+			// Discovery can return cached rows without ownership labels.
+			fresh, err := beads.HandlesFor(graphStore).Live.Get(attached.ID)
+			if err != nil || !convoyAutocloseOwnerMatches(fresh.Labels, identity) {
+				continue
+			}
+			attached = fresh
 			if attachedMoleculeIsParked(graphStore, attached) {
 				continue
 			}
@@ -113,7 +119,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
 		}
 	}
-	if parent.Status != "closed" || !sourceworkflow.IsWorkflowRoot(parent) {
+	if parent.Status != "closed" || !sourceworkflow.IsWorkflowRoot(parent) || !convoyAutocloseOwnerMatches(parent.Labels, identity) {
 		return
 	}
 	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")

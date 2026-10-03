@@ -2530,6 +2530,34 @@ func relocatedConvoyCity(t *testing.T) (cityPath, convoyID string, work, binding
 // gate it feeds never opens.
 func TestConvoyCheckReadsTheBindingRow(t *testing.T) {
 	cityPath, convoyID, work, binding := relocatedConvoyCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheckFallback(cityPath, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy check exited %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Auto-closed convoy "+convoyID) {
+		t.Errorf("the finished convoy did not auto-close; check read the frozen copy's open child:\n%s", stdout.String())
+	}
+
+	closed, err := binding.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the binding: %v", convoyID, err)
+	}
+	if !convoycore.IsTerminalStatus(closed.Status) {
+		t.Errorf("the binding's convoy is %q after the check, want a terminal status", closed.Status)
+	}
+	retained, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("reading %s back from the work store: %v", convoyID, err)
+	}
+	if convoycore.IsTerminalStatus(retained.Status) {
+		t.Errorf("the check closed the retained work copy too; the frozen copy still has an open child and is not the row this decides from")
+	}
+}
+
+// Ownership checks must resolve the same authoritative binding row.
+func TestConvoyCheckReadsTheOwnedBindingRow(t *testing.T) {
+	cityPath, convoyID, work, binding := relocatedConvoyCity(t)
 	configPath := filepath.Join(cityPath, "city.toml")
 	contents, err := os.ReadFile(configPath)
 	requireNoError(t, err)

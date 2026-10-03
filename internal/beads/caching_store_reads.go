@@ -374,6 +374,13 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 				continue
 			}
 		}
+		if item.Status == "closed" && c.pendingCloses[item.ID] > 0 {
+			// Preserve the cached transition for Close, but return the live row.
+			if query.Matches(item) {
+				refreshed = append(refreshed, cloneBead(item))
+			}
+			continue
+		}
 		noteClose(item)
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
 			depsMode:   depsFromFieldsIfCarried,
@@ -385,6 +392,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		}
 	}
 	for id, bead := range refreshedParents {
+		if bead.Status == "closed" && c.pendingCloses[id] > 0 {
+			continue
+		}
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
@@ -408,6 +418,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		c.evictLocked(id)
 	}
 	for id, bead := range refreshedLiveMissing {
+		if bead.Status == "closed" && c.pendingCloses[id] > 0 {
+			continue
+		}
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}

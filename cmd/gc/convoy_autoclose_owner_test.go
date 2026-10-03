@@ -41,6 +41,9 @@ func TestConvoyAutocloseOwnerFromController(t *testing.T) {
 		want     string
 	}{
 		{"owner", "citadel", []string{"owner:citadel"}, "closed"},
+		{"trimmed_identity", " \tcitadel\n", []string{"owner:citadel"}, "closed"},
+		{"whitespace_identity", " \t\n", []string{"owner:citadel"}, "open"},
+		{"case_mismatch", "citadel", []string{"owner:Citadel"}, "open"},
 		{"peer", "jadegate", []string{"owner:citadel"}, "open"},
 		{"legacy", "jadegate", nil, "closed"},
 		{"identity_missing", "", []string{"owner:citadel"}, "open"},
