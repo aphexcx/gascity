@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Darwin defaults to the per-user temporary directory. A caller's short,
+# staff-owned TMPDIR without a /private alias is valid; tests must not assume one.
 
 set -euo pipefail
 
@@ -12,6 +14,8 @@ Environment:
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
   GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
+  LOCAL_TEST_LOG_DIR    create and retain logs here (default: temporary directory)
+  TMPDIR                scratch root (default: Darwin per-user temp; else /var/tmp)
 USAGE
 }
 
@@ -120,6 +124,22 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+
+test_tmpdir="${TMPDIR:-}"
+cleanup_test_tmpdir=0
+if [[ -z "$test_tmpdir" ]]; then
+  if [[ "$(uname -s)" == Darwin ]]; then
+    test_tmpdir="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)"
+    test_tmpdir="${test_tmpdir%/}"
+    if [[ -z "$test_tmpdir" ]]; then
+      test_tmpdir="$(mktemp -d /var/tmp/gc-local-tmp.XXXXXX)"
+      cleanup_test_tmpdir=1
+    fi
+  else
+    test_tmpdir=/var/tmp
+  fi
+fi
+export TEST_LOCAL_TMPDIR="$test_tmpdir"
 
 jobspecs=()
 
@@ -253,9 +273,13 @@ export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=${inner_p}"
 cleanup_log_dir=1
 if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
   log_dir="$LOCAL_TEST_LOG_DIR"
+  if ! mkdir -p "$log_dir" 2>/dev/null; then
+    echo "cannot create LOCAL_TEST_LOG_DIR: $log_dir" >&2
+    exit 1
+  fi
   cleanup_log_dir=0
 else
-  log_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-local-tests.XXXXXX")"
+  log_dir="$(mktemp -d "$test_tmpdir/gc-local-tests.XXXXXX")"
 fi
 export LOCAL_TEST_LOG_DIR="$log_dir"
 export TEST_LOCAL_GOPATH="$gopath_val"
@@ -323,7 +347,7 @@ run_fan_out() {
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/var/tmp}" \
+    TMPDIR="${TEST_LOCAL_TMPDIR}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
@@ -366,6 +390,9 @@ set -e
 if [[ "$status" -eq 0 ]]; then
   if [[ "$cleanup_log_dir" -eq 1 ]]; then
     rm -rf "$log_dir"
+  fi
+  if [[ "$cleanup_test_tmpdir" -eq 1 ]]; then
+    rm -rf "$test_tmpdir"
   fi
   echo "All ${mode} jobs passed"
 else
