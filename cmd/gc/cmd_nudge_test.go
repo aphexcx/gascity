@@ -4084,10 +4084,9 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
-	// gf-7k0 / pc_d957cb6edfae: Darwin passed 20 isolated and 20 loaded
-	// runs (eight CPU-bound companions, 2026-10-03). The reported false
-	// negative was not reproduced; startPollerLikeProcess already waits for
-	// the same command-line predicate as existingPollerPID.
+	// gf-7k0 / pc_d957cb6edfae: macOS /bin/sh can re-exec after the
+	// readiness check, making kern.procargs2 briefly return EIO under load.
+	// The fixture uses /bin/bash directly to keep argv stable like the gc binary.
 	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
@@ -4302,7 +4301,7 @@ func startPollerLikeProcess(t *testing.T, cityPath, agentName string) *exec.Cmd 
 	t.Helper()
 	const sessionName = "sess-worker"
 	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\nread _hold\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake poller): %v", err)
 	}
 	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
