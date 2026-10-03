@@ -11,10 +11,12 @@ usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
+  CORE_SHARD_TOTAL      non-cmd/gc package shard count (default: 6)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
   GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
   LOCAL_TEST_LOG_DIR    create and retain logs here (default: temporary directory)
+  OBSERVABLE_FAILURE_LINES  failure detail line budget (default: 240, incl. tail)
   TMPDIR                scratch root (default: Darwin per-user temp; else /var/tmp)
 USAGE
 }
@@ -91,6 +93,7 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
+core_total="${CORE_SHARD_TOTAL:-6}"
 
 # One per-package go test budget for the unit sweep and the cmd/gc shards. The
 # fan-out runs LOCAL_TEST_JOBS heavyweight test binaries at once, so a package's
@@ -112,6 +115,10 @@ if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
 fi
 if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
   echo "CMD_GC_PROCESS_TOTAL must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$core_total" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CORE_SHARD_TOTAL must be a positive integer without leading zeros" >&2
   exit 1
 fi
 if ! [[ "$go_test_timeout" =~ ^[0-9]+[smh]$ ]]; then
@@ -154,13 +161,33 @@ add_fsys_compile_job() {
     'tmp=$(mktemp -d); trap '"'"'rm -rf "$tmp"'"'"' EXIT; GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys'
 }
 
-# The unit sweep runs with -count=1, mirroring the cmd/gc shards' GO_TEST_COUNT=1
-# so it is a real run rather than a cached-result stall, and shares the shards'
-# timeout budget. Package parallelism is bounded separately for every job by the
-# GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
+# Seed the four known slow packages into separate shards, then distribute the
+# remaining sorted packages round-robin. Every package except cmd/gc runs once;
+# count, timeout and GC_FAST_UNIT match the fast unit sweep. The existing outer
+# job count still determines each job's GOFLAGS -p budget below.
 add_unit_core_job() {
-  add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')"
+  local packages package index=0 i
+  local shards=()
+  packages="$(go list ./... | awk '
+    $0 != "github.com/gastownhall/gascity/cmd/gc" {
+      heavy = ($0 ~ /\/(examples\/bd\/dolt|examples\/gastown|internal\/runtime\/tmux|scripts)$/)
+      print (heavy ? 0 : 1), $0
+    }
+  ' | LC_ALL=C sort -k1,1n -k2,2 | cut -d " " -f2)"
+  if [[ -z "$packages" ]]; then
+    echo "no core packages found" >&2
+    return 1
+  fi
+  while IFS= read -r package; do
+    # Quote package paths for the worker shell, including unusual import paths.
+    printf -v package '%q' "$package"
+    shards[index]="${shards[$index]-} $package"
+    index=$(( (index + 1) % core_total ))
+  done <<< "$packages"
+  for i in "${!shards[@]}"; do
+    add_job "unit-core""-$((i + 1))-of-${#shards[@]}" \
+      "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} ${shards[$i]}"
+  done
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -313,6 +340,43 @@ gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
 
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
 
+# Keep failure markers with three lines of context and reserve the final 80
+# lines for the log tail. The shared observable-test knob caps content lines;
+# headings and an optional truncation notice add at most four lines.
+print_job_failure() {
+  local log="$1" limit="${OBSERVABLE_FAILURE_LINES:-240}" tail_lines=80
+  if ! [[ "$limit" =~ ^[1-9][0-9]*$ ]]; then
+    echo "invalid OBSERVABLE_FAILURE_LINES; using 240" >&2
+    limit=240
+  fi
+  if (( limit < tail_lines )); then
+    tail_lines="$limit"
+  fi
+  local context_lines=$((limit - tail_lines))
+  if (( context_lines > 0 )); then
+    echo "Failure markers and context (up to ${context_lines} lines):" >&2
+    awk -v limit="$context_lines" '
+      function emit(n, line) {
+        if (n <= last) return
+        if (count < limit) { print line; count++ } else { truncated = 1 }
+        last = n
+      }
+      {
+        recent[NR % 4] = $0
+        if ($0 ~ /--- FAIL|^FAIL([[:space:]]|$)|panic:|test timed out|build failed|^# /) {
+          for (i = NR - 3; i <= NR; i++)
+            if (i > 0) emit(i, recent[i % 4])
+          through = NR + 3
+        } else if (NR <= through) emit(NR, $0)
+      }
+      END { if (truncated) print "... additional failure context omitted; see full log" }
+    ' "$log" >&2
+  fi
+  echo "Last ${tail_lines} log lines:" >&2
+  tail -n "$tail_lines" "$log" >&2
+}
+export -f print_job_failure
+
 set +e
 # Sever gate-FD inheritance at the fan-out boundary (ga-owh20p): the slot FD
 # is closed inside this subshell before any job starts, so no job — and no
@@ -376,7 +440,7 @@ run_fan_out() {
   else
     status=$?
     echo "[$label] failed with exit ${status}; log: ${log}" >&2
-    sed -n '"'"'1,240p'"'"' "$log" >&2
+    print_job_failure "$log"
     exit "$status"
   fi
 ' _
