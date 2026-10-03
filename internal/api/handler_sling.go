@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -124,6 +125,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		GraphStore: s.state.GraphBeadStore().Store,
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
+		SessionLookup: func(identifier string) (session.Info, error) {
+			return session.NewStore(s.state.SessionsBeadStore()).ResolveAddress(identifier, false)
+		},
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			return s.sourceWorkflowStores(), nil
 		},

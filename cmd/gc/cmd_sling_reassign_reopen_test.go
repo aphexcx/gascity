@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -8,16 +11,65 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestOnFormulaReassignReopensOrderClaimedBead is the end-to-end regression for
-// gastownhall/gascity#3231, mirroring the exact failing command from the
-// issue: `gc sling <pool> <bead> --on mol-polecat-work --no-convoy --reassign`.
-//
-// An order claims the bead first (status=in_progress, assignee=order:<name>);
-// without the reopen, --reassign clears the assignee but leaves the status
-// in_progress, so the routed bead never becomes a Ready candidate and no pool
-// worker can claim it. After the fix the source bead is routed to the pool AND
-// open + unassigned, i.e. claimable.
-func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
+func TestSlingRetainsCitySessionOwnerOfRigWork(t *testing.T) {
+	for _, identifier := range []string{"session-1", "named-seat", "runtime-seat"} {
+		t.Run(identifier, func(t *testing.T) {
+			for _, unavailable := range []bool{false, true} {
+				t.Run(map[bool]string{false: "city session", true: "city unavailable"}[unavailable], func(t *testing.T) {
+					a := config.Agent{Name: "builder", Dir: "project", MaxActiveSessions: intPtr(2)}
+					cfg := &config.City{
+						Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{a},
+						Rigs: []config.Rig{{Name: "project", Path: "/project", Prefix: "work"}},
+					}
+					deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+					deps.StoreRef = "rig:project"
+					work := beads.Bead{
+						ID: "work-1", Type: "task", Status: "in_progress", Assignee: identifier,
+						Metadata: map[string]string{"gc.routed_to": a.QualifiedName()},
+					}
+					deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{work}, nil)
+					cityStore := beads.NewMemStoreFrom(1, []beads.Bead{{
+						ID: "session-1", Type: "session", Status: "open",
+						Metadata: map[string]string{"template": a.QualifiedName(), "state": "active", "alias": "named-seat", "session_name": "runtime-seat"},
+					}}, nil)
+					previous := slingOpenCityStore
+					slingOpenCityStore = func(path string) (beads.Store, error) {
+						if path != deps.CityPath {
+							t.Fatalf("city path = %q, want %q", path, deps.CityPath)
+						}
+						if unavailable {
+							return nil, errors.New("session ledger unavailable")
+						}
+						return cityStore, nil
+					}
+					t.Cleanup(func() { slingOpenCityStore = previous })
+					before, err := deps.Store.Get(work.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					opts := testOpts(a, work.ID)
+					opts.NoFormula, opts.NoConvoy = true, true
+					opts.Nudge = true
+					code := doSling(opts, deps, deps.Store, stdout, stderr)
+					if unavailable {
+						if code == 0 || !strings.Contains(stderr.String(), "session ledger unavailable") {
+							t.Fatalf("missing session-ledger failure: code=%d stderr=%s", code, stderr.String())
+						}
+					} else if code != 0 || !strings.Contains(stdout.String(), "already routed") {
+						t.Fatalf("existing session-owned route was not preserved: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+					}
+					after, err := deps.Store.Get(work.ID)
+					if err != nil || !reflect.DeepEqual(after, before) {
+						t.Fatalf("session claim changed: before=%+v after=%+v err=%v", before, after, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The CLI forwards explicit reassignment into formula-backed held-work routing.
+func TestOnFormulaReassignReopensHeldBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -25,8 +77,9 @@ func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
-		{ID: "BL-42", Title: "hotspot work", Type: "task", Status: "in_progress", Assignee: "order:mol-dog-jsonl"},
+		{ID: "BL-42", Title: "hotspot work", Type: "task", Status: "deferred", Assignee: "human"},
 	}, nil)
+	deps.Store = wrapStoreWithBeadPolicies(deps.Store, cfg)
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "mol-polecat-work"
@@ -46,9 +99,9 @@ func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
 		t.Errorf("gc.routed_to = %q, want polecat", got)
 	}
 	if source.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty after --reassign (order actor must not retain pool work)", source.Assignee)
+		t.Errorf("Assignee = %q, want empty after --reassign (the human hold must be released)", source.Assignee)
 	}
 	if source.Status != "open" {
-		t.Errorf("Status = %q, want open after --reassign so the pool can claim it (#3231)", source.Status)
+		t.Errorf("Status = %q, want open after --reassign so the pool can claim it", source.Status)
 	}
 }

@@ -359,6 +359,7 @@ func computePoolDesiredStatesAt(
 	// wake_mode="fresh" agent must not resume one of these stale rows — see the
 	// resume-tier guard below.
 	asleepSessionBeadIDs := make(map[string]bool)
+	quarantinedSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -381,6 +382,9 @@ func computePoolDesiredStatesAt(
 		}
 		if sb.State == sessionpkg.StateAsleep {
 			asleepSessionBeadIDs[sb.ID] = true
+		}
+		if metadataTimeInFuture(sb.QuarantinedUntil, decisionTime) {
+			quarantinedSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -452,7 +456,9 @@ func computePoolDesiredStatesAt(
 				// already uses. A live (non-asleep) session still resumes;
 				// agents with unset or wake_mode="resume" are unaffected.
 				// (gastownhall/gascity#4849)
-				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+				// Keep the owner during backoff so a fresh identity cannot bypass
+				// its quarantine. The reconciler gates the retained session's wake.
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] && !quarantinedSessionBeadIDs[sessionBeadID] {
 					if _, ok := wakeRequestedTemplates[template]; ok {
 						continue
 					}
@@ -687,7 +693,48 @@ func computePoolDesiredStatesAt(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	states := applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	bindRateLimitedPoolMinimumRequests(states, inFlightNewRequests, sessionInfoByID, decisionTime)
+	return states
+}
+
+// bindRateLimitedPoolMinimumRequests assigns already-admitted minimum slots to
+// parked sessions. Binding after caps preserves demand, priority, and minimum
+// arithmetic while preventing an anonymous minimum replacement from bypassing
+// a provider hold. A concrete session can fill only one accepted request.
+func bindRateLimitedPoolMinimumRequests(states []PoolDesiredState, candidatesByTemplate map[string][]SessionRequest, infos map[string]sessionpkg.Info, decisionTime time.Time) {
+	used := make(map[string]bool)
+	for _, state := range states {
+		for _, req := range state.Requests {
+			if req.SessionBeadID != "" {
+				used[req.SessionBeadID] = true
+			}
+		}
+	}
+	for i := range states {
+		candidates := candidatesByTemplate[states[i].Template]
+		for j := range states[i].Requests {
+			req := &states[i].Requests[j]
+			if !req.FloorGuarantee || req.SessionBeadID != "" {
+				continue
+			}
+			for len(candidates) > 0 {
+				candidate := candidates[0]
+				candidates = candidates[1:]
+				if used[candidate.SessionBeadID] || !poolSessionHasActiveRateLimit(infos[candidate.SessionBeadID], decisionTime) {
+					continue
+				}
+				*req = candidate
+				req.FloorGuarantee = true
+				used[candidate.SessionBeadID] = true
+				break
+			}
+		}
+	}
+}
+
+func poolSessionHasActiveRateLimit(info sessionpkg.Info, decisionTime time.Time) bool {
+	return !info.Closed && !isDrainedSessionInfo(info) && info.SleepReason == string(sessionpkg.SleepReasonRateLimit) && metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
 }
 
 // assignedWorkRequestStoreRef translates census shorthand at the request boundary.
@@ -873,7 +920,11 @@ func poolNewDemandRequests(
 				protected[template] = append(protected[template], req)
 				continue
 			}
-			if poolSessionConsumesNewDemandInfo(sb) {
+			// A provider refusal before the first claim still occupies the
+			// demand that created this lane. Retain its concrete identity so
+			// an anonymous replacement cannot bypass the retry deadline. This
+			// consumes existing demand without establishing a demand floor.
+			if poolSessionConsumesNewDemandInfo(sb) || poolSessionHasActiveRateLimit(sb, decisionTime) {
 				inFlight[template] = append(inFlight[template], req)
 			}
 		}
@@ -964,6 +1015,9 @@ func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City,
 // creating sessions still represent already-spent new demand; lifecycle code
 // owns stale-creating recovery with its clock-aware predicate.
 func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
+	if info.Closed || isDrainedSessionInfo(info) || sessionHasProviderTerminalErrorInfo(info) {
+		return false
+	}
 	if info.PendingCreateClaim {
 		return true
 	}

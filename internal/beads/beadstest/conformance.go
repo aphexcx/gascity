@@ -830,6 +830,8 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	RunShippedReadyConformance(t, newStore)
+
 	t.Run("ReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked", func(t *testing.T) {
 		s := newStore()
 		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
