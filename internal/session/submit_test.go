@@ -799,10 +799,13 @@ func TestPollerKeyFromInfoMatchesBead(t *testing.T) {
 	}
 }
 
+// macOS /bin/sh can re-exec after the readiness check, making kern.procargs2
+// briefly return EIO under load. Use /bin/bash directly to keep argv stable
+// like the gc binary.
 func startSubmitPollerLikeProcess(t *testing.T, cityPath, sessionName, agentName string) *exec.Cmd {
 	t.Helper()
 	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\nread _hold\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake poller): %v", err)
 	}
 	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
