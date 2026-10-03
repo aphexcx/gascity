@@ -633,6 +633,13 @@ wins:
 LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
 ```
 
+On Darwin, the parallel runner defaults scratch space to the per-user temp
+directory from `getconf DARWIN_USER_TEMP_DIR`. A caller's `TMPDIR` takes
+precedence; a short, staff-owned path without a `/private` alias is valid, and
+tests must not assume that alias exists. Set `LOCAL_TEST_LOG_DIR` to create and
+retain logs at a chosen path. `make test-fast-parallel` preserves both settings
+and the `GC_TEST_INNER_P` override through its environment scrub.
+
 Both `go test` jobs in `make test-fast-parallel` — the `unit-core` package sweep
 and the `cmd/gc` shards — share one 20m per-package budget. A package's wall
 time under the fan-out is well above its runtime in isolation, so with Go's

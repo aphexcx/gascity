@@ -9,17 +9,18 @@ import (
 
 // wantTestTMPDirDefault is the fallback TMPDIR the test-running wrappers
 // (Makefile TEST_ENV, and the shard scripts below) must use when the calling
-// shell has not already set TMPDIR itself. It must stay off the shared,
-// size-capped /tmp tmpfs (see AGENTS.md "Build Cache Conventions") and it
-// must stay short: internal/testutil.ShortTempDir roots test-owned socket
+// shell has not already set TMPDIR itself. The parallel runner's platform
+// default is covered by test-local-environment.sh. Defaults must stay off the
+// shared, size-capped /tmp tmpfs (see AGENTS.md "Build Cache Conventions") and
+// stay short: internal/testutil.ShortTempDir roots test-owned socket
 // directories at os.TempDir() (== $TMPDIR on Linux), and Unix socket paths
 // built under it must stay under the sun_path limit (104 bytes on macOS, 108
 // on Linux; see internal/runtime/acp and internal/runtime/subprocess).
 const wantTestTMPDirDefault = "/var/tmp"
 
-// TestMakefileTestEnvDefaultsTMPDirOffSharedTmpTmpfs guards ga-ntbpyb.4: make
-// test-fast-parallel (and every other $(TEST_ENV)-wrapped target) must not
-// fall back to the shared /tmp tmpfs when the caller leaves TMPDIR unset.
+// TestMakefileTestEnvDefaultsTMPDirOffSharedTmpTmpfs guards ga-ntbpyb.4:
+// TEST_ENV-wrapped targets must not fall back to the shared /tmp tmpfs when
+// the caller leaves TMPDIR unset.
 func TestMakefileTestEnvDefaultsTMPDirOffSharedTmpTmpfs(t *testing.T) {
 	got := runMakefileTestEnvTMPDirPrintTarget(t, nil)
 	if got == "/tmp" || strings.HasPrefix(got, "/tmp/") {
@@ -111,8 +112,9 @@ print-test-env-tmpdir:
 // TMPDIR default. Each count is the exact number of "${TMPDIR:-...}"
 // fallback sites in that file today; a changed count means a site was added
 // or removed and this ledger must be updated deliberately, not silently.
+// test-local-environment.sh exercises test-local-parallel's platform defaults
+// through its real log and worker environment boundaries.
 var shardScriptTMPDirDefaults = map[string]int{
-	"scripts/test-local-parallel":    2, // log_dir mktemp + per-job env
 	"scripts/go-test-observable":     1, // per-run log file mktemp
 	"scripts/test-go-test-shard":     1, // per-shard env
 	"scripts/test-integration-shard": 1, // per-shard env

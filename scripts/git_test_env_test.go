@@ -162,6 +162,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		"local_jobs=1",
 		"jobspecs=('probe::" + probeCmd + "')",
 		"export LOCAL_TEST_LOG_DIR=" + shellQuote(logDir),
+		"export TEST_LOCAL_TMPDIR=" + shellQuote(os.TempDir()),
 		`export TEST_LOCAL_NICE=""`,
 		"export TEST_LOCAL_GOPATH=" + shellQuote(goEnvValue(t, "GOPATH")),
 		"export TEST_LOCAL_GOCACHE=" + shellQuote(goEnvValue(t, "GOCACHE")),
