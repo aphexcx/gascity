@@ -315,6 +315,26 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
+# npm dependencies can contain Go packages. Keep them out of repository gates
+# without introducing a module boundary around the embedded dashboard.
+# Capture go list before filtering so discovery failures stop the caller.
+# Optional call argument supplies build tags or a coverage output template.
+# Relative paths work for both the Go tool and golangci-lint's package loader.
+PKG_PATH = {{if eq .ImportPath .Module.Path}}.{{else}}.{{slice .ImportPath (len .Module.Path)}}{{end}}
+PKGS = $$(packages=$$(GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go list -f '$(PKG_PATH)' $(1) ./...) && printf '%s\n' "$$packages" | grep -vE '(^|/)node_modules(/|$$)')
+# Match golangci-lint's explicit tags during discovery, including repeated
+# string-slice flags. With no flag, go list retains the ambient GOFLAGS tags.
+define LINT_PKGS
+$$(set -- $(LINT_FLAGS); unset tags; \
+	while [ "$$#" -gt 0 ]; do \
+		if [ "$$1" = --build-tags ]; then \
+			shift; [ "$$#" -gt 0 ] || exit 2; tags="$${tags:+$$tags,}$$1"; \
+		elif [ "$${1%%=*}" = --build-tags ]; then \
+			tags="$${tags:+$$tags,}$${1#*=}"; \
+		fi; shift; \
+	done; \
+	pkgs="$(call PKGS,$${tags+-tags="$$tags"})" || exit $$?; printf '%s\n' "$$pkgs")
+endef
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 CI_STATIC_GO ?= go
 
@@ -323,11 +343,13 @@ lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
+	@pkgs="$(LINT_PKGS)" || exit $$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
+	@pkgs="$(LINT_PKGS)" || exit $$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files $$pkgs
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
@@ -389,7 +411,8 @@ fmt: $(GOLANGCI_LINT)
 
 ## vet: run go vet
 vet:
-	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet ./...
+	@pkgs="$(PKGS)" || exit $$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet $$pkgs
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into
@@ -478,7 +501,8 @@ test-ci-policy:
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	@pkgs="$(PKGS)" || exit $$?; \
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $$pkgs
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
 ## the provider's own tier under internal/runtime/herdr, plus the controller's
@@ -494,11 +518,12 @@ test-herdr-live:
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
 # sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+MAC_UNIT_PKGS = $$(pkgs="$(PKGS)" && printf '%s\n' "$$pkgs" | grep -v '/cmd/gc$$')
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+	@pkgs="$(MAC_UNIT_PKGS)" || exit $$?; \
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $$pkgs
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
@@ -677,7 +702,8 @@ test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test
 
 ## test-integration: run all tests including integration (tmux, etc.)
 test-integration:
-	$(TEST_ENV) go test -tags integration -timeout 30m ./...
+	@pkgs="$(call PKGS,-tags integration)" || exit $$?; \
+	$(TEST_ENV) go test -tags integration -timeout 30m $$pkgs
 
 ## test-integration-huma: run just the Huma binary smoke test
 test-integration-huma:
@@ -818,7 +844,7 @@ check-docs:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
 # cmd/gc excluded: it runs sharded below in test-cover to stay under per-package timeout
-UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
+UNIT_COVER_PKGS_NONCMDGC = $$(pkgs="$(call PKGS,-f '{{if or .TestGoFiles .XTestGoFiles}}$(PKG_PATH){{end}}')" && printf '%s\n' "$$pkgs" | grep -v -e /session/tmux -e /beadstest -e '/cmd/gc$$')
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep.
 ## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each
@@ -826,7 +852,8 @@ UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFile
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
 test-cover: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@pkgs="$(UNIT_COVER_PKGS_NONCMDGC)" || exit $$?; \
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $$pkgs
 	@rm -f coverage.cmdgc.*.txt
 	@for s in $$(seq 1 $(CMD_GC_COVER_TOTAL)); do \
 		$(TEST_ENV) GO_TEST_COVERPROFILE="coverage.cmdgc.$$s.txt" \
@@ -838,11 +865,13 @@ test-cover: test-fsys-darwin-compile
 ## test-cover-mac: Mac coverage sweep with cmd/gc excluded; cmd/gc runs via the Mac sharded job.
 ## Running the full test-cover cmd/gc shards sequentially on Mac would exceed the 25m job cap.
 test-cover-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@pkgs="$(UNIT_COVER_PKGS_NONCMDGC)" || exit $$?; \
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.txt $$pkgs
 
 ## test-cover-noncmdgc: run unit coverage for all packages except cmd/gc (CI parallel half).
 test-cover-noncmdgc: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
+	@pkgs="$(UNIT_COVER_PKGS_NONCMDGC)" || exit $$?; \
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $$pkgs
 
 ## test-cover-cmdgc-shard: run unit coverage for one cmd/gc shard (CMD_GC_COVER_SHARD of CMD_GC_COVER_TOTAL).
 test-cover-cmdgc-shard:

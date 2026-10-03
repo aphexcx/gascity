@@ -4084,6 +4084,10 @@ func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
+	// gf-7k0 / pc_d957cb6edfae: Darwin passed 20 isolated and 20 loaded
+	// runs (eight CPU-bound companions, 2026-10-03). The reported false
+	// negative was not reproduced; startPollerLikeProcess already waits for
+	// the same command-line predicate as existingPollerPID.
 	cityPath := filepath.Join(t.TempDir(), "city with spaces")
 	sessionName := "sess-worker"
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, "session-id")
