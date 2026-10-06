@@ -272,7 +272,7 @@ change as any other waiver.
 Two checked ledgers carry dated waivers: the runtime provider ledger
 (`internal/testutil/providerledger`) and the resource census
 (`internal/testpolicy/resourcecensus`). Both are untagged, both land in the
-unit-core job, and that job runs in `.githooks/pre-push`. A date passing is
+unit-core shards, and those shards run in `.githooks/pre-push`. A date passing is
 therefore enough on its own to turn every Go-touching push in the fleet red with
 no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
 and both times it was cleared by whoever happened to be blocked rather than by
@@ -608,7 +608,7 @@ processes.
 Use these as the default entry points:
 
 ```bash
-# Fast unit baseline, with cmd/gc split into shards.
+# Fast unit baseline, with core packages and cmd/gc split into shards.
 make test-fast-parallel
 
 # Full process-backed cmd/gc suite, sharded.
@@ -630,7 +630,7 @@ If memory cannot be detected, they use three jobs. An explicit override always
 wins:
 
 ```bash
-LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
+LOCAL_TEST_JOBS=48 CORE_SHARD_TOTAL=8 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
 ```
 
 On Darwin, the parallel runner defaults scratch space to the per-user temp
@@ -640,19 +640,40 @@ tests must not assume that alias exists. Set `LOCAL_TEST_LOG_DIR` to create and
 retain logs at a chosen path. `make test-fast-parallel` preserves both settings
 and the `GC_TEST_INNER_P` override through its environment scrub.
 
-Both `go test` jobs in `make test-fast-parallel` — the `unit-core` package sweep
-and the `cmd/gc` shards — share one 20m per-package budget. A package's wall
-time under the fan-out is well above its runtime in isolation, so with Go's
-built-in 10m default (which the unit sweep alone used to inherit) contention
-panicked six packages with `test timed out after 10m0s` while they were still
-working through their test lists. The unit sweep and the shards contend for the
-same box, so they share one number rather than drifting onto two. The
-integration shards keep `scripts/test-integration-shard`'s own 30m default, and
-the `productmetrics-testhook` job scheduled by `full`/`cmd-gc-process` still
-inherits Go's 10m. Raise it on a slow or heavily shared host:
+The `fast` and `full` modes split non-`cmd/gc` packages into six core shards
+by default. Set `CORE_SHARD_TOTAL` to a positive integer to change that count.
+The runner sorts package paths, places `examples/bd/dolt`, `examples/gastown`,
+`internal/runtime/tmux`, and `scripts` first, then distributes packages
+round-robin. With at least four shards, those heavy packages run separately.
+Every package runs once; empty shards are omitted. The actual job count feeds
+the existing `inner_p` calculation, so adding shards keeps the total parallel
+budget bounded by `LOCAL_TEST_JOBS`.
+
+The core and `cmd/gc` shards share one 20m per-package budget and run with
+`-count=1`. The integration shards keep `scripts/test-integration-shard`'s own
+30m default, and the `productmetrics-testhook` job scheduled by
+`full`/`cmd-gc-process` inherits Go's 10m. Raise the shared budget on a slow host:
 
 ```bash
 GO_TEST_TIMEOUT=30m make test-fast-parallel
+```
+
+When a job fails, the runner prints its log path, Go failure markers with up to
+three surrounding lines, and the last 80 log lines. `OBSERVABLE_FAILURE_LINES`
+sets the total content-line budget (default: 240); the tail takes priority when
+the budget is smaller than 80. Headings and a truncation notice add at most four
+lines. The full log remains available at the printed path.
+
+For focused fast tests, use `test-pkg` so the same scrubbed `TEST_ENV`, readonly
+module flags, and platform CGO flags apply. On Darwin this includes Homebrew's
+ICU headers and libraries. `PKG` is required; `RUN` defaults to all tests and
+`COUNT` to 1. Like `make test`, this target sets `GC_FAST_UNIT=1`, bounds package
+parallelism to four, and uses a 15m per-package timeout. Process-backed and
+integration suites keep their dedicated targets.
+
+```bash
+make test-pkg PKG=./internal/doctor
+make test-pkg PKG=./internal/doctor RUN='^TestName$' COUNT=1
 ```
 
 For one package, shard top-level Go tests directly:
