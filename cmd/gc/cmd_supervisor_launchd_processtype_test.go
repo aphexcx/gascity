@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -18,7 +20,7 @@ import (
 
 // The launchd tests below never reach the real launchd or the real
 // ~/Library/LaunchAgents: HOME and GC_HOME point at temporary directories and
-// supervisorLaunchctlRun / supervisorLaunchdLoaded are stubbed (hq-a6cny).
+// supervisorLaunchctlRun / supervisorLaunchdPrint are stubbed (hq-a6cny).
 
 const launchdProcessTypeLines = "    <key>ProcessType</key>\n    <string>Interactive</string>\n"
 
@@ -412,35 +414,173 @@ func TestLaunchdPrintSpawnType(t *testing.T) {
 }
 
 func TestProbeSupervisorLaunchdSpawnType(t *testing.T) {
-	old := supervisorLaunchdLoaded
-	t.Cleanup(func() { supervisorLaunchdLoaded = old })
+	const label = "com.gascity.supervisor"
+	old := supervisorLaunchdPrint
+	t.Cleanup(func() { supervisorLaunchdPrint = old })
 
-	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
-		return true, false, label + " = {\n\tspawn type = daemon (3)\n}"
+	cases := []struct {
+		name string
+		out  string
+		err  error
+		want doctor.SupervisorLaunchdSpawnType
+	}{
+		{
+			name: "loaded",
+			out:  "gui/501/" + label + " = {\n\tspawn type = daemon (3)\n}\n",
+			want: doctor.SupervisorLaunchdSpawnType{Label: label, Loaded: true, SpawnType: "daemon"},
+		},
+		{
+			name: "absent by exit status",
+			out:  "Bad request.\n",
+			err:  stubExitError{code: launchdPrintNotFoundExitCode},
+			want: doctor.SupervisorLaunchdSpawnType{Label: label},
+		},
+		{
+			name: "absent by message",
+			out:  "Could not find service \"" + label + "\" in domain for user gui: 501\n",
+			err:  stubExitError{code: 1},
+			want: doctor.SupervisorLaunchdSpawnType{Label: label},
+		},
+		// A failure that does not confirm absence says nothing about the job.
+		{
+			name: "unreadable with an exit status",
+			out:  "Bad request.\n",
+			err:  stubExitError{code: 5},
+			want: doctor.SupervisorLaunchdSpawnType{Label: label, Unreadable: true, ExitStatus: 5},
+		},
+		{
+			name: "unreadable after a signal",
+			err:  stubExitError{code: -1},
+			want: doctor.SupervisorLaunchdSpawnType{Label: label, Unreadable: true},
+		},
+		{
+			name: "unreadable without an exit status",
+			err:  exec.ErrNotFound,
+			want: doctor.SupervisorLaunchdSpawnType{Label: label, Unreadable: true},
+		},
 	}
-	got := probeSupervisorLaunchdSpawnType("com.gascity.supervisor")
-	want := doctor.SupervisorLaunchdSpawnType{Label: "com.gascity.supervisor", Loaded: true, SpawnType: "daemon"}
-	if got != want {
-		t.Fatalf("probe = %+v, want %+v", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			supervisorLaunchdPrint = func(got string) ([]byte, error) {
+				if got != label {
+					t.Fatalf("launchctl print label = %q, want %q", got, label)
+				}
+				return []byte(tc.out), tc.err
+			}
+			if got := probeSupervisorLaunchdSpawnType(label); got != tc.want {
+				t.Fatalf("probe = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
+}
 
-	supervisorLaunchdLoaded = func(string) (bool, bool, string) {
-		return false, true, "Could not find service"
-	}
-	got = probeSupervisorLaunchdSpawnType("com.gascity.supervisor")
-	want = doctor.SupervisorLaunchdSpawnType{Label: "com.gascity.supervisor"}
-	if got != want {
-		t.Fatalf("probe for an absent job = %+v, want %+v", got, want)
-	}
+// TestSupervisorLaunchdSpawnTypeWarningNeverCarriesLaunchctlOutput pins that
+// none of launchctl's output reaches the unreadable-job warning. A job dump
+// carries the job's environment values, and the supervisor plist's
+// EnvironmentVariables hold API keys: a launchctl print that prints a dump and
+// then fails (a partial dump, a termination) must not put them in gc doctor's
+// result, its text output or its JSON (hq-a6cny).
+func TestSupervisorLaunchdSpawnTypeWarningNeverCarriesLaunchctlOutput(t *testing.T) {
+	const marker = "sk-marker-xyz"
+	// A partial dump in launchctl print's layout: the environment block, then
+	// the output stops before the closing brace.
+	dump := "gui/501/" + defaultSupervisorLaunchdLabel + " = {\n" +
+		"\tactive count = 1\n" +
+		"\tstate = running\n" +
+		"\tenvironment = {\n" +
+		"\t\tANTHROPIC_API_KEY => " + marker + "\n" +
+		"\t\tPATH => /usr/bin:/bin\n" +
+		"\t}\n" +
+		"\tspawn type = daemon (3)\n"
+	old := supervisorLaunchdPrint
+	t.Cleanup(func() { supervisorLaunchdPrint = old })
 
-	// A failure that does not confirm absence says nothing about the job.
-	supervisorLaunchdLoaded = func(string) (bool, bool, string) {
-		return false, false, "Bad request."
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
 	}
-	got = probeSupervisorLaunchdSpawnType("com.gascity.supervisor")
-	want = doctor.SupervisorLaunchdSpawnType{Label: "com.gascity.supervisor", Unreadable: true, Detail: "Bad request."}
-	if got != want {
-		t.Fatalf("probe for an unreadable job = %+v, want %+v", got, want)
+	t.Setenv("GC_DOLT", "skip")
+	withAgents := &config.City{Workspace: config.Workspace{Name: "demo"}, Agents: []config.Agent{{Name: "worker"}}}
+
+	failures := []struct {
+		name       string
+		err        error
+		wantStatus string
+	}{
+		{name: "exit status", err: stubExitError{code: 5}, wantStatus: "failed (exit status 5)"},
+		{name: "signal", err: stubExitError{code: -1}, wantStatus: "failed (no exit status)"},
+		{name: "no exit status", err: errors.New("launchctl: " + dump), wantStatus: "failed (no exit status)"},
+	}
+	for _, f := range failures {
+		t.Run(f.name, func(t *testing.T) {
+			supervisorLaunchdPrint = func(string) ([]byte, error) { return []byte(dump), f.err }
+			probe := probeSupervisorLaunchdSpawnType(defaultSupervisorLaunchdLabel)
+			if !probe.Unreadable {
+				t.Fatalf("probe = %+v, want Unreadable", probe)
+			}
+			if got := fmt.Sprintf("%+v", probe); strings.Contains(got, marker) {
+				t.Fatalf("probe carries the environment marker: %s", got)
+			}
+
+			var check doctor.Check
+			for _, c := range buildDoctorChecks(cityDir, withAgents, nil, buildDoctorChecksOpts{
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+				LaunchdSpawnType:     &probe,
+			}) {
+				if c.Name() == "supervisor-launchd-spawn-type" {
+					check = c
+				}
+			}
+			if check == nil {
+				t.Fatal("supervisor-launchd-spawn-type not registered")
+			}
+			ctx := &doctor.CheckContext{CityPath: cityDir, Verbose: true}
+
+			collect := &doctor.Doctor{}
+			collect.Register(check)
+			report := collect.RunCollect(ctx, false)
+			r := requireSingleDoctorResult(t, report)
+			if r.Status != doctor.StatusWarning {
+				t.Fatalf("Status = %v, want warning; message=%q", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "'launchctl print gui/$(id -u)/"+defaultSupervisorLaunchdLabel+"' "+f.wantStatus) {
+				t.Fatalf("Message = %q, want the launchctl command and %q", r.Message, f.wantStatus)
+			}
+			for field, got := range map[string]string{
+				"message":   r.Message,
+				"fix hint":  r.FixHint,
+				"details":   strings.Join(r.Details, "\n"),
+				"fix error": r.FixError,
+			} {
+				if strings.Contains(got, marker) {
+					t.Fatalf("result %s carries the environment marker: %q", field, got)
+				}
+			}
+
+			var jsonOut bytes.Buffer
+			if err := writeDoctorJSON(&jsonOut, report); err != nil {
+				t.Fatalf("writeDoctorJSON: %v", err)
+			}
+			var decoded doctorJSONReport
+			if err := json.Unmarshal(jsonOut.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode doctor JSON: %v; out=%q", err, jsonOut.String())
+			}
+			if len(decoded.Results) != 1 || decoded.Results[0].Name != "supervisor-launchd-spawn-type" || decoded.Results[0].Status != "warning" {
+				t.Fatalf("doctor JSON results = %+v, want the one supervisor-launchd-spawn-type warning", decoded.Results)
+			}
+			if strings.Contains(jsonOut.String(), marker) {
+				t.Fatalf("doctor JSON carries the environment marker: %s", jsonOut.String())
+			}
+
+			var text bytes.Buffer
+			stream := &doctor.Doctor{}
+			stream.Register(check)
+			doctor.PrintSummary(&text, stream.Run(ctx, &text, false))
+			if strings.Contains(text.String(), marker) {
+				t.Fatalf("doctor text output carries the environment marker: %s", text.String())
+			}
+		})
 	}
 }
 

@@ -1,9 +1,6 @@
 package doctor
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // SupervisorLaunchdSpawnType is what the caller (cmd/gc) read from
 // `launchctl print` for the supervisor's launchd job, once per doctor run on
@@ -15,10 +12,13 @@ type SupervisorLaunchdSpawnType struct {
 	Loaded bool
 	// Unreadable reports that launchctl print failed without confirming the
 	// job is absent, so whether it is loaded, and in which spawn type, is
-	// unknown. Detail carries launchctl's output.
+	// unknown.
 	Unreadable bool
-	// Detail is launchctl print's output when Unreadable.
-	Detail string
+	// ExitStatus is launchctl print's exit status when Unreadable, or 0 when
+	// it gave none (it did not start, or a signal ended it). The probe keeps
+	// none of launchctl's output: a job dump carries the job's environment
+	// values, API keys among them.
+	ExitStatus int
 	// SpawnType is the job's spawn type as launchctl prints it, lowercased
 	// ("interactive", "daemon", ...); empty when the line was absent.
 	SpawnType string
@@ -64,13 +64,13 @@ func (c *SupervisorLaunchdSpawnTypeCheck) Run(_ *CheckContext) *CheckResult {
 	label := c.probe.Label
 	switch {
 	case c.probe.Unreadable:
-		detail := strings.Join(strings.Fields(c.probe.Detail), " ")
-		if detail == "" {
-			detail = "no output"
+		status := "no exit status"
+		if c.probe.ExitStatus > 0 {
+			status = fmt.Sprintf("exit status %d", c.probe.ExitStatus)
 		}
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("could not read launchd job %s, so its spawn type is unknown: launchctl print failed (%s)", label, detail)
-		r.FixHint = fmt.Sprintf("run 'launchctl print gui/$(id -u)/%s' to see why it fails", label)
+		r.Message = fmt.Sprintf("could not read launchd job %s, so its spawn type is unknown: 'launchctl print gui/$(id -u)/%s' failed (%s)", label, label, status)
+		r.FixHint = fmt.Sprintf("run 'launchctl print gui/$(id -u)/%s' by hand to see why it fails", label)
 	case !c.probe.Loaded:
 		r.Message = fmt.Sprintf("launchd job %s is not loaded", label)
 	case c.probe.SpawnType == "":

@@ -70,6 +70,13 @@ var (
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
 	}
+	// supervisorLaunchdPrint runs `launchctl print` for a launchd job and
+	// returns its combined output and its error apart, for a caller that
+	// needs the exit status of a failure without its output: a job dump
+	// carries the job's environment values, API keys among them.
+	supervisorLaunchdPrint = func(label string) ([]byte, error) {
+		return exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+	}
 	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
 	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
 	// have it flow into the supervisor's launchd plist. Returns "" on

@@ -20,8 +20,8 @@ func TestSupervisorLaunchdSpawnTypeCheck_Metadata(t *testing.T) {
 
 // TestSupervisorLaunchdSpawnTypeCheckRun pins the hq-a6cny contract: a
 // loaded job in a non-interactive spawn type with agents configured warns, a
-// job launchctl could not read warns with launchctl's output, and every other
-// state is OK.
+// job launchctl could not read warns with launchctl's exit status (never its
+// output) whether or not agents are configured, and every other state is OK.
 func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 	const label = "com.gascity.supervisor"
 	cases := []struct {
@@ -41,19 +41,19 @@ func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 		},
 		{
 			name:             "job unreadable",
-			probe:            SupervisorLaunchdSpawnType{Label: label, Unreadable: true, Detail: "Bad request.\n\tCould not print domain"},
+			probe:            SupervisorLaunchdSpawnType{Label: label, Unreadable: true, ExitStatus: 5},
 			agentsConfigured: true,
 			wantStatus:       StatusWarning,
-			wantMessage:      "could not read launchd job " + label + ", so its spawn type is unknown: launchctl print failed (Bad request. Could not print domain)",
-			wantFixHint:      []string{"launchctl print gui/$(id -u)/" + label},
+			wantMessage:      "could not read launchd job " + label + ", so its spawn type is unknown: 'launchctl print gui/$(id -u)/" + label + "' failed (exit status 5)",
+			wantFixHint:      []string{"run 'launchctl print gui/$(id -u)/" + label + "' by hand"},
 		},
 		{
-			name:             "job unreadable without output or agents",
+			name:             "job unreadable without an exit status or agents",
 			probe:            SupervisorLaunchdSpawnType{Label: label, Unreadable: true},
 			agentsConfigured: false,
 			wantStatus:       StatusWarning,
-			wantMessage:      "launchctl print failed (no output)",
-			wantFixHint:      []string{"launchctl print gui/$(id -u)/" + label},
+			wantMessage:      "'launchctl print gui/$(id -u)/" + label + "' failed (no exit status)",
+			wantFixHint:      []string{"run 'launchctl print gui/$(id -u)/" + label + "' by hand"},
 		},
 		{
 			name:             "interactive",
