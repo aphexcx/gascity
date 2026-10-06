@@ -511,10 +511,7 @@ func probeSupervisorLaunchdSpawnType(label string) doctor.SupervisorLaunchdSpawn
 		probe.SpawnType = launchdPrintSpawnType(out)
 	case !launchdPrintReportsNotFound(err, strings.TrimSpace(string(out))):
 		probe.Unreadable = true
-		var ec exitCoder
-		if errors.As(err, &ec) && ec.ExitCode() > 0 {
-			probe.ExitStatus = ec.ExitCode()
-		}
+		probe.ExitStatus = launchdPrintExitStatus(err)
 	}
 	return probe
 }
