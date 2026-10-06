@@ -495,6 +495,8 @@ func TestSupervisorLaunchdSpawnTypeWarningNeverCarriesLaunchctlOutput(t *testing
 	old := supervisorLaunchdPrint
 	t.Cleanup(func() { supervisorLaunchdPrint = old })
 
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "isolated-home"))
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
