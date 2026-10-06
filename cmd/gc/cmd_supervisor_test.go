@@ -2456,7 +2456,7 @@ func TestUnloadSupervisorServiceDarwinDisablesBootsOutAndVerifiesAbsent(t *testi
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	supervisorLaunchdLoaded = func(string) (bool, bool, string) { return false, true, "" }
+	supervisorLaunchdLoaded = func(string) (bool, bool, int) { return false, true, 0 }
 	t.Cleanup(func() {
 		supervisorLaunchctlRun = oldRun
 		supervisorLaunchdLoaded = oldLoaded
@@ -2509,12 +2509,12 @@ func TestUnloadSupervisorServiceDarwinWaitsThroughSIGTERMedUntilAbsent(t *testin
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
+	supervisorLaunchdLoaded = func(string) (bool, bool, int) {
 		checks++
 		if checks < 3 {
-			return true, false, "state = SIGTERMed\npid = 4242\nlabel = " + label
+			return true, false, 0
 		}
-		return false, true, ""
+		return false, true, 0
 	}
 	supervisorLaunchdStopTimeout = time.Second
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2569,8 +2569,8 @@ func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 	oldTimeout := supervisorLaunchdStopTimeout
 	oldPoll := supervisorLaunchdStopPollInterval
 	supervisorLaunchctlRun = func(_ ...string) error { return nil }
-	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
-		return true, false, "state = running\npid = 4242\nlabel = " + label
+	supervisorLaunchdLoaded = func(string) (bool, bool, int) {
+		return true, false, 0
 	}
 	supervisorLaunchdStopTimeout = 5 * time.Millisecond
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2589,7 +2589,7 @@ func TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded(t *testing.T) {
 		t.Fatal("verifySupervisorServiceStopped returned nil, want loaded launchd target failure")
 	}
 	got := err.Error()
-	for _, want := range []string{"launchd target", "still loaded", supervisorLaunchdLabel(), "pid = 4242"} {
+	for _, want := range []string{"launchd target", "still loaded", supervisorLaunchdLabel()} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("error = %q, want %q", got, want)
 		}
@@ -2620,8 +2620,8 @@ func TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed(t *test
 	oldLoaded := supervisorLaunchdLoaded
 	oldTimeout := supervisorLaunchdStopTimeout
 	oldPoll := supervisorLaunchdStopPollInterval
-	supervisorLaunchdLoaded = func(string) (bool, bool, string) {
-		return false, false, "Bootstrap failed: 5: Input/output error"
+	supervisorLaunchdLoaded = func(string) (bool, bool, int) {
+		return false, false, 5
 	}
 	supervisorLaunchdStopTimeout = 5 * time.Millisecond
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2635,7 +2635,7 @@ func TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed(t *test
 	if err == nil {
 		t.Fatal("verifySupervisorServiceStopped returned nil for an unknown probe result, want failure")
 	}
-	for _, want := range []string{"could not be confirmed unloaded", supervisorLaunchdLabel(), "Input/output error"} {
+	for _, want := range []string{"could not be confirmed unloaded", supervisorLaunchdLabel(), "launchctl print failed (exit status 5)"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
 		}
@@ -2667,8 +2667,8 @@ func TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline(t *test
 	oldLoaded := supervisorLaunchdLoaded
 	oldTimeout := supervisorLaunchdStopTimeout
 	oldPoll := supervisorLaunchdStopPollInterval
-	supervisorLaunchdLoaded = func(label string) (bool, bool, string) {
-		return true, false, "state = running\npid = 4242\nlabel = " + label
+	supervisorLaunchdLoaded = func(string) (bool, bool, int) {
+		return true, false, 0
 	}
 	supervisorLaunchdStopTimeout = 45 * time.Second
 	supervisorLaunchdStopPollInterval = time.Millisecond
@@ -2720,6 +2720,121 @@ func TestLaunchdPrintReportsNotFound(t *testing.T) {
 			if got := launchdPrintReportsNotFound(tc.err, tc.detail); got != tc.want {
 				t.Fatalf("launchdPrintReportsNotFound(%v, %q) = %v, want %v", tc.err, tc.detail, got, tc.want)
 			}
+		})
+	}
+}
+
+// launchdJobDumpMarkerKey and launchdJobDumpMarkerValue are a synthetic
+// environment entry in a launchd job dump: a test that feeds the dump to a
+// launchd probe asserts that neither reaches an error or a command's output.
+const (
+	launchdJobDumpMarkerKey   = "GC_TEST_MARKER_SECRET"
+	launchdJobDumpMarkerValue = "gc-test-marker-value-7f3a9c"
+)
+
+// syntheticLaunchdJobDump is `launchctl print` output for a loaded job in
+// launchctl's layout, its environment block holding the marker entry the
+// way the supervisor plist's EnvironmentVariables hold API keys.
+func syntheticLaunchdJobDump(label string) string {
+	return "gui/501/" + label + " = {\n" +
+		"\tactive count = 1\n" +
+		"\tstate = running\n" +
+		"\tpid = 4242\n" +
+		"\tenvironment = {\n" +
+		"\t\t" + launchdJobDumpMarkerKey + " => " + launchdJobDumpMarkerValue + "\n" +
+		"\t\tPATH => /usr/bin:/bin\n" +
+		"\t}\n" +
+		"\tspawn type = interactive (4)\n" +
+		"}\n"
+}
+
+func assertNoLaunchdJobDump(t *testing.T, what, text string) {
+	t.Helper()
+	for _, leak := range []string{launchdJobDumpMarkerKey, launchdJobDumpMarkerValue, "environment = {"} {
+		if strings.Contains(text, leak) {
+			t.Fatalf("%s carries launchctl print output (%q): %q", what, leak, text)
+		}
+	}
+}
+
+// TestSupervisorLaunchdLoadedKeepsOnlyTheVerdict pins the probe's three
+// answers over launchctl print's results. Its third return is an exit
+// status, so none of launchctl's output can leave the probe (hq-ri0pu).
+func TestSupervisorLaunchdLoadedKeepsOnlyTheVerdict(t *testing.T) {
+	const label = "com.gascity.supervisor"
+	old := supervisorLaunchdPrint
+	t.Cleanup(func() { supervisorLaunchdPrint = old })
+
+	dump := syntheticLaunchdJobDump(label)
+	cases := []struct {
+		name           string
+		out            string
+		err            error
+		wantLoaded     bool
+		wantAbsent     bool
+		wantExitStatus int
+	}{
+		{name: "loaded", out: dump, wantLoaded: true},
+		{name: "absent by exit status", out: "Bad request.\n", err: stubExitError{code: launchdPrintNotFoundExitCode}, wantAbsent: true},
+		{name: "absent by message", out: "Could not find service \"" + label + "\" in domain for user gui: 501\n", err: stubExitError{code: 1}, wantAbsent: true},
+		// A failure that does not confirm absence says nothing about the job.
+		{name: "unknown with an exit status", out: dump, err: stubExitError{code: 5}, wantExitStatus: 5},
+		{name: "unknown after a signal", out: dump, err: stubExitError{code: -1}},
+		{name: "unknown without an exit status", err: exec.ErrNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			supervisorLaunchdPrint = func(got string) ([]byte, error) {
+				if got != label {
+					t.Fatalf("launchctl print label = %q, want %q", got, label)
+				}
+				return []byte(tc.out), tc.err
+			}
+			loaded, absent, exitStatus := supervisorLaunchdLoaded(label)
+			if loaded != tc.wantLoaded || absent != tc.wantAbsent || exitStatus != tc.wantExitStatus {
+				t.Fatalf("supervisorLaunchdLoaded = (%v, %v, %d), want (%v, %v, %d)",
+					loaded, absent, exitStatus, tc.wantLoaded, tc.wantAbsent, tc.wantExitStatus)
+			}
+		})
+	}
+}
+
+// TestWaitForSupervisorLaunchdAbsentTimeoutNeverCarriesJobDump is the
+// regression guard for hq-ri0pu: while the job is still loaded, launchctl
+// print's output is the job dump, the plist's environment values (API keys
+// among them) included, and the stop timeout error used to append it. The
+// error must say only what the probe found.
+func TestWaitForSupervisorLaunchdAbsentTimeoutNeverCarriesJobDump(t *testing.T) {
+	const label = "com.gascity.supervisor"
+	const target = "gui/501/" + label
+	old := supervisorLaunchdPrint
+	t.Cleanup(func() { supervisorLaunchdPrint = old })
+
+	dump := syntheticLaunchdJobDump(label)
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "still loaded", want: "launchd target " + target + " is still loaded after stop"},
+		// launchctl print can print a dump and then fail: a partial dump, a
+		// termination.
+		{name: "failed with an exit status", err: stubExitError{code: 5}, want: "launchd target " + target + " could not be confirmed unloaded after stop: launchctl print failed (exit status 5)"},
+		{name: "failed after a signal", err: stubExitError{code: -1}, want: "launchctl print failed (no exit status)"},
+		{name: "failed with the dump in its error", err: errors.New("launchctl: " + dump), want: "launchctl print failed (no exit status)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			supervisorLaunchdPrint = func(string) ([]byte, error) { return []byte(dump), tc.err }
+			// A deadline already past: the first probe is the last one.
+			err := waitForSupervisorLaunchdAbsent(label, target, time.Now())
+			if err == nil {
+				t.Fatal("waitForSupervisorLaunchdAbsent returned nil, want a timeout error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+			assertNoLaunchdJobDump(t, "timeout error", err.Error())
 		})
 	}
 }
@@ -6236,6 +6351,91 @@ func TestStopSupervisorWithWaitFailsWhenServiceAbsenceUnconfirmed(t *testing.T) 
 	}
 	if strings.Contains(stdout.String(), "Supervisor stopped.") {
 		t.Fatalf("stdout unexpectedly reports success when absence was unconfirmed: %q", stdout.String())
+	}
+}
+
+// TestStopSupervisorWithWaitNeverPrintsLaunchdJobDump drives the stop
+// command through the real absence verifier and probe, with only launchctl
+// print stubbed, returning a still-loaded job's dump until the deadline: the
+// stop must fail, and neither its text nor its JSON-mode output may carry
+// the dump (hq-ri0pu). launchctl's other verbs are stubbed to fail the test,
+// and HOME, GC_HOME and the runtime dir are temporary.
+func TestStopSupervisorWithWaitNeverPrintsLaunchdJobDump(t *testing.T) {
+	if goruntime.GOOS != "darwin" {
+		t.Skip("launchd path only applies on darwin")
+	}
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", jsonOut), func(t *testing.T) {
+			gcHome := shortTempDir(t, "gc-home-")
+			runtimeDir := shortTempDir(t, "gc-run-")
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+			path := supervisorLaunchdPlistPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("<plist/>"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			oldUnload := unloadSupervisorServiceHook
+			oldVerify := verifySupervisorServiceStoppedHook
+			oldRun := supervisorLaunchctlRun
+			oldPrint := supervisorLaunchdPrint
+			oldPoll := supervisorLaunchdStopPollInterval
+			unloadSupervisorServiceHook = func() error { return nil }
+			verifySupervisorServiceStoppedHook = verifySupervisorServiceStopped
+			supervisorLaunchctlRun = func(args ...string) error {
+				t.Errorf("launchctl %s reached during stop, want no launchd mutation", strings.Join(args, " "))
+				return nil
+			}
+			label := supervisorLaunchdLabel()
+			supervisorLaunchdPrint = func(got string) ([]byte, error) {
+				if got != label {
+					t.Errorf("launchctl print label = %q, want %q", got, label)
+				}
+				return []byte(syntheticLaunchdJobDump(got)), nil
+			}
+			supervisorLaunchdStopPollInterval = time.Millisecond
+			t.Cleanup(func() {
+				unloadSupervisorServiceHook = oldUnload
+				verifySupervisorServiceStoppedHook = oldVerify
+				supervisorLaunchctlRun = oldRun
+				supervisorLaunchdPrint = oldPrint
+				supervisorLaunchdStopPollInterval = oldPoll
+			})
+
+			var stopped atomic.Bool
+			sockPath := filepath.Join(gcHome, "supervisor.sock")
+			startTestSupervisorSocket(t, sockPath, func(cmd string) string {
+				switch cmd {
+				case "ping":
+					if stopped.Load() {
+						return ""
+					}
+					return "4242\n"
+				case "stop":
+					stopped.Store(true)
+					return "ok\ndone:ok\n"
+				}
+				return ""
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := stopSupervisorWithWaitJSON(&stdout, &stderr, true, 2*time.Second, jsonOut)
+
+			if code != 1 {
+				t.Fatalf("stop code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "platform service did not stop durably") ||
+				!strings.Contains(stderr.String(), "is still loaded after stop") {
+				t.Fatalf("stderr = %q, want the still-loaded failure", stderr.String())
+			}
+			assertNoLaunchdJobDump(t, "stop stdout", stdout.String())
+			assertNoLaunchdJobDump(t, "stop stderr", stderr.String())
+		})
 	}
 }
 
