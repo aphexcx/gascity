@@ -18,9 +18,10 @@ func TestSupervisorLaunchdSpawnTypeCheck_Metadata(t *testing.T) {
 	}
 }
 
-// TestSupervisorLaunchdSpawnTypeCheckRun pins the hq-a6cny contract: only a
-// loaded job in a non-interactive spawn type with agents configured warns;
-// every other state is OK.
+// TestSupervisorLaunchdSpawnTypeCheckRun pins the hq-a6cny contract: a
+// loaded job in a non-interactive spawn type with agents configured warns, a
+// job launchctl could not read warns with launchctl's output, and every other
+// state is OK.
 func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 	const label = "com.gascity.supervisor"
 	cases := []struct {
@@ -29,6 +30,7 @@ func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 		agentsConfigured bool
 		wantStatus       CheckStatus
 		wantMessage      string
+		wantFixHint      []string
 	}{
 		{
 			name:             "job not loaded",
@@ -36,6 +38,22 @@ func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 			agentsConfigured: true,
 			wantStatus:       StatusOK,
 			wantMessage:      "is not loaded",
+		},
+		{
+			name:             "job unreadable",
+			probe:            SupervisorLaunchdSpawnType{Label: label, Unreadable: true, Detail: "Bad request.\n\tCould not print domain"},
+			agentsConfigured: true,
+			wantStatus:       StatusWarning,
+			wantMessage:      "could not read launchd job " + label + ", so its spawn type is unknown: launchctl print failed (Bad request. Could not print domain)",
+			wantFixHint:      []string{"launchctl print gui/$(id -u)/" + label},
+		},
+		{
+			name:             "job unreadable without output or agents",
+			probe:            SupervisorLaunchdSpawnType{Label: label, Unreadable: true},
+			agentsConfigured: false,
+			wantStatus:       StatusWarning,
+			wantMessage:      "launchctl print failed (no output)",
+			wantFixHint:      []string{"launchctl print gui/$(id -u)/" + label},
 		},
 		{
 			name:             "interactive",
@@ -64,6 +82,12 @@ func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 			agentsConfigured: true,
 			wantStatus:       StatusWarning,
 			wantMessage:      "runs in the daemon spawn type, not interactive",
+			wantFixHint: []string{
+				"'gc supervisor install' to regenerate the plist with ProcessType=Interactive",
+				"reloads the supervisor when the plist changes",
+				"'gc supervisor install --force' reloads the job",
+				"launchctl print gui/$(id -u)/" + label,
+			},
 		},
 	}
 	for _, tc := range cases {
@@ -76,7 +100,10 @@ func TestSupervisorLaunchdSpawnTypeCheckRun(t *testing.T) {
 				t.Fatalf("Message = %q, want it to contain %q", r.Message, tc.wantMessage)
 			}
 			if tc.wantStatus == StatusWarning {
-				for _, want := range []string{"gc supervisor install", "ProcessType=Interactive", "launchctl print gui/$(id -u)/" + label} {
+				if len(tc.wantFixHint) == 0 {
+					t.Fatal("a warning case must name what its FixHint carries")
+				}
+				for _, want := range tc.wantFixHint {
 					if !strings.Contains(r.FixHint, want) {
 						t.Fatalf("FixHint = %q, want it to contain %q", r.FixHint, want)
 					}

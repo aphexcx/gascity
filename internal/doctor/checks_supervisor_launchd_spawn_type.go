@@ -1,6 +1,9 @@
 package doctor
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // SupervisorLaunchdSpawnType is what the caller (cmd/gc) read from
 // `launchctl print` for the supervisor's launchd job, once per doctor run on
@@ -10,25 +13,32 @@ type SupervisorLaunchdSpawnType struct {
 	Label string
 	// Loaded reports whether launchctl print found the job.
 	Loaded bool
+	// Unreadable reports that launchctl print failed without confirming the
+	// job is absent, so whether it is loaded, and in which spawn type, is
+	// unknown. Detail carries launchctl's output.
+	Unreadable bool
+	// Detail is launchctl print's output when Unreadable.
+	Detail string
 	// SpawnType is the job's spawn type as launchctl prints it, lowercased
 	// ("interactive", "daemon", ...); empty when the line was absent.
 	SpawnType string
 }
 
 // SupervisorLaunchdSpawnTypeCheck warns when the supervisor's launchd job is
-// not in the interactive spawn type while agents are configured. Every
-// session the supervisor spawns inherits the job's class, and launchd's
-// default for a job without ProcessType is the daemon class, which macOS
-// throttles: on Apple Silicon it holds the supervisor and every agent on the
-// efficiency cores at a clamped priority (hq-a6cny).
+// not in the interactive spawn type while agents are configured, and when
+// launchctl cannot read the job at all. Every session the supervisor spawns
+// inherits the job's class, and launchd's default for a job without
+// ProcessType is the daemon class, which macOS throttles: on Apple Silicon it
+// holds the supervisor and every agent on the efficiency cores at a clamped
+// priority (hq-a6cny).
 type SupervisorLaunchdSpawnTypeCheck struct {
 	probe            SupervisorLaunchdSpawnType
 	agentsConfigured bool
 }
 
 // NewSupervisorLaunchdSpawnTypeCheck returns a check over a spawn-type probe
-// the caller already ran. agentsConfigured gates the warning: a supervisor
-// with no agents has nothing to starve.
+// the caller already ran. agentsConfigured gates the spawn-type warning: a
+// supervisor with no agents has nothing to starve.
 func NewSupervisorLaunchdSpawnTypeCheck(probe SupervisorLaunchdSpawnType, agentsConfigured bool) *SupervisorLaunchdSpawnTypeCheck {
 	return &SupervisorLaunchdSpawnTypeCheck{probe: probe, agentsConfigured: agentsConfigured}
 }
@@ -53,6 +63,14 @@ func (c *SupervisorLaunchdSpawnTypeCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name(), Status: StatusOK}
 	label := c.probe.Label
 	switch {
+	case c.probe.Unreadable:
+		detail := strings.Join(strings.Fields(c.probe.Detail), " ")
+		if detail == "" {
+			detail = "no output"
+		}
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("could not read launchd job %s, so its spawn type is unknown: launchctl print failed (%s)", label, detail)
+		r.FixHint = fmt.Sprintf("run 'launchctl print gui/$(id -u)/%s' to see why it fails", label)
 	case !c.probe.Loaded:
 		r.Message = fmt.Sprintf("launchd job %s is not loaded", label)
 	case c.probe.SpawnType == "":
@@ -68,7 +86,7 @@ func (c *SupervisorLaunchdSpawnTypeCheck) Run(_ *CheckContext) *CheckResult {
 			label, c.probe.SpawnType,
 		)
 		r.FixHint = fmt.Sprintf(
-			"run 'gc supervisor install' to regenerate the plist with ProcessType=Interactive (it reloads the supervisor); sessions started before keep the old class until they are recreated. Check with: launchctl print gui/$(id -u)/%s | grep 'spawn type'",
+			"run 'gc supervisor install' to regenerate the plist with ProcessType=Interactive: it rewrites the plist and reloads the supervisor when the plist changes. If the plist already carries the key, 'gc supervisor install --force' reloads the job. Sessions started before keep the old class until they are recreated. Check with: launchctl print gui/$(id -u)/%s | grep 'spawn type'",
 			label,
 		)
 	}

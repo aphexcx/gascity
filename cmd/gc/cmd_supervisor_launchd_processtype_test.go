@@ -22,16 +22,24 @@ import (
 
 const launchdProcessTypeLines = "    <key>ProcessType</key>\n    <string>Interactive</string>\n"
 
-// launchdPlistTopLevelStrings decodes a rendered plist strictly and returns
-// the string values of its top-level dict by key. A decode error fails the
-// test, so every caller also proves the plist is well formed.
-func launchdPlistTopLevelStrings(t *testing.T, content string) map[string][]string {
+// launchdPlistEntry is one key of a plist's top-level dict and the element
+// that follows it: Value is that element's name ("string", "true", "array",
+// ...) and Text its character data when it is a <string>.
+type launchdPlistEntry struct {
+	Key, Value, Text string
+}
+
+// launchdPlistTopLevelEntries decodes a rendered plist strictly and returns
+// every key of its top-level dict in order, whatever its value's type, so a
+// duplicate key counts even when its value is not a string. A decode error,
+// or a key without exactly one value after it, fails the test, so every
+// caller also proves the plist is well formed.
+func launchdPlistTopLevelEntries(t *testing.T, content string) []launchdPlistEntry {
 	t.Helper()
 	dec := xml.NewDecoder(strings.NewReader(content))
 	dec.Strict = true
-	out := map[string][]string{}
+	var entries []launchdPlistEntry
 	var stack []string
-	pendingKey := ""
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -42,26 +50,37 @@ func launchdPlistTopLevelStrings(t *testing.T, content string) map[string][]stri
 		}
 		switch tok := tok.(type) {
 		case xml.StartElement:
-			topLevel := len(stack) == 2 && stack[0] == "plist" && stack[1] == "dict"
-			if !topLevel || (tok.Name.Local != "key" && tok.Name.Local != "string") {
-				if topLevel {
-					pendingKey = ""
-				}
+			if len(stack) != 2 || stack[0] != "plist" || stack[1] != "dict" {
 				stack = append(stack, tok.Name.Local)
 				continue
 			}
-			var text string
-			if err := dec.DecodeElement(&text, &tok); err != nil {
-				t.Fatalf("decoding <%s> in plist: %v\n%s", tok.Name.Local, err, content)
-			}
+			// A child of the top-level dict: a <key>, or the value after one.
+			// DecodeElement and Skip consume the element through its end tag.
+			awaitingValue := len(entries) > 0 && entries[len(entries)-1].Value == ""
 			if tok.Name.Local == "key" {
-				pendingKey = text
+				if awaitingValue {
+					t.Fatalf("plist key %q has no value\n%s", entries[len(entries)-1].Key, content)
+				}
+				var key string
+				if err := dec.DecodeElement(&key, &tok); err != nil {
+					t.Fatalf("decoding <key> in plist: %v\n%s", err, content)
+				}
+				entries = append(entries, launchdPlistEntry{Key: key})
 				continue
 			}
-			if pendingKey != "" {
-				out[pendingKey] = append(out[pendingKey], text)
+			if !awaitingValue {
+				t.Fatalf("top-level <%s> in plist without a <key> before it\n%s", tok.Name.Local, content)
 			}
-			pendingKey = ""
+			entry := &entries[len(entries)-1]
+			entry.Value = tok.Name.Local
+			if tok.Name.Local == "string" {
+				err = dec.DecodeElement(&entry.Text, &tok)
+			} else {
+				err = dec.Skip()
+			}
+			if err != nil {
+				t.Fatalf("decoding the value of plist key %q: %v\n%s", entry.Key, err, content)
+			}
 		case xml.EndElement:
 			stack = stack[:len(stack)-1]
 		}
@@ -69,14 +88,35 @@ func launchdPlistTopLevelStrings(t *testing.T, content string) map[string][]stri
 	if len(stack) != 0 {
 		t.Fatalf("rendered plist ends with unclosed elements %v\n%s", stack, content)
 	}
-	return out
+	if len(entries) > 0 && entries[len(entries)-1].Value == "" {
+		t.Fatalf("plist key %q has no value\n%s", entries[len(entries)-1].Key, content)
+	}
+	return entries
+}
+
+// launchdProcessTypeEntries returns every ProcessType key of the plist's
+// top-level dict, with its value.
+func launchdProcessTypeEntries(t *testing.T, content string) []launchdPlistEntry {
+	t.Helper()
+	var got []launchdPlistEntry
+	for _, e := range launchdPlistTopLevelEntries(t, content) {
+		if e.Key == "ProcessType" {
+			got = append(got, e)
+		}
+	}
+	return got
+}
+
+// launchdSingleInteractiveProcessType reports whether entries is exactly one
+// ProcessType whose value is the string Interactive.
+func launchdSingleInteractiveProcessType(entries []launchdPlistEntry) bool {
+	return len(entries) == 1 && entries[0].Value == "string" && entries[0].Text == "Interactive"
 }
 
 func requireLaunchdInteractiveProcessType(t *testing.T, content string) {
 	t.Helper()
-	got := launchdPlistTopLevelStrings(t, content)["ProcessType"]
-	if len(got) != 1 || got[0] != "Interactive" {
-		t.Fatalf("top-level ProcessType = %q, want exactly one \"Interactive\"\n%s", got, content)
+	if got := launchdProcessTypeEntries(t, content); !launchdSingleInteractiveProcessType(got) {
+		t.Fatalf("top-level ProcessType entries = %+v, want exactly one, the string Interactive\n%s", got, content)
 	}
 }
 
@@ -108,6 +148,46 @@ func lintLaunchdPlistWithPlutil(t *testing.T, content string) {
 	}
 }
 
+// TestLaunchdProcessTypeAssertionCountsEveryKey pins the assertion the tests
+// below rely on: it counts every top-level ProcessType key whatever its
+// value's type, so a second key with a non-string value fails it.
+func TestLaunchdProcessTypeAssertionCountsEveryKey(t *testing.T) {
+	plist := func(dict string) string {
+		return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gascity.supervisor</string>
+` + dict + `    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+`
+	}
+	cases := []struct {
+		name string
+		dict string
+		want bool
+	}{
+		{name: "one string Interactive", dict: launchdProcessTypeLines, want: true},
+		{name: "no key", dict: "", want: false},
+		{name: "a duplicate with an integer value", dict: launchdProcessTypeLines + "    <key>ProcessType</key>\n    <integer>4</integer>\n", want: false},
+		{name: "a duplicate with an integer value first", dict: "    <key>ProcessType</key>\n    <integer>4</integer>\n" + launchdProcessTypeLines, want: false},
+		{name: "a single integer value", dict: "    <key>ProcessType</key>\n    <integer>4</integer>\n", want: false},
+		{name: "another class", dict: "    <key>ProcessType</key>\n    <string>Background</string>\n", want: false},
+		{name: "only inside a nested dict", dict: "    <key>EnvironmentVariables</key>\n    <dict>\n" + launchdProcessTypeLines + "    </dict>\n", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := launchdProcessTypeEntries(t, plist(tc.dict))
+			if got := launchdSingleInteractiveProcessType(entries); got != tc.want {
+				t.Fatalf("single Interactive ProcessType = %v, want %v; entries=%+v", got, tc.want, entries)
+			}
+		})
+	}
+}
+
 func TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType(t *testing.T) {
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
 		GCPath:        "/usr/local/bin/gc",
@@ -131,11 +211,11 @@ func TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType(t *testing.T)
 }
 
 // TestInstallSupervisorLaunchdRegenerationKeepsProcessType covers the path
-// that used to drop a hand-applied key: gc start and gc supervisor start
-// regenerate the plist from the template (ensureSupervisorRunning ->
-// doSupervisorInstall -> installSupervisorLaunchd). Whatever plist is on disk
-// beforehand, the regenerated one carries ProcessType=Interactive, and a
-// second regeneration keeps it.
+// that used to drop a hand-applied key: gc start (ensureSupervisorRunning ->
+// doSupervisorInstall -> installSupervisorLaunchd) and gc supervisor install
+// (doSupervisorInstall) regenerate the plist from the template. Whatever
+// plist is on disk beforehand, the regenerated one carries
+// ProcessType=Interactive, and a second regeneration keeps it.
 func TestInstallSupervisorLaunchdRegenerationKeepsProcessType(t *testing.T) {
 	cases := []struct {
 		name string
@@ -234,6 +314,83 @@ func TestInstallSupervisorLaunchdRegenerationKeepsProcessType(t *testing.T) {
 	}
 }
 
+// TestInstallSupervisorLaunchdForceReloadsUnchangedLiveJob covers a plist
+// that already equals the rendering (a hand edit that matches it byte for
+// byte) under a live job still loaded without the key. A plain install leaves
+// the job alone; gc supervisor install --force writes the plist and reloads
+// the job, so the spawn type the doctor check warns about can change.
+func TestInstallSupervisorLaunchdForceReloadsUnchangedLiveJob(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		name := "without --force"
+		if force {
+			name = "with --force"
+		}
+		t.Run(name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			gcHome := filepath.Join(t.TempDir(), "isolated-home")
+			t.Setenv("HOME", homeDir)
+			t.Setenv("GC_HOME", gcHome)
+			setSupervisorInstallForceForTest(t, force)
+
+			data := &supervisorServiceData{
+				GCPath:       "/tmp/gc-same",
+				LogPath:      filepath.Join(gcHome, "supervisor.log"),
+				GCHome:       gcHome,
+				LaunchdLabel: supervisorLaunchdLabel(),
+				Path:         "/usr/local/bin:/usr/bin:/bin",
+			}
+			rendered, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := supervisorLaunchdPlistPath()
+			if !strings.HasPrefix(path, homeDir+string(filepath.Separator)) {
+				t.Fatalf("plist path %q is outside the temporary HOME %q", path, homeDir)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			oldRun, oldAlive := supervisorLaunchctlRun, supervisorAliveHook
+			var calls []string
+			supervisorLaunchctlRun = func(args ...string) error {
+				calls = append(calls, strings.Join(args, " "))
+				return nil
+			}
+			supervisorAliveHook = func() int { return 4242 }
+			t.Cleanup(func() {
+				supervisorLaunchctlRun, supervisorAliveHook = oldRun, oldAlive
+			})
+
+			var stdout, stderr bytes.Buffer
+			if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+				t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%q): %v", path, err)
+			}
+			if string(got) != rendered {
+				t.Fatalf("plist after install differs from the rendering\n--- got ---\n%s\n--- want ---\n%s", got, rendered)
+			}
+			var sawUnload, sawLoad bool
+			for _, call := range calls {
+				sawUnload = sawUnload || call == "unload "+path
+				sawLoad = sawLoad || call == "load "+path
+			}
+			if force && (!sawUnload || !sawLoad) {
+				t.Fatalf("launchctl calls = %v, want unload and load of %s under --force", calls, path)
+			}
+			if !force && (sawUnload || sawLoad) {
+				t.Fatalf("launchctl calls = %v, want neither unload nor load of %s without --force", calls, path)
+			}
+		})
+	}
+}
+
 func TestLaunchdPrintSpawnType(t *testing.T) {
 	cases := []struct {
 		name string
@@ -274,6 +431,16 @@ func TestProbeSupervisorLaunchdSpawnType(t *testing.T) {
 	want = doctor.SupervisorLaunchdSpawnType{Label: "com.gascity.supervisor"}
 	if got != want {
 		t.Fatalf("probe for an absent job = %+v, want %+v", got, want)
+	}
+
+	// A failure that does not confirm absence says nothing about the job.
+	supervisorLaunchdLoaded = func(string) (bool, bool, string) {
+		return false, false, "Bad request."
+	}
+	got = probeSupervisorLaunchdSpawnType("com.gascity.supervisor")
+	want = doctor.SupervisorLaunchdSpawnType{Label: "com.gascity.supervisor", Unreadable: true, Detail: "Bad request."}
+	if got != want {
+		t.Fatalf("probe for an unreadable job = %+v, want %+v", got, want)
 	}
 }
 

@@ -148,7 +148,9 @@ var (
 	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr
 	// supervisorInstallForce is set true by --force on 'gc supervisor install'.
 	// It permits overwriting an existing service unit that references a
-	// different gc binary. Exposed as a var so tests can override it directly.
+	// different gc binary, and makes the launchd install reload a live job
+	// even when its plist has not changed. Exposed as a var so tests can
+	// override it directly.
 	supervisorInstallForce bool
 
 	// supervisorServiceManagerActive reports whether the platform service
@@ -1590,8 +1592,9 @@ func supervisorSystemdServiceName() string {
 // the job in the daemon class, which on Apple Silicon holds the supervisor,
 // its tmux server and every agent on the efficiency cores at a clamped
 // priority: a busy city starves itself while the performance cores idle.
-// The template is re-rendered on every gc start / gc supervisor start, so
-// the key must live here rather than in a hand edit of the installed plist.
+// gc start (ensureSupervisorRunning -> doSupervisorInstall) and gc
+// supervisor install re-render the template and rewrite the installed plist
+// whenever it differs, so the key must live here rather than in a hand edit.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2057,7 +2060,11 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 			return 1
 		}
 	}
-	if contentUnchanged && supervisorAliveHook() != 0 {
+	// --force reloads an unchanged plist too: a live job keeps the settings
+	// it was loaded with, so a plist edited by hand to match the rendering
+	// (e.g. one that already carries ProcessType) takes effect only on a
+	// reload.
+	if contentUnchanged && !supervisorInstallForce && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 		return 0
 	}

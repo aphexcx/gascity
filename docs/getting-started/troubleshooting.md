@@ -464,9 +464,12 @@ The plist that `gc supervisor install` and `gc start` generate carries
 `ProcessType = Interactive`; one written by an older `gc` does not, and an
 older `gc` drops a hand-added key each time it regenerates the plist. To
 check, run the commands below (the label carries a suffix when `GC_HOME` is
-an isolated override). Regenerate the plist with `gc supervisor install`,
-which reloads the supervisor. Sessions started before the change keep the old
-class until they are recreated, and so does the city's tmux server.
+an isolated override). Regenerate the plist with `gc supervisor install`: it
+rewrites the plist and reloads the supervisor when the plist changes. If the
+plist already carries the key (a hand edit that matches what `gc` renders)
+and the job still reads daemon, `gc supervisor install --force` reloads the
+job. Sessions started before the change keep the old class until they are
+recreated, and so does the city's tmux server.
 
 ```bash
 launchctl print gui/$(id -u)/com.gascity.supervisor | grep "spawn type"   # want: interactive (4)

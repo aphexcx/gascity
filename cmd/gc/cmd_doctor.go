@@ -496,16 +496,20 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 }
 
 // probeSupervisorLaunchdSpawnType reads the supervisor launchd job's spawn
-// type for the supervisor-launchd-spawn-type check. A job launchctl cannot
-// print reads as not loaded.
+// type for the supervisor-launchd-spawn-type check. A job launchctl confirms
+// absent reads as not loaded; any other launchctl failure says nothing about
+// the job, so it reads as unreadable, with launchctl's output.
 func probeSupervisorLaunchdSpawnType(label string) doctor.SupervisorLaunchdSpawnType {
 	probe := doctor.SupervisorLaunchdSpawnType{Label: label}
-	loaded, _, detail := supervisorLaunchdLoaded(label)
-	if !loaded {
-		return probe
+	loaded, absent, detail := supervisorLaunchdLoaded(label)
+	switch {
+	case loaded:
+		probe.Loaded = true
+		probe.SpawnType = launchdPrintSpawnType([]byte(detail))
+	case !absent:
+		probe.Unreadable = true
+		probe.Detail = detail
 	}
-	probe.Loaded = true
-	probe.SpawnType = launchdPrintSpawnType([]byte(detail))
 	return probe
 }
 
