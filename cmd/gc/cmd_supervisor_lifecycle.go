@@ -259,6 +259,20 @@ func launchdPrintReportsRunning(out []byte) bool {
 	return false
 }
 
+// launchdPrintSpawnType returns the job's spawn type from `launchctl print`
+// output, lowercased ("interactive" from "spawn type = interactive (4)"), or
+// "" when the line is absent.
+func launchdPrintSpawnType(out []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 4 && fields[0] == "spawn" && fields[1] == "type" && fields[2] == "=" {
+			return strings.ToLower(fields[3])
+		}
+	}
+	return ""
+}
+
 func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
 	scope, err := supervisorWorkspaceServiceCleanupScopeFromRegistry(gcHome)
 	if err != nil {
@@ -1570,6 +1584,14 @@ func supervisorSystemdServiceName() string {
 // supervisorPortInUseMessage) instead of falsely claiming "without restart".
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
+//
+// ProcessType is Interactive because every agent session the supervisor
+// spawns inherits the job's scheduling class. Without the key launchd runs
+// the job in the daemon class, which on Apple Silicon holds the supervisor,
+// its tmux server and every agent on the efficiency cores at a clamped
+// priority: a busy city starves itself while the performance cores idle.
+// The template is re-rendered on every gc start / gc supervisor start, so
+// the key must live here rather than in a hand edit of the installed plist.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1582,6 +1604,8 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>supervisor</string>
         <string>run</string>
     </array>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

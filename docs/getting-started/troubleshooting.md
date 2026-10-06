@@ -451,6 +451,29 @@ Scope and caveats:
   defaults, so a hand-edited unit at gc's service path stays journal-only
   only on hosts where gc never manages the unit.
 
+## Agents Slow on macOS: Supervisor on the Efficiency Cores
+
+On a Mac, a busy city can starve itself while most of the machine is idle:
+the load average climbs, local builds and tests run many times slower than on
+CI, and hooks hit their timeouts, yet the performance cores sit unused. The
+cause is launchd's scheduling class. A launchd job whose plist has no
+`ProcessType` runs in the daemon class, and every process it spawns inherits
+that class: the supervisor, its tmux server and every agent session. On Apple
+Silicon, macOS holds that class on the efficiency cores at a clamped priority.
+The plist that `gc supervisor install` and `gc start` generate carries
+`ProcessType = Interactive`; one written by an older `gc` does not, and an
+older `gc` drops a hand-added key each time it regenerates the plist. To
+check, run the commands below (the label carries a suffix when `GC_HOME` is
+an isolated override). Regenerate the plist with `gc supervisor install`,
+which reloads the supervisor. Sessions started before the change keep the old
+class until they are recreated, and so does the city's tmux server.
+
+```bash
+launchctl print gui/$(id -u)/com.gascity.supervisor | grep "spawn type"   # want: interactive (4)
+ps -o pri= -p $$     # inside a city session: 31 is normal, 20 is the clamp
+gc doctor --check supervisor-launchd-spawn-type
+```
+
 ## Delegating the Supervisor Lifecycle to an Operator-Managed systemd Unit
 
 By default `gc` owns the supervisor lifecycle: `gc start` installs and
