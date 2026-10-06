@@ -57,14 +57,21 @@ var (
 	// registered. It is deliberately tri-state: a failing `launchctl
 	// print` is not proof the job is gone. Absence is reported only on a
 	// positive not-found signal; any other failure returns
-	// (false, false), meaning "unknown".
-	supervisorLaunchdLoaded = func(label string) (loaded bool, absent bool, detail string) {
-		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
-		detail = strings.TrimSpace(string(out))
-		if err == nil {
-			return true, false, detail
+	// (false, false), meaning "unknown", with launchctl print's exit
+	// status (0 when it gave none). It returns nothing of launchctl's
+	// output: while the job is loaded that output is the job dump, the
+	// job's environment values (API keys among them) included, and an
+	// error built from it would print them (hq-ri0pu).
+	supervisorLaunchdLoaded = func(label string) (loaded bool, absent bool, exitStatus int) {
+		out, err := supervisorLaunchdPrint(label)
+		switch {
+		case err == nil:
+			return true, false, 0
+		case launchdPrintReportsNotFound(err, strings.TrimSpace(string(out))):
+			return false, true, 0
+		default:
+			return false, false, launchdPrintExitStatus(err)
 		}
-		return false, launchdPrintReportsNotFound(err, detail), detail
 	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
@@ -255,6 +262,16 @@ func launchdPrintReportsNotFound(err error, detail string) bool {
 		return true
 	}
 	return strings.Contains(detail, "Could not find service")
+}
+
+// launchdPrintExitStatus returns a failed `launchctl print`'s exit status,
+// or 0 when it gave none (it did not start, or a signal ended it).
+func launchdPrintExitStatus(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() > 0 {
+		return ec.ExitCode()
+	}
+	return 0
 }
 
 func launchdPrintReportsRunning(out []byte) bool {
@@ -1008,29 +1025,24 @@ func verifySupervisorServiceStopped(deadline time.Time) error {
 // the target is gone. A probe that merely fails is "unknown", not proof
 // of absence, so it keeps polling and times out with the reason it could
 // not confirm — an unverifiable teardown must never read as success.
+// The timeout error says only what the last probe found: the job still
+// loaded, or launchctl print failing with its exit status. It never
+// carries launchctl's output, which can be the job dump.
 func waitForSupervisorLaunchdAbsent(label, target string, deadline time.Time) error {
-	var lastDetail string
-	var lastLoaded bool
 	for {
-		loaded, absent, detail := supervisorLaunchdLoaded(label)
+		loaded, absent, exitStatus := supervisorLaunchdLoaded(label)
 		if absent {
 			return nil
 		}
-		lastLoaded = loaded
-		if detail != "" {
-			lastDetail = detail
-		}
 		if !time.Now().Before(deadline) {
-			var err error
-			if lastLoaded {
-				err = fmt.Errorf("launchd target %s is still loaded after stop", target)
-			} else {
-				err = fmt.Errorf("launchd target %s could not be confirmed unloaded after stop", target)
+			if loaded {
+				return fmt.Errorf("launchd target %s is still loaded after stop", target)
 			}
-			if lastDetail != "" {
-				err = fmt.Errorf("%w: %s", err, lastDetail)
+			status := "no exit status"
+			if exitStatus > 0 {
+				status = fmt.Sprintf("exit status %d", exitStatus)
 			}
-			return err
+			return fmt.Errorf("launchd target %s could not be confirmed unloaded after stop: launchctl print failed (%s)", target, status)
 		}
 		time.Sleep(supervisorLaunchdStopPollInterval)
 	}
