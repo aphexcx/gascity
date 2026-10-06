@@ -1506,6 +1506,13 @@ operation completes in < 1s on an idle machine but fails under CI CPU
 saturation. The only exception is a timer that is itself the subject under
 test (e.g., testing that a function honours a 100ms deadline).
 
+Measure load-sensitive waits beside the local gate's fan-out and a concurrent
+`make lint-full`, recording before/after counts and the slowest observed waits.
+Give deadlock guards scheduling margin above the loaded measurements; they must
+still fail in bounded time and return immediately when the condition is met.
+For an idle-timeout scenario, keep progress well inside the idle budget and the
+total runtime beyond it, and retain a companion proof that silent hangs fail.
+
 ### Floors, ceilings, and inputs
 
 `GoroutineRaceTimeout` and `ExecRaceTimeout` are **floors** — the minimum a
