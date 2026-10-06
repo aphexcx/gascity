@@ -16,6 +16,30 @@ type startFailProvider struct {
 	err error
 }
 
+// interruptExitProvider models a command that exits on the contract's soft
+// interrupt. Later operations must not assume that command is still alive.
+type interruptExitProvider struct {
+	runtime.Provider
+}
+
+func (p interruptExitProvider) Interrupt(name string) error {
+	return p.Stop(name)
+}
+
+func (p interruptExitProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if !p.IsRunning(name) {
+		return runtime.ErrSessionNotFound
+	}
+	return p.Provider.Nudge(name, content)
+}
+
+func TestRunSessionTestsAllowsCommandToExitOnInterrupt(t *testing.T) {
+	provider := interruptExitProvider{Provider: runtime.NewFake()}
+	const name = "interrupt-exits"
+	startOrSkip(t, Options{}, provider, name, runtime.Config{}, "Start")
+	RunSessionTests(t, provider, runtime.Config{}, name)
+}
+
 func (p startFailProvider) Start(_ context.Context, _ string, _ runtime.Config) error {
 	return p.err
 }

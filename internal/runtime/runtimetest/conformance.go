@@ -578,18 +578,6 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		}
 	})
 
-	t.Run("Interrupt_RunningSession", func(t *testing.T) {
-		if err := sp.Interrupt(name); err != nil {
-			t.Errorf("Interrupt: %v", err)
-		}
-	})
-
-	t.Run("Interrupt_MissingSession", func(t *testing.T) {
-		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil {
-			t.Errorf("Interrupt on missing session should not error: %v", err)
-		}
-	})
-
 	t.Run("Nudge_RunningSession", func(t *testing.T) {
 		if err := sp.Nudge(name, runtime.TextContent("hello")); err != nil {
 			t.Errorf("Nudge: %v", err)
@@ -599,6 +587,21 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	t.Run("Nudge_MissingSession", func(t *testing.T) {
 		if err := sp.Nudge("nonexistent-conformance-session", runtime.TextContent("hello")); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Errorf("Nudge on missing session error = %v, want nil or ErrSessionNotFound", err)
+		}
+	})
+
+	// Interrupt is a graceful-shutdown signal and may end the command (for
+	// example, tmux's sleep fixture). Run it after operations needing a live
+	// command so Nudge does not inherit an exited pane (gf-7k0).
+	t.Run("Interrupt_RunningSession", func(t *testing.T) {
+		if err := sp.Interrupt(name); err != nil {
+			t.Errorf("Interrupt: %v", err)
+		}
+	})
+
+	t.Run("Interrupt_MissingSession", func(t *testing.T) {
+		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil {
+			t.Errorf("Interrupt on missing session should not error: %v", err)
 		}
 	})
 }
