@@ -70,6 +70,13 @@ var (
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
 	}
+	// supervisorLaunchdPrint runs `launchctl print` for a launchd job and
+	// returns its combined output and its error apart, for a caller that
+	// needs the exit status of a failure without its output: a job dump
+	// carries the job's environment values, API keys among them.
+	supervisorLaunchdPrint = func(label string) ([]byte, error) {
+		return exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+	}
 	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
 	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
 	// have it flow into the supervisor's launchd plist. Returns "" on
@@ -148,7 +155,9 @@ var (
 	supervisorWorkspaceServiceCleanupWarnings io.Writer = os.Stderr
 	// supervisorInstallForce is set true by --force on 'gc supervisor install'.
 	// It permits overwriting an existing service unit that references a
-	// different gc binary. Exposed as a var so tests can override it directly.
+	// different gc binary, and makes the launchd install reload a live job
+	// even when its plist has not changed. Exposed as a var so tests can
+	// override it directly.
 	supervisorInstallForce bool
 
 	// supervisorServiceManagerActive reports whether the platform service
@@ -257,6 +266,20 @@ func launchdPrintReportsRunning(out []byte) bool {
 		}
 	}
 	return false
+}
+
+// launchdPrintSpawnType returns the job's spawn type from `launchctl print`
+// output, lowercased ("interactive" from "spawn type = interactive (4)"), or
+// "" when the line is absent.
+func launchdPrintSpawnType(out []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 4 && fields[0] == "spawn" && fields[1] == "type" && fields[2] == "=" {
+			return strings.ToLower(fields[3])
+		}
+	}
+	return ""
 }
 
 func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
@@ -1570,6 +1593,15 @@ func supervisorSystemdServiceName() string {
 // supervisorPortInUseMessage) instead of falsely claiming "without restart".
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
+//
+// ProcessType is Interactive because every agent session the supervisor
+// spawns inherits the job's scheduling class. Without the key launchd runs
+// the job in the daemon class, which on Apple Silicon holds the supervisor,
+// its tmux server and every agent on the efficiency cores at a clamped
+// priority: a busy city starves itself while the performance cores idle.
+// gc start (ensureSupervisorRunning -> doSupervisorInstall) and gc
+// supervisor install re-render the template and rewrite the installed plist
+// whenever it differs, so the key must live here rather than in a hand edit.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1582,6 +1614,8 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>supervisor</string>
         <string>run</string>
     </array>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -2033,7 +2067,11 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 			return 1
 		}
 	}
-	if contentUnchanged && supervisorAliveHook() != 0 {
+	// --force reloads an unchanged plist too: a live job keeps the settings
+	// it was loaded with, so a plist edited by hand to match the rendering
+	// (e.g. one that already carries ProcessType) takes effect only on a
+	// reload.
+	if contentUnchanged && !supervisorInstallForce && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 		return 0
 	}

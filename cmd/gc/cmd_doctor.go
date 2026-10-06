@@ -185,6 +185,9 @@ type buildDoctorChecksOpts struct {
 	SkipCityDoltCheck       bool
 	SkipManagedDoltCheck    bool
 	SkipRigDoltChecks       bool
+	// LaunchdSpawnType is the supervisor's macOS launchd spawn-type probe; nil
+	// off macOS, which leaves the supervisor-launchd-spawn-type check out.
+	LaunchdSpawnType *doctor.SupervisorLaunchdSpawnType
 	// SkipStorePreflight suppresses the #5064 bead-store probe. Set by the
 	// `gc start` warmup path: every store-dependent check the preflight gates
 	// is WarmupEligible() == false, so warmupEligibleChecks filters all of them
@@ -318,6 +321,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
+	if opts.LaunchdSpawnType != nil {
+		// A city.toml that did not load says nothing about its agents, so it
+		// counts as having some: the warning is the safer side there.
+		agentsConfigured := cfgErr != nil || cfg == nil || len(cfg.Agents) > 0
+		register(doctor.NewSupervisorLaunchdSpawnTypeCheck(*opts.LaunchdSpawnType, agentsConfigured))
+	}
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
@@ -486,6 +495,30 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
+// probeSupervisorLaunchdSpawnType reads the supervisor launchd job's spawn
+// type for the supervisor-launchd-spawn-type check. A job launchctl confirms
+// absent reads as not loaded; any other launchctl failure says nothing about
+// the job, so it reads as unreadable, with launchctl's exit status. The probe
+// keeps nothing of launchctl's output but the spawn type: a job dump carries
+// the job's environment values (API keys among them), and a launchctl that
+// prints a dump and then fails must not hand them to a doctor warning.
+func probeSupervisorLaunchdSpawnType(label string) doctor.SupervisorLaunchdSpawnType {
+	probe := doctor.SupervisorLaunchdSpawnType{Label: label}
+	out, err := supervisorLaunchdPrint(label)
+	switch {
+	case err == nil:
+		probe.Loaded = true
+		probe.SpawnType = launchdPrintSpawnType(out)
+	case !launchdPrintReportsNotFound(err, strings.TrimSpace(string(out))):
+		probe.Unreadable = true
+		var ec exitCoder
+		if errors.As(err, &ec) && ec.ExitCode() > 0 {
+			probe.ExitStatus = ec.ExitCode()
+		}
+	}
+	return probe
+}
+
 // doDoctor runs the health checks and prints results. With opts.Checks set it
 // runs only those checks and derives the exit code from them alone.
 func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
@@ -520,6 +553,11 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 			UnitPID:    raw.UnitPID,
 		}
 	}
+	var supervisorLaunchdSpawnType *doctor.SupervisorLaunchdSpawnType
+	if supervisorRuntimeGOOS == "darwin" {
+		probe := probeSupervisorLaunchdSpawnType(supervisorLaunchdLabel())
+		supervisorLaunchdSpawnType = &probe
+	}
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
@@ -539,6 +577,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SupervisorRunning:       supervisorRunning,
 		SupervisorPID:           supervisorPID,
 		SupervisorUnitOwnership: supervisorUnitOwnership,
+		LaunchdSpawnType:        supervisorLaunchdSpawnType,
 		SkipCityDoltCheck:       skipCityDoltCheck,
 		SkipManagedDoltCheck:    skipManagedDoltCheck,
 		SkipRigDoltChecks:       skipRigDoltChecks,
