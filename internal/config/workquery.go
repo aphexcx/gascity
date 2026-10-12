@@ -432,6 +432,19 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 	return filter
 }
 
+// legacyEphemeralPoolDemandShell emits the legacy ephemeral tier of the
+// pool-demand probe: the open wisps routed to the target, read with
+// `bd query` on a bd-1.0.4-compatible city and filtered in jq. On a
+// federated city the ownership predicate (claimablePredicateJQ, the jq mirror
+// of federation.MayClaim) gates the rows BEFORE the tier's oldest-first sort
+// and before both of its cuts — the filter's own window and the caller's
+// first-row cut — so an older bead owned by another city can no longer fill
+// the window and starve the eligible local wisp behind it. It filters rather
+// than reorders, unlike the two `bd ready` tiers (claimableFirstJQClause):
+// a foreign wisp alone yields no work here, as the fenced count-form of
+// finding 1c already counts none for it, so a seat minted for local demand
+// finds that demand instead of draining on a refusal (gf-pu2 finding 1e).
+// A non-federated city emits the command it emits today, byte for byte.
 func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
 	if topo.includeEphemeralReady() {
 		return `printf "[]"`
@@ -440,6 +453,9 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 		` | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $target) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $target) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true")))`
 	if !topo.FederatedReady {
 		selector += excludeShippedPoolDemandJQClause()
+	}
+	if predicate := claimablePredicateJQ(topo.FederationIdentity); predicate != "" {
+		selector += ` | select(` + predicate + `)`
 	}
 	filter := legacyEphemeralReadyFilterJQ(
 		selector,
