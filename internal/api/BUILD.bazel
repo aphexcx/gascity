@@ -194,6 +194,7 @@ go_library(
         "//internal/execenv",
         "//internal/extmsg",
         "//internal/featureflags",
+        "//internal/federation",
         "//internal/formula",
         "//internal/fsys",
         "//internal/git",
