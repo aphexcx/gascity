@@ -95,7 +95,11 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 }
 
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
-	b.Labels = s.ownerLabelsForCreate(b)
+	labels, err := s.ownerLabelsForCreate(b)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	b.Labels = labels
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.createTarget(coordclass.Classify(b)), b, storage)
 }
@@ -130,7 +134,11 @@ type ownerStampingTx struct {
 func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
 	parentLabels, seen := tx.created[strings.TrimSpace(b.ParentID)]
 	if !seen {
-		parentLabels = tx.store.ownerParentLabels(b.ParentID)
+		var err error
+		parentLabels, err = tx.store.ownerParentLabels(b.ParentID)
+		if err != nil {
+			return beads.Bead{}, err
+		}
 	}
 	b.Labels = tx.store.ownerLabelsForCreateUnder(b, parentLabels)
 	created, err := tx.Tx.Create(b)
@@ -146,12 +154,17 @@ func (tx *ownerStampingTx) Create(b beads.Bead) (beads.Bead, error) {
 
 // ownerLabelsForCreate applies the owner rule to one create: an owner on the
 // bead wins, else its parent's (read through the wrapped store), else this
-// city's. Reads the parent only on a federated city.
-func (s *beadPolicyStore) ownerLabelsForCreate(b beads.Bead) []string {
+// city's. Reads the parent only on a federated city; a parent that cannot be
+// read is that read's error, never an unowned parent.
+func (s *beadPolicyStore) ownerLabelsForCreate(b beads.Bead) ([]string, error) {
 	if s.ownerLabel() == "" {
-		return b.Labels
+		return b.Labels, nil
 	}
-	return s.ownerLabelsForCreateUnder(b, s.ownerParentLabels(b.ParentID))
+	parentLabels, err := s.ownerParentLabels(b.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ownerLabelsForCreateUnder(b, parentLabels), nil
 }
 
 // ownerLabelsForCreateUnder is ownerLabelsForCreate with the parent's labels
@@ -164,18 +177,25 @@ func (s *beadPolicyStore) ownerLabelsForCreateUnder(b beads.Bead, parentLabels [
 	return federation.OwnerLabelForChild(b.Labels, parentLabels, owner)
 }
 
-// ownerParentLabels returns the labels of the bead a create names as parent,
-// or nil when there is none or it cannot be read.
-func (s *beadPolicyStore) ownerParentLabels(parentID string) []string {
+// ownerParentLabels returns the labels of the bead a create names as parent
+// — nil, and no error, when it names none — or the error that kept the
+// parent from being read. The two are told apart on purpose, as BdStore's
+// own read does: a failed read used to come back as "no owner", the wrapper
+// stamped the creating city's label, and the backing store — reading the
+// foreign parent successfully a moment later — took that label for an
+// explicit override and switched its inheritance off, so a child of another
+// city's bead became claimable by this one (gf-4c9 round 2, finding 1d).
+// An unread parent is not an unowned one; the create aborts instead.
+func (s *beadPolicyStore) ownerParentLabels(parentID string) ([]string, error) {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
-		return nil
+		return nil, nil
 	}
 	parent, err := s.Get(parentID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("reading parent %q for the owner label: %w", parentID, err)
 	}
-	return parent.Labels
+	return parent.Labels, nil
 }
 
 // ownerLabel is the owner:<identity> label a federated city stamps on every
@@ -194,10 +214,10 @@ func (s *beadPolicyStore) ownerLabel() string {
 // names no owner of its own. A graph apply is a bulk create — molecule roots,
 // steps, control beads — so each node is stamped as a single create would be.
 // It works on a copy: the caller's plan stays theirs.
-func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads.GraphApplyPlan {
+func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) (*beads.GraphApplyPlan, error) {
 	owner := s.ownerLabel()
 	if owner == "" || plan == nil {
-		return plan
+		return plan, nil
 	}
 	stamped := *plan
 	stamped.Nodes = make([]beads.GraphApplyNode, len(plan.Nodes))
@@ -217,7 +237,11 @@ func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads
 			}
 		} else if id := strings.TrimSpace(node.ParentID); id != "" {
 			if _, seen := read[id]; !seen {
-				read[id] = s.ownerParentLabels(id)
+				parentLabels, err := s.ownerParentLabels(id)
+				if err != nil {
+					return nil, err
+				}
+				read[id] = parentLabels
 			}
 			pn.ParentLabels = read[id]
 		}
@@ -228,7 +252,7 @@ func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) *beads
 		node.Labels = labels[i]
 		stamped.Nodes[i] = node
 	}
-	return &stamped
+	return &stamped, nil
 }
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -449,7 +473,10 @@ func storageFromPersistedWispRoot(root beads.Bead) string {
 }
 
 func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
-	plan = s.stampGraphPlanOwner(plan)
+	plan, err := s.stampGraphPlanOwner(plan)
+	if err != nil {
+		return nil, err
+	}
 	if plan == nil {
 		return s.graphApplierFor(coordclass.ClassWork).ApplyGraphPlan(ctx, plan)
 	}
