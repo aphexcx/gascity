@@ -71,6 +71,15 @@ type FileRecorder struct {
 	recordCount           uint64
 	lastSizeCheck         time.Time
 
+	// followRotation makes a recorder that does not own rotation keep writing
+	// to the ACTIVE log after another recorder (or process) rotates it
+	// (WithFollowRotation): before each append the open handle is compared
+	// with the file now at path and reopened when the path was replaced or
+	// removed. Without it a secondary writer appends into the renamed
+	// rotating-* file, which is gzipped and unlinked, and its events vanish
+	// from every reader until restart.
+	followRotation bool
+
 	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
 	// files (WithoutStartupSweep). Transient per-open recorders — the
 	// per-mutation class-store emitter is the one in tree — set it so they do
@@ -134,6 +143,20 @@ func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
 // through the in-flight read path meanwhile.
 func WithoutStartupSweep() FileRecorderOption {
 	return func(r *FileRecorder) { r.skipSweep = true }
+}
+
+// WithFollowRotation makes a recorder that does not own rotation (typically
+// one opened with WithMaxSize(0) beside a long-lived rotating recorder on the
+// same path) follow the active log across rotations: every Record, RecordAck
+// and AppendBatch first checks whether its open handle still names the file
+// at path — one stat of the path and one of the handle — and reopens the path
+// when it was renamed away or removed. FileRecorder.rotateLocked only
+// reopens the rotating recorder's own handle, so without this a secondary
+// writer keeps appending into the archived file and its events silently
+// disappear from every reader (gf-4c9 row 6). Rotation itself stays the
+// owner's; this recorder never renames.
+func WithFollowRotation() FileRecorderOption {
+	return func(r *FileRecorder) { r.followRotation = true }
 }
 
 // RotationResult is returned by ForceRotate (and B-3's API endpoint)
@@ -270,6 +293,7 @@ func (r *FileRecorder) RecordAck(e Event) error {
 		return errRecorderClosed
 	}
 
+	r.followRotationLocked()
 	r.maybeAutoRotateLocked()
 
 	// Cross-process flock contention only — r.mu already serializes
@@ -314,6 +338,7 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 		return nil
 	}
 
+	r.followRotationLocked()
 	fd := int(r.file.Fd())
 	if err := lockRecorderFile(fd, r.path); err != nil {
 		return fmt.Errorf("lock: %w", err)
@@ -451,6 +476,39 @@ func encodeAndWriteRecord(w io.Writer, e *Event) error {
 		return fmt.Errorf("write: %w", err)
 	}
 	return nil
+}
+
+// followRotationLocked is the WithFollowRotation check: with r.mu held, it
+// reopens r.path when the open handle no longer names the file at that path
+// (the owner rotated it away, or nothing is at the path yet). A stat error
+// other than not-found, or a failed reopen, is logged and the current handle
+// kept: the append then still lands somewhere a crash-recovery sweep can
+// find, which beats dropping it. Best-effort: a rotation that lands between
+// this check and the write is the same window the owner's own readers accept.
+func (r *FileRecorder) followRotationLocked() {
+	if !r.followRotation || r.file == nil {
+		return
+	}
+	current, err := os.Stat(r.path)
+	switch {
+	case err == nil:
+		held, herr := r.file.Stat()
+		if herr == nil && os.SameFile(current, held) {
+			return
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		fmt.Fprintf(r.stderr, "events: follow rotation: stat %s: %v\n", r.path, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	reopened, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(r.stderr, "events: follow rotation: reopen %s: %v\n", r.path, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if err := r.file.Close(); err != nil {
+		fmt.Fprintf(r.stderr, "events: follow rotation: close rotated handle: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	r.file = reopened
 }
 
 // maybeAutoRotateLocked is the size-gated rotation hook on the

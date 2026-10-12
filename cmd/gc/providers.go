@@ -1039,9 +1039,16 @@ func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder
 // gets gzipped away. events.WithMaxSize(0) makes this a secondary writer that
 // never rotates, and events.WithoutStartupSweep keeps it from racing the
 // long-lived recorder mid-rotation — a concurrent sweep can double-gzip the
-// same in-flight rotating-* file through a shared .tmp path. Neither option
-// makes the open free: NewFileRecorder reads the log directory either way, to
-// continue the sequence past the archives.
+// same in-flight rotating-* file through a shared .tmp path. The same
+// asymmetry cuts the other way: when the long-lived recorder rotates, THIS
+// recorder's cached handle still names the renamed rotating-* file, so every
+// later worker event would be appended into the archive and vanish from the
+// readers until the process restarts (the memo below keeps it for the process
+// lifetime). events.WithFollowRotation makes it re-check the path before
+// each append and reopen the fresh active log (gf-4c9 row 6; upstream issue
+// filed from the fork). Neither option makes the open free: NewFileRecorder
+// reads the log directory either way, to continue the sequence past the
+// archives.
 //
 // The exec:/fake/fail branches carry no file handle at all, so they stay on the
 // shared newEventsProviderForNameWithConfig resolution.
@@ -1055,6 +1062,7 @@ func newCLIFactoryRecorder(eventsCfg config.EventsConfig, eventsPath string) (ev
 		io.Discard,
 		events.WithMaxSize(0),
 		events.WithoutStartupSweep(),
+		events.WithFollowRotation(),
 	)
 	if err != nil {
 		// Never box a typed-nil *events.FileRecorder into events.Recorder.
