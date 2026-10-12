@@ -186,12 +186,20 @@ func (s *beadPolicyStore) ownerLabelsForCreateUnder(b beads.Bead, parentLabels [
 // explicit override and switched its inheritance off, so a child of another
 // city's bead became claimable by this one (gf-4c9 round 2, finding 1d).
 // An unread parent is not an unowned one; the create aborts instead.
+//
+// The read goes through the wrapped store's LIVE handle, never its plain Get:
+// a caching store answers Get from its cache, and a parent another process
+// had moved to another city's lane since the prime came back with its stale
+// owner, so the child was stamped into the wrong lane with the same effect —
+// the backing store read the stamp as an explicit override and a foreign
+// city's child became claimable here (gf-jr0 round 3, finding 1f). A plain
+// store's live handle is its own Get, so nothing changes for one.
 func (s *beadPolicyStore) ownerParentLabels(parentID string) ([]string, error) {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
 		return nil, nil
 	}
-	parent, err := s.Get(parentID)
+	parent, err := beads.HandlesFor(s.Store).Live.Get(parentID)
 	if err != nil {
 		return nil, fmt.Errorf("reading parent %q for the owner label: %w", parentID, err)
 	}

@@ -176,6 +176,7 @@ go_test(
         "workquery_ephemeral_scan_reuse_test.go",
         "workquery_claimable_test.go",
         "workquery_demand_owner_test.go",
+        "workquery_legacy_ephemeral_owner_test.go",
         "workquery_federation_test.go",
         "workquery_graph_anchor_test.go",
         "workquery_hold_label_test.go",
