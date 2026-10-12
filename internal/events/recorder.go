@@ -79,6 +79,10 @@ type FileRecorder struct {
 	// rotating-* file, which is gzipped and unlinked, and its events vanish
 	// from every reader until restart.
 	followRotation bool
+	// beforeAnchorWrite, when set (tests only), runs inside rotateLocked after
+	// the new active log is opened and its flock taken, before the anchor
+	// event is written: the window a follower's append must not enter.
+	beforeAnchorWrite func()
 
 	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
 	// files (WithoutStartupSweep). Transient per-open recorders — the
@@ -669,8 +673,25 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		Message: fmt.Sprintf("rotated to %s", archiveBase),
 		Payload: payloadBytes,
 	}
-	if err := r.writeRecordLocked(&anchor); err != nil {
-		return RotationResult{}, fmt.Errorf("writing anchor event: %w", err)
+	// The anchor is published under the new active log's flock, the same
+	// lock every appender takes (RecordAck, AppendBatch, and a follower that
+	// just reopened this file). Without it a follower and this owner could
+	// both read the empty new log, allocate the same sequence number and
+	// append, and sequence-based readers would discard one of the two as a
+	// duplicate (codex round 3, gf-4c9 row 6).
+	anchorFD := int(r.file.Fd())
+	if err := lockRecorderFile(anchorFD, r.path); err != nil {
+		return RotationResult{}, fmt.Errorf("locking new active log for the anchor event: %w", err)
+	}
+	if r.beforeAnchorWrite != nil {
+		r.beforeAnchorWrite()
+	}
+	writeErr := r.writeRecordLocked(&anchor)
+	if err := syscall.Flock(anchorFD, syscall.LOCK_UN); err != nil {
+		fmt.Fprintf(r.stderr, "events: rotation: unlock new active log: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	if writeErr != nil {
+		return RotationResult{}, fmt.Errorf("writing anchor event: %w", writeErr)
 	}
 	if err := r.file.Sync(); err != nil {
 		fmt.Fprintf(r.stderr, "events: rotation: sync new active log: %v\n", err) //nolint:errcheck // best-effort stderr
