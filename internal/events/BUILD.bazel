@@ -48,6 +48,7 @@ go_test(
         "recorder_batch_test.go",
         "recorder_shortwrite_unix_test.go",
         "rotation_anchor_lock_test.go",
+        "rotation_anchor_stranded_test.go",
         "rotation_archive_test.go",
         "rotation_auto_test.go",
         "rotation_follow_test.go",

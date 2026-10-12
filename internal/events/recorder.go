@@ -83,6 +83,10 @@ type FileRecorder struct {
 	// the new active log is opened and its flock taken, before the anchor
 	// event is written: the window a follower's append must not enter.
 	beforeAnchorWrite func()
+	// beforeAnchorLock, when set (tests only), runs inside rotateLocked after
+	// the old log is renamed and the new active log opened, before the
+	// anchor's flock is taken: where another writer may hold that lock.
+	beforeAnchorLock func()
 
 	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
 	// files (WithoutStartupSweep). Transient per-open recorders — the
@@ -679,6 +683,31 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	// both read the empty new log, allocate the same sequence number and
 	// append, and sequence-based readers would discard one of the two as a
 	// duplicate (codex round 3, gf-4c9 row 6).
+	// The renamed segment's compression starts BEFORE the anchor is
+	// attempted: once the rename has happened the segment must reach its
+	// archive name whatever the anchor's fate, or it stays stranded as a
+	// rotating-* file that plain readers do not see until a startup sweep
+	// and that no later rotation retries (codex round 4; the pre-existing
+	// anchor-write failure path had the same hole).
+	done := make(chan struct{})
+	retainAge := r.archiveRetainAge
+	r.rotations.Add(1)
+	go func() {
+		defer r.rotations.Done()
+		defer close(done)
+		if err := gzipAndArchive(rotatingPath, archivePath, r.stderr); err != nil {
+			// gzipAndArchive already wrote to stderr.
+			_ = err
+			return
+		}
+		if err := reapExpiredArchives(dir, retainAge, r.stderr); err != nil {
+			fmt.Fprintf(r.stderr, "events: rotation: archive retention: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
+
+	if r.beforeAnchorLock != nil {
+		r.beforeAnchorLock()
+	}
 	anchorFD := int(r.file.Fd())
 	if err := lockRecorderFile(anchorFD, r.path); err != nil {
 		return RotationResult{}, fmt.Errorf("locking new active log for the anchor event: %w", err)
@@ -696,22 +725,6 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	if err := r.file.Sync(); err != nil {
 		fmt.Fprintf(r.stderr, "events: rotation: sync new active log: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
-
-	done := make(chan struct{})
-	retainAge := r.archiveRetainAge
-	r.rotations.Add(1)
-	go func() {
-		defer r.rotations.Done()
-		defer close(done)
-		if err := gzipAndArchive(rotatingPath, archivePath, r.stderr); err != nil {
-			// gzipAndArchive already wrote to stderr.
-			_ = err
-			return
-		}
-		if err := reapExpiredArchives(dir, retainAge, r.stderr); err != nil {
-			fmt.Fprintf(r.stderr, "events: rotation: archive retention: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}()
 
 	return RotationResult{
 		Rotated:            true,
