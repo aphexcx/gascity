@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,11 +60,15 @@ const (
 // bdFlagTokens walks the flag tokens of a create argv before a `--`
 // terminator, skipping the VALUE of every value flag bd's create surface and
 // its globals know (`--description --dry-run` is a description, not a dry
-// run). A token is visited as (index, name, value, inline). A value shorthand
-// with its value attached (`-lowner:x`, `-l=owner:x`: pflag's forms) is
-// visited as that shorthand with an inline value, the way bd reads it.
+// run). A token is visited as (index, name, value, inline). A shorthand
+// cluster is walked with pflag's rules, the way bd reads it: each boolean
+// shorthand is visited on its own (`-qv`), a value shorthand takes the rest
+// of the token as its inline value (`-lowner:x`, `-l=owner:x`, `-qlowner:x`)
+// or, when nothing is attached, the next token (`-qf issues.md`); a shorthand
+// gc does not know ends the walk of that token.
 func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline bool)) {
 	valueFlags := bdflags.ValueFlags("create")
+	boolFlags := bdflags.BoolFlags("create")
 	for i := 0; i < len(bdArgs); i++ {
 		tok := bdArgs[i]
 		if tok == "--" {
@@ -72,13 +77,35 @@ func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline 
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
 			continue
 		}
-		name, value, inline := strings.Cut(tok, "=")
-		if !strings.HasPrefix(tok, "--") && len(tok) > 2 && valueFlags[tok[:2]] {
-			name, value, inline = tok[:2], strings.TrimPrefix(tok[2:], "="), true
+		if strings.HasPrefix(tok, "--") {
+			name, value, inline := strings.Cut(tok, "=")
+			visit(i, name, value, inline)
+			if !inline && valueFlags[name] {
+				i++ // its value is not a flag
+			}
+			continue
 		}
-		visit(i, name, value, inline)
-		if !inline && valueFlags[name] {
-			i++ // its value is not a flag
+		for j := 1; j < len(tok); j++ {
+			short := "-" + tok[j:j+1]
+			switch {
+			case valueFlags[short]:
+				if rest := strings.TrimPrefix(tok[j+1:], "="); rest != "" || j+1 < len(tok) {
+					visit(i, short, rest, true)
+				} else {
+					visit(i, short, "", false)
+					i++ // its value is the next token
+				}
+				j = len(tok)
+			case boolFlags[short]:
+				if j+1 < len(tok) && tok[j+1] == '=' {
+					visit(i, short, tok[j+2:], true) // `-v=false`: an inline value ends the cluster
+					j = len(tok)
+				} else {
+					visit(i, short, "", false)
+				}
+			default:
+				j = len(tok) // a shorthand gc does not know: bd's business
+			}
 		}
 	}
 }
@@ -271,13 +298,24 @@ func bdCreateLabelValues(bdArgs []string) []string {
 			}
 			value = bdArgs[i+1]
 		}
-		for _, l := range strings.Split(value, ",") {
+		for _, l := range bdSliceFlagValues(value) {
 			if l = strings.TrimSpace(l); l != "" {
 				labels = append(labels, l)
 			}
 		}
 	})
 	return labels
+}
+
+// bdSliceFlagValues splits one value of a pflag StringSlice flag the way
+// pflag does — as a CSV record, so `"owner:x"` is owner:x and a quoted field
+// may hold a comma — falling back to a plain split when it is not valid CSV.
+func bdSliceFlagValues(value string) []string {
+	fields, err := csv.NewReader(strings.NewReader(value)).Read()
+	if err != nil {
+		return strings.Split(value, ",")
+	}
+	return fields
 }
 
 // bdCreateArgvWithLabel returns bdArgs with `--labels=<label>` inserted right
@@ -310,7 +348,8 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //     anything is created; a parent that cannot be read refuses the create
 //     with that error (finding 1d's rule); a nil parentRead means the
 //     configured store cannot be read for this create (a bd database
-//     override), and such a create carries nothing;
+//     override), and such a create carries nothing; --no-inherit-labels
+//     switches the parent's lane off too, and the child is this city's;
 //   - every other create carries this city's owner.
 func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs []string, owner string) (label string, carry bool, err error) {
 	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
@@ -320,7 +359,10 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 		return "", false, nil
 	}
 	parentID := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--parent"))
-	if parentID == "" {
+	if parentID == "" || bdHasBoolFlag(bdArgs, "--no-inherit-labels") {
+		// No parent, or the operator switched inheritance off for this
+		// create: the child is this city's, as the follow-up stamp always
+		// made it when bd copied nothing.
 		return owner, true, nil
 	}
 	if parentRead == nil {

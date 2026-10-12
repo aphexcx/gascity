@@ -217,6 +217,10 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"explicit owner in a comma list respected", federatedDemoCityTOML, []string{"create", "t", "--labels", "pool:x,owner:jadegate"}, "pool:x,owner:jadegate", "", "create t --labels pool:x,owner:jadegate", false, "", false},
 		{"explicit owner attached to the shorthand respected", federatedDemoCityTOML, []string{"create", "t", "-lowner:jadegate"}, "owner:jadegate", "", "create t -lowner:jadegate", false, "", false},
 		{"explicit owner attached to the shorthand with = respected", federatedDemoCityTOML, []string{"create", "t", "-l=owner:jadegate"}, "owner:jadegate", "", "create t -l=owner:jadegate", false, "", false},
+		{"explicit owner behind a boolean shorthand in a cluster respected", federatedDemoCityTOML, []string{"create", "t", "-qlowner:jadegate"}, "owner:jadegate", "", "create t -qlowner:jadegate", false, "", false},
+		{"explicit owner in a quoted CSV field respected", federatedDemoCityTOML, []string{"create", "t", "--labels", "\"owner:jadegate\",pool:x"}, "owner:jadegate,pool:x", "", "create t --labels \"owner:jadegate\",pool:x", false, "", false},
+		{"no-inherit-labels makes the child this city's", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "--no-inherit-labels"}, "", "", "create --labels=owner:citadel child --parent demo-0 --no-inherit-labels", false, "", false},
+		{"no-inherit-labels=false keeps the parent's lane", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "--no-inherit-labels=false"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0 --no-inherit-labels=false", false, "", false},
 		{"a child of a foreign parent carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0", false, "", false},
 		{"a child of a foreign parent carries the parent's owner (inline parent)", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0", false, "", false},
 		{"opt-out stripped, nothing carried, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, "", false},
@@ -233,6 +237,7 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"a graph plan cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--graph", "plan.json"}, "", "Created 1 issues\n  root -> demo-1", "create --graph plan.json", true, "", false},
 		{"a markdown batch cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--file", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create --file issues.md", true, "", false},
 		{"a markdown batch by shorthand cannot carry the label either", federatedDemoCityTOML, []string{"create", "-f", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -f issues.md", true, "", false},
+		{"a markdown batch behind a boolean shorthand in a cluster is seen", federatedDemoCityTOML, []string{"create", "-qf", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -qf issues.md", true, "", false},
 		{"a bd that dropped the carried label is repaired after", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create --labels=owner:citadel t", true, "", true},
 	}
 	for _, tt := range tests {
@@ -448,6 +453,10 @@ func TestBdCreateArgvWithLabel(t *testing.T) {
 		{[]string{"create", "t", "--", "-l", "z"}, nil},
 		{[]string{"create", "t", "-lowner:jadegate"}, []string{"owner:jadegate"}},
 		{[]string{"create", "t", "-l=a,b"}, []string{"a", "b"}},
+		{[]string{"create", "t", "-qlowner:jadegate"}, []string{"owner:jadegate"}},
+		{[]string{"create", "t", "-ql", "owner:jadegate"}, []string{"owner:jadegate"}},
+		{[]string{"create", "t", "--labels", "\"owner:jadegate\",\"a,b\""}, []string{"owner:jadegate", "a,b"}},
+		{[]string{"create", "t", "-qv", "-l", "x"}, []string{"x"}},
 	} {
 		if got := bdCreateLabelValues(tt.args); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("bdCreateLabelValues(%v) = %v, want %v", tt.args, got, tt.want)
@@ -461,6 +470,12 @@ func TestBdCreateArgvWithLabel(t *testing.T) {
 	}
 	if got := bdCreateValueFlag([]string{"create", "t", "--description", "--parent"}, "--parent"); got != "" {
 		t.Errorf("bdCreateValueFlag(a value spelling the flag) = %q, want empty", got)
+	}
+	if got := bdCreateValueFlag([]string{"create", "-qf", "issues.md"}, "-f"); got != "issues.md" {
+		t.Errorf("bdCreateValueFlag(-qf issues.md) = %q, want the next token", got)
+	}
+	if !bdHasBoolFlag([]string{"create", "t", "-q", "--no-inherit-labels"}, "--no-inherit-labels") || bdHasBoolFlag([]string{"create", "t", "--no-inherit-labels=false"}, "--no-inherit-labels") {
+		t.Error("bdHasBoolFlag must honor an inline false")
 	}
 }
 
