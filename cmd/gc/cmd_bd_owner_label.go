@@ -154,17 +154,28 @@ func bdCreateVerdict(bdArgs []string) bdVerb {
 // nothing attached (`-vC dir`): pflag would take dir, cobra reads it as the
 // verb, and bd runs what cobra found.
 func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
+	i, hidden := bdVerbIndexAfterGlobals(bdArgs)
+	if hidden || i < 0 {
+		return "", hidden
+	}
+	return bdArgs[i], false
+}
+
+// bdVerbIndexAfterGlobals is bdVerbAfterGlobals returning the verb's index in
+// bdArgs (-1 when the argv names no verb) instead of the verb itself, for the
+// caller that has to insert a flag right after it.
+func bdVerbIndexAfterGlobals(bdArgs []string) (index int, hidden bool) {
 	valueFlags := bdflags.GlobalValueFlags()
 	boolFlags := bdflags.GlobalBoolFlags()
 	for i := 0; i < len(bdArgs); i++ {
 		tok := bdArgs[i]
 		switch {
 		case tok == "--":
-			return "", false // bd's flags end here; nothing after is a verb
+			return -1, false // bd's flags end here; nothing after is a verb
 		case tok == "-":
 			continue // skipped by the search, a positional to the verb's parser
 		case !strings.HasPrefix(tok, "-"):
-			return tok, false
+			return i, false
 		case strings.HasPrefix(tok, "--"):
 			name, _, inline := strings.Cut(tok, "=")
 			switch {
@@ -174,7 +185,7 @@ func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
 					i++
 				}
 			default:
-				return "", true
+				return -1, true
 			}
 		default:
 			for j := 1; j < len(tok); j++ {
@@ -182,7 +193,7 @@ func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
 				switch {
 				case boolFlags[short] && j+1 < len(tok) && tok[j+1] == '=':
 					if j+2 == len(tok) {
-						return "", true // `-v=`: pflag reads the bare `=` as a shorthand it does not know
+						return -1, true // `-v=`: pflag reads the bare `=` as a shorthand it does not know
 					}
 					j = len(tok) // `-v=false`: an inline value ends the cluster
 				case boolFlags[short]:
@@ -193,12 +204,130 @@ func bdVerbAfterGlobals(bdArgs []string) (verb string, hidden bool) {
 				case valueFlags[short]:
 					// `-vC path`: cobra reads path as the verb (see above)
 				default:
-					return "", true
+					return -1, true
 				}
 			}
 		}
 	}
-	return "", false
+	return -1, false
+}
+
+// The create-time door of the owner label (gf-jr0 round 3, finding 1g). The
+// post-create stamp above left a window: bd published the bead before gc's
+// follow-up label write, and federation.MayClaim accepts an unowned bead, so
+// a concurrent city could claim a routed bead in that window — and a label
+// written afterwards does not undo a claim, while an interrupted gc left the
+// bead unowned for good. The owner label now travels IN the create's own
+// argument list, through bd's label flag, so bd never publishes the bead
+// unowned; the follow-up write stays only as the repair for a create that
+// could not carry it (a --graph plan, which refuses the flag) or whose bd
+// ignored it.
+//
+// What the carried label is follows the same rule as the in-process door
+// (federation.OwnerLabelForChild): an owner the operator named wins and
+// nothing is added; a child of a parent owned by another city carries the
+// PARENT's owner, read through the store's live handle before the create (a
+// parent that cannot be read refuses the create — an unread parent is not an
+// unowned one, finding 1d); any other create carries this city's.
+
+// bdCreateLabelFlags are bd create's label flags, every spelling.
+var bdCreateLabelFlags = map[string]bool{"-l": true, "--label": true, "--labels": true}
+
+// bdCreateValueFlag returns the value a create argv gives one value flag,
+// inline (`--parent=x`) or as the next token (`--parent x`); "" when the flag
+// is absent. The last occurrence wins, as pflag's string flags do.
+func bdCreateValueFlag(bdArgs []string, flag string) string {
+	value := ""
+	bdFlagTokens(bdArgs, func(i int, name, inlineValue string, inline bool) {
+		if name != flag {
+			return
+		}
+		switch {
+		case inline:
+			value = inlineValue
+		case i+1 < len(bdArgs):
+			value = bdArgs[i+1]
+		}
+	})
+	return value
+}
+
+// bdCreateLabelValues returns the labels a create argv names through bd's
+// label flags (comma-separated, every spelling), as bd will read them.
+func bdCreateLabelValues(bdArgs []string) []string {
+	var labels []string
+	bdFlagTokens(bdArgs, func(i int, name, value string, inline bool) {
+		if !bdCreateLabelFlags[name] {
+			return
+		}
+		if !inline {
+			if i+1 >= len(bdArgs) {
+				return
+			}
+			value = bdArgs[i+1]
+		}
+		for _, l := range strings.Split(value, ",") {
+			if l = strings.TrimSpace(l); l != "" {
+				labels = append(labels, l)
+			}
+		}
+	})
+	return labels
+}
+
+// bdCreateArgvWithLabel returns bdArgs with `--labels=<label>` inserted right
+// after the verb — before any positional, before a `--` terminator — so bd
+// reads it as one more label of the create (pflag appends a repeated slice
+// flag). An argv whose verb cannot be located is returned unchanged.
+func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
+	i, hidden := bdVerbIndexAfterGlobals(bdArgs)
+	if hidden || i < 0 {
+		return bdArgs
+	}
+	out := make([]string, 0, len(bdArgs)+1)
+	out = append(out, bdArgs[:i+1]...)
+	out = append(out, "--labels="+label)
+	out = append(out, bdArgs[i+1:]...)
+	return out
+}
+
+// bdCreateOwnerLabel decides the owner label a federated city's create
+// carries in its own argument list, and whether it carries one at all:
+//
+//   - an owner the operator named (any label flag) is respected: nothing is
+//     carried, the follow-up read-back keeps today's resolution;
+//   - a --graph plan carries nothing: bd refuses the label flag beside
+//     --graph (per-node fields), so its nodes take the follow-up repair;
+//   - a create under a --parent carries the PARENT's owner when the parent
+//     has one, read through parentRead — the store's live handle — before
+//     anything is created; a parent that cannot be read refuses the create
+//     with that error (finding 1d's rule); a nil parentRead means the
+//     configured store cannot be read for this create (a bd database
+//     override), and such a create carries nothing;
+//   - every other create carries this city's owner.
+func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs []string, owner string) (label string, carry bool, err error) {
+	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
+		return "", false, nil
+	}
+	if bdCreateValueFlag(bdArgs, "--graph") != "" {
+		return "", false, nil
+	}
+	parentID := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--parent"))
+	if parentID == "" {
+		return owner, true, nil
+	}
+	if parentRead == nil {
+		return "", false, nil
+	}
+	parent, err := parentRead(parentID)
+	if err != nil {
+		return "", false, fmt.Errorf("reading parent %q for the owner label: %w", parentID, err)
+	}
+	owners := federation.OwnerLabels(federation.OwnerLabelForChild(nil, parent.Labels, owner))
+	if len(owners) != 1 {
+		return owner, true, nil
+	}
+	return owners[0], true, nil
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`

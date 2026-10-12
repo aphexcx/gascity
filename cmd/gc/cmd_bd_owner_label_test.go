@@ -150,13 +150,21 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
 case "$1" in
   create|new)
+    # bd 1.3.1 applies --labels to the bead(s) it creates (and dedups them
+    # against a parent's copied labels); the created bead's show reports them
+    # below. IGNORE_CREATE_LABELS=1 plays a bd that dropped the flag.
+    if [ "${IGNORE_CREATE_LABELS:-}" = "" ]; then
+      for a in "$@"; do case "$a" in --labels=*) printf '%s\n' "${a#--labels=}" >> "${CAPTURE_PATH}.labels" ;; esac; done
+    fi
     if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi
     exit "${CREATE_EXIT:-0}" ;;
   show)
+    if [ "$3" = "demo-0" ] && [ "${PARENT_UNREADABLE:-}" != "" ]; then printf 'Error: dolt server unavailable\n' >&2; exit 1; fi
     labels=""
     src="${LABELS:-}"
     if [ "$3" = "demo-0" ]; then src="hold:mayor,owner:jadegate"; fi
-    if [ "$src" != "" ]; then labels=$(printf '%s' "$src" | awk -F, '{for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}}'); fi
+    if [ "$3" != "demo-0" ] && [ -f "${CAPTURE_PATH}.labels" ]; then rec=$(paste -sd, "${CAPTURE_PATH}.labels"); src="${src:+$src,}$rec"; fi
+    if [ "$src" != "" ]; then labels=$(printf '%s' "$src" | awk -F, '{for(i=1;i<=NF;i++){if(!seen[$i]++){printf "%s\"%s\"", (n++?",":""), $i}}}'); fi
     parent=""
     if [ "$3" != "demo-0" ] && [ "${PARENT:-}" != "" ]; then parent=",\"parent\":\"${PARENT}\""; fi
     printf '[{"id":"%s","title":"t","status":"open","issue_type":"task","created_at":"2026-09-01T00:00:00Z","labels":[%s]%s}]\n' "$3" "$labels" "$parent" ;;
@@ -181,37 +189,47 @@ func fakeBdCalls(t *testing.T, capture string) []string {
 const federatedDemoCityTOML = "[workspace]\nname = \"demo\"\n\n[federation]\nidentity = \"citadel\"\n"
 
 // TestGcBdCreateStampsTheCreatedBead is the acceptance table for the argv
-// door of gp-0uj in its post-create shape: the argv reaches bd as typed (minus
-// the gc-owned opt-out), and the bead bd reports created is labeled through
-// the store unless it already carries an owner — its own, or its parent's.
+// door of gp-0uj in its create-time shape (gf-pu2 finding 1g): the argv
+// reaches bd as typed (minus the gc-owned opt-out) plus the owner label the
+// create carries — this city's, or the parent's for a child of another
+// city's bead — inserted right after the verb, so bd never publishes the bead
+// unowned; the bead bd reports created is then read back and repaired only
+// where the create could not carry the label (a --graph plan) or bd ignored
+// it. An owner the operator named is respected and nothing is carried.
 func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 	const stamp = "update --json demo-1 --add-label owner:citadel"
 	tests := []struct {
-		name      string
-		city      string
-		args      []string
-		labels    string // what show --json reports on the created bead
-		createOut string // override bd's create output
-		wantArgv  string
-		wantStamp bool
-		wantNote  string
+		name         string
+		city         string
+		args         []string
+		labels       string // what show --json reports on the created bead
+		createOut    string // override bd's create output
+		wantArgv     string
+		wantStamp    bool
+		wantNote     string
+		ignoreLabels bool // a bd that dropped the carried flag
 	}{
-		{"plain create is stamped", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create t", true, ""},
-		{"the new alias is a create", federatedDemoCityTOML, []string{"new", "t"}, "", "", "new t", true, ""},
-		{"flags gc does not know are bd's business", federatedDemoCityTOML, []string{"create", "t", "-p1", "--future-flag", "x"}, "", "", "create t -p1 --future-flag x", true, ""},
-		{"json output is parsed", federatedDemoCityTOML, []string{"create", "--json", "t"}, "", `{"id":"demo-1","title":"t"}`, "create --json t", true, ""},
-		{"explicit owner respected", federatedDemoCityTOML, []string{"create", "t", "-l", "owner:jadegate"}, "owner:jadegate", "", "create t -l owner:jadegate", false, ""},
-		{"inherited owner respected", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create child --parent demo-0", false, ""},
-		{"opt-out stripped, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, ""},
-		{"inline false opt-out is not an opt-out", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label=false"}, "", "", "create t", true, ""},
-		{"dry run creates nothing", federatedDemoCityTOML, []string{"create", "t", "--dry-run"}, "", "⚠ [DRY RUN] Would create issue:\n  ID: demo-1\n  Title: t", "create t --dry-run", false, ""},
-		{"identity unset is byte-identical and silent", "[workspace]\nname = \"demo\"\n", []string{"create", "t", "-l", "foo"}, "", "", "create t -l foo", false, ""},
-		{"no id in the output is said out loud", federatedDemoCityTOML, []string{"create", "t", "--silent"}, "", "created something, format unknown", "create t --silent", false, bdOwnerLabelNotAppliedNotice},
-		{"a hidden verb is never stamped, only said", federatedDemoCityTOML, []string{"--future-flag", "x", "create", "t"}, "", "", "--future-flag x create t", false, bdOwnerLabelHiddenVerbNotice},
-		{"a value that spells the opt-out is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--no-owner-label"}, "", "", "create t --description --no-owner-label", true, ""},
-		{"an explicit owner beats an inherited one", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "-l", "owner:boomtown"}, "owner:boomtown,owner:jadegate", "", "create child --parent demo-0 -l owner:boomtown", false, ""},
-		{"a shorthand cluster before the verb is stamped", federatedDemoCityTOML, []string{"-vv", "create", "t"}, "", "", "-vv create t", true, ""},
-		{"an attached shorthand value before the verb is stamped", federatedDemoCityTOML, []string{"-C/tmp", "create", "t"}, "", "", "-C/tmp create t", true, ""},
+		{"plain create carries the label, no follow-up write", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create --labels=owner:citadel t", false, "", false},
+		{"the new alias is a create", federatedDemoCityTOML, []string{"new", "t"}, "", "", "new --labels=owner:citadel t", false, "", false},
+		{"flags gc does not know are bd's business", federatedDemoCityTOML, []string{"create", "t", "-p1", "--future-flag", "x"}, "", "", "create --labels=owner:citadel t -p1 --future-flag x", false, "", false},
+		{"json output is parsed", federatedDemoCityTOML, []string{"create", "--json", "t"}, "", `{"id":"demo-1","title":"t"}`, "create --labels=owner:citadel --json t", false, "", false},
+		{"explicit owner respected, nothing carried", federatedDemoCityTOML, []string{"create", "t", "-l", "owner:jadegate"}, "owner:jadegate", "", "create t -l owner:jadegate", false, "", false},
+		{"explicit owner in a comma list respected", federatedDemoCityTOML, []string{"create", "t", "--labels", "pool:x,owner:jadegate"}, "pool:x,owner:jadegate", "", "create t --labels pool:x,owner:jadegate", false, "", false},
+		{"a child of a foreign parent carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0", false, "", false},
+		{"a child of a foreign parent carries the parent's owner (inline parent)", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0", false, "", false},
+		{"opt-out stripped, nothing carried, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, "", false},
+		{"inline false opt-out is not an opt-out", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label=false"}, "", "", "create --labels=owner:citadel t", false, "", false},
+		{"dry run creates nothing and carries nothing", federatedDemoCityTOML, []string{"create", "t", "--dry-run"}, "", "⚠ [DRY RUN] Would create issue:\n  ID: demo-1\n  Title: t", "create t --dry-run", false, "", false},
+		{"identity unset is byte-identical and silent", "[workspace]\nname = \"demo\"\n", []string{"create", "t", "-l", "foo"}, "", "", "create t -l foo", false, "", false},
+		{"no id in the output needs no notice when the create carried the label", federatedDemoCityTOML, []string{"create", "t", "--silent"}, "", "created something, format unknown", "create --labels=owner:citadel t --silent", false, "", false},
+		{"a hidden verb is never stamped, only said", federatedDemoCityTOML, []string{"--future-flag", "x", "create", "t"}, "", "", "--future-flag x create t", false, bdOwnerLabelHiddenVerbNotice, false},
+		{"a value that spells the opt-out is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--no-owner-label"}, "", "", "create --labels=owner:citadel t --description --no-owner-label", false, "", false},
+		{"an explicit owner beats an inherited one", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "-l", "owner:boomtown"}, "owner:boomtown,owner:jadegate", "", "create child --parent demo-0 -l owner:boomtown", false, "", false},
+		{"a shorthand cluster before the verb carries the label", federatedDemoCityTOML, []string{"-vv", "create", "t"}, "", "", "-vv create --labels=owner:citadel t", false, "", false},
+		{"an attached shorthand value before the verb carries the label", federatedDemoCityTOML, []string{"-C/tmp", "create", "t"}, "", "", "-C/tmp create --labels=owner:citadel t", false, "", false},
+		{"the label precedes a -- terminator", federatedDemoCityTOML, []string{"create", "--", "t"}, "", "", "create --labels=owner:citadel -- t", false, "", false},
+		{"a graph plan cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--graph", "plan.json"}, "", "Created 1 issues\n  root -> demo-1", "create --graph plan.json", true, "", false},
+		{"a bd that dropped the carried label is repaired after", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create --labels=owner:citadel t", true, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -221,8 +239,14 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			t.Setenv("LABELS", tt.labels)
 			t.Setenv("CREATE_OUT", tt.createOut)
 			t.Setenv("CREATE_EXIT", "")
+			t.Setenv("PARENT_UNREADABLE", "")
+			if tt.ignoreLabels {
+				t.Setenv("IGNORE_CREATE_LABELS", "1")
+			} else {
+				t.Setenv("IGNORE_CREATE_LABELS", "")
+			}
 			parent := ""
-			if slices.Contains(tt.args, "--parent") {
+			if slices.ContainsFunc(tt.args, func(a string) bool { return strings.HasPrefix(a, "--parent") }) {
 				parent = "demo-0"
 			}
 			t.Setenv("PARENT", parent)
@@ -232,11 +256,17 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tt.args, got, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
-			if len(calls) == 0 || calls[0] != tt.wantArgv {
-				t.Fatalf("bd received %q first, want %q", calls, tt.wantArgv)
+			// The create is the first call that is not a read: a child's
+			// parent is read before it, for the owner it carries.
+			createAt := slices.IndexFunc(calls, func(c string) bool { return !strings.HasPrefix(c, "show ") })
+			if createAt < 0 || calls[createAt] != tt.wantArgv {
+				t.Fatalf("bd received %q, want the create %q", calls, tt.wantArgv)
+			}
+			if parent != "" && createAt == 0 && strings.Contains(tt.wantArgv, "--labels=owner:jadegate") {
+				t.Fatalf("the parent's owner was carried without reading the parent first: calls=%q", calls)
 			}
 			stamped := false
-			for _, c := range calls[1:] {
+			for _, c := range calls[createAt+1:] {
 				if c == stamp {
 					stamped = true
 				}
@@ -264,88 +294,204 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 	}
 }
 
-// TestGcBdCreateStampsEveryBeadOfABatch: a --file or --graph create names
-// several beads; each one is labeled on its own terms.
+// TestGcBdCreateStampsEveryBeadOfABatch: a --file create names several
+// beads; the label the create carries reaches every one of them through bd's
+// own flag, so none needs a follow-up write — and when bd dropped the flag,
+// each is repaired on its own terms.
 func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
-	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
-	t.Setenv("CAPTURE_PATH", capture)
-	t.Setenv("LABELS", "")
-	t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
+	for _, ignored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "bd applied the carried label", true: "bd dropped the carried label"}[ignored], func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("LABELS", "")
+			t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
+			if ignored {
+				t.Setenv("IGNORE_CREATE_LABELS", "1")
+			}
 
-	var stdout, stderr bytes.Buffer
-	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 0 {
-		t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
-	}
-	calls := strings.Join(fakeBdCalls(t, capture), "\n")
-	if strings.Contains(calls, "demo-old") {
-		t.Fatalf("title redirected owner stamping: %q", calls)
-	}
-	for _, want := range []string{"update --json demo-1 --add-label owner:citadel", "update --json demo-2 --add-label owner:citadel"} {
-		if !strings.Contains(calls, want) {
-			t.Fatalf("calls = %q, want %q", calls, want)
-		}
+			var stdout, stderr bytes.Buffer
+			if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if len(calls) == 0 || calls[0] != "create --labels=owner:citadel --file issues.md" {
+				t.Fatalf("bd received %q, want the batch create carrying the owner label first", calls)
+			}
+			joined := strings.Join(calls, "\n")
+			if strings.Contains(joined, "demo-old") {
+				t.Fatalf("title redirected owner stamping: %q", calls)
+			}
+			for _, repair := range []string{"update --json demo-1 --add-label owner:citadel", "update --json demo-2 --add-label owner:citadel"} {
+				if strings.Contains(joined, repair) != ignored {
+					t.Fatalf("calls = %q: repair write %q present = %v, want %v", calls, repair, !ignored, ignored)
+				}
+			}
+		})
 	}
 }
 
-// TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead: a create that exited
-// non-zero and whose output names no bead is said out loud too — a batch can
-// persist beads before failing, in a shape gc does not read — and the exit
-// code stays bd's. Nothing is stamped: there is no id to stamp.
+// TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead: a create that could not
+// carry the label (a --graph plan), exited non-zero and whose output names no
+// bead is said out loud — a batch can persist beads before failing, in a
+// shape gc does not read — and the exit code stays bd's. Nothing is stamped:
+// there is no id to stamp. A create that carried the label needs no notice:
+// whatever bd persisted carries it.
 func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
-	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
-	t.Setenv("CAPTURE_PATH", capture)
-	t.Setenv("LABELS", "")
-	t.Setenv("CREATE_OUT", "created something, format unknown")
-	t.Setenv("CREATE_EXIT", "3")
+	for _, tt := range []struct {
+		name     string
+		args     []string
+		wantNote bool
+	}{
+		{"a graph plan carried nothing", []string{"create", "--graph", "plan.json"}, true},
+		{"a markdown batch carried the label", []string{"create", "--file", "issues.md"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("LABELS", "")
+			t.Setenv("CREATE_OUT", "created something, format unknown")
+			t.Setenv("CREATE_EXIT", "3")
 
-	var stdout, stderr bytes.Buffer
-	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
-		t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), bdOwnerLabelNotAppliedOnFailureNotice) {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), bdOwnerLabelNotAppliedOnFailureNotice)
-	}
-	if calls := strings.Join(fakeBdCalls(t, capture), "\n"); strings.Contains(calls, "update") {
-		t.Fatalf("calls = %q, want no stamp write without a created id", calls)
+			var stdout, stderr bytes.Buffer
+			if got := doBd(tt.args, &stdout, &stderr); got != 3 {
+				t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+			}
+			if strings.Contains(stderr.String(), bdOwnerLabelNotAppliedOnFailureNotice) != tt.wantNote {
+				t.Fatalf("stderr = %q, notice present = %v, want %v", stderr.String(), !tt.wantNote, tt.wantNote)
+			}
+			if calls := strings.Join(fakeBdCalls(t, capture), "\n"); strings.Contains(calls, "update") {
+				t.Fatalf("calls = %q, want no stamp write without a created id", calls)
+			}
+		})
 	}
 }
 
 // TestGcBdCreateStampsWhatBdReportedEvenOnFailure: a batch that persisted
-// some beads and then failed still names them; they are labeled and the
-// exit code stays bd's.
+// some beads and then failed still names them; each carries the label the
+// create brought, or is repaired when bd dropped it, and the exit code stays
+// bd's.
 func TestGcBdCreateStampsWhatBdReportedEvenOnFailure(t *testing.T) {
+	for _, ignored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "bd applied the carried label", true: "bd dropped the carried label"}[ignored], func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("LABELS", "")
+			t.Setenv("CREATE_OUT", "✓ Created issue: demo-1 — first")
+			t.Setenv("CREATE_EXIT", "3")
+			if ignored {
+				t.Setenv("IGNORE_CREATE_LABELS", "1")
+			}
+
+			var stdout, stderr bytes.Buffer
+			if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
+				t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+			}
+			calls := strings.Join(fakeBdCalls(t, capture), "\n")
+			if !strings.Contains(calls, "create --labels=owner:citadel --file issues.md") {
+				t.Fatalf("calls = %q, want the create carrying the owner label", calls)
+			}
+			if strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") != ignored {
+				t.Fatalf("calls = %q, repair write present = %v, want %v", calls, !ignored, ignored)
+			}
+		})
+	}
+}
+
+// TestGcBdCreateRefusesAnUnreadableParent: a child's owner is its parent's,
+// read before the create; a parent that cannot be read is not an unowned
+// one (finding 1d), so the create is refused — nothing reaches bd's create.
+func TestGcBdCreateRefusesAnUnreadableParent(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("LABELS", "")
-	t.Setenv("CREATE_OUT", "✓ Created issue: demo-1 — first")
-	t.Setenv("CREATE_EXIT", "3")
+	t.Setenv("CREATE_OUT", "")
+	t.Setenv("PARENT", "demo-0")
+	t.Setenv("PARENT_UNREADABLE", "1")
 
 	var stdout, stderr bytes.Buffer
-	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
-		t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+	if got := doBd([]string{"create", "child", "--parent", "demo-0"}, &stdout, &stderr); got != 1 {
+		t.Fatalf("doBd = %d, want 1 (refused); stderr=%q", got, stderr.String())
 	}
-	if calls := strings.Join(fakeBdCalls(t, capture), "\n"); !strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") {
-		t.Fatalf("calls = %q, want the reported bead labeled despite the failure", calls)
+	if !strings.Contains(stderr.String(), "refusing to create") || !strings.Contains(stderr.String(), "demo-0") {
+		t.Fatalf("stderr = %q, want a refusal naming the parent", stderr.String())
+	}
+	for _, c := range fakeBdCalls(t, capture) {
+		if !strings.HasPrefix(c, "show ") {
+			t.Fatalf("bd ran %q; nothing but the parent read may run for a refused create", c)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing from a refused create", stdout.String())
 	}
 }
 
-// Database overrides reach bd unchanged, but must never redirect the follow-up
-// owner write into the scope's default store using an unrelated local ID.
+// TestBdCreateArgvWithLabel pins the shape of the carried label: inserted
+// right after the verb, whatever precedes it, before positionals and a `--`;
+// and the label flags bd reads are read the same way here.
+func TestBdCreateArgvWithLabel(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"create", "t"}, "create --labels=owner:citadel t"},
+		{[]string{"new", "t", "-p1"}, "new --labels=owner:citadel t -p1"},
+		{[]string{"--actor", "bob", "create", "t"}, "--actor bob create --labels=owner:citadel t"},
+		{[]string{"-vC/tmp", "create", "t"}, "-vC/tmp create --labels=owner:citadel t"},
+		{[]string{"create", "--", "--not-a-flag"}, "create --labels=owner:citadel -- --not-a-flag"},
+		{[]string{"--future-flag", "x", "create", "t"}, "--future-flag x create t"}, // hidden verb: unchanged
+	} {
+		if got := strings.Join(bdCreateArgvWithLabel(tt.args, "owner:citadel"), " "); got != tt.want {
+			t.Errorf("bdCreateArgvWithLabel(%v) = %q, want %q", tt.args, got, tt.want)
+		}
+	}
+	for _, tt := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"create", "t", "-l", "a,b"}, []string{"a", "b"}},
+		{[]string{"create", "t", "--labels=x", "--label", "y"}, []string{"x", "y"}},
+		{[]string{"create", "t", "--description", "-l"}, nil},
+		{[]string{"create", "t", "--", "-l", "z"}, nil},
+	} {
+		if got := bdCreateLabelValues(tt.args); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("bdCreateLabelValues(%v) = %v, want %v", tt.args, got, tt.want)
+		}
+	}
+	if got := bdCreateValueFlag([]string{"create", "t", "--parent", "demo-0"}, "--parent"); got != "demo-0" {
+		t.Errorf("bdCreateValueFlag(--parent x) = %q", got)
+	}
+	if got := bdCreateValueFlag([]string{"create", "t", "--parent=demo-0"}, "--parent"); got != "demo-0" {
+		t.Errorf("bdCreateValueFlag(--parent=x) = %q", got)
+	}
+	if got := bdCreateValueFlag([]string{"create", "t", "--description", "--parent"}, "--parent"); got != "" {
+		t.Errorf("bdCreateValueFlag(a value spelling the flag) = %q, want empty", got)
+	}
+}
+
+// Database overrides reach bd unchanged, and must never redirect a follow-up
+// owner write into the scope's default store using an unrelated local ID. A
+// create without a parent still carries this city's label (no store is
+// needed for that); a create under a parent carries nothing, because the
+// parent cannot be read from the configured store, and says so.
 func TestGcBdCreateDatabaseOverrideDoesNotStampDefaultStore(t *testing.T) {
 	tests := []struct {
-		name   string
-		args   []string
-		envKey string
+		name     string
+		args     []string
+		envKey   string
+		wantArgv string
+		wantNote bool
 	}{
-		{"database before verb", []string{"--database", "other", "create", "t"}, ""},
-		{"database inline", []string{"create", "t", "--database=other"}, ""},
-		{"db before verb", []string{"--db", "other.db", "create", "t"}, ""},
-		{"db inline", []string{"create", "t", "--db=other.db"}, ""},
-		{"BEADS_DB", []string{"create", "t"}, "BEADS_DB"},
-		{"BD_DB", []string{"create", "t"}, "BD_DB"},
+		{"database before verb", []string{"--database", "other", "create", "t"}, "", "--database other create --labels=owner:citadel t", false},
+		{"database inline", []string{"create", "t", "--database=other"}, "", "create --labels=owner:citadel t --database=other", false},
+		{"db before verb", []string{"--db", "other.db", "create", "t"}, "", "--db other.db create --labels=owner:citadel t", false},
+		{"db inline", []string{"create", "t", "--db=other.db"}, "", "create --labels=owner:citadel t --db=other.db", false},
+		{"BEADS_DB", []string{"create", "t"}, "BEADS_DB", "create --labels=owner:citadel t", false},
+		{"BD_DB", []string{"create", "t"}, "BD_DB", "create --labels=owner:citadel t", false},
+		{"a child under an override carries nothing and is said", []string{"create", "t", "--parent", "demo-0", "--database=other"}, "", "create t --parent demo-0 --database=other", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -364,11 +510,11 @@ printf '✓ Created issue: demo-1 — t\n'
 				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
-			if len(calls) != 1 || calls[0] != strings.Join(tt.args, " ") {
-				t.Fatalf("bd calls = %q, want only the unchanged create argv", calls)
+			if len(calls) != 1 || calls[0] != tt.wantArgv {
+				t.Fatalf("bd calls = %q, want only the create %q", calls, tt.wantArgv)
 			}
-			if !strings.Contains(stderr.String(), "owner label not applied") || !strings.Contains(stderr.String(), "database") {
-				t.Fatalf("stderr=%q, want owner-label database-selection notice", stderr.String())
+			if got := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database"); got != tt.wantNote {
+				t.Fatalf("stderr=%q, owner-label database-selection notice present = %v, want %v", stderr.String(), got, tt.wantNote)
 			}
 			if !strings.Contains(stdout.String(), "Created issue: demo-1") {
 				t.Fatalf("create output lost: %q", stdout.String())

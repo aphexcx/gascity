@@ -716,33 +716,75 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if !stampOwner {
 		return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
 	}
+	// The owner label travels IN the create (bdCreateOwnerLabel): bd must never
+	// publish the bead unowned, because federation.MayClaim accepts an unowned
+	// bead and a concurrent city could claim a routed one between bd's create
+	// and a follow-up label write, which no later label undoes. A child of a
+	// parent owned by another city carries the parent's owner, read through
+	// the configured store's live handle before anything is created; a parent
+	// that cannot be read refuses the create. Under a bd database override the
+	// configured store is not the create's store, so no parent is read there
+	// and a create naming one carries nothing (the notice below says so).
+	override := bdOwnerLabelDatabaseOverride(bdArgs, env)
+	var store beads.Store
+	var parentRead func(string) (beads.Bead, error)
+	if !override {
+		parentRead = func(id string) (beads.Bead, error) {
+			if store == nil {
+				opened, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+				if err != nil {
+					return beads.Bead{}, fmt.Errorf("opening the %s store: %w", scopeLabel(target), err)
+				}
+				store = opened
+			}
+			return beads.HandlesFor(store).Live.Get(id)
+		}
+	}
+	label, carried, err := bdCreateOwnerLabel(parentRead, bdArgs, owner)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if carried {
+		bdArgs = bdCreateArgvWithLabel(bdArgs, label)
+	}
 	// Tee bd's stdout so the created ids can be read out of it; the operator
-	// still sees every byte. Whatever bd reported it created is labeled even
-	// when bd then exited non-zero (a batch that persisted some beads and
-	// failed on a later one), and the create's exit code stays the exit code:
-	// the stamp is a follow-up write that reports its own outcome on stderr.
-	// A create that named no bead is said out loud whatever the exit code —
-	// after a failure, gc cannot tell "created nothing" from "created some, in
-	// a shape gc does not read".
+	// still sees every byte. Whatever bd reported it created is read back and
+	// repaired where the create could not carry the label (a --graph plan) or
+	// bd ignored it, even when bd then exited non-zero (a batch that persisted
+	// some beads and failed on a later one), and the create's exit code stays
+	// the exit code: the repair is a follow-up write that reports its own
+	// outcome on stderr. A create that carried nothing and named no bead is
+	// said out loud whatever the exit code — after a failure, gc cannot tell
+	// "created nothing" from "created some, in a shape gc does not read".
 	var created bytes.Buffer
 	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, &created)
 	ids := bdCreatedIDs(created.String())
 	if len(ids) == 0 {
-		notice := bdOwnerLabelNotAppliedNotice
-		if code != 0 {
-			notice = bdOwnerLabelNotAppliedOnFailureNotice
+		if !carried {
+			notice := bdOwnerLabelNotAppliedNotice
+			if code != 0 {
+				notice = bdOwnerLabelNotAppliedOnFailureNotice
+			}
+			fmt.Fprintln(stderr, notice) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintln(stderr, notice) //nolint:errcheck // best-effort stderr
 		return code
 	}
-	if bdOwnerLabelDatabaseOverride(bdArgs, env) {
-		fmt.Fprintln(stderr, "gc bd: owner label not applied (bd database selection overrides the configured scope; label the created beads in the selected database)") //nolint:errcheck // best-effort stderr
+	if override {
+		if !carried {
+			fmt.Fprintln(stderr, "gc bd: owner label not applied (bd database selection overrides the configured scope; label the created beads in the selected database)") //nolint:errcheck // best-effort stderr
+		}
 		return code
 	}
-	store, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: opening the %s store: %v\n", strings.Join(ids, ", "), scopeLabel(target), err) //nolint:errcheck // best-effort stderr
-		return code
+	if store == nil {
+		opened, err := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+		if err != nil {
+			if !carried {
+				fmt.Fprintf(stderr, "gc bd: owner label not applied to %s: opening the %s store: %v\n", strings.Join(ids, ", "), scopeLabel(target), err) //nolint:errcheck // best-effort stderr
+			}
+			return code
+		}
+		store = opened
 	}
 	stampCreatedBeads(store, ids, owner, stderr)
 	return code
