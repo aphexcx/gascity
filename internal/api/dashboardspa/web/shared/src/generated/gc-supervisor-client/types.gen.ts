@@ -914,7 +914,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundDroppedEventPayload | InboundDuplicateEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1018,6 +1018,10 @@ export type ExtMsgAdapterRegisterInputBody = {
      * Provider name.
      */
     provider: string;
+    /**
+     * Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle}).
+     */
+    reply_instructions?: string;
 };
 
 export type ExtMsgAdapterRegisterOutputBody = {
@@ -1446,6 +1450,40 @@ export type HookClaimReclaimedStalePayload = {
     previous_owner: string;
 };
 
+export type InboundDelivery = {
+    delivered_bytes: number;
+    expected_bytes: number;
+    members?: Array<InboundDeliveryMember> | null;
+    receipt_id: string;
+    status: string;
+};
+
+export type InboundDeliveryMember = {
+    delivered_bytes: number;
+    digest: string;
+    error?: string;
+    expected_bytes: number;
+    selector?: string;
+    session_id: string;
+    status: string;
+};
+
+export type InboundDroppedEventPayload = {
+    actor: string;
+    conversation_id: string;
+    explicit_target?: string;
+    provider: string;
+};
+
+export type InboundDuplicateEventPayload = {
+    actor: string;
+    conversation_id: string;
+    provider: string;
+    provider_message_id: string;
+    target_agent?: string;
+    target_session: string;
+};
+
 export type InboundEventPayload = {
     actor: string;
     conversation_id: string;
@@ -1464,11 +1502,13 @@ export type InboundReceiptStatus = {
 
 export type InboundResult = {
     Binding: SessionBindingRecord;
+    Duplicate: boolean;
     GroupRoute: GroupRouteDecision;
     Message: ExternalInboundMessage;
     TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry: ConversationTranscriptRecord;
+    delivery?: InboundDelivery;
 };
 
 export type ListBodyAgentPatch = {
@@ -5362,6 +5402,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgGroupCreated) | ({
     type: 'extmsg.inbound';
 } & TypedEventStreamEnvelopeExtmsgInbound) | ({
+    type: 'extmsg.inbound_dropped';
+} & TypedEventStreamEnvelopeExtmsgInboundDropped) | ({
+    type: 'extmsg.inbound_duplicate';
+} & TypedEventStreamEnvelopeExtmsgInboundDuplicate) | ({
     type: 'extmsg.outbound';
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
@@ -6174,6 +6218,42 @@ export type TypedEventStreamEnvelopeExtmsgInbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.inbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope extmsg.inbound_dropped
+ */
+export type TypedEventStreamEnvelopeExtmsgInboundDropped = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: InboundDroppedEventPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.inbound_dropped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope extmsg.inbound_duplicate
+ */
+export type TypedEventStreamEnvelopeExtmsgInboundDuplicate = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: InboundDuplicateEventPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.inbound_duplicate';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7409,6 +7489,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgGroupCreated) | ({
     type: 'extmsg.inbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgInbound) | ({
+    type: 'extmsg.inbound_dropped';
+} & TypedTaggedEventStreamEnvelopeExtmsgInboundDropped) | ({
+    type: 'extmsg.inbound_duplicate';
+} & TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate) | ({
     type: 'extmsg.outbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
@@ -8259,6 +8343,44 @@ export type TypedTaggedEventStreamEnvelopeExtmsgInbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.inbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.inbound_dropped
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgInboundDropped = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: InboundDroppedEventPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.inbound_dropped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.inbound_duplicate
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgInboundDuplicate = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: InboundDuplicateEventPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.inbound_duplicate';
     workflow?: WorkflowEventProjection;
 };
 
