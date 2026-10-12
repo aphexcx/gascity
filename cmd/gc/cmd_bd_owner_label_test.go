@@ -215,6 +215,8 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"json output is parsed", federatedDemoCityTOML, []string{"create", "--json", "t"}, "", `{"id":"demo-1","title":"t"}`, "create --labels=owner:citadel --json t", false, "", false},
 		{"explicit owner respected, nothing carried", federatedDemoCityTOML, []string{"create", "t", "-l", "owner:jadegate"}, "owner:jadegate", "", "create t -l owner:jadegate", false, "", false},
 		{"explicit owner in a comma list respected", federatedDemoCityTOML, []string{"create", "t", "--labels", "pool:x,owner:jadegate"}, "pool:x,owner:jadegate", "", "create t --labels pool:x,owner:jadegate", false, "", false},
+		{"explicit owner attached to the shorthand respected", federatedDemoCityTOML, []string{"create", "t", "-lowner:jadegate"}, "owner:jadegate", "", "create t -lowner:jadegate", false, "", false},
+		{"explicit owner attached to the shorthand with = respected", federatedDemoCityTOML, []string{"create", "t", "-l=owner:jadegate"}, "owner:jadegate", "", "create t -l=owner:jadegate", false, "", false},
 		{"a child of a foreign parent carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0", false, "", false},
 		{"a child of a foreign parent carries the parent's owner (inline parent)", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0", false, "", false},
 		{"opt-out stripped, nothing carried, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, "", false},
@@ -229,6 +231,8 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"an attached shorthand value before the verb carries the label", federatedDemoCityTOML, []string{"-C/tmp", "create", "t"}, "", "", "-C/tmp create --labels=owner:citadel t", false, "", false},
 		{"the label precedes a -- terminator", federatedDemoCityTOML, []string{"create", "--", "t"}, "", "", "create --labels=owner:citadel -- t", false, "", false},
 		{"a graph plan cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--graph", "plan.json"}, "", "Created 1 issues\n  root -> demo-1", "create --graph plan.json", true, "", false},
+		{"a markdown batch cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--file", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create --file issues.md", true, "", false},
+		{"a markdown batch by shorthand cannot carry the label either", federatedDemoCityTOML, []string{"create", "-f", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -f issues.md", true, "", false},
 		{"a bd that dropped the carried label is repaired after", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create --labels=owner:citadel t", true, "", true},
 	}
 	for _, tt := range tests {
@@ -295,48 +299,41 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 }
 
 // TestGcBdCreateStampsEveryBeadOfABatch: a --file create names several
-// beads; the label the create carries reaches every one of them through bd's
-// own flag, so none needs a follow-up write — and when bd dropped the flag,
-// each is repaired on its own terms.
+// beads and cannot carry the label (bd refuses --labels beside --file: the
+// markdown template supplies per-issue fields), so each bead is repaired on
+// its own terms after the create, as before.
 func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
-	for _, ignored := range []bool{false, true} {
-		t.Run(map[bool]string{false: "bd applied the carried label", true: "bd dropped the carried label"}[ignored], func(t *testing.T) {
-			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
-			t.Setenv("CAPTURE_PATH", capture)
-			t.Setenv("LABELS", "")
-			t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
-			if ignored {
-				t.Setenv("IGNORE_CREATE_LABELS", "1")
-			}
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("LABELS", "")
+	t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
 
-			var stdout, stderr bytes.Buffer
-			if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 0 {
-				t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
-			}
-			calls := fakeBdCalls(t, capture)
-			if len(calls) == 0 || calls[0] != "create --labels=owner:citadel --file issues.md" {
-				t.Fatalf("bd received %q, want the batch create carrying the owner label first", calls)
-			}
-			joined := strings.Join(calls, "\n")
-			if strings.Contains(joined, "demo-old") {
-				t.Fatalf("title redirected owner stamping: %q", calls)
-			}
-			for _, repair := range []string{"update --json demo-1 --add-label owner:citadel", "update --json demo-2 --add-label owner:citadel"} {
-				if strings.Contains(joined, repair) != ignored {
-					t.Fatalf("calls = %q: repair write %q present = %v, want %v", calls, repair, !ignored, ignored)
-				}
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	calls := fakeBdCalls(t, capture)
+	if len(calls) == 0 || calls[0] != "create --file issues.md" {
+		t.Fatalf("bd received %q, want the batch create as typed first (bd refuses --labels beside --file)", calls)
+	}
+	joined := strings.Join(calls, "\n")
+	if strings.Contains(joined, "demo-old") {
+		t.Fatalf("title redirected owner stamping: %q", calls)
+	}
+	for _, want := range []string{"update --json demo-1 --add-label owner:citadel", "update --json demo-2 --add-label owner:citadel"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("calls = %q, want %q", calls, want)
+		}
 	}
 }
 
 // TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead: a create that could not
-// carry the label (a --graph plan), exited non-zero and whose output names no
-// bead is said out loud — a batch can persist beads before failing, in a
-// shape gc does not read — and the exit code stays bd's. Nothing is stamped:
-// there is no id to stamp. A create that carried the label needs no notice:
-// whatever bd persisted carries it.
+// carry the label (a --graph plan, a --file batch), exited non-zero and
+// whose output names no bead is said out loud — a batch can persist beads
+// before failing, in a shape gc does not read — and the exit code stays
+// bd's. Nothing is stamped: there is no id to stamp. A create that carried
+// the label needs no notice: whatever bd persisted carries it.
 func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
@@ -344,7 +341,8 @@ func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
 		wantNote bool
 	}{
 		{"a graph plan carried nothing", []string{"create", "--graph", "plan.json"}, true},
-		{"a markdown batch carried the label", []string{"create", "--file", "issues.md"}, false},
+		{"a markdown batch carried nothing", []string{"create", "--file", "issues.md"}, true},
+		{"a single create carried the label", []string{"create", "t", "--silent"}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
@@ -369,34 +367,26 @@ func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
 }
 
 // TestGcBdCreateStampsWhatBdReportedEvenOnFailure: a batch that persisted
-// some beads and then failed still names them; each carries the label the
-// create brought, or is repaired when bd dropped it, and the exit code stays
-// bd's.
+// some beads and then failed still names them; a batch carries nothing, so
+// each is repaired, and the exit code stays bd's.
 func TestGcBdCreateStampsWhatBdReportedEvenOnFailure(t *testing.T) {
-	for _, ignored := range []bool{false, true} {
-		t.Run(map[bool]string{false: "bd applied the carried label", true: "bd dropped the carried label"}[ignored], func(t *testing.T) {
-			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
-			t.Setenv("CAPTURE_PATH", capture)
-			t.Setenv("LABELS", "")
-			t.Setenv("CREATE_OUT", "✓ Created issue: demo-1 — first")
-			t.Setenv("CREATE_EXIT", "3")
-			if ignored {
-				t.Setenv("IGNORE_CREATE_LABELS", "1")
-			}
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("LABELS", "")
+	t.Setenv("CREATE_OUT", "✓ Created issue: demo-1 — first")
+	t.Setenv("CREATE_EXIT", "3")
 
-			var stdout, stderr bytes.Buffer
-			if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
-				t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
-			}
-			calls := strings.Join(fakeBdCalls(t, capture), "\n")
-			if !strings.Contains(calls, "create --labels=owner:citadel --file issues.md") {
-				t.Fatalf("calls = %q, want the create carrying the owner label", calls)
-			}
-			if strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") != ignored {
-				t.Fatalf("calls = %q, repair write present = %v, want %v", calls, !ignored, ignored)
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"create", "--file", "issues.md"}, &stdout, &stderr); got != 3 {
+		t.Fatalf("doBd = %d, want bd's exit code 3; stderr=%q", got, stderr.String())
+	}
+	calls := strings.Join(fakeBdCalls(t, capture), "\n")
+	if !strings.Contains(calls, "create --file issues.md") {
+		t.Fatalf("calls = %q, want the batch create as typed", calls)
+	}
+	if !strings.Contains(calls, "update --json demo-1 --add-label owner:citadel") {
+		t.Fatalf("calls = %q, want the reported bead labeled despite the failure", calls)
 	}
 }
 
@@ -456,6 +446,8 @@ func TestBdCreateArgvWithLabel(t *testing.T) {
 		{[]string{"create", "t", "--labels=x", "--label", "y"}, []string{"x", "y"}},
 		{[]string{"create", "t", "--description", "-l"}, nil},
 		{[]string{"create", "t", "--", "-l", "z"}, nil},
+		{[]string{"create", "t", "-lowner:jadegate"}, []string{"owner:jadegate"}},
+		{[]string{"create", "t", "-l=a,b"}, []string{"a", "b"}},
 	} {
 		if got := bdCreateLabelValues(tt.args); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("bdCreateLabelValues(%v) = %v, want %v", tt.args, got, tt.want)
@@ -492,6 +484,10 @@ func TestGcBdCreateDatabaseOverrideDoesNotStampDefaultStore(t *testing.T) {
 		{"BEADS_DB", []string{"create", "t"}, "BEADS_DB", "create --labels=owner:citadel t", false},
 		{"BD_DB", []string{"create", "t"}, "BD_DB", "create --labels=owner:citadel t", false},
 		{"a child under an override carries nothing and is said", []string{"create", "t", "--parent", "demo-0", "--database=other"}, "", "create t --parent demo-0 --database=other", true},
+		{"repo selector", []string{"create", "t", "--repo", "/other/repo"}, "", "create --labels=owner:citadel t --repo /other/repo", false},
+		{"a child under a repo selector carries nothing and is said", []string{"create", "t", "--repo", "/other/repo", "--parent", "other-123"}, "", "create t --repo /other/repo --parent other-123", true},
+		{"global selector before verb", []string{"--global", "create", "t"}, "", "--global create --labels=owner:citadel t", false},
+		{"a child under the global selector carries nothing and is said", []string{"--global", "create", "t", "--parent", "other-123"}, "", "--global create t --parent other-123", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

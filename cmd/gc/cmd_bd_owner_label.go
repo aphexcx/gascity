@@ -59,7 +59,9 @@ const (
 // bdFlagTokens walks the flag tokens of a create argv before a `--`
 // terminator, skipping the VALUE of every value flag bd's create surface and
 // its globals know (`--description --dry-run` is a description, not a dry
-// run). A token is visited as (index, name, value, inline).
+// run). A token is visited as (index, name, value, inline). A value shorthand
+// with its value attached (`-lowner:x`, `-l=owner:x`: pflag's forms) is
+// visited as that shorthand with an inline value, the way bd reads it.
 func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline bool)) {
 	valueFlags := bdflags.ValueFlags("create")
 	for i := 0; i < len(bdArgs); i++ {
@@ -71,6 +73,9 @@ func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline 
 			continue
 		}
 		name, value, inline := strings.Cut(tok, "=")
+		if !strings.HasPrefix(tok, "--") && len(tok) > 2 && valueFlags[tok[:2]] {
+			name, value, inline = tok[:2], strings.TrimPrefix(tok[2:], "="), true
+		}
 		visit(i, name, value, inline)
 		if !inline && valueFlags[name] {
 			i++ // its value is not a flag
@@ -220,8 +225,8 @@ func bdVerbIndexAfterGlobals(bdArgs []string) (index int, hidden bool) {
 // bead unowned for good. The owner label now travels IN the create's own
 // argument list, through bd's label flag, so bd never publishes the bead
 // unowned; the follow-up write stays only as the repair for a create that
-// could not carry it (a --graph plan, which refuses the flag) or whose bd
-// ignored it.
+// could not carry it (a --graph plan or a --file batch, which refuse the
+// flag) or whose bd ignored it.
 //
 // What the carried label is follows the same rule as the in-process door
 // (federation.OwnerLabelForChild): an owner the operator named wins and
@@ -296,8 +301,10 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //
 //   - an owner the operator named (any label flag) is respected: nothing is
 //     carried, the follow-up read-back keeps today's resolution;
-//   - a --graph plan carries nothing: bd refuses the label flag beside
-//     --graph (per-node fields), so its nodes take the follow-up repair;
+//   - a --graph plan or a --file batch carries nothing: bd refuses the label
+//     flag beside either (per-node and per-issue fields;
+//     rejectSingleIssueFlagsForGraph / rejectSingleIssueFlagsForMarkdown in
+//     cmd/bd), so their beads take the follow-up repair;
 //   - a create under a --parent carries the PARENT's owner when the parent
 //     has one, read through parentRead — the store's live handle — before
 //     anything is created; a parent that cannot be read refuses the create
@@ -309,7 +316,7 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
 		return "", false, nil
 	}
-	if bdCreateValueFlag(bdArgs, "--graph") != "" {
+	if bdCreateValueFlag(bdArgs, "--graph") != "" || bdCreateValueFlag(bdArgs, "--file") != "" || bdCreateValueFlag(bdArgs, "-f") != "" {
 		return "", false, nil
 	}
 	parentID := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--parent"))
@@ -350,14 +357,27 @@ func bdHasBoolFlag(bdArgs []string, flag string) bool {
 }
 
 // bdOwnerLabelDatabaseOverride reports selections that a reopen of the scope's
-// configured store cannot safely reproduce. Inspect the actual child environment
-// (after gc's projections), not the ambient environment. Conservatively skip the
-// follow-up stamp even when an explicit override happens to name the same store.
+// configured store cannot safely reproduce: bd's database flags, its other
+// destination selectors (`--repo` opens another repository's store, `--global`
+// the shared server's global database), and the environment's database
+// selection. Inspect the actual child environment (after gc's projections),
+// not the ambient environment. Conservatively skip the follow-up stamp — and
+// the parent read before the create — even when an explicit override happens
+// to name the same store.
 func bdOwnerLabelDatabaseOverride(bdArgs, env []string) bool {
 	overridden := false
-	bdFlagTokens(bdArgs, func(_ int, name, _ string, _ bool) {
-		if name == "--database" || name == "--db" {
+	bdFlagTokens(bdArgs, func(_ int, name, value string, inline bool) {
+		switch name {
+		case "--database", "--db", "--repo":
 			overridden = true
+		case "--global":
+			if !inline {
+				overridden = true
+				return
+			}
+			if v, err := strconv.ParseBool(value); err != nil || v {
+				overridden = true
+			}
 		}
 	})
 	if overridden {

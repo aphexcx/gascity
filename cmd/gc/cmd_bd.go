@@ -750,8 +750,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	// Tee bd's stdout so the created ids can be read out of it; the operator
 	// still sees every byte. Whatever bd reported it created is read back and
-	// repaired where the create could not carry the label (a --graph plan) or
-	// bd ignored it, even when bd then exited non-zero (a batch that persisted
+	// repaired where the create could not carry the label (a --graph plan, a
+	// --file batch) or bd ignored it, even when bd then exited non-zero (a batch that persisted
 	// some beads and failed on a later one), and the create's exit code stays
 	// the exit code: the repair is a follow-up write that reports its own
 	// outcome on stderr. A create that carried nothing and named no bead is
