@@ -535,24 +535,30 @@ func (r *FileRecorder) followRotationLocked() {
 // rotation leaves between its rename and its gzip: the sequence floor a
 // writer must respect while the owner is mid-rotation. Errors read as 0 so a
 // caller only ever moves its sequence forward.
+//
+// The rotating-* files are read FIRST and the archives (ReadLatestSeq)
+// second: gzipAndArchive publishes the archive (rename of its temp file)
+// before it removes the rotating file, so a compression that completes
+// between the two reads is seen by one of them — the rotating file by the
+// first, or the archive by the second. The other order could miss the
+// segment on both reads and hand a follower an archived sequence number
+// (codex round 5, gf-4c9 row 6).
 func latestSeqIncludingInFlight(path string) uint64 {
-	seq, err := ReadLatestSeq(path)
-	if err != nil {
-		seq = 0
-	}
-	entries, err := os.ReadDir(filepath.Dir(path))
-	if err != nil {
-		return seq
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if _, _, last, ok := parseRotatingBasename(e.Name()); ok && last > seq {
-			seq = last
+	var floor uint64
+	if entries, err := os.ReadDir(filepath.Dir(path)); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if _, _, last, ok := parseRotatingBasename(e.Name()); ok && last > floor {
+				floor = last
+			}
 		}
 	}
-	return seq
+	if seq, err := ReadLatestSeq(path); err == nil && seq > floor {
+		floor = seq
+	}
+	return floor
 }
 
 // maybeAutoRotateLocked is the size-gated rotation hook on the

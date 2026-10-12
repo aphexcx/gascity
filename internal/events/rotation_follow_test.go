@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestFollowRotationRecorderWritesToTheActiveLogAfterTheOwnerRotates is the
@@ -45,8 +47,8 @@ func TestFollowRotationRecorderWritesToTheActiveLogAfterTheOwnerRotates(t *testi
 	}
 	select {
 	case <-res.Done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("rotation compression did not finish within 2s")
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("rotation compression did not finish within %s", testutil.GoroutineRaceTimeout)
 	}
 
 	follower.Record(Event{Type: WorkerOperation, Actor: "follower", Subject: "follower-after-rotation"})
