@@ -68,6 +68,9 @@ const (
 // gc does not know ends the walk of that token.
 func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline bool)) {
 	valueFlags := bdflags.ValueFlags("create")
+	for flag := range bdCreateHiddenValueFlags {
+		valueFlags[flag] = true
+	}
 	boolFlags := bdflags.BoolFlags("create")
 	for i := 0; i < len(bdArgs); i++ {
 		tok := bdArgs[i]
@@ -265,6 +268,13 @@ func bdVerbIndexAfterGlobals(bdArgs []string) (index int, hidden bool) {
 // bdCreateLabelFlags are bd create's label flags, every spelling.
 var bdCreateLabelFlags = map[string]bool{"-l": true, "--label": true, "--labels": true}
 
+// bdCreateHiddenValueFlags are bd create's hidden value-taking aliases (the
+// description's --body / --message / -m and --description-file), which the
+// generated manifest (from `bd create --help`) does not list. Their values
+// must be skipped like any other value's: `--body '--parent=x'` is a
+// description, not a parent.
+var bdCreateHiddenValueFlags = map[string]bool{"--body": true, "--message": true, "-m": true, "--description-file": true}
+
 // bdCreateValueFlag returns the value a create argv gives one value flag,
 // inline (`--parent=x`) or as the next token (`--parent x`); "" when the flag
 // is absent. The last occurrence wins, as pflag's string flags do.
@@ -380,20 +390,21 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`
-// terminator, honoring an inline value and skipping value flags' values.
+// terminator, honoring an inline value and skipping value flags' values. A
+// repeated flag resolves as pflag does: the last occurrence wins
+// (`--dry-run --dry-run=false` is not a dry run).
 func bdHasBoolFlag(bdArgs []string, flag string) bool {
 	set := false
 	bdFlagTokens(bdArgs, func(_ int, name, value string, inline bool) {
-		if name != flag || set {
+		if name != flag {
 			return
 		}
 		if !inline {
 			set = true
 			return
 		}
-		if v, err := strconv.ParseBool(value); err != nil || v {
-			set = true
-		}
+		v, err := strconv.ParseBool(value)
+		set = err != nil || v
 	})
 	return set
 }

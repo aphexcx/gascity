@@ -221,6 +221,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"explicit owner in a quoted CSV field respected", federatedDemoCityTOML, []string{"create", "t", "--labels", "\"owner:jadegate\",pool:x"}, "owner:jadegate,pool:x", "", "create t --labels \"owner:jadegate\",pool:x", false, "", false},
 		{"no-inherit-labels makes the child this city's", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "--no-inherit-labels"}, "", "", "create --labels=owner:citadel child --parent demo-0 --no-inherit-labels", false, "", false},
 		{"no-inherit-labels=false keeps the parent's lane", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "--no-inherit-labels=false"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0 --no-inherit-labels=false", false, "", false},
+		{"a repeated inheritance boolean resolves to its last value", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0", "--no-inherit-labels", "--no-inherit-labels=false"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0 --no-inherit-labels --no-inherit-labels=false", false, "", false},
+		{"a description alias value that spells a parent is a description", federatedDemoCityTOML, []string{"create", "t", "--body", "--parent=p-1"}, "", "", "create --labels=owner:citadel t --body --parent=p-1", false, "", false},
+		{"the -m alias value that spells a parent is a description", federatedDemoCityTOML, []string{"create", "t", "-m", "--parent=p-1"}, "", "", "create --labels=owner:citadel t -m --parent=p-1", false, "", false},
 		{"a child of a foreign parent carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0", false, "", false},
 		{"a child of a foreign parent carries the parent's owner (inline parent)", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0", false, "", false},
 		{"opt-out stripped, nothing carried, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, "", false},
@@ -476,6 +479,14 @@ func TestBdCreateArgvWithLabel(t *testing.T) {
 	}
 	if !bdHasBoolFlag([]string{"create", "t", "-q", "--no-inherit-labels"}, "--no-inherit-labels") || bdHasBoolFlag([]string{"create", "t", "--no-inherit-labels=false"}, "--no-inherit-labels") {
 		t.Error("bdHasBoolFlag must honor an inline false")
+	}
+	if bdHasBoolFlag([]string{"create", "t", "--dry-run", "--dry-run=false"}, "--dry-run") || !bdHasBoolFlag([]string{"create", "t", "--dry-run=false", "--dry-run"}, "--dry-run") {
+		t.Error("bdHasBoolFlag must resolve a repeated flag to its last value")
+	}
+	for _, alias := range []string{"--body", "--message", "-m", "--description-file"} {
+		if got := bdCreateValueFlag([]string{"create", "t", alias, "--parent=p-1"}, "--parent"); got != "" {
+			t.Errorf("bdCreateValueFlag after %s = %q, want the alias's value skipped", alias, got)
+		}
 	}
 }
 
