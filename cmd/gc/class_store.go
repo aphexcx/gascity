@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -474,6 +475,10 @@ func cityQueryTopology(cityPath string, cfg *config.City) config.QueryTopology {
 	topo := config.QueryTopology{}
 	if cfg != nil {
 		topo.Beads = cfg.Beads
+		// The hook's generated pool-demand read keeps only claimable rows
+		// before cutting its window (gf-4c9 row 4); the same identity the
+		// claim fence compares against (cmd_hook.go hookClaimOptions).
+		topo.FederationIdentity = strings.TrimSpace(cfg.Federation.Identity)
 	}
 	topo.FederatedReady = routedWorkNeedsFederatedReader(cityPath, cfg)
 	return topo

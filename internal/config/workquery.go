@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -30,6 +31,16 @@ type QueryTopology struct {
 	// The zero value is the single-store city every deployment has today, and
 	// the generated command for it is byte-for-byte the one it already runs.
 	FederatedReady bool
+	// FederationIdentity is this city's name in a bead store it shares with
+	// other cities (city.toml [federation] identity, validated lowercase at
+	// config load). When set, the generated routed pool-demand reads order the
+	// rows this city may claim (federation.MayClaim: no owner label, an owner
+	// label naming this city, or a handoff label naming it) AHEAD of the rest
+	// BEFORE the candidate window is cut, so another city's rows cannot fill
+	// the window and starve eligible local work behind it (gf-4c9 row 4).
+	// Empty means the city is not federated: no clause is emitted and the
+	// command is byte-for-byte the one it already runs.
+	FederationIdentity string
 }
 
 // includeEphemeralReady reports whether generated ready reads may ask for the
@@ -232,6 +243,42 @@ func excludeShippedPoolDemandJQClause() string {
 	return ` | select(` + jqMeta(beadmeta.WorkOutcomeMetadataKey) + ` != "` + beadmeta.WorkOutcomeShipped + `")`
 }
 
+// claimablePredicateJQ renders the jq boolean that is true for a row this
+// city may claim, mirroring federation.MayClaim exactly: a row with no owner
+// label, a row whose owner labels all name identity, or a row carrying the
+// handoff label for identity. It is spelled from the federation package's own
+// label prefixes so the two cannot drift, and identity is safe to interpolate
+// because config validation restricts it to [a-z0-9-]. An empty identity
+// renders nothing: the city is not federated.
+func claimablePredicateJQ(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ""
+	}
+	owners := `[ (.labels // [])[] | select(startswith("` + federation.OwnerLabelPrefix + `")) | .[` + strconv.Itoa(len(federation.OwnerLabelPrefix)) + `:] ]`
+	handoff := `(.labels // []) | index("` + federation.HandoffLabel(identity) + `")`
+	return `(` + owners + `) as $gc_owners | ($gc_owners | length) == 0 or (` + handoff + `) != null or all($gc_owners[]; . == "` + identity + `")`
+}
+
+// claimableFirstJQClause renders the jq pipeline step that moves the rows
+// this city may claim AHEAD of the rows it may not (claimablePredicateJQ),
+// keeping the reader's order inside each half, so that the window cut after
+// it is filled by claimable work first. It reorders rather than drops: the
+// hook's cross-city fence (cmd/gc fenceCrossCityHookCandidates) stays the
+// authoritative judge of every row served, and a foreign row that still fits
+// the window is refused and LOGGED there exactly as before — the refusal line
+// an incident responder greps for keeps its one source. What the reorder
+// takes away is only the starvation: foreign rows can no longer fill the
+// window while eligible local work waits behind it (gf-4c9 row 4). Empty for
+// a non-federated city.
+func claimableFirstJQClause(identity string) string {
+	predicate := claimablePredicateJQ(identity)
+	if predicate == "" {
+		return ""
+	}
+	return ` | ([.[] | select(` + predicate + `)] + [.[] | select((` + predicate + `) | not)])`
+}
+
 // poolDemandReadyReadShell filters the single-store reader's full ready set
 // before limiting it, so shipped rows cannot hide pending demand. Capture the
 // reader first to preserve its exit status instead of masking it in a pipeline.
@@ -243,10 +290,18 @@ func poolDemandReadyReadShell(command string, limit int, topo QueryTopology) str
 	if limit > 0 {
 		limitFlag = ` --limit=` + strconv.Itoa(limit)
 	}
-	if topo.FederatedReady {
+	claimableFirst := claimableFirstJQClause(topo.FederationIdentity)
+	if topo.FederatedReady && claimableFirst == "" {
 		return command + limitFlag
 	}
-	filter := `[.[]` + excludeShippedPoolDemandJQClause() + `]`
+	// The federated reader already applies the shared Ready predicate (and the
+	// shipped-work exclusion); on a federated city the only reason to read the
+	// whole set here is the ownership ordering, which must run before the cut.
+	filter := `[.[]`
+	if !topo.FederatedReady {
+		filter += excludeShippedPoolDemandJQClause()
+	}
+	filter += `]` + claimableFirst
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}

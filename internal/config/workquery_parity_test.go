@@ -475,8 +475,14 @@ func TestWorkQueryGolden(t *testing.T) {
 				// reddens THOSE goldens, which is the byte-identity claim.
 				{"bd104_federated", QueryTopology{FederatedReady: true}},
 				{"bd105_federated", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, FederatedReady: true}},
+				// A federated city's ownership clause (gf-4c9 row 4): new
+				// files again; the rows above stay byte-identical.
+				{"bd104_claimable", QueryTopology{FederationIdentity: "citadel"}},
 			} {
 				if strings.HasSuffix(flag.name, "_federated") && !v.federates {
+					continue
+				}
+				if strings.HasSuffix(flag.name, "_claimable") && !v.federates {
 					continue
 				}
 				got := v.forTopo(shape.agent, flag.topo)
