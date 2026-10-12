@@ -7753,7 +7753,15 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 // API listeners come up (the same trick as the ephemeral-port tests).
 func writeSupervisorBootFixture(t *testing.T, cfg string) {
 	t.Helper()
-	gcHome := t.TempDir()
+	// The fixture makes runSupervisor return after the listeners announce by
+	// planting a DIRECTORY at the control socket path, so the unix bind fails.
+	// That only works while the canonical path is the one bound: past
+	// supervisorSocketPathLimit (#5913) the socket falls back to a hashed
+	// /tmp path and the planted directory is never consulted, the bind
+	// succeeds and runSupervisor serves until the test binary's deadline.
+	// t.TempDir() on Darwin is long enough to cross the limit, so the home
+	// lives in a short scratch directory.
+	gcHome := shortTempDir(t, "gc-sup-boot-")
 	t.Setenv("GC_HOME", gcHome)
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
