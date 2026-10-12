@@ -509,6 +509,42 @@ func (r *FileRecorder) followRotationLocked() {
 		fmt.Fprintf(r.stderr, "events: follow rotation: close rotated handle: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	r.file = reopened
+	// The owner's rotation is rename, then reopen, then the anchor write; a
+	// follower that lands between the rename and the anchor sees an EMPTY
+	// active log, and writeRecordLocked's by-path tail read would then fall
+	// back to this recorder's cached sequence — the owner's events this
+	// recorder never saw are not in it, so the next append could reuse a
+	// sequence number the archive already holds (codex round 1, gf-4c9 row
+	// 6). Re-seed the cached sequence the way the constructor does, from the
+	// active log, the .gz archives AND the not-yet-compressed rotating-*
+	// file the rename just produced.
+	if floor := latestSeqIncludingInFlight(r.path); floor > r.seq {
+		r.seq = floor
+	}
+}
+
+// latestSeqIncludingInFlight is ReadLatestSeq plus the rotating-* files a
+// rotation leaves between its rename and its gzip: the sequence floor a
+// writer must respect while the owner is mid-rotation. Errors read as 0 so a
+// caller only ever moves its sequence forward.
+func latestSeqIncludingInFlight(path string) uint64 {
+	seq, err := ReadLatestSeq(path)
+	if err != nil {
+		seq = 0
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return seq
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if _, _, last, ok := parseRotatingBasename(e.Name()); ok && last > seq {
+			seq = last
+		}
+	}
+	return seq
 }
 
 // maybeAutoRotateLocked is the size-gated rotation hook on the

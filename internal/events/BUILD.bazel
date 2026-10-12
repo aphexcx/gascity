@@ -49,6 +49,7 @@ go_test(
         "recorder_shortwrite_unix_test.go",
         "rotation_archive_test.go",
         "rotation_auto_test.go",
+        "rotation_follow_test.go",
         "rotation_force_test.go",
         "rotation_reader_test.go",
         "rotation_superseded_test.go",

@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -100,5 +101,48 @@ func TestFollowRotationIsInertWhilePathIsUnchanged(t *testing.T) {
 	}
 	if len(evts) != 2 || evts[0].Seq != 1 || evts[1].Seq != 2 {
 		t.Fatalf("events = %+v, want seq 1 and 2 in the active log", evts)
+	}
+}
+
+// TestFollowRotationReopenContinuesSequencePastRenamedLog reproduces the
+// interleaving the lane's codex round named: the owner has renamed the
+// active log away but not yet written the rotation anchor, so the follower
+// reopens an EMPTY active log. Its next append must continue past the
+// renamed file's last sequence (11 after ten owner events), never reuse one
+// that sequence-based watchers would discard.
+func TestFollowRotationReopenContinuesSequencePastRenamedLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	owner, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close() //nolint:errcheck // test cleanup
+	follower, err := NewFileRecorder(path, &stderr, WithMaxSize(0), WithoutStartupSweep(), WithFollowRotation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close() //nolint:errcheck // test cleanup
+
+	for i := 1; i <= 10; i++ {
+		owner.Record(Event{Type: BeadCreated, Actor: "owner", Subject: "owner-" + string(rune('0'+i))})
+	}
+	// The owner's rotation, frozen after its rename and before its anchor.
+	if err := os.Rename(path, filepath.Join(dir, formatRotatingBasename(time.Now().UTC(), 1, 10))); err != nil {
+		t.Fatal(err)
+	}
+
+	follower.Record(Event{Type: WorkerOperation, Actor: "follower", Subject: "mid-rotation"})
+
+	active, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered(active): %v", err)
+	}
+	if len(active) != 1 || active[0].Subject != "mid-rotation" {
+		t.Fatalf("active log = %+v, want the follower's one event", active)
+	}
+	if active[0].Seq != 11 {
+		t.Fatalf("mid-rotation event seq = %d, want 11 (past the renamed log's last sequence)", active[0].Seq)
 	}
 }
