@@ -584,7 +584,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		// default-probe pool counts in-process below (defaultScaleTargets), and a
 		// custom-scale_check pool runs the operator's own command, so the
 		// generated count-form is reached only by the legacy nil-store caller.
-		sp := scaleParamsForTopology(&cfg.Agents[i], config.QueryTopology{Beads: cfg.Beads})
+		// The identity rides along so the generated count-form applies the
+		// same ownership fence the in-process counter does (finding 1c).
+		sp := scaleParamsForTopology(&cfg.Agents[i], config.QueryTopology{Beads: cfg.Beads, FederationIdentity: federationIdentity(cfg)})
 		// Expand {{.Rig}}/{{.AgentBase}} before the scale_check enters the
 		// controller probe pool so rig-scoped agents query their own rig.
 		sp.Check = expandAgentCommandTemplate(cityPath, cityName, &cfg.Agents[i], cfg.Rigs, "scale_check", sp.Check, stderr)
@@ -2020,6 +2022,14 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
 	countedBeads := make(map[string]map[string]struct{})
+	// The ownership fence the hook applies to every row it serves
+	// (federation.MayClaim via fenceCrossCityHookCandidates). A row this city
+	// may not claim is not demand either: counting it minted a seat whose
+	// startup claim was then refused, and the pool cycled start/drain on
+	// another city's work forever (gf-4c9 round 2, finding 1c). Not logged
+	// here — the demand count runs every tick, and the refusal line an
+	// incident responder greps for keeps its one source in the hook.
+	identity := federationIdentity(cfg)
 	for key, group := range groups {
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
@@ -2046,6 +2056,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// A parked or backed-off row is not demand this tick: neither counted
 			// nor listed, so no seat is minted for it (pool_start_backoff.go).
 			if startDeferral.skip(b, template, group.storeKey) {
+				continue
+			}
+			if ok, _ := federation.MayClaim(b.Labels, identity); !ok {
 				continue
 			}
 			seen := countedBeads[template]

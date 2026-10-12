@@ -260,6 +260,21 @@ func claimablePredicateJQ(identity string) string {
 	return `(` + owners + `) as $gc_owners | ($gc_owners | length) == 0 or (` + handoff + `) != null or all($gc_owners[]; . == "` + identity + `")`
 }
 
+// claimableOnlyJQClause renders the jq pipeline step that KEEPS only the rows
+// this city may claim (claimablePredicateJQ): the count-form's use of the
+// predicate. Where the worker's read reorders (claimableFirstJQClause, so the
+// Go fence still sees and logs the foreign rows), a demand count that
+// included a foreign row minted a seat whose startup claim the fence then
+// refused — start, drain, repeat, on another city's work (gf-4c9 round 2,
+// finding 1c). Empty for a non-federated city.
+func claimableOnlyJQClause(identity string) string {
+	predicate := claimablePredicateJQ(identity)
+	if predicate == "" {
+		return ""
+	}
+	return ` | [.[] | select(` + predicate + `)]`
+}
+
 // claimableFirstJQClause renders the jq pipeline step that moves the rows
 // this city may claim AHEAD of the rows it may not (claimablePredicateJQ),
 // keeping the reader's order inside each half, so that the window cut after
@@ -516,8 +531,20 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell(0, topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + poolDemandCountJQ(topo)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
+}
+
+// poolDemandCountJQ is the count-form's final aggregation: the union of the
+// three reads, de-duplicated by id, with the ownership fence applied on a
+// federated city (claimableOnlyJQClause), then its length. The non-federated
+// form is byte-identical to what it always was.
+func poolDemandCountJQ(topo QueryTopology) string {
+	clause := claimableOnlyJQClause(topo.FederationIdentity)
+	if clause == "" {
+		return `jq -s "(add // []) | unique_by(.id) | length"`
+	}
+	return shellquote.Join([]string{"jq", "-s", `(add // []) | unique_by(.id)` + clause + ` | length`})
 }
 
 func (a *Agent) poolDemandTarget() string {
