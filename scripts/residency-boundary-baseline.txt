@@ -109,7 +109,7 @@
 # appears below on the cliSoleClassBinding row, which is a different claim (this
 # surface answers every reserved prefix from one store) and stays.
 #
-# The four ast:uncounted-call-spelling rows are storeFor calls reached through a
+# The five ast:uncounted-call-spelling rows are storeFor calls reached through a
 # receiver no grep row names: cs.storageRoutes.storeFor in api_state.go,
 # cliStorageRoutes(cityPath).storeFor in cli_class_stores.go (the receiver is a
 # CALL, so there is no identifier to match at all), and graphStores.storeFor in
@@ -117,9 +117,13 @@
 # no layout of these lines can ever match it — which is the hole this rule
 # exists to report rather than to silence. They are a census, not a verdict: the
 # api_state.go and cli_class_stores.go sites read the routes table the residency
-# resolver owns, and cmd_graph.go's is that file's own id-to-store answer. A
-# fifth row is a fifth surface deciding residency through a spelling the grep
-# half cannot see.
+# resolver owns, and cmd_graph.go's is that file's own id-to-store answer. The
+# fifth row, pool_start_backoff.go workBead, is the fork start-failure policy
+# (gp-r8sk): p.storeFor(ref) resolves only the nonempty ref from the start
+# request, refuses a missing store or read failure, and never searches another
+# store for the same id; upstream's broader AST rule counts its receiver
+# spelling. A sixth row is another surface deciding residency through a spelling
+# the grep half cannot see.
 #
 # The b:cliSoleClassBinding rows are the same kind of census one layer down:
 # the surfaces that answer every reserved prefix from ONE store, which is a
@@ -219,6 +223,7 @@ cmd/gc/order_store.go	appendOrdersSweepStore	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresForConfigTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	orderTrackingSweepStoresFromTargets	ast:returns-store-list	1
 cmd/gc/order_store.go	rawOrderStores	ast:returns-store-list	1
+cmd/gc/pool_start_backoff.go	workBead	ast:uncounted-call-spelling	1
 cmd/gc/ready_federation.go	readyFederationLegsOverBinding	d:ReservedPrefixesFor	1
 cmd/gc/ready_federation.go	readyLegsForTopology	c:storeref.EachLeg	1
 cmd/gc/ready_federation.go	readyRigLegStores	ast:returns-store-list	1
