@@ -667,6 +667,16 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	r.file = newFile
 	r.recordCount = 0
 	r.lastSizeCheck = time.Now()
+	// The renamed log's last sequence is the floor for everything written
+	// after it. A following recorder advances the log without this owner's
+	// cached sequence seeing it, so the cached value can sit BELOW the
+	// window just read; writing the anchor from it reused a sequence the
+	// archive holds, and every later owner event overlapped the archive too
+	// — a watcher past that point discarded them all (gf-4c9 round 2,
+	// finding 1a).
+	if last > r.seq {
+		r.seq = last
+	}
 
 	payload := RotatedPayload{
 		PriorArchive:  archiveBase,
