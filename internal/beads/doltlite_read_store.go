@@ -352,7 +352,14 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	}
 	s.readyMu.Unlock()
 
-	q := ListQuery{Status: "open", AllowScan: true, IncludeClosed: false, Limit: 0, SkipLabels: true}
+	// The ready read CARRIES the labels: the controller's demand count and
+	// every other reader of this projection judge ownership with
+	// federation.MayClaim on b.Labels, and a label-free row reads as unowned,
+	// so another city's task counted as this city's demand, minted a seat
+	// the authoritative claim then refused, and the pool cycled start/drain
+	// (gf-c7n finding 1k). The per-hash ready cache below amortizes the
+	// label join to one read per store change.
+	q := ListQuery{Status: "open", AllowScan: true, IncludeClosed: false, Limit: 0}
 	if rq.Assignee != "" {
 		q.Assignee = rq.Assignee
 	}
