@@ -1177,7 +1177,11 @@ func bdDirectoryFlag(args []string) (value string, slot int, attached bool) {
 			}
 		}
 		if !bdflags.Known(next) && !hasChildren {
-			args, slots = args[:i], slots[:i]
+			// The verb itself is known to be positional. For an unlisted
+			// command, scan only globals until an unknown flag obscures
+			// whether its next token is a value.
+			args = append(append([]string{}, args[:i]...), args[i+1:]...)
+			slots = append(append([]int{}, slots[:i]...), slots[i+1:]...)
 			break
 		}
 		command = next
