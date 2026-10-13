@@ -3,6 +3,8 @@
 package beads
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -60,6 +62,83 @@ func TestDoltliteReadStoreReadyCarriesLabelsForTheOwnershipFence(t *testing.T) {
 	for _, b := range again {
 		if b.ID == "gc-foreign" && (len(b.Labels) != 1 || b.Labels[0] != foreign) {
 			t.Errorf("cached Ready dropped the owner label: %v", b.Labels)
+		}
+	}
+}
+
+// TestDoltliteReadStoreReadyHydratesLabelsBeyondTheVariableLimit pins the
+// codex round-1 finding on 1k: hydrating labels bound one SQL variable per
+// returned row, and modernc SQLite refuses a statement with more than 32766
+// variables, so an unlimited ready read of a queue past that size — the
+// controller's demand read — failed with "too many SQL variables" where the
+// label-free read had succeeded. The ids are now bound in chunks.
+func TestDoltliteReadStoreReadyHydratesLabelsBeyondTheVariableLimit(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, nil)
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	const rows = 32766 + 10
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := tx.Prepare(`INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, description, design, acceptance_criteria, notes, metadata, ephemeral, no_history) VALUES (?, ?, 'open', 'task', 2, ?, ?, '', '', '', '', '', '{}', 0, 0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	label, err := tx.Prepare(`INSERT INTO labels (issue_id, label) VALUES (?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Format(time.RFC3339Nano)
+	for i := 0; i < rows; i++ {
+		id := fmt.Sprintf("gc-big-%05d", i)
+		if _, err := issue.Exec(id, "big queue "+id, created, created); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := label.Exec(id, "owner:citadel"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready over %d rows: %v", rows, err)
+	}
+	if len(got) != rows {
+		t.Fatalf("Ready returned %d rows, want %d", len(got), rows)
+	}
+	for _, b := range got {
+		if len(b.Labels) != 1 || b.Labels[0] != "owner:citadel" {
+			t.Fatalf("%s labels = %v, want [owner:citadel] on every row", b.ID, b.Labels)
+		}
+	}
+}
+
+// TestDoltliteHydrateLabelsChunksTheIDs pins the chunking itself with a
+// chunk smaller than the row set: every row's labels arrive, none twice.
+func TestDoltliteHydrateLabelsChunksTheIDs(t *testing.T) {
+	saved := doltliteLabelHydrationChunk
+	doltliteLabelHydrationChunk = 2
+	defer func() { doltliteLabelHydrationChunk = saved }()
+	now := time.Now().UTC()
+	var issues []testDoltliteIssue
+	for i := 0; i < 5; i++ {
+		issues = append(issues, testDoltliteIssue{ID: fmt.Sprintf("gc-chunk-%d", i), Title: "chunked", Status: "open", IssueType: "task", CreatedAt: now.Add(time.Duration(i) * time.Second), Labels: []string{"p1", fmt.Sprintf("n:%d", i)}})
+	}
+	store := newDoltliteStoreWithIssues(t, issues)
+	got, err := store.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("Ready returned %d rows, want 5", len(got))
+	}
+	for i, b := range got {
+		want := []string{fmt.Sprintf("n:%d", i), "p1"}
+		if !reflect.DeepEqual(b.Labels, want) {
+			t.Errorf("%s labels = %v, want %v", b.ID, b.Labels, want)
 		}
 	}
 }

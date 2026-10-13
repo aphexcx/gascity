@@ -1604,16 +1604,41 @@ func (s *DoltliteReadStore) tableHasColumn(table, column string) (bool, error) {
 	return true, nil
 }
 
+// doltliteLabelHydrationChunk bounds the ids one label query binds. modernc
+// SQLite refuses a statement with more than 32766 variables, and an
+// unlimited ready read of a large queue hydrates every row it returns
+// (gf-c7n finding 1k, codex round 1), so the IN list is issued in chunks.
+var doltliteLabelHydrationChunk = 500
+
 func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error {
 	if len(beads) == 0 {
 		return nil
 	}
 	byID := make(map[string]*Bead, len(beads))
-	args := make([]any, 0, len(beads))
 	for i := range beads {
 		byID[beads[i].ID] = &beads[i]
-		args = append(args, beads[i].ID)
 	}
+	chunk := doltliteLabelHydrationChunk
+	if chunk <= 0 {
+		chunk = 1
+	}
+	for start := 0; start < len(beads); start += chunk {
+		end := min(start+chunk, len(beads))
+		args := make([]any, 0, end-start)
+		for _, b := range beads[start:end] {
+			args = append(args, b.ID)
+		}
+		if err := s.hydrateLabelChunk(byID, labelTable, args); err != nil {
+			return err
+		}
+	}
+	for i := range beads {
+		sort.Strings(beads[i].Labels)
+	}
+	return nil
+}
+
+func (s *DoltliteReadStore) hydrateLabelChunk(byID map[string]*Bead, labelTable string, args []any) error {
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
 	rows, err := s.db.Query(`SELECT issue_id, label FROM `+labelTable+` WHERE issue_id IN (`+placeholders+`)`, args...)
 	if err != nil {
@@ -1631,9 +1656,6 @@ func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error
 		if b := byID[id]; b != nil {
 			b.Labels = append(b.Labels, label)
 		}
-	}
-	for i := range beads {
-		sort.Strings(beads[i].Labels)
 	}
 	return rows.Err()
 }

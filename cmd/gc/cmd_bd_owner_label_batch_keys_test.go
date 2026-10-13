@@ -33,17 +33,31 @@ func TestBdGraphPlanWithOwnerMatchesKeysAsBdDoes(t *testing.T) {
 		t.Errorf("a plan member spelled its own way must be carried through: %s", got)
 	}
 
-	// The last key bd binds wins: the earlier, shadowed member is what bd
-	// never read, so only the bound one is rewritten and kept.
-	got, carried, err = bdGraphPlanWithOwner([]byte(`{"nodes":[{"key":"x","title":"X"}],"Nodes":[{"key":"y","title":"Y","labels":["owner:boomtown"],"Labels":["p1"]}]}`), "owner:citadel", nil)
+	// Inside a node the last key bd binds wins (a []string is decoded afresh
+	// each time), so only the bound labels member is rewritten and kept.
+	got, carried, err = bdGraphPlanWithOwner([]byte(`{"nodes":[{"key":"y","title":"Y","labels":["owner:boomtown"],"Labels":["p1"]}]}`), "owner:citadel", nil)
 	if err != nil || !carried {
-		t.Fatalf("shadowed keys: carried=%v err=%v", carried, err)
+		t.Fatalf("shadowed node keys: carried=%v err=%v", carried, err)
 	}
 	if labels := planNodeLabels(t, got); !reflect.DeepEqual(labels, map[string][]string{"y": {"p1", "owner:citadel"}}) {
-		t.Errorf("shadowed keys: labels = %v, want y with its LAST labels member (p1) plus this city's owner, x never read", labels)
+		t.Errorf("shadowed node keys: labels = %v, want y with its LAST labels member (p1) plus this city's owner", labels)
 	}
-	if n := strings.Count(strings.ToLower(string(got)), `"nodes"`); n != 1 {
-		t.Errorf("shadowed keys: the rewritten plan must hold one nodes member, got %d:\n%s", n, got)
+	if n := strings.Count(strings.ToLower(string(got)), `"labels"`); n != 1 {
+		t.Errorf("shadowed node keys: the rewritten node must hold one labels member, got %d:\n%s", n, got)
+	}
+	// Two plan members bd binds to one field are REFUSED (codex round 1 on
+	// 1m): for the plan's arrays encoding/json decodes the later member into
+	// the elements the earlier one built, so a node member the later object
+	// omits (an owner) survives in bd's plan — neither member alone is what
+	// bd reads, and stamping from one would change ownership.
+	for _, in := range []string{
+		`{"nodes":[{"key":"x","title":"X","labels":["owner:boomtown"]}],"Nodes":[{"key":"x","title":"X"}]}`,
+		`{"nodes":[{"key":"x","title":"X"}],"edges":[],"Edges":[{"from_key":"x","to_id":"hw-1","type":"parent-child"}]}`,
+		`{"commit_message":"a","Commit_Message":"b","nodes":[]}`,
+	} {
+		if got, carried, err := bdGraphPlanWithOwner([]byte(in), "owner:citadel", nil); err == nil || got != nil || carried || !strings.Contains(err.Error(), "twice") {
+			t.Errorf("bdGraphPlanWithOwner(%q) = (%s, %v, %v), want a refusal naming the twice-spelled member", in, got, carried, err)
+		}
 	}
 
 	// Whatever bd would refuse — and whatever gc cannot stamp — is refused

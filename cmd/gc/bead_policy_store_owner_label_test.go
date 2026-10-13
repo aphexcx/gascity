@@ -305,11 +305,15 @@ func TestBeadPolicyGraphStoreFollowsEveryParentRelationshipBdAccepts(t *testing.
 			{Key: "edge-existing", Title: "under an existing bead through an edge"},
 			{Key: "grandchild", Title: "under edge-child", ParentKey: "edge-child"},
 			{Key: "blocked", Title: "blocks only"},
+			{Key: "keyed-beside-an-id", Title: "an edge whose from_id names an existing bead"},
 		},
 		Edges: []beads.GraphApplyEdge{
 			{FromKey: "edge-child", ToKey: "foreign", Type: "parent-child"},
 			{FromKey: "edge-existing", ToID: existing.ID, Type: "parent-child"},
 			{FromKey: "blocked", ToKey: "foreign", Type: "blocks"},
+			// bd takes from_id over from_key (resolveEdgeRef): this edge makes
+			// an EXISTING bead the child, not the keyed plan node.
+			{FromKey: "keyed-beside-an-id", FromID: "hw-existing-child", ToID: existing.ID, Type: "parent-child"},
 		},
 	}
 	if _, err := applier.ApplyGraphPlan(context.Background(), plan); err != nil {
@@ -319,7 +323,7 @@ func TestBeadPolicyGraphStoreFollowsEveryParentRelationshipBdAccepts(t *testing.
 	for _, n := range backing.plan.Nodes {
 		got = append(got, strings.Join(n.Labels, ","))
 	}
-	want := []string{"owner:jadegate", "owner:jadegate", "owner:boomtown", "owner:jadegate", "owner:citadel"}
+	want := []string{"owner:jadegate", "owner:jadegate", "owner:boomtown", "owner:jadegate", "owner:citadel", "owner:citadel"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("node labels = %v, want %v", got, want)
 	}

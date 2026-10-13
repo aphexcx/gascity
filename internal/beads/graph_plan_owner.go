@@ -18,9 +18,10 @@ type GraphPlanParent struct {
 // graph apply accepts for a typed plan, in the order bd wires them (cmd/bd
 // graph_apply.go: the node's own parent first, then the edges): the node's
 // parent_key, else its parent_id (bd's effective parent — parent_key wins);
-// then every edge of type parent-child whose child is the node (from_key;
-// a from_id names an existing bead, not a plan node — a typed plan node has
-// no explicit id), its parent to_id (an existing bead) or else to_key. A
+// then every edge of type parent-child whose child is the node (from_key
+// with no from_id: bd takes an id over a key, a from_id names an existing
+// bead, and a typed plan node has no explicit id), its parent to_id (an
+// existing bead) or else to_key. A
 // relationship naming the node itself, or a key bd would refuse as unknown,
 // is skipped.
 func GraphPlanParents(plan *GraphApplyPlan) [][]GraphPlanParent {
@@ -50,7 +51,11 @@ func GraphPlanParents(plan *GraphApplyPlan) [][]GraphPlanParent {
 		}
 	}
 	for _, edge := range plan.Edges {
-		if edge.Type != "parent-child" || edge.FromKey == "" {
+		// bd resolves an edge end by its id first (resolveEdgeRef): an edge
+		// with a from_id names an existing bead as the child whatever its
+		// from_key says, and a typed plan node has no explicit id, so it is
+		// never a plan node's relationship.
+		if edge.Type != "parent-child" || edge.FromKey == "" || edge.FromID != "" {
 			continue
 		}
 		child, ok := index[edge.FromKey]

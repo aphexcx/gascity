@@ -264,6 +264,23 @@ func bdBoundMember(members []jsonMember, name string) int {
 	return bound
 }
 
+// bdDuplicateMember returns the name of a field two members of the plan both
+// bind to, or "". For a scalar the last member wins outright, but for the
+// plan's arrays encoding/json decodes the later member INTO the elements the
+// earlier one built (a node's members the later object omits survive from
+// the earlier one), so the plan bd ends up with is neither member — such a
+// plan is refused rather than stamped from one of them.
+func bdDuplicateMember(members []jsonMember) string {
+	for i, m := range members {
+		for _, other := range members[i+1:] {
+			if strings.EqualFold(m.key, other.key) {
+				return m.key
+			}
+		}
+	}
+	return ""
+}
+
 // bdRebindMember returns members with value as the member bd binds to name:
 // the bound member keeps its own spelling and takes the value, the members it
 // shadowed (bd never read them) are dropped, and a field with no member gets
@@ -317,6 +334,9 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 	plan, err := decodeJSONObject(data)
 	if err != nil {
 		return nil, false, fmt.Errorf("the graph plan is not one bd can stamp: %w", err)
+	}
+	if dup := bdDuplicateMember(plan); dup != "" {
+		return nil, false, fmt.Errorf("the graph plan names %q twice (bd merges the two): spell each plan member once", dup)
 	}
 	nodesAt := bdBoundMember(plan, "nodes")
 	if nodesAt < 0 {
