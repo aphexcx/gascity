@@ -130,12 +130,16 @@ city's claim path refuses beads owned by another city. An owner: label
 you pass yourself, or one bd copies from the bead's --parent, is kept as
 given (a child stays in its parent's lane), and the gc-only
 --no-owner-label flag (stripped before dispatch) leaves one create
-unlabeled. The argv itself reaches bd exactly as typed: the label is
-applied AFTER the create, to the bead bd reports it created (one label
-write per created bead, batch creates included), so nothing gc does not
-understand about bd's create surface can break a create or leave a bead
-silently unlabeled. A create whose output names no bead is said out loud
-on stderr. With the identity unset, create is untouched.
+unlabeled. The label travels IN the create, so bd never publishes the
+bead unowned: a single create gets --labels=owner:<name> added right
+after the verb (a child of a --parent owned by another city gets that
+parent's owner, read first; a parent that cannot be read refuses the
+create); a --graph plan or a --file batch is rewritten into a temporary
+copy with the owner on every node or issue (per-row labels, which bd
+persists in the create's own transaction) and bd is pointed at the copy.
+The bead bd reports created is then read back, and only a bead that came
+out unowned is labeled afterwards. A create whose output names no bead is
+said out loud on stderr. With the identity unset, create is untouched.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -489,10 +493,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// On a federated city every bead this city creates names its owner
-	// (internal/federation). The argv reaches bd as typed — only the gc-owned
-	// opt-out is stripped — and the bead bd reports created is labeled
-	// afterwards, through the store, unless it already carries an owner. See
-	// cmd_bd_owner_label.go for why the stamp follows the create.
+	// (internal/federation). The label travels IN the create — the argv for a
+	// single create, the rewritten batch file for a --graph plan or a --file
+	// batch (cmd_bd_owner_label.go, cmd_bd_owner_label_batch.go) — and the
+	// bead bd reports created is read back afterwards, repaired only if it
+	// came out unowned; the gc-owned opt-out is stripped first.
 	owner, federated := cfg.Federation.OwnerLabel()
 	var ownerOptOut bool
 	bdArgs, ownerOptOut = stripBdNoOwnerLabel(bdArgs)
@@ -716,12 +721,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if !stampOwner {
 		return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
 	}
-	// The owner label travels IN the create (bdCreateOwnerLabel): bd must never
-	// publish the bead unowned, because federation.MayClaim accepts an unowned
-	// bead and a concurrent city could claim a routed one between bd's create
-	// and a follow-up label write, which no later label undoes. A child of a
-	// parent owned by another city carries the parent's owner, read through
-	// the configured store's live handle before anything is created; a parent
+	// The owner label travels IN the create (bdCreateOwnerLabel for a single
+	// create; bdCreateBatchWithOwner rewrites a --graph plan's nodes or a
+	// --file batch's issues, gf-xid finding 1j): bd must never publish a bead
+	// unowned, because federation.MayClaim accepts an unowned bead and a
+	// concurrent city could claim a routed one between bd's create and a
+	// follow-up label write, which no later label undoes. A child of a parent
+	// owned by another city carries the parent's owner, read through the
+	// configured store's live handle before anything is created; a parent
 	// that cannot be read refuses the create. Under a bd database override the
 	// configured store is not the create's store, so no parent is read there
 	// and a create naming one carries nothing (the notice below says so).
@@ -740,23 +747,36 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			return beads.HandlesFor(store).Live.Get(id)
 		}
 	}
-	label, carried, err := bdCreateOwnerLabel(parentRead, bdArgs, owner)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if carried {
-		bdArgs = bdCreateArgvWithLabel(bdArgs, label)
+	var carried bool
+	if form, path := bdCreateBatchFile(bdArgs); form != bdBatchNone {
+		rewrite, err := bdCreateBatchWithOwner(bdArgs, target.ScopeRoot, form, path, owner, parentRead)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer rewrite.cleanup()
+		bdArgs, carried = rewrite.args, rewrite.carried
+	} else {
+		label, single, err := bdCreateOwnerLabel(parentRead, bdArgs, owner)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if single {
+			bdArgs = bdCreateArgvWithLabel(bdArgs, label)
+		}
+		carried = single
 	}
 	// Tee bd's stdout so the created ids can be read out of it; the operator
 	// still sees every byte. Whatever bd reported it created is read back and
-	// repaired where the create could not carry the label (a --graph plan, a
-	// --file batch) or bd ignored it, even when bd then exited non-zero (a batch that persisted
-	// some beads and failed on a later one), and the create's exit code stays
-	// the exit code: the repair is a follow-up write that reports its own
-	// outcome on stderr. A create that carried nothing and named no bead is
-	// said out loud whatever the exit code — after a failure, gc cannot tell
-	// "created nothing" from "created some, in a shape gc does not read".
+	// repaired where the create could not carry the label (a batch file gc
+	// could not read, a plan node under a database override) or bd ignored
+	// it, even when bd then exited non-zero (a batch that persisted some beads
+	// and failed on a later one), and the create's exit code stays the exit
+	// code: the repair is a follow-up write that reports its own outcome on
+	// stderr. A create that carried nothing and named no bead is said out
+	// loud whatever the exit code — after a failure, gc cannot tell "created
+	// nothing" from "created some, in a shape gc does not read".
 	var created bytes.Buffer
 	code := runBdSubprocessTee(bdPath, bdArgs, cityPath, target, env, stdout, stderr, &created)
 	ids := bdCreatedIDs(created.String())

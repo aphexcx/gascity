@@ -318,12 +318,16 @@ city's claim path refuses beads owned by another city. An owner: label
 you pass yourself, or one bd copies from the bead's --parent, is kept as
 given (a child stays in its parent's lane), and the gc-only
 --no-owner-label flag (stripped before dispatch) leaves one create
-unlabeled. The argv itself reaches bd exactly as typed: the label is
-applied AFTER the create, to the bead bd reports it created (one label
-write per created bead, batch creates included), so nothing gc does not
-understand about bd's create surface can break a create or leave a bead
-silently unlabeled. A create whose output names no bead is said out loud
-on stderr. With the identity unset, create is untouched.
+unlabeled. The label travels IN the create, so bd never publishes the
+bead unowned: a single create gets --labels=owner:&lt;name&gt; added right
+after the verb (a child of a --parent owned by another city gets that
+parent's owner, read first; a parent that cannot be read refuses the
+create); a --graph plan or a --file batch is rewritten into a temporary
+copy with the owner on every node or issue (per-row labels, which bd
+persists in the create's own transaction) and bd is pointed at the copy.
+The bead bd reports created is then read back, and only a bead that came
+out unowned is labeled afterwards. A create whose output names no bead is
+said out loud on stderr. With the identity unset, create is untouched.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need

@@ -36,26 +36,29 @@ const (
 	bdOwnerLabelHiddenVerbNotice = "gc bd: owner label not applied (a flag gc does not know hides the verb; if this was a create, label the bead with gc bd update <id> --add-label owner:<identity>)"
 )
 
-// The argv door of the federation owner label (internal/federation) works
-// AFTER the create, on the bead bd says it created:
+// The argv door of the federation owner label (internal/federation) writes
+// the owner INTO the create, and reads back what bd created:
 //
-//  1. The argv reaches bd exactly as typed, minus the gc-owned opt-out. gc
-//     does not parse bd's create surface — every alias, inline boolean,
-//     batch mode, inherited label and flag bd adds tomorrow is bd's own
-//     business — so no create that worked yesterday can break, and nothing
-//     gc fails to understand can leave a bead silently unlabeled.
+//  1. A single create carries `--labels=owner:<identity>` right after the
+//     verb (bdCreateOwnerLabel, bdCreateArgvWithLabel); a --graph plan or a
+//     --file batch is rewritten into a temporary copy with the owner on every
+//     node or issue and bd is pointed at the copy (cmd_bd_owner_label_batch.go).
+//     Only what the label needs is read from bd's create surface — the label
+//     flags, the parent, the batch file, the inheritance switch, the value
+//     flags whose values must be skipped — by the generated flag manifests
+//     (internal/bdflags); everything else reaches bd as typed, minus the
+//     gc-owned opt-out.
 //  2. bd's stdout is teed and the ids it reports as created are read out of
 //     it (its single-create line, its --json object, its --silent bare id,
 //     its --graph and --file listings).
 //  3. Each created bead is read back through the store and labeled
-//     owner:<identity> unless it already carries an owner — its own, or one
-//     bd copied from its parent. The bead's stored labels are the operand no
-//     argv variant can move.
+//     owner:<identity> only if it came out unowned (a batch file gc could not
+//     read, a bd that dropped the flag): the repair, never the door.
 //
-// A create whose output names no bead (a format gc does not know) is said
-// out loud, once, on stderr, whatever bd's exit code — a failed batch may have
-// persisted beads before it failed; a --dry-run creates nothing and is left
-// alone.
+// A create whose output names no bead (a format gc does not know) and that
+// carried nothing is said out loud, once, on stderr, whatever bd's exit code —
+// a failed batch may have persisted beads before it failed; a --dry-run
+// creates nothing and is left alone.
 
 // bdFlagTokens walks the flag tokens of a create argv before a `--`
 // terminator, skipping the VALUE of every value flag bd's create surface and
@@ -247,16 +250,17 @@ func bdVerbIndexAfterGlobals(bdArgs []string) (index int, hidden bool) {
 	return -1, false
 }
 
-// The create-time door of the owner label (gf-jr0 round 3, finding 1g). The
-// post-create stamp above left a window: bd published the bead before gc's
-// follow-up label write, and federation.MayClaim accepts an unowned bead, so
-// a concurrent city could claim a routed bead in that window — and a label
-// written afterwards does not undo a claim, while an interrupted gc left the
-// bead unowned for good. The owner label now travels IN the create's own
-// argument list, through bd's label flag, so bd never publishes the bead
-// unowned; the follow-up write stays only as the repair for a create that
-// could not carry it (a --graph plan or a --file batch, which refuse the
-// flag) or whose bd ignored it.
+// The create-time door of the owner label (gf-jr0 round 3, finding 1g; the
+// batch half gf-xid finding 1j). The post-create stamp left a window: bd
+// published the bead before gc's follow-up label write, and
+// federation.MayClaim accepts an unowned bead, so a concurrent city could
+// claim a routed bead in that window — and a label written afterwards does
+// not undo a claim, while an interrupted gc left the bead unowned for good.
+// The owner label now travels IN the create: a single create's own argument
+// list, through bd's label flag; a --graph plan's nodes or a --file batch's
+// issues, through their per-row labels (bd refuses the flag beside either).
+// bd never publishes a bead unowned; the follow-up write stays only as the
+// repair for a row that could not carry it or whose bd ignored it.
 //
 // What the carried label is follows the same rule as the in-process door
 // (federation.OwnerLabelForChild): an owner the operator named wins and
@@ -349,10 +353,10 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //
 //   - an owner the operator named (any label flag) is respected: nothing is
 //     carried, the follow-up read-back keeps today's resolution;
-//   - a --graph plan or a --file batch carries nothing: bd refuses the label
-//     flag beside either (per-node and per-issue fields;
-//     rejectSingleIssueFlagsForGraph / rejectSingleIssueFlagsForMarkdown in
-//     cmd/bd), so their beads take the follow-up repair;
+//   - a --graph plan or a --file batch is not this function's: bd refuses the
+//     label flag beside either (rejectSingleIssueFlagsForGraph /
+//     rejectSingleIssueFlagsForMarkdown in cmd/bd), so their rows carry the
+//     owner in the batch file instead (bdCreateBatchWithOwner);
 //   - a create under a --parent carries the PARENT's owner when the parent
 //     has one, read through parentRead — the store's live handle — before
 //     anything is created; a parent that cannot be read refuses the create
@@ -365,7 +369,7 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
 		return "", false, nil
 	}
-	if bdCreateValueFlag(bdArgs, "--graph") != "" || bdCreateValueFlag(bdArgs, "--file") != "" || bdCreateValueFlag(bdArgs, "-f") != "" {
+	if form, _ := bdCreateBatchFile(bdArgs); form != bdBatchNone {
 		return "", false, nil
 	}
 	parentID := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--parent"))

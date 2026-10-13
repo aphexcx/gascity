@@ -156,6 +156,9 @@ case "$1" in
     if [ "${IGNORE_CREATE_LABELS:-}" = "" ]; then
       for a in "$@"; do case "$a" in --labels=*) printf '%s\n' "${a#--labels=}" >> "${CAPTURE_PATH}.labels" ;; esac; done
     fi
+    # A batch create reads its rows from the LAST --graph / --file value (pflag);
+    # the file bd would read is kept for the test (gc removes its copy after).
+    for a in "$@"; do case "$a" in --graph=*) cat "${a#--graph=}" > "${CAPTURE_PATH}.plan" ;; --file=*) cat "${a#--file=}" > "${CAPTURE_PATH}.md" ;; esac; done
     if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi
     exit "${CREATE_EXIT:-0}" ;;
   show)
@@ -194,8 +197,9 @@ const federatedDemoCityTOML = "[workspace]\nname = \"demo\"\n\n[federation]\nide
 // create carries — this city's, or the parent's for a child of another
 // city's bead — inserted right after the verb, so bd never publishes the bead
 // unowned; the bead bd reports created is then read back and repaired only
-// where the create could not carry the label (a --graph plan) or bd ignored
-// it. An owner the operator named is respected and nothing is carried.
+// where the create could not carry the label (a batch file gc cannot read)
+// or bd ignored it. An owner the operator named is respected and nothing is
+// carried.
 func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 	const stamp = "update --json demo-1 --add-label owner:citadel"
 	tests := []struct {
@@ -237,9 +241,12 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"a shorthand cluster before the verb carries the label", federatedDemoCityTOML, []string{"-vv", "create", "t"}, "", "", "-vv create --labels=owner:citadel t", false, "", false},
 		{"an attached shorthand value before the verb carries the label", federatedDemoCityTOML, []string{"-C/tmp", "create", "t"}, "", "", "-C/tmp create --labels=owner:citadel t", false, "", false},
 		{"the label precedes a -- terminator", federatedDemoCityTOML, []string{"create", "--", "t"}, "", "", "create --labels=owner:citadel -- t", false, "", false},
-		{"a graph plan cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--graph", "plan.json"}, "", "Created 1 issues\n  root -> demo-1", "create --graph plan.json", true, "", false},
-		{"a markdown batch cannot carry the label and is repaired after", federatedDemoCityTOML, []string{"create", "--file", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create --file issues.md", true, "", false},
-		{"a markdown batch by shorthand cannot carry the label either", federatedDemoCityTOML, []string{"create", "-f", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -f issues.md", true, "", false},
+		// The batch files below do not exist in the scope: a batch gc cannot
+		// read reaches bd as typed and is repaired after (the batches gc CAN
+		// read carry the owner in the file: TestGcBdCreateCarriesTheOwnerInABatch).
+		{"a graph plan gc cannot read is handed over as typed and repaired after", federatedDemoCityTOML, []string{"create", "--graph", "plan.json"}, "", "Created 1 issues\n  root -> demo-1", "create --graph plan.json", true, "", false},
+		{"a markdown batch gc cannot read is handed over as typed and repaired after", federatedDemoCityTOML, []string{"create", "--file", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create --file issues.md", true, "", false},
+		{"a markdown batch by shorthand is seen as a batch", federatedDemoCityTOML, []string{"create", "-f", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -f issues.md", true, "", false},
 		{"a markdown batch behind a boolean shorthand in a cluster is seen", federatedDemoCityTOML, []string{"create", "-qf", "issues.md"}, "", "✓ Created 1 issues from issues.md:\n  demo-1: First [P2, task]", "create -qf issues.md", true, "", false},
 		{"a bd that dropped the carried label is repaired after", federatedDemoCityTOML, []string{"create", "t"}, "", "", "create --labels=owner:citadel t", true, "", true},
 	}
@@ -307,12 +314,15 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 }
 
 // TestGcBdCreateStampsEveryBeadOfABatch: a --file create names several
-// beads and cannot carry the label (bd refuses --labels beside --file: the
-// markdown template supplies per-issue fields), so each bead is repaired on
-// its own terms after the create, as before.
+// beads; when the batch's rows carry the owner (the markdown rewrite) but bd
+// came back with beads that carry none (a bd that dropped the per-issue
+// labels), each bead is repaired on its own terms after the create, as before.
 func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	if err := os.WriteFile(filepath.Join(os.Getenv("GC_CITY_PATH"), "issues.md"), []byte("## First\n\n## Second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("LABELS", "")
 	t.Setenv("CREATE_OUT", "✓ Created 2 issues from issues.md:\n  demo-1: Fix Created issue: demo-old [P2, task]\n  demo-2: Created 1 issues from other.md: [P1, bug]")
@@ -322,8 +332,8 @@ func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 		t.Fatalf("doBd = %d, want 0; stderr=%q", got, stderr.String())
 	}
 	calls := fakeBdCalls(t, capture)
-	if len(calls) == 0 || calls[0] != "create --file issues.md" {
-		t.Fatalf("bd received %q, want the batch create as typed first (bd refuses --labels beside --file)", calls)
+	if len(calls) == 0 || !strings.HasPrefix(calls[0], "create --file issues.md --file=") {
+		t.Fatalf("bd received %q, want the batch create pointed at the rewritten file first", calls)
 	}
 	joined := strings.Join(calls, "\n")
 	if strings.Contains(joined, "demo-old") {
@@ -337,7 +347,7 @@ func TestGcBdCreateStampsEveryBeadOfABatch(t *testing.T) {
 }
 
 // TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead: a create that could not
-// carry the label (a --graph plan, a --file batch), exited non-zero and
+// carry the label (a batch whose file gc could not read), exited non-zero and
 // whose output names no bead is said out loud — a batch can persist beads
 // before failing, in a shape gc does not read — and the exit code stays
 // bd's. Nothing is stamped: there is no id to stamp. A create that carried
@@ -348,8 +358,8 @@ func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
 		args     []string
 		wantNote bool
 	}{
-		{"a graph plan carried nothing", []string{"create", "--graph", "plan.json"}, true},
-		{"a markdown batch carried nothing", []string{"create", "--file", "issues.md"}, true},
+		{"an unreadable graph plan carried nothing", []string{"create", "--graph", "plan.json"}, true},
+		{"an unreadable markdown batch carried nothing", []string{"create", "--file", "issues.md"}, true},
 		{"a single create carried the label", []string{"create", "t", "--silent"}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,8 +385,8 @@ func TestGcBdCreateSaysSoWhenAFailedCreateNamesNoBead(t *testing.T) {
 }
 
 // TestGcBdCreateStampsWhatBdReportedEvenOnFailure: a batch that persisted
-// some beads and then failed still names them; a batch carries nothing, so
-// each is repaired, and the exit code stays bd's.
+// some beads and then failed still names them; a batch gc could not read
+// carries nothing, so each is repaired, and the exit code stays bd's.
 func TestGcBdCreateStampsWhatBdReportedEvenOnFailure(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
