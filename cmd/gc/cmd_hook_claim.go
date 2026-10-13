@@ -914,7 +914,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if err != nil || !reclaimed {
 				// Best-effort optimization, not a claim path of its own: any
 				// non-reclaim outcome leaves the candidate untouched (FR4) and
-				// the hook moves on to the next candidate.
+				// the hook moves on to the next candidate. On a federated city
+				// the seam is fenced (installCrossCityWriteFence): a bead whose
+				// store copy another city owns is refused and logged here,
+				// before anything is cleared, and never reaches the claim CAS.
 				continue
 			}
 			reclaimedFrom = previousOwner
@@ -1075,10 +1078,12 @@ func fenceCrossCityHookCandidates(candidates []beads.Bead, opts hookClaimOptions
 // loop the fence exists to end.
 var errCrossCityFenced = errors.New("cross-city fence refused the write")
 
-// installCrossCityWriteFence wraps the hook's two claim-time write seams —
-// Claim (the fresh-claim and ready-promotion CAS) and AssignContinuation (the
-// sibling preassign) — with an authoritative re-check of the bead about to be
-// written, read through ReadWorkMeta from the store the write will land in.
+// installCrossCityWriteFence wraps the hook's three claim-time write seams —
+// Claim (the fresh-claim and ready-promotion CAS), AssignContinuation (the
+// sibling preassign) and ReclaimStale (the opt-in stale-lease reclaim that
+// clears an expired assignee so the claim CAS can run, gf-xid finding 1i) —
+// with an authoritative re-check of the bead about to be written, read
+// through ReadWorkMeta from the store the write will land in.
 //
 // The write never runs unverified. A refusal surfaces as errCrossCityFenced
 // (already logged; every tier skips the candidate as no-work). A read that
@@ -1087,9 +1092,15 @@ var errCrossCityFenced = errors.New("cross-city fence refused the write")
 // (a bead held in another federated leg) is skipped and the loop moves on to
 // the leg that holds it; any other failure is a claims_errored skip, or on the
 // ready-assignment tier the fail-closed exit that tier already takes — and the
-// drain never launders a store failure into idle. Idempotent across the
-// federated loop's per-store copies of the ops. Inert on a non-federated city
-// (see hookClaimOptions.FederationIdentity).
+// drain never launders a store failure into idle. The reclaim seam is
+// best-effort by its own contract (any non-reclaim outcome leaves the
+// candidate untouched), so both a refusal and a failed read there read as
+// "nothing reclaimed"; the candidate is skipped and never reaches the claim
+// CAS, which the fence would refuse as well. Before this wrapper a work query
+// that omitted labels let the reclaim clear another city's expired assignment
+// — a write onto a foreign bead — before the guarded claim refused it.
+// Idempotent across the federated loop's per-store copies of the ops. Inert on
+// a non-federated city (see hookClaimOptions.FederationIdentity).
 func (ops *hookClaimOps) installCrossCityWriteFence(opts hookClaimOptions, stderr io.Writer) {
 	if ops.crossCityWriteFenced || strings.TrimSpace(opts.FederationIdentity) == "" {
 		return
@@ -1115,6 +1126,19 @@ func (ops *hookClaimOps) installCrossCityWriteFence(opts hookClaimOptions, stder
 			return errCrossCityFenced
 		}
 		return base.AssignContinuation(ctx, dir, env, beadID, assignee)
+	}
+	ops.ReclaimStale = func(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+		refused, err := hookCrossCityRefusedAtWrite(ctx, dir, env, beadID, opts, base, "reclaim", stderr)
+		if err != nil {
+			return false, "", fmt.Errorf("cross-city fence: %s could not be verified before the reclaim, nothing written: %w", beadID, err)
+		}
+		if refused {
+			return false, "", errCrossCityFenced
+		}
+		if base.ReclaimStale == nil {
+			return false, "", nil
+		}
+		return base.ReclaimStale(ctx, dir, env, beadID)
 	}
 }
 

@@ -986,3 +986,96 @@ func TestClaimHookWorkCrossCityFenceResolvesAcrossFederatedLegs(t *testing.T) {
 		assertCrossCityRefusalLogged(t, &stderr, beadID, foreignOwner, "adoption")
 	})
 }
+
+// TestHookClaimCrossCityFenceRefusesForeignStaleReclaim covers gf-xid finding
+// 1i (the gf-pu2 re-gate's Major at cmd/gc/cmd_hook_claim.go:913 / :1099):
+// the fence wrapped Claim and AssignContinuation but not ReclaimStale, so with
+// AutoReclaimStaleClaims on and a work query omitting labels (layer 1 blind)
+// the hook cleared another city's expired assignment — a write onto a foreign
+// bead — before the guarded claim refused it. The reclaim seam is now fenced:
+// the store copy is read first, a foreign owner is refused and logged
+// (tier=reclaim), the store's reclaim is never reached, and the session drains
+// as no-work.
+func TestHookClaimCrossCityFenceRefusesForeignStaleReclaim(t *testing.T) {
+	const foreignID = "hw-stale-foreign"
+	foreignOwner := crossCityOwnerLabel(crossCityForeignCity)
+	store := map[string]beads.Bead{foreignID: crossCityStoreBead(foreignID, "open", "dead-worker", foreignOwner)}
+	ops := crossCityOps(store, crossCityNeverClaim(t), crossCityBlindRow(foreignID, "open", "dead-worker"))
+	ops.ReclaimStale = func(_ context.Context, _ string, _ []string, id string) (bool, string, error) {
+		t.Fatalf("store.ReclaimStale called for %q; the cross-city fence must refuse a foreign-owner bead before any reclaim write", id)
+		return false, "", nil
+	}
+	opts := crossCityClaimOptions()
+	opts.AutoReclaimStaleClaims = true
+	var stdout, stderr bytes.Buffer
+	doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+
+	assertCrossCityDrain(t, decodeCrossCityResult(t, &stdout))
+	assertCrossCityRefusalLogged(t, &stderr, foreignID, foreignOwner, "reclaim")
+}
+
+// TestHookClaimCrossCityFenceStillReclaimsLocalStaleAssignment: the fence
+// refuses foreign beads only. An expired assignment on a bead this city owns,
+// an unlabeled one, or a foreign one handed off to this city is still reclaimed
+// and then claimed in the same cycle, exactly as before — and nothing is
+// logged as refused.
+func TestHookClaimCrossCityFenceStillReclaimsLocalStaleAssignment(t *testing.T) {
+	cases := map[string][]string{
+		"own city":  {crossCityOwnerLabel(crossCityThisCity)},
+		"unlabeled": nil,
+		"handed off": {
+			crossCityOwnerLabel(crossCityForeignCity),
+			federation.HandoffLabel(crossCityThisCity),
+		},
+	}
+	for name, labels := range cases {
+		t.Run(name, func(t *testing.T) {
+			const staleID = "jg-stale"
+			claimed := ""
+			var reclaimed []string
+			store := map[string]beads.Bead{staleID: crossCityStoreBead(staleID, "open", "dead-worker", labels...)}
+			ops := crossCityOps(store, crossCityRecordingClaim(&claimed), crossCityBlindRow(staleID, "open", "dead-worker"))
+			ops.ReclaimStale = func(_ context.Context, _ string, _ []string, id string) (bool, string, error) {
+				reclaimed = append(reclaimed, id)
+				return true, "dead-worker", nil
+			}
+			opts := crossCityClaimOptions()
+			opts.AutoReclaimStaleClaims = true
+			var stdout, stderr bytes.Buffer
+			doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+
+			result := decodeCrossCityResult(t, &stdout)
+			if result.Action != "work" || result.BeadID != staleID || claimed != staleID {
+				t.Fatalf("labels %q: a local expired assignment must still be reclaimed and claimed: got action=%q reason=%q bead=%q claimed=%q\nstderr: %s",
+					labels, result.Action, result.Reason, result.BeadID, claimed, stderr.String())
+			}
+			if strings.Join(reclaimed, ",") != staleID {
+				t.Fatalf("reclaim calls = %v, want exactly one on %s", reclaimed, staleID)
+			}
+			if strings.Contains(stderr.String(), "cross-city-fence refused") {
+				t.Fatalf("a local reclaim must not log a refusal:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// TestHookClaimCrossCityFenceReclaimReadFailureReclaimsNothing: a store copy
+// that cannot be read before the reclaim is not a verdict either way — the
+// reclaim seam's own contract (best-effort, any non-reclaim outcome leaves the
+// candidate untouched) applies: nothing is cleared, the store's reclaim is not
+// reached, and the hook moves on.
+func TestHookClaimCrossCityFenceReclaimReadFailureReclaimsNothing(t *testing.T) {
+	const unreadID = "hw-unread"
+	ops := crossCityOps(map[string]beads.Bead{}, crossCityNeverClaim(t), crossCityBlindRow(unreadID, "open", "dead-worker"))
+	ops.ReclaimStale = func(_ context.Context, _ string, _ []string, id string) (bool, string, error) {
+		t.Fatalf("store.ReclaimStale called for %q although its store copy could not be read", id)
+		return false, "", nil
+	}
+	opts := crossCityClaimOptions()
+	opts.AutoReclaimStaleClaims = true
+	var stdout, stderr bytes.Buffer
+	doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if result := decodeCrossCityResult(t, &stdout); result.Action == "work" {
+		t.Fatalf("an unverifiable candidate was served: %+v", result)
+	}
+}
