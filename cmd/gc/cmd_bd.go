@@ -774,11 +774,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	var carried bool
 	if form, path := bdCreateBatchFile(bdArgs); form != bdBatchNone {
-		batchDir := target.ScopeRoot
-		if directory := extractBdDirectoryFlag(bdArgs); directory != "" {
-			batchDir = directory
-		}
-		rewrite, err := bdCreateBatchWithOwner(bdArgs, batchDir, form, path, owner, parentRead)
+		// bd's directory selector changes the store, not the process cwd.
+		rewrite, err := bdCreateBatchWithOwner(bdArgs, target.ScopeRoot, form, path, owner, parentRead)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1

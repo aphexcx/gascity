@@ -457,7 +457,7 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 	}
 }
 
-func TestGcBdCreateBatchUsesDirectorySelector(t *testing.T) {
+func TestGcBdCreateBatchUsesSubprocessDirectory(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "args")
 	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
 	city := os.Getenv("GC_CITY_PATH")
@@ -466,7 +466,7 @@ func TestGcBdCreateBatchUsesDirectorySelector(t *testing.T) {
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for path, data := range map[string]string{filepath.Join(city, "issues.md"): "## Wrong scope file\n", filepath.Join(destination, "issues.md"): "## Requested file\n"} {
+	for path, data := range map[string]string{filepath.Join(city, "issues.md"): "## Subprocess file\n", filepath.Join(destination, "issues.md"): "## Store selector file\n"} {
 		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -481,7 +481,7 @@ func TestGcBdCreateBatchUsesDirectorySelector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "## Requested file") || strings.Contains(string(got), "Wrong scope") {
+	if !strings.Contains(string(got), "## Subprocess file") || strings.Contains(string(got), "Store selector") {
 		t.Fatalf("rewrote wrong directory's batch: %s", got)
 	}
 }
