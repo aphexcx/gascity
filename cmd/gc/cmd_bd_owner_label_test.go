@@ -167,6 +167,9 @@ case "$1" in
     if [ "${CREATE_OUT:-}" != "" ]; then printf '%s\n' "${CREATE_OUT}"; else printf '\n✓ Created issue: demo-1 — t\n  Type:     task\n'; fi
     exit "${CREATE_EXIT:-0}" ;;
   show)
+    # bd show resolves a unique abbreviation to the bead it abbreviates and
+    # reports THAT id (utils.ResolvePartialID); PARENT_ABBREV is one for demo-0.
+    if [ "${PARENT_ABBREV:-}" != "" ] && [ "$3" = "${PARENT_ABBREV}" ]; then set -- "$1" "$2" demo-0; fi
     if [ "$3" = "demo-0" ] && [ "${PARENT_UNREADABLE:-}" != "" ]; then printf 'Error: dolt server unavailable\n' >&2; exit 1; fi
     labels=""
     src="${LABELS:-}"
@@ -252,6 +255,12 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"a --deps edge of another type is not a parent", federatedDemoCityTOML, []string{"create", "t", "--deps", "blocked-by:demo-0"}, "", "", "create --labels=owner:citadel t --deps blocked-by:demo-0", false, "", false},
 		{"a bare --deps id is not a parent", federatedDemoCityTOML, []string{"create", "t", "--deps", "demo-0"}, "", "", "create --labels=owner:citadel t --deps demo-0", false, "", false},
 		{"a value that spells a --deps parent is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--deps=parent-child:demo-0"}, "", "", "create --labels=owner:citadel t --description --deps=parent-child:demo-0", false, "", false},
+		// The lane's codex round 2 on 1n: bd's create resolves every --deps
+		// target through its partial-id resolver before wiring the edge, so
+		// an abbreviation that uniquely names the foreign parent is that
+		// parent — read as bd resolves it — and the argv reaches bd as typed.
+		{"an abbreviated --deps parent-child target is read as bd resolves it", federatedDemoCityTOML, []string{"create", "child", "--deps", "parent-child:d0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps parent-child:d0", false, "", false},
+		{"an external --deps parent-child target is bd's to wire and reads nothing", federatedDemoCityTOML, []string{"create", "t", "--deps", "parent-child:external:gh-1"}, "", "", "create --labels=owner:citadel t --deps parent-child:external:gh-1", false, "", false},
 		// The re-gate's Minor at cmd_bd_owner_label.go:136: the last opt-out wins.
 		{"a repeated opt-out resolves to its last value (false last)", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label", "--no-owner-label=false"}, "", "", "create --labels=owner:citadel t", false, "", false},
 		{"a repeated opt-out resolves to its last value (bare last)", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label=false", "--no-owner-label"}, "", "", "create t", false, "", false},
@@ -284,6 +293,7 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			t.Setenv("CREATE_OUT", tt.createOut)
 			t.Setenv("CREATE_EXIT", "")
 			t.Setenv("PARENT_UNREADABLE", "")
+			t.Setenv("PARENT_ABBREV", "d0")
 			if tt.ignoreLabels {
 				t.Setenv("IGNORE_CREATE_LABELS", "1")
 			} else {
@@ -291,7 +301,7 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			}
 			parent := ""
 			if slices.ContainsFunc(tt.args, func(a string) bool {
-				return strings.HasPrefix(a, "--parent") || (strings.Contains(a, "parent-child") && strings.Contains(a, "demo-0"))
+				return strings.HasPrefix(a, "--parent") || (strings.Contains(a, "parent-child") && (strings.Contains(a, "demo-0") || strings.HasSuffix(a, ":d0")))
 			}) {
 				parent = "demo-0"
 			}
@@ -485,6 +495,10 @@ func TestGcBdCreateRefusesParentsInDifferentLanes(t *testing.T) {
 		{"two --deps parent-child parents in different lanes", "owner:boomtown", "", []string{"create", "child", "--deps", "parent-child:demo-0,parent-child:demo-2"}, "different lanes"},
 		{"a foreign parent beside an unowned one (this city's lane)", "", "", []string{"create", "child", "--parent", "demo-0", "--deps", "parent-child:demo-3"}, "different lanes"},
 		{"a --deps parent-child parent that cannot be read", "", "1", []string{"create", "child", "--deps", "parent-child:demo-0"}, "demo-0"},
+		// bd's create takes --parent literally (no partial-id resolution), so
+		// an abbreviation there is a read that resolved to another bead: the
+		// refusal the exact-id guard always gave (not a parent bd would wire).
+		{"an abbreviated --parent is exact to bd and refused when bd resolves it elsewhere", "", "", []string{"create", "child", "--parent", "d0"}, `"d0"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
@@ -494,6 +508,7 @@ func TestGcBdCreateRefusesParentsInDifferentLanes(t *testing.T) {
 			t.Setenv("CREATE_OUT", "")
 			t.Setenv("PARENT", "demo-0")
 			t.Setenv("PARENT_UNREADABLE", tt.unreadable)
+			t.Setenv("PARENT_ABBREV", "d0")
 
 			var stdout, stderr bytes.Buffer
 			if got := doBd(tt.args, &stdout, &stderr); got != 1 {
@@ -514,29 +529,35 @@ func TestGcBdCreateRefusesParentsInDifferentLanes(t *testing.T) {
 	}
 }
 
-// TestBdCreateParentIDs pins the parent set a single create names, read the
+// TestBdCreateParents pins the parent set a single create names, read the
 // way bd's create wires it (gf-d7b finding 1n): the --parent value first,
 // then every --deps entry of type parent-child in each spelling bd's
 // parseDepSpec accepts (cmd/bd create_deps.go) — pflag's CSV split of each
 // value, a repeated flag appending, the entry and its two halves TrimSpace'd
 // around the first colon; a bare id or another type is no parent; a value
-// that spells the flag is a value; after `--` everything is positional.
-func TestBdCreateParentIDs(t *testing.T) {
+// that spells the flag is a value; after `--` everything is positional. A
+// --deps parent is one bd RESOLVES (its partial-id resolver) before wiring,
+// a --parent one bd takes literally; an external: target names no bead here.
+func TestBdCreateParents(t *testing.T) {
+	exact := func(id string) bdCreateParent { return bdCreateParent{ID: id} }
+	dep := func(id string) bdCreateParent { return bdCreateParent{ID: id, Resolved: true} }
 	for _, tt := range []struct {
 		args []string
-		want []string
+		want []bdCreateParent
 	}{
 		{[]string{"create", "t"}, nil},
-		{[]string{"create", "t", "--parent", "p-1"}, []string{"p-1"}},
-		{[]string{"create", "t", "--parent=p-1"}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps", "parent-child:p-1"}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps=parent-child:p-1"}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps", " parent-child : p-1 "}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps", "blocked-by:p-9,parent-child:p-1,discovered-from:p-8"}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps", "\"parent-child:p-1\",p-9"}, []string{"p-1"}},
-		{[]string{"create", "t", "--deps", "p-9", "--deps", "parent-child:p-1", "--deps", "parent-child:p-2"}, []string{"p-1", "p-2"}},
-		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-2"}, []string{"p-1", "p-2"}},
-		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--parent", "p-1"}, []bdCreateParent{exact("p-1")}},
+		{[]string{"create", "t", "--parent=p-1"}, []bdCreateParent{exact("p-1")}},
+		{[]string{"create", "t", "--deps", "parent-child:p-1"}, []bdCreateParent{dep("p-1")}},
+		{[]string{"create", "t", "--deps=parent-child:p-1"}, []bdCreateParent{dep("p-1")}},
+		{[]string{"create", "t", "--deps", " parent-child : p-1 "}, []bdCreateParent{dep("p-1")}},
+		{[]string{"create", "t", "--deps", "blocked-by:p-9,parent-child:p-1,discovered-from:p-8"}, []bdCreateParent{dep("p-1")}},
+		{[]string{"create", "t", "--deps", "\"parent-child:p-1\",p-9"}, []bdCreateParent{dep("p-1")}},
+		{[]string{"create", "t", "--deps", "p-9", "--deps", "parent-child:p-1", "--deps", "parent-child:p-2"}, []bdCreateParent{dep("p-1"), dep("p-2")}},
+		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-2"}, []bdCreateParent{exact("p-1"), dep("p-2")}},
+		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-1"}, []bdCreateParent{exact("p-1")}},
+		{[]string{"create", "t", "--deps", "parent-child:a3f8"}, []bdCreateParent{dep("a3f8")}},
+		{[]string{"create", "t", "--deps", "parent-child:external:gh-1"}, nil},
 		{[]string{"create", "t", "--deps", "p-1"}, nil},
 		{[]string{"create", "t", "--deps", "blocks:p-1"}, nil},
 		{[]string{"create", "t", "--deps", "parent-child:"}, nil},
@@ -544,8 +565,8 @@ func TestBdCreateParentIDs(t *testing.T) {
 		{[]string{"create", "t", "--", "--deps", "parent-child:p-1"}, nil},
 		{[]string{"create", "t", "--deps"}, nil},
 	} {
-		if got := bdCreateParentIDs(tt.args); !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("bdCreateParentIDs(%q) = %q, want %q", tt.args, got, tt.want)
+		if got := bdCreateParents(tt.args); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("bdCreateParents(%q) = %+v, want %+v", tt.args, got, tt.want)
 		}
 	}
 }

@@ -43,6 +43,7 @@ go_test(
         "bdstore_exact_batch_test.go",
         "bdstore_exec_internal_test.go",
         "bdstore_failure_detail_internal_test.go",
+        "bdstore_id_collision_test.go",
         "bdstore_inline_deps_internal_test.go",
         "bdstore_internal_test.go",
         "bdstore_owner_label_test.go",

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -378,7 +379,7 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	if form, _ := bdCreateBatchFile(bdArgs); form != bdBatchNone {
 		return "", false, nil
 	}
-	parents := bdCreateParentIDs(bdArgs)
+	parents := bdCreateParents(bdArgs)
 	if len(parents) == 0 || bdHasBoolFlag(bdArgs, "--no-inherit-labels") {
 		// No parent, or the operator switched inheritance off for this
 		// create: the child is this city's, as the follow-up stamp always
@@ -391,10 +392,10 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	thisLane := federation.OwnerOf([]string{owner})
 	var first beads.Bead
 	lane := ""
-	for i, id := range parents {
-		parent, err := parentRead(id)
+	for i, p := range parents {
+		parent, err := bdReadCreateParent(parentRead, p)
 		if err != nil {
-			return "", false, fmt.Errorf("reading parent %q for the owner label: %w", id, err)
+			return "", false, fmt.Errorf("reading parent %q for the owner label: %w", p.ID, err)
 		}
 		parentLane := federation.OwnerOf(parent.Labels)
 		if parentLane == "" {
@@ -405,7 +406,7 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 			continue
 		}
 		if parentLane != lane {
-			return "", false, fmt.Errorf("the create names parents in different lanes (%q owner %q, %q owner %q): the owner label cannot be resolved", parents[0], lane, id, parentLane)
+			return "", false, fmt.Errorf("the create names parents in different lanes (%q owner %q, %q owner %q): the owner label cannot be resolved", parents[0].ID, lane, p.ID, parentLane)
 		}
 	}
 	owners := federation.OwnerLabels(federation.OwnerLabelForChild(nil, first.Labels, owner))
@@ -422,23 +423,42 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 // unchanged.
 const bdDepParentChild = "parent-child"
 
-// bdCreateParentIDs returns every parent a single create names, in the
-// order bd wires them (cmd/bd create_atomic.go: the --parent edge, then the
-// --deps edges): the --parent value, then each --deps entry of type
-// parent-child in every spelling bd's parseDepSpec accepts — the flag inline
-// or with the next token, its value split as pflag's StringSlice splits it
-// (a CSV record; a repeated flag appends), each entry TrimSpace'd, its type
-// and its id TrimSpace'd around the first colon (cmd/bd create_deps.go
-// parseDepSpecs / parseDepSpec). A bare id (blocks) or an entry of any other
-// type is not a parent. Duplicates are dropped; an empty id is no parent.
-func bdCreateParentIDs(bdArgs []string) []string {
-	var ids []string
-	add := func(id string) {
-		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
-			ids = append(ids, id)
+// bdCreateParent is one parent a single create names: its id as typed, and
+// whether bd resolves that id before wiring the edge. bd's create takes the
+// --parent id literally (cmd/bd create.go: GetNextChildID and addParentEdge
+// on the value as given), while every --deps target goes through bd's
+// partial-id resolver first (create_deps.go resolveDepSpecTargets →
+// utils.ResolvePartialID: the exact id, else a unique leading abbreviation
+// of the hash under the configured or a known prefix), so the parent bd
+// wires for `--deps parent-child:a3f8` is the bead a3f8 abbreviates.
+type bdCreateParent struct {
+	ID       string
+	Resolved bool
+}
+
+// bdCreateParents returns every parent a single create names, in the order
+// bd wires them (cmd/bd create_atomic.go: the --parent edge, then the --deps
+// edges): the --parent value, then each --deps entry of type parent-child in
+// every spelling bd's parseDepSpec accepts — the flag inline or with the
+// next token, its value split as pflag's StringSlice splits it (a CSV
+// record; a repeated flag appends), each entry TrimSpace'd, its type and its
+// id TrimSpace'd around the first colon (cmd/bd create_deps.go parseDepSpecs
+// / parseDepSpec). A bare id (blocks) or an entry of any other type is not a
+// parent; an `external:` target, which bd wires literally without resolving
+// (resolveDepSpecTargets), names no bead of this store and is not one
+// either. Duplicates are dropped; an empty id is no parent.
+func bdCreateParents(bdArgs []string) []bdCreateParent {
+	var parents []bdCreateParent
+	add := func(id string, resolved bool) {
+		if id = strings.TrimSpace(id); id == "" || strings.HasPrefix(id, "external:") {
+			return
 		}
+		if slices.ContainsFunc(parents, func(p bdCreateParent) bool { return p.ID == id }) {
+			return
+		}
+		parents = append(parents, bdCreateParent{ID: id, Resolved: resolved})
 	}
-	add(bdCreateValueFlag(bdArgs, "--parent"))
+	add(bdCreateValueFlag(bdArgs, "--parent"), false)
 	bdFlagTokens(bdArgs, func(i int, name, value string, inline bool) {
 		if name != "--deps" {
 			return
@@ -454,10 +474,28 @@ func bdCreateParentIDs(bdArgs []string) []string {
 			if !ok || strings.TrimSpace(depType) != bdDepParentChild {
 				continue
 			}
-			add(target)
+			add(target, true)
 		}
 	})
-	return ids
+	return parents
+}
+
+// bdReadCreateParent reads one parent of a create through parentRead, the
+// store's live handle. A --parent id is read exactly, as bd's create wires
+// it: a read that resolved to another bead (beads.IDCollisionError) is the
+// refusal it always was. A --deps target is read the way bd's create
+// resolves it: when the exact read reports that bd resolved the id to
+// another bead — a unique abbreviation, by bd's own resolver — THAT bead is
+// read, exactly, and is the parent whose lane the child joins (the lane's
+// codex round 2 on finding 1n: the exact-id guard had refused a create bd
+// itself accepts).
+func bdReadCreateParent(parentRead func(id string) (beads.Bead, error), p bdCreateParent) (beads.Bead, error) {
+	parent, err := parentRead(p.ID)
+	var collision *beads.IDCollisionError
+	if err == nil || !p.Resolved || !errors.As(err, &collision) || collision.Resolved == "" || collision.Resolved == p.ID {
+		return parent, err
+	}
+	return parentRead(collision.Resolved)
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`

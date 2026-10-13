@@ -1522,7 +1522,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// Return ErrIDCollision so mutation guards can distinguish this from a
 		// plain absent bead. ErrIDCollision wraps ErrNotFound so existing
 		// errors.Is(err, ErrNotFound) callers remain unaffected.
-		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
+		return Bead{}, &IDCollisionError{Requested: id, Resolved: bead.ID}
 	}
 	return bead, nil
 }

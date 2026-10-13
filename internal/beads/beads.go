@@ -23,6 +23,25 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// IDCollisionError is the ErrIDCollision a read reports when bd's resolver
+// answered a request for one id with a bead of another: Requested is the id
+// the caller named, Resolved the id bd returned. It wraps ErrIDCollision (and
+// so ErrNotFound), so every errors.Is caller is unaffected; a caller that
+// deliberately asked bd to resolve an abbreviation — the way bd itself
+// resolves a `--deps` target — reads Resolved and fetches that bead exactly.
+type IDCollisionError struct {
+	Requested string
+	Resolved  string
+}
+
+// Error names both ids beside ErrIDCollision's text.
+func (e *IDCollisionError) Error() string {
+	return fmt.Sprintf("getting bead %q (resolved to %q): %v", e.Requested, e.Resolved, ErrIDCollision)
+}
+
+// Unwrap makes errors.Is(err, ErrIDCollision) and errors.Is(err, ErrNotFound) true.
+func (e *IDCollisionError) Unwrap() error { return ErrIDCollision }
+
 // ErrPinnedIDOutsideNamespace is returned by a namespace-fenced store when a
 // create pins an id in a namespace that store does not serve. It is distinct
 // from a duplicate-id error, which says the store DOES serve the namespace and
