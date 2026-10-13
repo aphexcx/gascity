@@ -261,37 +261,30 @@ func claimablePredicateJQ(identity string) string {
 }
 
 // claimableOnlyJQClause renders the jq pipeline step that KEEPS only the rows
-// this city may claim (claimablePredicateJQ): the count-form's use of the
-// predicate. Where the worker's read reorders (claimableFirstJQClause, so the
-// Go fence still sees and logs the foreign rows), a demand count that
-// included a foreign row minted a seat whose startup claim the fence then
-// refused — start, drain, repeat, on another city's work (gf-4c9 round 2,
-// finding 1c). Empty for a non-federated city.
+// this city may claim (claimablePredicateJQ). It is the one ownership step
+// every tier of the generated reads applies, before any sort and before any
+// cut: the count-form's aggregation (gf-4c9 round 2, finding 1c), the legacy
+// ephemeral tier (gf-pu2 finding 1e) and, since gf-xid finding 1h, the two
+// `bd ready` tiers and the anchor read (poolDemandReadyReadShell). Round 1's
+// row-4 shape REORDERED those tiers instead — claimable rows ahead of the
+// rest, the foreign rows kept behind them for the hook's fence to refuse and
+// log — and that kept a second starvation open: probe_pool_demand ends on the
+// first NONEMPTY tier, so a tier whose only rows were foreign still ended the
+// probe, the hook refused every row it was handed, the worker drained, and
+// the eligible local work in a LATER tier (a legacy wisp behind a foreign
+// routed task) was never reached — while the fenced count read 1 and kept
+// minting seats for it. Filtering makes "nonempty" mean "has a claimable
+// candidate", so the probe falls through to the next tier exactly when it
+// should. The hook's cross-city fence (cmd/gc fenceCrossCityHookCandidates)
+// stays the authoritative judge of every row served — a row from a custom
+// work_query, or one a store answered after this read, is still refused and
+// logged there. Empty for a non-federated city: the command is byte-identical.
 func claimableOnlyJQClause(identity string) string {
 	predicate := claimablePredicateJQ(identity)
 	if predicate == "" {
 		return ""
 	}
 	return ` | [.[] | select(` + predicate + `)]`
-}
-
-// claimableFirstJQClause renders the jq pipeline step that moves the rows
-// this city may claim AHEAD of the rows it may not (claimablePredicateJQ),
-// keeping the reader's order inside each half, so that the window cut after
-// it is filled by claimable work first. It reorders rather than drops: the
-// hook's cross-city fence (cmd/gc fenceCrossCityHookCandidates) stays the
-// authoritative judge of every row served, and a foreign row that still fits
-// the window is refused and LOGGED there exactly as before — the refusal line
-// an incident responder greps for keeps its one source. What the reorder
-// takes away is only the starvation: foreign rows can no longer fill the
-// window while eligible local work waits behind it (gf-4c9 row 4). Empty for
-// a non-federated city.
-func claimableFirstJQClause(identity string) string {
-	predicate := claimablePredicateJQ(identity)
-	if predicate == "" {
-		return ""
-	}
-	return ` | ([.[] | select(` + predicate + `)] + [.[] | select((` + predicate + `) | not)])`
 }
 
 // poolDemandReadyReadShell filters the single-store reader's full ready set
@@ -305,18 +298,18 @@ func poolDemandReadyReadShell(command string, limit int, topo QueryTopology) str
 	if limit > 0 {
 		limitFlag = ` --limit=` + strconv.Itoa(limit)
 	}
-	claimableFirst := claimableFirstJQClause(topo.FederationIdentity)
-	if topo.FederatedReady && claimableFirst == "" {
+	claimableOnly := claimableOnlyJQClause(topo.FederationIdentity)
+	if topo.FederatedReady && claimableOnly == "" {
 		return command + limitFlag
 	}
 	// The federated reader already applies the shared Ready predicate (and the
 	// shipped-work exclusion); on a federated city the only reason to read the
-	// whole set here is the ownership ordering, which must run before the cut.
+	// whole set here is the ownership filter, which must run before the cut.
 	filter := `[.[]`
 	if !topo.FederatedReady {
 		filter += excludeShippedPoolDemandJQClause()
 	}
-	filter += `]` + claimableFirst
+	filter += `]` + claimableOnly
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -439,12 +432,12 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 // of federation.MayClaim) gates the rows BEFORE the tier's oldest-first sort
 // and before both of its cuts — the filter's own window and the caller's
 // first-row cut — so an older bead owned by another city can no longer fill
-// the window and starve the eligible local wisp behind it. It filters rather
-// than reorders, unlike the two `bd ready` tiers (claimableFirstJQClause):
-// a foreign wisp alone yields no work here, as the fenced count-form of
-// finding 1c already counts none for it, so a seat minted for local demand
-// finds that demand instead of draining on a refusal (gf-pu2 finding 1e).
-// A non-federated city emits the command it emits today, byte for byte.
+// the window and starve the eligible local wisp behind it. It filters, as
+// every tier now does (claimableOnlyJQClause): a foreign wisp alone yields no
+// work here, as the fenced count-form of finding 1c already counts none for
+// it, so a seat minted for local demand finds that demand instead of
+// draining on a refusal (gf-pu2 finding 1e). A non-federated city emits the
+// command it emits today, byte for byte.
 func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
 	if topo.includeEphemeralReady() {
 		return `printf "[]"`

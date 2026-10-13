@@ -11,14 +11,20 @@ import (
 )
 
 // Regression coverage for gf-4c9 row 4 (the gf-9x2 codex gate's Major at
-// cmd/gc/cmd_hook_claim.go:501): on a federated city the hook's cross-city
-// fence (federation.MayClaim on the decoded rows) ran AFTER the routed
-// pool-demand tier had cut its 20-row window. When that window was filled by
-// another city's rows the hook reported no work and drained, every retry saw
-// the same foreign rows, and eligible local work behind them starved. The
-// generated read now orders claimable rows AHEAD of the rest BEFORE the cut
-// (claimableFirstJQClause); the Go fence still judges every row served and
-// still logs the foreign rows that fit the window.
+// cmd/gc/cmd_hook_claim.go:501) and gf-xid finding 1h (the gf-pu2 re-gates'
+// Major at internal/config/workquery.go:294 and :319): on a federated city the
+// hook's cross-city fence (federation.MayClaim on the decoded rows) ran AFTER
+// the routed pool-demand tier had cut its 20-row window. When that window was
+// filled by another city's rows the hook reported no work and drained, every
+// retry saw the same foreign rows, and eligible local work behind them
+// starved. Round 1 ordered claimable rows ahead of the rest before the cut
+// but KEPT the foreign rows, and probe_pool_demand ends on the first nonempty
+// tier — so a tier whose only rows were foreign still ended the probe, the
+// hook refused every row, and local work in a later tier (a legacy wisp
+// behind a foreign routed task) was never reached while the fenced count kept
+// minting seats for it. The generated read now FILTERS foreign rows out of
+// every tier before the cut (claimableOnlyJQClause); the Go fence still
+// judges every row served.
 
 // claimableRow renders one routed ready row with the given labels.
 func claimableRow(id string, labels ...string) string {
@@ -41,14 +47,15 @@ esac
 `
 }
 
-// TestRoutedPoolDemandWindowIsCutAfterTheOwnershipFence EXECUTES the routed
+// TestRoutedPoolDemandWindowKeepsOnlyClaimableRows EXECUTES the routed
 // pool-demand read against a fake bd that answers with twenty-five rows owned
 // by another city followed by one row this city owns. Without an identity the
 // window is the first twenty rows (all foreign: what the hook used to be
 // handed and then fence to nothing); with the city's identity the ownership
-// ordering runs before the cut and the own row leads the window, with the
-// foreign rows behind it for the Go fence to refuse and log.
-func TestRoutedPoolDemandWindowIsCutAfterTheOwnershipFence(t *testing.T) {
+// filter runs before the cut and the window holds the own row alone — no
+// foreign row is served, so a tier of foreign rows is an EMPTY tier and the
+// probe falls through to the next one.
+func TestRoutedPoolDemandWindowKeepsOnlyClaimableRows(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
@@ -78,8 +85,13 @@ func TestRoutedPoolDemandWindowIsCutAfterTheOwnershipFence(t *testing.T) {
 	}
 
 	fenced := run(QueryTopology{FederationIdentity: "citadel"})
-	if len(fenced) != 20 || fenced[0]["id"] != "hw-own-1" || fenced[1]["id"] != "hw-foreign-1" {
-		t.Fatalf("with the identity the own row behind 25 foreign rows must lead the window, the foreign rows following in reader order; got %d rows, first two %v %v", len(fenced), fenced[0], fenced[1])
+	if len(fenced) != 1 || fenced[0]["id"] != "hw-own-1" {
+		t.Fatalf("with the identity the window must hold the own row alone, every foreign row filtered before the cut; got %d rows: %v", len(fenced), fenced)
+	}
+	foreignOnly := fakeBdReadyRows(rows[:25]...)
+	out := strings.TrimSpace(runShellWithFakeBd(t, "sh -c "+shellQuoteForTest(`target="$1"; `+bdReadyPoolDemandShell(20, QueryTopology{FederationIdentity: "citadel"}))+" -- claude", nil, foreignOnly))
+	if out != "[]" {
+		t.Fatalf("a tier of foreign rows alone must read as empty so the probe falls through; got %q", out)
 	}
 }
 
@@ -124,26 +136,32 @@ func TestClaimablePredicateJQAgreesWithMayClaim(t *testing.T) {
 	}
 }
 
-// TestClaimableFirstJQClauseIsEmptyWithoutIdentity is the byte-identity
+// TestClaimableOnlyJQClauseIsEmptyWithoutIdentity is the byte-identity
 // claim: a non-federated city emits exactly the read it emits today.
-func TestClaimableFirstJQClauseIsEmptyWithoutIdentity(t *testing.T) {
-	if got := claimableFirstJQClause(""); got != "" {
-		t.Fatalf("claimableFirstJQClause(\"\") = %q, want empty", got)
+func TestClaimableOnlyJQClauseIsEmptyWithoutIdentity(t *testing.T) {
+	if got := claimableOnlyJQClause(""); got != "" {
+		t.Fatalf("claimableOnlyJQClause(\"\") = %q, want empty", got)
 	}
-	if got := claimableFirstJQClause("  "); got != "" {
-		t.Fatalf("claimableFirstJQClause(blank) = %q, want empty", got)
+	if got := claimableOnlyJQClause("  "); got != "" {
+		t.Fatalf("claimableOnlyJQClause(blank) = %q, want empty", got)
 	}
 	if bdReadyPoolDemandShell(20, QueryTopology{}) != bdReadyPoolDemandShell(20, QueryTopology{FederationIdentity: ""}) {
 		t.Fatal("an empty identity changed the generated read")
 	}
-	if !strings.Contains(bdReadyPoolDemandShell(20, QueryTopology{FederationIdentity: "citadel"}), `handoff:citadel`) {
+	fenced := bdReadyPoolDemandShell(20, QueryTopology{FederationIdentity: "citadel"})
+	if !strings.Contains(fenced, `handoff:citadel`) {
 		t.Fatal("an identity did not reach the generated read")
 	}
+	// The filter keeps only the claimable rows (no "| not" half carrying the
+	// foreign ones behind them) and runs before the window cut.
+	if strings.Contains(fenced, `| not)`) || strings.Index(fenced, `handoff:citadel`) > strings.Index(fenced, `.[:20]`) {
+		t.Fatalf("the ownership step must filter, not reorder, before the cut: %q", fenced)
+	}
 	// The federated reader applies the Ready predicate itself; with an identity
-	// it still has to read the whole set and order before cutting.
+	// it still has to read the whole set and filter before cutting.
 	fed := bdReadyPoolDemandShell(20, QueryTopology{FederatedReady: true, FederationIdentity: "citadel"})
 	if !strings.Contains(fed, "--limit 0") || !strings.Contains(fed, ".[:20]") || !strings.Contains(fed, `handoff:citadel`) {
-		t.Fatalf("federated read with an identity must order before the cut: %q", fed)
+		t.Fatalf("federated read with an identity must filter before the cut: %q", fed)
 	}
 }
 

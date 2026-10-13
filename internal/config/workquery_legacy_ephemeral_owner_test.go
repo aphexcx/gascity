@@ -16,13 +16,14 @@ import (
 // jq, the read a bd-1.0.4-compatible city takes for wisps routed to a pool —
 // sorted its candidates oldest-first and cut them to a window BEFORE any
 // ownership rule, and then cut again to one row. Round 1's row-4 ordering
-// (claimableFirstJQClause) covered the two `bd ready` tiers only. On a
+// (the ordering clause of that round) covered the two `bd ready` tiers only. On a
 // federated city an older bead owned by another city therefore led the
 // window, the Work query served it alone, the hook's claim fence refused it,
 // the worker drained, and the eligible local wisp behind it was never served
 // — while the count-form (fenced since finding 1c) read 1 and kept minting
 // seats for it. The ownership predicate now gates the legacy ephemeral rows
-// before the sort and both cuts.
+// before the sort and both cuts (and, since gf-xid finding 1h, every other
+// tier the same way: workquery_foreign_tier_owner_test.go).
 
 // legacyEphemeralRow renders one `bd query --json` row of an open, unassigned,
 // pool-routed wisp with the given creation time and labels.
