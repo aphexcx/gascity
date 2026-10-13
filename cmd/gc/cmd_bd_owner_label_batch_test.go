@@ -238,25 +238,37 @@ func TestGcBdCreateCarriesTheOwnerInABatch(t *testing.T) {
 		}
 	})
 
-	t.Run("a plan gc cannot parse reaches bd as typed", func(t *testing.T) {
-		capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
-		fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
-		if err := os.WriteFile(filepath.Join(os.Getenv("GC_CITY_PATH"), "plan.json"), []byte(`{"nodes": [`), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CAPTURE_PATH", capture)
-		t.Setenv("LABELS", "")
-		t.Setenv("CREATE_OUT", "Error: reading graph plan: unexpected end of JSON input")
-		t.Setenv("CREATE_EXIT", "1")
+	// A plan gc read but cannot stamp is refused BEFORE bd runs (gf-c7n
+	// finding 1m): handed to bd it could reach the store unowned, and bd
+	// refuses the same shapes itself, minting nothing.
+	for _, tt := range []struct{ name, plan string }{
+		{"a plan gc cannot parse", `{"nodes": [`},
+		{"a plan without a nodes array", `{"Edges": []}`},
+		{"a plan whose node is not an object", `{"Nodes": [1]}`},
+	} {
+		t.Run(tt.name+" is refused before bd runs", func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			if err := os.WriteFile(filepath.Join(os.Getenv("GC_CITY_PATH"), "plan.json"), []byte(tt.plan), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("LABELS", "")
+			t.Setenv("CREATE_OUT", "")
+			t.Setenv("CREATE_EXIT", "")
 
-		var stdout, stderr bytes.Buffer
-		if got := doBd([]string{"create", "--graph", "plan.json"}, &stdout, &stderr); got != 1 {
-			t.Fatalf("doBd = %d, want bd's exit 1; stderr=%q", got, stderr.String())
-		}
-		if calls := fakeBdCalls(t, capture); len(calls) != 1 || calls[0] != "create --graph plan.json" {
-			t.Fatalf("bd calls = %q, want the create as typed", calls)
-		}
-	})
+			var stdout, stderr bytes.Buffer
+			if got := doBd([]string{"create", "--graph", "plan.json"}, &stdout, &stderr); got != 1 {
+				t.Fatalf("doBd = %d, want the refusal's exit 1; stderr=%q", got, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "gc bd: refusing to create:") {
+				t.Fatalf("stderr = %q, want the refusal", stderr.String())
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("bd ran (%q); a plan gc cannot stamp must never reach bd", fakeBdCalls(t, capture))
+			}
+		})
+	}
 }
 
 // TestBdMarkdownBatchWithOwner pins the markdown rewrite against bd's own
@@ -300,11 +312,7 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 // TestBdGraphPlanWithOwner pins the generic plan rewrite: only each node's
 // labels change; a plan that is not a nodes object is left to bd.
 func TestBdGraphPlanWithOwner(t *testing.T) {
-	for _, in := range []string{`[]`, `{"edges":[]}`, `{"nodes":"no"}`, `{"nodes":[1]}`, `not json`} {
-		if got, _, err := bdGraphPlanWithOwner([]byte(in), "owner:citadel", nil); got != nil || err != nil {
-			t.Errorf("bdGraphPlanWithOwner(%q) = (%s, %v), want nil (bd refuses it)", in, got, err)
-		}
-	}
+	// A plan gc cannot stamp is refused: TestBdGraphPlanWithOwnerMatchesKeysAsBdDoes.
 	got, carried, err := bdGraphPlanWithOwner([]byte(`{"nodes":[{"key":"a","title":"A","priority":0,"ephemeral":true,"labels":["owner:boomtown"]},{"key":"b","title":"B","parent_key":"a"},{"key":"c","title":"C"}]}`), "owner:citadel", nil)
 	if err != nil || !carried {
 		t.Fatalf("carried=%v err=%v", carried, err)

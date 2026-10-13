@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -116,8 +117,10 @@ func bdCreateArgvWithBatchFile(bdArgs []string, form bdBatchCreateForm, path str
 // bdBatchOwnerRewrite is the outcome of writing the owner into a batch's
 // input: the argv bd runs, whether every row of the batch carries an owner
 // (carried), and the cleanup that removes the temporary file. A batch whose
-// file gc cannot read or parse is handed to bd unchanged (bd refuses it the
-// same way and mints nothing), carried=false, so the follow-up repair stands.
+// file gc cannot read is handed to bd unchanged (bd cannot read it either,
+// refuses it and mints nothing), carried=false, so the follow-up repair
+// stands; a graph plan gc read but cannot stamp is REFUSED before bd runs
+// (bdGraphPlanWithOwner), never handed over unowned.
 type bdBatchOwnerRewrite struct {
 	args    []string
 	carried bool
@@ -132,7 +135,7 @@ type bdBatchOwnerRewrite struct {
 // cannot be read for this create (a bd database override), and such a node
 // is left as authored while the rest of the plan still carries this city's
 // owner. A parent that cannot be read refuses the create: an unread parent is
-// not an unowned one.
+// not an unowned one. A plan gc cannot stamp refuses the create too.
 func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreateForm, path, owner string, parentRead func(id string) (beads.Bead, error)) (bdBatchOwnerRewrite, error) {
 	unchanged := bdBatchOwnerRewrite{args: bdArgs, cleanup: func() {}}
 	source := path
@@ -141,6 +144,9 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 	}
 	data, err := os.ReadFile(source) // #nosec G304 -- the operator's own batch file
 	if err != nil {
+		// bd reads the same path from the same directory as the same user, so
+		// a file gc cannot read is one bd cannot read either: bd refuses it
+		// and mints nothing, and the operator sees bd's own error.
 		return unchanged, nil
 	}
 	var rewritten []byte
@@ -177,16 +183,124 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 	}, nil
 }
 
+// jsonMember is one member of a JSON object, in document order.
+type jsonMember struct {
+	key   string
+	value json.RawMessage
+}
+
+// decodeJSONObject decodes data as one JSON object into its members in
+// document order — the order encoding/json binds them in, so the member bd
+// reads for a field (the LAST whose key matches it, see bdBoundMember) can be
+// told from the ones it shadows. Anything but a single JSON object, trailing
+// data included, is an error, as it is for bd's json.Unmarshal.
+func decodeJSONObject(data []byte) ([]jsonMember, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("not a JSON object")
+	}
+	var members []jsonMember
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("object key %v is not a string", keyTok)
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		members = append(members, jsonMember{key: key, value: value})
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("trailing data after the JSON object")
+	}
+	return members, nil
+}
+
+// encodeJSONObject renders members as a compact JSON object in their order.
+func encodeJSONObject(members []jsonMember) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, m := range members {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		key, err := json.Marshal(m.key)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(m.value)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// bdBoundMember returns the index of the member bd's parser binds to the
+// field named name, or -1. bd decodes a plan with json.Unmarshal into
+// GraphApplyPlan (cmd/bd graph_apply.go, createIssuesFromGraph): encoding/json
+// takes a key that matches the field's name exactly OR case-insensitively
+// (bd's own unknownKeys helper folds case for that reason), and when several
+// keys of one object match, the last one in document order wins.
+func bdBoundMember(members []jsonMember, name string) int {
+	bound := -1
+	for i, m := range members {
+		if strings.EqualFold(m.key, name) {
+			bound = i
+		}
+	}
+	return bound
+}
+
+// bdRebindMember returns members with value as the member bd binds to name:
+// the bound member keeps its own spelling and takes the value, the members it
+// shadowed (bd never read them) are dropped, and a field with no member gets
+// one spelled name at the end.
+func bdRebindMember(members []jsonMember, name string, value json.RawMessage) []jsonMember {
+	bound := bdBoundMember(members, name)
+	out := make([]jsonMember, 0, len(members)+1)
+	for i, m := range members {
+		switch {
+		case i == bound:
+			out = append(out, jsonMember{key: m.key, value: value})
+		case strings.EqualFold(m.key, name):
+			continue
+		default:
+			out = append(out, m)
+		}
+	}
+	if bound < 0 {
+		out = append(out, jsonMember{key: name, value: value})
+	}
+	return out
+}
+
 // bdGraphPlanWithOwner returns the plan with the owner label on every node by
 // the per-node rule of every create door (beads.GraphPlanOwnerLabels), and
-// whether every node carries an owner afterwards. The plan is rewritten
-// GENERICALLY — only each node's "labels" member is replaced; every other
-// member of the plan and of its nodes, known to gc or not, is carried through
-// as the bytes bd will read — so a plan field gc does not know is never
-// dropped on the way. A plan that is not a JSON object with a "nodes" array
-// is returned as nil: bd parses it the same way, refuses it and mints
-// nothing. A node's parents are every relationship bd's graph apply wires
-// (cmd/bd graph_apply.go): its parent_key, or bd's `parent` alias
+// whether every node carries an owner afterwards. The plan is read the way
+// bd reads it — its members bound by name as encoding/json binds them, case
+// aside, the last of several winning (bdBoundMember) — and rewritten
+// GENERICALLY: only the member bd binds to each node's "labels" is replaced,
+// in its own spelling and place; every other member of the plan and of its
+// nodes, known to gc or not, is carried through as the bytes bd will read,
+// so a plan field gc does not know is never dropped on the way. A plan gc
+// cannot stamp — not one JSON object, no nodes array, a node that is not an
+// object, edges or deps bd could not decode — is REFUSED with an error:
+// handed to bd it would reach the store unowned, and bd refuses the same
+// shapes itself. A node's parents are every relationship bd's graph apply
+// wires (cmd/bd graph_apply.go): its parent_key, or bd's `parent` alias
 // (parent_key wins), else its parent_id; an `edges` entry of type
 // parent-child whose child is the node (from_key, or from_id naming the
 // node's explicit id) with the parent in to_id or to_key; and a `deps` entry
@@ -198,17 +312,19 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 // node whose parents sit in different lanes refuses the create. With
 // parentRead nil (the configured store cannot be read for this create) a
 // node under an existing parent is left as authored — and so is every
-// in-plan descendant of it that names no owner of its own: their lane is the
-// unread parent's, which this create cannot know, and stamping this city's
-// owner on them would make a foreign subtree claimable here.
+// in-plan descendant of it that names no owner of its own.
 func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) (beads.Bead, error)) ([]byte, bool, error) {
-	var plan map[string]json.RawMessage
-	if err := json.Unmarshal(data, &plan); err != nil || plan == nil {
-		return nil, false, nil
+	plan, err := decodeJSONObject(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("the graph plan is not one bd can stamp: %w", err)
+	}
+	nodesAt := bdBoundMember(plan, "nodes")
+	if nodesAt < 0 {
+		return nil, false, fmt.Errorf("the graph plan has no nodes member")
 	}
 	var rawNodes []json.RawMessage
-	if err := json.Unmarshal(plan["nodes"], &rawNodes); err != nil {
-		return nil, false, nil
+	if err := json.Unmarshal(plan[nodesAt].value, &rawNodes); err != nil || rawNodes == nil {
+		return nil, false, fmt.Errorf("the graph plan's nodes are not a JSON array")
 	}
 	type nodeView struct {
 		Key       string   `json:"key"`
@@ -230,15 +346,17 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		Type    string `json:"type"`
 	}
 	views := make([]nodeView, len(rawNodes))
-	members := make([]map[string]json.RawMessage, len(rawNodes))
+	members := make([][]jsonMember, len(rawNodes))
 	index := make(map[string]int, len(rawNodes)) // by key
 	byID := make(map[string]int, len(rawNodes))  // by explicit id
 	for i, raw := range rawNodes {
+		// json.Unmarshal into the view binds the node's members as bd's own
+		// decode of GraphApplyNode does, case and shadowing included.
 		if err := json.Unmarshal(raw, &views[i]); err != nil {
-			return nil, false, nil
+			return nil, false, fmt.Errorf("graph plan node %d: %w", i, err)
 		}
-		if err := json.Unmarshal(raw, &members[i]); err != nil || members[i] == nil {
-			return nil, false, nil
+		if members[i], err = decodeJSONObject(raw); err != nil {
+			return nil, false, fmt.Errorf("graph plan node %d is not a JSON object: %w", i, err)
 		}
 		if views[i].Key != "" {
 			index[views[i].Key] = i
@@ -248,9 +366,9 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		}
 	}
 	var edges []edgeView
-	if raw, ok := plan["edges"]; ok {
-		if err := json.Unmarshal(raw, &edges); err != nil {
-			return nil, false, nil
+	if edgesAt := bdBoundMember(plan, "edges"); edgesAt >= 0 {
+		if err := json.Unmarshal(plan[edgesAt].value, &edges); err != nil {
+			return nil, false, fmt.Errorf("graph plan edges: %w", err)
 		}
 	}
 	// ref resolves an id the way bd's apply does: another node of this plan
@@ -344,23 +462,29 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		if err != nil {
 			return nil, false, fmt.Errorf("encoding node labels: %w", err)
 		}
-		members[i]["labels"] = encoded
-		node, err := json.Marshal(members[i])
-		if err != nil {
+		if rawNodes[i], err = encodeJSONObject(bdRebindMember(members[i], "labels", encoded)); err != nil {
 			return nil, false, fmt.Errorf("encoding plan node: %w", err)
 		}
-		rawNodes[i] = node
 	}
-	encodedNodes, err := json.Marshal(rawNodes)
-	if err != nil {
-		return nil, false, fmt.Errorf("encoding plan nodes: %w", err)
+	var nodes bytes.Buffer
+	nodes.WriteByte('[')
+	for i, raw := range rawNodes {
+		if i > 0 {
+			nodes.WriteByte(',')
+		}
+		nodes.Write(raw)
 	}
-	plan["nodes"] = encodedNodes
-	out, err := json.MarshalIndent(plan, "", "  ")
+	nodes.WriteByte(']')
+	compact, err := encodeJSONObject(bdRebindMember(plan, "nodes", nodes.Bytes()))
 	if err != nil {
 		return nil, false, fmt.Errorf("encoding plan: %w", err)
 	}
-	return append(out, '\n'), carried, nil
+	var out bytes.Buffer
+	if err := json.Indent(&out, compact, "", "  "); err != nil {
+		return nil, false, fmt.Errorf("encoding plan: %w", err)
+	}
+	out.WriteByte('\n')
+	return out.Bytes(), carried, nil
 }
 
 var (

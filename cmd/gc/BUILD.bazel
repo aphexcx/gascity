@@ -761,6 +761,7 @@ go_test(
         "cmd_bd_batch_guard_test.go",
         "cmd_bd_by_id_rig_test.go",
         "cmd_bd_by_id_test.go",
+        "cmd_bd_owner_label_batch_keys_test.go",
         "cmd_bd_owner_label_batch_parents_test.go",
         "cmd_bd_owner_label_batch_test.go",
         "cmd_bd_owner_label_test.go",
