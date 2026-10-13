@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -209,5 +210,62 @@ func TestBdStoreCreateWithStorageStopsWhenOwnedParentCannotBeRead(t *testing.T) 
 				t.Fatalf("bd create calls = %d, want 0 after parent lookup failure", createCalls)
 			}
 		})
+	}
+}
+
+// TestBdStoreApplyGraphPlanFollowsEveryParentRelationshipBdAccepts pins
+// gf-c7n finding 1l on the bd-backed door: a node under another through an
+// edge of type parent-child takes that parent's lane — an in-plan parent's
+// effective owner, or an existing bead's owner read first — and parents in
+// different lanes refuse the create before anything reaches bd.
+func TestBdStoreApplyGraphPlanFollowsEveryParentRelationshipBdAccepts(t *testing.T) {
+	var captured beads.GraphApplyPlan
+	var calls []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, args[0])
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"P","title":"parent","status":"open","issue_type":"epic","created_at":"2026-09-01T00:00:00Z","labels":["owner:boomtown"]}]`), nil
+		case "create":
+			data, err := os.ReadFile(args[2])
+			if err != nil {
+				t.Fatalf("reading graph plan: %v", err)
+			}
+			if err := json.Unmarshal(data, &captured); err != nil {
+				t.Fatalf("unmarshal graph plan: %v", err)
+			}
+			return []byte(`{"ids":{"foreign":"bd-f","edge-child":"bd-e","edge-existing":"bd-x"}}`), nil
+		}
+		return nil, errors.New("unexpected: " + strings.Join(args, " "))
+	}
+	s := beads.NewBdStore(t.TempDir(), runner, beads.WithBdStoreOwnerLabel("owner:citadel"))
+	plan := &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{
+			{Key: "foreign", Title: "foreign", Labels: []string{"owner:jadegate"}},
+			{Key: "edge-child", Title: "under foreign through an edge"},
+			{Key: "edge-existing", Title: "under an existing bead through an edge"},
+		},
+		Edges: []beads.GraphApplyEdge{
+			{FromKey: "edge-child", ToKey: "foreign", Type: "parent-child"},
+			{FromKey: "edge-existing", ToID: "P", Type: "parent-child"},
+		},
+	}
+	if _, err := s.ApplyGraphPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(captured.Nodes))
+	for _, n := range captured.Nodes {
+		got = append(got, strings.Join(n.Labels, ","))
+	}
+	if want := []string{"owner:jadegate", "owner:jadegate", "owner:boomtown"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("node labels sent to bd = %v, want %v (calls %v)", got, want, calls)
+	}
+	calls = nil
+	torn := &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{{Key: "local", Title: "local"}, {Key: "torn", Title: "two lanes", ParentKey: "local"}},
+		Edges: []beads.GraphApplyEdge{{FromKey: "torn", ToID: "P", Type: "parent-child"}},
+	}
+	if _, err := s.ApplyGraphPlan(context.Background(), torn); err == nil || !strings.Contains(err.Error(), `"torn"`) || slices.Contains(calls, "create") {
+		t.Fatalf("parents in different lanes: err = %v, calls = %v; want a refusal naming node torn and no create", err, calls)
 	}
 }

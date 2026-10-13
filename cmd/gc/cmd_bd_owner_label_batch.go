@@ -178,23 +178,29 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 }
 
 // bdGraphPlanWithOwner returns the plan with the owner label on every node by
-// the per-node rule (federation.OwnerLabelsForPlan), and whether every node
-// carries an owner afterwards. The plan is rewritten GENERICALLY — only each
-// node's "labels" member is replaced; every other member of the plan and of
-// its nodes, known to gc or not, is carried through as the bytes bd will
-// read — so a plan field gc does not know is never dropped on the way. A plan
-// that is not a JSON object with a "nodes" array is returned as nil: bd parses
-// it the same way, refuses it and mints nothing. An existing parent a node
-// names (parent_id) is read through parentRead; a read failure refuses the
-// create. A parent_id that names another node of the SAME plan by its
-// explicit "id" is an in-plan parent (bd creates the nodes before it wires
-// them, so that shape is valid and the parent is not in the store yet) and
-// is resolved in-plan, never read. With parentRead nil (the configured store
-// cannot be read for this create) a node naming an existing parent is left
-// as authored — and so is every in-plan descendant of it that names no owner
-// of its own: their lane is the unread parent's, which this create cannot
-// know, and stamping this city's owner on them would make a foreign subtree
-// claimable here.
+// the per-node rule of every create door (beads.GraphPlanOwnerLabels), and
+// whether every node carries an owner afterwards. The plan is rewritten
+// GENERICALLY — only each node's "labels" member is replaced; every other
+// member of the plan and of its nodes, known to gc or not, is carried through
+// as the bytes bd will read — so a plan field gc does not know is never
+// dropped on the way. A plan that is not a JSON object with a "nodes" array
+// is returned as nil: bd parses it the same way, refuses it and mints
+// nothing. A node's parents are every relationship bd's graph apply wires
+// (cmd/bd graph_apply.go): its parent_key, or bd's `parent` alias
+// (parent_key wins), else its parent_id; an `edges` entry of type
+// parent-child whose child is the node (from_key, or from_id naming the
+// node's explicit id) with the parent in to_id or to_key; and a `deps` entry
+// of that type on the node (target: a plan key first, then an issue id). A
+// parent_id, to_id or dep target that names another node of the SAME plan
+// by its explicit "id" is an in-plan parent (bd creates the nodes before it
+// wires them) and is resolved in-plan, never read; one naming an existing
+// bead is read through parentRead, and a read failure refuses the create. A
+// node whose parents sit in different lanes refuses the create. With
+// parentRead nil (the configured store cannot be read for this create) a
+// node under an existing parent is left as authored — and so is every
+// in-plan descendant of it that names no owner of its own: their lane is the
+// unread parent's, which this create cannot know, and stamping this city's
+// owner on them would make a foreign subtree claimable here.
 func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) (beads.Bead, error)) ([]byte, bool, error) {
 	var plan map[string]json.RawMessage
 	if err := json.Unmarshal(data, &plan); err != nil || plan == nil {
@@ -211,6 +217,17 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		Parent    string   `json:"parent"`
 		ParentKey string   `json:"parent_key"`
 		ParentID  string   `json:"parent_id"`
+		Deps      []struct {
+			Type   string `json:"type"`
+			Target string `json:"target"`
+		} `json:"deps"`
+	}
+	type edgeView struct {
+		FromKey string `json:"from_key"`
+		FromID  string `json:"from_id"`
+		ToKey   string `json:"to_key"`
+		ToID    string `json:"to_id"`
+		Type    string `json:"type"`
 	}
 	views := make([]nodeView, len(rawNodes))
 	members := make([]map[string]json.RawMessage, len(rawNodes))
@@ -230,55 +247,93 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 			byID[id] = i
 		}
 	}
-	read := make(map[string][]string)
-	nodes := make([]federation.PlanNode, len(rawNodes))
-	unresolved := make([]bool, len(rawNodes)) // left as authored: under an unreadable scope's parent
+	var edges []edgeView
+	if raw, ok := plan["edges"]; ok {
+		if err := json.Unmarshal(raw, &edges); err != nil {
+			return nil, false, nil
+		}
+	}
+	// ref resolves an id the way bd's apply does: another node of this plan
+	// by its explicit id, else an existing bead.
+	ref := func(id string) beads.GraphPlanParent {
+		if p, ok := byID[id]; ok {
+			return beads.GraphPlanParent{Index: p}
+		}
+		return beads.GraphPlanParent{Index: -1, ID: id}
+	}
+	parents := make([][]beads.GraphPlanParent, len(rawNodes))
+	add := func(child int, parent beads.GraphPlanParent, ok bool) {
+		if !ok || parent.Index == child {
+			return
+		}
+		parents[child] = append(parents[child], parent)
+	}
 	for i, v := range views {
-		pn := federation.PlanNode{Labels: v.Labels, ParentIndex: -1}
 		parentKey := v.ParentKey
 		if parentKey == "" {
 			parentKey = v.Parent // bd's alias: parent_key wins, then parent
 		}
 		switch {
 		case parentKey != "":
-			if p, ok := index[parentKey]; ok {
-				pn.ParentIndex = p
-			}
+			p, ok := index[parentKey]
+			add(i, beads.GraphPlanParent{Index: p}, ok)
 		case strings.TrimSpace(v.ParentID) != "":
-			id := strings.TrimSpace(v.ParentID)
-			if p, ok := byID[id]; ok && p != i {
-				pn.ParentIndex = p // the parent is another node of this plan, by its explicit id
-				break
-			}
-			if parentRead == nil {
-				unresolved[i] = !federation.HasOwnerLabel(v.Labels)
-				break
-			}
-			if _, seen := read[id]; !seen {
-				parent, err := parentRead(id)
-				if err != nil {
-					return nil, false, fmt.Errorf("reading parent %q for the owner label: %w", id, err)
-				}
-				read[id] = parent.Labels
-			}
-			pn.ParentLabels = read[id]
+			add(i, ref(strings.TrimSpace(v.ParentID)), true)
 		}
-		nodes[i] = pn
 	}
-	// An unresolved lane reaches every in-plan descendant that names no owner
-	// of its own; a node with an authored owner resolves its own subtree.
-	for changed := true; changed; {
-		changed = false
-		for i, pn := range nodes {
-			if unresolved[i] || federation.HasOwnerLabel(pn.Labels) || pn.ParentIndex < 0 || pn.ParentIndex == i {
+	for _, e := range edges {
+		if e.Type != "parent-child" {
+			continue
+		}
+		child, ok := -1, false
+		switch {
+		case e.FromID != "":
+			child, ok = byID[e.FromID] // an existing bead as the child is not a plan node
+		case e.FromKey != "":
+			child, ok = index[e.FromKey]
+		}
+		if !ok {
+			continue
+		}
+		switch {
+		case e.ToID != "":
+			add(child, ref(e.ToID), true)
+		case e.ToKey != "":
+			p, ok := index[e.ToKey]
+			add(child, beads.GraphPlanParent{Index: p}, ok)
+		}
+	}
+	for i, v := range views {
+		for _, d := range v.Deps {
+			if d.Type != "parent-child" || d.Target == "" {
 				continue
 			}
-			if unresolved[pn.ParentIndex] {
-				unresolved[i], changed = true, true
+			if p, ok := index[d.Target]; ok { // a plan key first, then an issue id
+				add(i, beads.GraphPlanParent{Index: p}, true)
+				continue
 			}
+			add(i, ref(d.Target), true)
 		}
 	}
-	labels := federation.OwnerLabelsForPlan(nodes, owner)
+	authored := make([][]string, len(views))
+	names := make([]string, len(views))
+	for i, v := range views {
+		authored[i], names[i] = v.Labels, v.Key
+	}
+	var read func(id string) ([]string, error)
+	if parentRead != nil {
+		read = func(id string) ([]string, error) {
+			parent, err := parentRead(id)
+			if err != nil {
+				return nil, err
+			}
+			return parent.Labels, nil
+		}
+	}
+	labels, unresolved, err := beads.GraphPlanOwnerLabels(authored, parents, names, owner, read)
+	if err != nil {
+		return nil, false, err
+	}
 	carried := true
 	for i := range rawNodes {
 		if unresolved[i] {

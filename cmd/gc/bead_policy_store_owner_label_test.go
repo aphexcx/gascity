@@ -279,3 +279,59 @@ func (s *invisibleUntilCommitStore) Get(id string) (beads.Bead, error) {
 	}
 	return s.Store.Get(id)
 }
+
+// TestBeadPolicyGraphStoreFollowsEveryParentRelationshipBdAccepts pins gf-c7n
+// finding 1l on the in-process door: a node made the child of another
+// through an edge of type parent-child (bd's graph apply wires it exactly
+// like parent_key / parent_id) takes that parent's lane — an in-plan parent's
+// effective owner, an existing bead's owner read through the live handle —
+// and a node whose parents sit in different lanes refuses the create.
+func TestBeadPolicyGraphStoreFollowsEveryParentRelationshipBdAccepts(t *testing.T) {
+	mem := beads.NewMemStore()
+	existing, err := mem.Create(beads.Bead{Title: "another city's bead", Labels: []string{"owner:boomtown"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing := &recordingGraphApplyStore{Store: mem}
+	store := wrapStoreWithBeadPolicies(backing, federatedTestConfig("citadel"))
+	applier, ok := beads.GraphApplyFor(store)
+	if !ok {
+		t.Fatal("policy wrapper over a graph-apply store must expose ApplyGraphPlan")
+	}
+	plan := &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{
+			{Key: "foreign", Title: "foreign", Labels: []string{"owner:jadegate"}},
+			{Key: "edge-child", Title: "under foreign through an edge"},
+			{Key: "edge-existing", Title: "under an existing bead through an edge"},
+			{Key: "grandchild", Title: "under edge-child", ParentKey: "edge-child"},
+			{Key: "blocked", Title: "blocks only"},
+		},
+		Edges: []beads.GraphApplyEdge{
+			{FromKey: "edge-child", ToKey: "foreign", Type: "parent-child"},
+			{FromKey: "edge-existing", ToID: existing.ID, Type: "parent-child"},
+			{FromKey: "blocked", ToKey: "foreign", Type: "blocks"},
+		},
+	}
+	if _, err := applier.ApplyGraphPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(backing.plan.Nodes))
+	for _, n := range backing.plan.Nodes {
+		got = append(got, strings.Join(n.Labels, ","))
+	}
+	want := []string{"owner:jadegate", "owner:jadegate", "owner:boomtown", "owner:jadegate", "owner:citadel"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("node labels = %v, want %v", got, want)
+	}
+	torn := &beads.GraphApplyPlan{
+		Nodes: []beads.GraphApplyNode{
+			{Key: "local", Title: "local"},
+			{Key: "torn", Title: "two lanes", ParentKey: "local"},
+		},
+		Edges: []beads.GraphApplyEdge{{FromKey: "torn", ToID: existing.ID, Type: "parent-child"}},
+	}
+	backing.plan = nil
+	if _, err := applier.ApplyGraphPlan(context.Background(), torn); err == nil || !strings.Contains(err.Error(), `"torn"`) || backing.plan != nil {
+		t.Fatalf("parents in different lanes: err = %v, plan handed down = %v; want a refusal naming node torn and no apply", err, backing.plan != nil)
+	}
+}

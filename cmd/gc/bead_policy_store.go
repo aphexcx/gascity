@@ -220,42 +220,27 @@ func (s *beadPolicyStore) ownerLabel() string {
 
 // stampGraphPlanOwner returns plan with the owner label on every node that
 // names no owner of its own. A graph apply is a bulk create — molecule roots,
-// steps, control beads — so each node is stamped as a single create would be.
-// It works on a copy: the caller's plan stays theirs.
+// steps, control beads — so each node is stamped as a single create would be,
+// under every parent relationship bd's graph apply accepts
+// (beads.GraphPlanParents: parent_key, parent_id and an edge of type
+// parent-child); a node whose parents sit in different lanes refuses the
+// create. It works on a copy: the caller's plan stays theirs.
 func (s *beadPolicyStore) stampGraphPlanOwner(plan *beads.GraphApplyPlan) (*beads.GraphApplyPlan, error) {
 	owner := s.ownerLabel()
 	if owner == "" || plan == nil {
 		return plan, nil
 	}
+	authored := make([][]string, len(plan.Nodes))
+	names := make([]string, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		authored[i], names[i] = node.Labels, node.Key
+	}
+	labels, _, err := beads.GraphPlanOwnerLabels(authored, beads.GraphPlanParents(plan), names, owner, s.ownerParentLabels)
+	if err != nil {
+		return nil, err
+	}
 	stamped := *plan
 	stamped.Nodes = make([]beads.GraphApplyNode, len(plan.Nodes))
-	index := make(map[string]int, len(plan.Nodes))
-	for i, node := range plan.Nodes {
-		if node.Key != "" {
-			index[node.Key] = i
-		}
-	}
-	read := make(map[string][]string)
-	nodes := make([]federation.PlanNode, len(plan.Nodes))
-	for i, node := range plan.Nodes {
-		pn := federation.PlanNode{Labels: node.Labels, ParentIndex: -1}
-		if node.ParentKey != "" {
-			if p, ok := index[node.ParentKey]; ok {
-				pn.ParentIndex = p
-			}
-		} else if id := strings.TrimSpace(node.ParentID); id != "" {
-			if _, seen := read[id]; !seen {
-				parentLabels, err := s.ownerParentLabels(id)
-				if err != nil {
-					return nil, err
-				}
-				read[id] = parentLabels
-			}
-			pn.ParentLabels = read[id]
-		}
-		nodes[i] = pn
-	}
-	labels := federation.OwnerLabelsForPlan(nodes, owner)
 	for i, node := range plan.Nodes {
 		node.Labels = labels[i]
 		stamped.Nodes[i] = node
