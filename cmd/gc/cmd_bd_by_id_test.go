@@ -2614,3 +2614,16 @@ func TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim(t *testing.T) {
 		})
 	}
 }
+
+func TestBdSearchAndCountQuoteNonIDFlagValues(t *testing.T) {
+	for _, args := range [][]string{{"count", "--title", "gcg-abc"}, {"search", "--query", "gcg-abc"}} {
+		if ids := bdArgsAddressedClassIDs(args); len(ids) != 0 {
+			t.Errorf("quoted selector %q addresses %q", args, ids)
+		}
+		// Real id selectors remain subject to the ownership gate.
+		args = append(args, "--parent", "gcg-def")
+		if ids := bdArgsAddressedClassIDs(args); !slices.Equal(ids, []string{"gcg-def"}) {
+			t.Errorf("parent selector %q addresses %q, want gcg-def", args, ids)
+		}
+	}
+}

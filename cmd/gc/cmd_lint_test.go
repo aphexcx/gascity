@@ -787,3 +787,18 @@ func validateLintJSONSchema(t *testing.T, data []byte) {
 		t.Fatalf("lint payload does not validate: %v\n%s", err, string(data))
 	}
 }
+
+func TestLintValidatesSearchAndCountFlags(t *testing.T) {
+	for _, verb := range []string{"search", "count"} {
+		t.Run(verb, func(t *testing.T) {
+			packDir := t.TempDir()
+			writeLintPack(t, packDir, "selector-flags", "worker", "prompts/worker.template.md")
+			writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+				"Agent {{.AgentName}}\n`gc bd "+verb+" --made-up-flag x`\n")
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"lint", packDir}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "bd-unknown-flag") {
+				t.Fatalf("lint %s = %d, stderr=%q", verb, code, stderr.String())
+			}
+		})
+	}
+}

@@ -501,9 +501,15 @@ test-ci-policy:
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
-test: test-fsys-darwin-compile
+test: test-fsys-darwin-compile check-bd-parent-grammar
 	pkgs="$(PKGS)" || exit $$?; \
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $$pkgs
+
+# Compare against the pinned bd module by default; a clone can validate an upgrade.
+BEADS_SOURCE ?= $(shell go list -m -f '{{.Dir}}' github.com/steveyegge/beads)
+.PHONY: check-bd-parent-grammar
+check-bd-parent-grammar:
+	$(TEST_ENV) python3 scripts/check-bd-parent-grammar.py "$(BEADS_SOURCE)"
 
 COUNT ?= 1
 RUN ?= .
