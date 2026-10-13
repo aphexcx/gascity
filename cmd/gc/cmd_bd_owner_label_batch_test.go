@@ -274,6 +274,11 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 		{"labels section empty", "## A\n### Labels\n\n### Type\nbug\n", "## A\n### Labels\nowner:citadel\n\n### Type\nbug\n", true},
 		{"authored owner kept", "## A\n### LABELS\nowner:boomtown z\n", "## A\n### LABELS\nowner:boomtown z\n", true},
 		{"authored owner on a later line kept", "## A\n### Labels\nx\nowner:boomtown\n", "## A\n### Labels\nx\nowner:boomtown\n", true},
+		// bd replaces an issue's labels with each nonempty Labels section and
+		// ignores a blank one, so the effective section is the last nonempty.
+		{"a populated section followed by an empty one keeps its labels", "## A\n### Labels\nx, y\n### Labels\n\n### Type\nbug\n", "## A\n### Labels\nowner:citadel\nx, y\n### Labels\n\n### Type\nbug\n", true},
+		{"an authored owner superseded by a later nonempty section", "## A\n### Labels\nowner:boomtown\n### Labels\nz\n", "## A\n### Labels\nowner:boomtown\n### Labels\nowner:citadel\nz\n", true},
+		{"every section blank: the last one takes it", "## A\n### Labels\n\n### Labels\n\n", "## A\n### Labels\n\n### Labels\nowner:citadel\n\n", true},
 		{"two issues, the second without a section, ends with one", "## A\n### Labels\nx\n## B\ntext\n### Design\nd\n", "## A\n### Labels\nowner:citadel\nx\n## B\ntext\n### Design\nd\n\n### Labels\nowner:citadel\n", true},
 		{"no trailing newline", "## A", "## A\n\n### Labels\nowner:citadel\n", true},
 		{"preamble left alone, h1 is not an issue", "# Title\n## A\n", "# Title\n## A\n\n### Labels\nowner:citadel\n", true},
@@ -301,6 +306,35 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 	got, carried, err := bdGraphPlanWithOwner([]byte(`{"nodes":[{"key":"a","title":"A","priority":0,"ephemeral":true,"labels":["owner:boomtown"]},{"key":"b","title":"B","parent_key":"a"},{"key":"c","title":"C"}]}`), "owner:citadel", nil)
 	if err != nil || !carried {
 		t.Fatalf("carried=%v err=%v", carried, err)
+	}
+	// With no store to read (a database override), a node naming an existing
+	// parent is left as authored, and so is every in-plan descendant without
+	// an owner of its own — down to a node that names one, whose own subtree
+	// resolves from it.
+	unread, carriedUnread, err := bdGraphPlanWithOwner([]byte(`{"nodes":[
+		{"key":"root","title":"R"},
+		{"key":"child","title":"C","parent_id":"other-1"},
+		{"key":"grandchild","title":"G","parent_key":"child"},
+		{"key":"great","title":"GG","parent":"grandchild"},
+		{"key":"explicit","title":"E","parent_key":"child","labels":["owner:boomtown"]},
+		{"key":"under-explicit","title":"UE","parent_key":"explicit"}]}`), "owner:citadel", nil)
+	if err != nil || carriedUnread {
+		t.Fatalf("unread parent: carried=%v err=%v (a subtree under an unread parent carries nothing)", carriedUnread, err)
+	}
+	var unreadPlan struct {
+		Nodes []struct {
+			Key    string   `json:"key"`
+			Labels []string `json:"labels"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(unread, &unreadPlan); err != nil {
+		t.Fatal(err)
+	}
+	wantUnread := map[string][]string{"root": {"owner:citadel"}, "child": nil, "grandchild": nil, "great": nil, "explicit": {"owner:boomtown"}, "under-explicit": {"owner:boomtown"}}
+	for _, n := range unreadPlan.Nodes {
+		if !reflect.DeepEqual(n.Labels, wantUnread[n.Key]) {
+			t.Errorf("unread parent: node %s labels = %v, want %v", n.Key, n.Labels, wantUnread[n.Key])
+		}
 	}
 	var plan struct {
 		Nodes []map[string]json.RawMessage `json:"nodes"`
@@ -343,6 +377,9 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 		{[]string{"create", "-qf", "i.md"}, bdBatchMarkdown, "i.md"},
 		{[]string{"create", "--file=i.md"}, bdBatchMarkdown, "i.md"},
 		{[]string{"create", "--file", "a.md", "-f", "b.md"}, bdBatchMarkdown, "b.md"},
+		{[]string{"create", "-f", "old.md", "--file", "new.md"}, bdBatchMarkdown, "new.md"},
+		{[]string{"create", "-fold.md", "--file=new.md"}, bdBatchMarkdown, "new.md"},
+		{[]string{"create", "--graph", "a.json", "--graph=b.json"}, bdBatchGraph, "b.json"},
 		{[]string{"create", "--graph", "p.json", "--file", "i.md"}, bdBatchNone, ""},
 		{[]string{"create", "t", "--description", "--graph"}, bdBatchNone, ""},
 	} {

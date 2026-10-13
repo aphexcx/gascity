@@ -47,15 +47,31 @@ const (
 )
 
 // bdCreateBatchFile reports the file-backed form a create argv names and the
-// path it names, as bd will read them (the last occurrence of the flag wins).
-// bd refuses --file beside --graph, so a create naming both is handed to bd
+// path it names, as bd will read them: the LAST occurrence of a flag wins in
+// pflag, and -f and --file are one flag, so the two spellings are resolved in
+// one ordered walk of the argv (`-f old.md --file new.md` names new.md). bd
+// refuses --file beside --graph, so a create naming both is handed to bd
 // unchanged to refuse.
 func bdCreateBatchFile(bdArgs []string) (bdBatchCreateForm, string) {
-	graph := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--graph"))
-	markdown := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--file"))
-	if short := strings.TrimSpace(bdCreateValueFlag(bdArgs, "-f")); short != "" {
-		markdown = short
-	}
+	graph, markdown := "", ""
+	bdFlagTokens(bdArgs, func(i int, name, value string, inline bool) {
+		switch name {
+		case "--graph", "--file", "-f":
+		default:
+			return
+		}
+		if !inline {
+			if i+1 >= len(bdArgs) {
+				return
+			}
+			value = bdArgs[i+1]
+		}
+		if name == "--graph" {
+			graph = strings.TrimSpace(value)
+		} else {
+			markdown = strings.TrimSpace(value)
+		}
+	})
 	switch {
 	case graph != "" && markdown != "":
 		return bdBatchNone, ""
@@ -170,7 +186,10 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 // it the same way, refuses it and mints nothing. An existing parent a node
 // names (parent_id) is read through parentRead; a read failure refuses the
 // create. With parentRead nil (the configured store cannot be read for this
-// create) a node naming an existing parent is left as authored.
+// create) a node naming an existing parent is left as authored — and so is
+// every in-plan descendant of it that names no owner of its own: their lane
+// is the unread parent's, which this create cannot know, and stamping this
+// city's owner on them would make a foreign subtree claimable here.
 func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) (beads.Bead, error)) ([]byte, bool, error) {
 	var plan map[string]json.RawMessage
 	if err := json.Unmarshal(data, &plan); err != nil || plan == nil {
@@ -203,7 +222,7 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 	}
 	read := make(map[string][]string)
 	nodes := make([]federation.PlanNode, len(rawNodes))
-	authored := make([]bool, len(rawNodes)) // left as authored: an unreadable scope's parent
+	unresolved := make([]bool, len(rawNodes)) // left as authored: under an unreadable scope's parent
 	for i, v := range views {
 		pn := federation.PlanNode{Labels: v.Labels, ParentIndex: -1}
 		parentKey := v.ParentKey
@@ -218,7 +237,7 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		case strings.TrimSpace(v.ParentID) != "":
 			id := strings.TrimSpace(v.ParentID)
 			if parentRead == nil {
-				authored[i] = true
+				unresolved[i] = !federation.HasOwnerLabel(v.Labels)
 				break
 			}
 			if _, seen := read[id]; !seen {
@@ -232,13 +251,24 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		}
 		nodes[i] = pn
 	}
+	// An unresolved lane reaches every in-plan descendant that names no owner
+	// of its own; a node with an authored owner resolves its own subtree.
+	for changed := true; changed; {
+		changed = false
+		for i, pn := range nodes {
+			if unresolved[i] || federation.HasOwnerLabel(pn.Labels) || pn.ParentIndex < 0 || pn.ParentIndex == i {
+				continue
+			}
+			if unresolved[pn.ParentIndex] {
+				unresolved[i], changed = true, true
+			}
+		}
+	}
 	labels := federation.OwnerLabelsForPlan(nodes, owner)
 	carried := true
 	for i := range rawNodes {
-		if authored[i] {
-			if !federation.HasOwnerLabel(views[i].Labels) {
-				carried = false
-			}
+		if unresolved[i] {
+			carried = false
 			continue
 		}
 		encoded, err := json.Marshal(labels[i])
@@ -273,28 +303,33 @@ var (
 )
 
 // bdMarkdownBatchWithOwner returns the markdown batch with the owner label in
-// every issue's `### Labels` section, and whether every issue carries an
-// owner afterwards (always, once rewritten: a markdown row names no parent, so
-// each row either names its own owner, which is kept, or takes this city's).
-// The rewrite is the one bd's parser reads: an issue is an H2 header and
-// everything to the next H2; its labels are the `### Labels` section, split on
-// commas, spaces and newlines. An issue with that section gets the owner as a
-// new line right after the header (the section's other lines are untouched);
-// an issue without one gets a `### Labels` section appended at the END of its
-// block, after its last section, so no line changes the section it was in.
-// Text before the first H2 is bd's to ignore and is left alone. A file with no
-// issue is returned as nil.
+// every issue's effective `### Labels` section, and whether every issue
+// carries an owner afterwards (always, once rewritten: a markdown row names no
+// parent, so each row either names its own owner, which is kept, or takes
+// this city's). The rewrite is the one bd's parser reads: an issue is an H2
+// header and everything to the next H2; a section is an H3 header, matched by
+// name case-insensitively; a repeated section REPLACES the earlier one unless
+// its content is blank, which bd ignores — so an issue's effective labels are
+// its LAST NONEMPTY Labels section, split on commas, spaces and newlines. The
+// owner goes as a new line right after that section's header (its other lines
+// untouched); an issue whose Labels sections are all blank gets it in the last
+// of them (they were nothing to bd); an issue without one gets a `### Labels`
+// section appended at the END of its block, after its last section, so no
+// existing line changes the section it was in. Text before the first H2 is
+// bd's to ignore and is left alone. A file with no issue is returned as nil.
 func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 	lines := strings.Split(string(data), "\n")
-	trailingNewline := strings.HasSuffix(string(data), "\n")
-	if trailingNewline {
+	if strings.HasSuffix(string(data), "\n") {
 		lines = lines[:len(lines)-1]
+	}
+	type labelsSection struct {
+		headerAt int
+		nonempty bool
+		hasOwner bool
 	}
 	type issue struct {
 		start, end int // [start, end): the H2 line through the line before the next H2
-		labelsAt   int // the `### Labels` header line, or -1
-		labelsEnd  int // the line after the section's last content line
-		hasOwner   bool
+		sections   []labelsSection
 	}
 	var issues []issue
 	for i, line := range lines {
@@ -302,7 +337,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 			if n := len(issues); n > 0 {
 				issues[n-1].end = i
 			}
-			issues = append(issues, issue{start: i, end: len(lines), labelsAt: -1})
+			issues = append(issues, issue{start: i, end: len(lines)})
 		}
 	}
 	if len(issues) == 0 {
@@ -310,37 +345,54 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 	}
 	for k := range issues {
 		it := &issues[k]
-		section := ""
+		inLabels := false
 		for i := it.start + 1; i < it.end; i++ {
 			if m := bdMarkdownSectionRE.FindStringSubmatch(lines[i]); m != nil {
-				section = strings.ToLower(strings.TrimSpace(m[1]))
-				if section == "labels" {
-					it.labelsAt = i
-					it.labelsEnd = it.end
+				inLabels = strings.ToLower(strings.TrimSpace(m[1])) == "labels"
+				if inLabels {
+					it.sections = append(it.sections, labelsSection{headerAt: i})
 				}
 				continue
 			}
-			if section == "labels" && it.labelsAt >= 0 {
-				for _, l := range strings.FieldsFunc(lines[i], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-					if federation.HasOwnerLabel([]string{strings.TrimSpace(l)}) {
-						it.hasOwner = true
-					}
+			if !inLabels || strings.TrimSpace(lines[i]) == "" {
+				continue
+			}
+			sec := &it.sections[len(it.sections)-1]
+			sec.nonempty = true
+			for _, l := range strings.FieldsFunc(lines[i], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+				if federation.HasOwnerLabel([]string{l}) {
+					sec.hasOwner = true
 				}
 			}
 		}
+	}
+	// effective picks the Labels section bd's parser ends up with: the last
+	// nonempty one; -1 when every one is blank or there is none.
+	effective := func(it issue) int {
+		for s := len(it.sections) - 1; s >= 0; s-- {
+			if it.sections[s].nonempty {
+				return s
+			}
+		}
+		return -1
 	}
 	var out []string
 	for k, it := range issues {
 		if k == 0 {
 			out = append(out, lines[:it.start]...)
 		}
+		target := effective(it)
 		switch {
-		case it.hasOwner:
+		case target >= 0 && it.sections[target].hasOwner:
 			out = append(out, lines[it.start:it.end]...)
-		case it.labelsAt >= 0:
-			out = append(out, lines[it.start:it.labelsAt+1]...)
+		case target >= 0 || len(it.sections) > 0:
+			if target < 0 {
+				target = len(it.sections) - 1 // every section blank: the last is as good as any
+			}
+			at := it.sections[target].headerAt
+			out = append(out, lines[it.start:at+1]...)
 			out = append(out, owner)
-			out = append(out, lines[it.labelsAt+1:it.end]...)
+			out = append(out, lines[at+1:it.end]...)
 		default:
 			out = append(out, lines[it.start:it.end]...)
 			if strings.TrimSpace(lines[it.end-1]) != "" {
