@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestStripBdNoOwnerLabel: the gc-owned opt-out never reaches bd, in any of
@@ -568,6 +573,92 @@ func TestBdCreateParents(t *testing.T) {
 		if got := bdCreateParents(tt.args); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("bdCreateParents(%q) = %+v, want %+v", tt.args, got, tt.want)
 		}
+	}
+}
+
+// TestBdCreateOwnerLabelResolvesADepsParentThroughBd (the lane's codex round
+// 3 on finding 1n): the store's live handle reads an id EXACTLY whatever the
+// store — the native Dolt and DoltLite readers answer an abbreviation with a
+// plain not-found, never the bd-backed store's collision report — so a
+// --deps target is resolved first through the scoped bd's own resolver, as
+// bd's create resolves it, and the id bd names is the one read. A --parent
+// is read as typed, as bd's create wires it. A target bd cannot resolve
+// refuses the create.
+func TestBdCreateOwnerLabelResolvesADepsParentThroughBd(t *testing.T) {
+	exactRead := func(id string) (beads.Bead, error) {
+		if id == "demo-0" {
+			return beads.Bead{ID: "demo-0", Labels: []string{"hold:mayor", "owner:jadegate"}}, nil
+		}
+		return beads.Bead{}, beads.ErrNotFound // an exact reader: an abbreviation is nobody
+	}
+	var asked []string
+	resolve := func(id string) (string, error) {
+		asked = append(asked, id)
+		if id == "d0" {
+			return "demo-0", nil
+		}
+		return "", errors.New("no issue found matching " + id)
+	}
+	label, carry, err := bdCreateOwnerLabel(exactRead, resolve, []string{"create", "child", "--deps", "parent-child:d0"}, "owner:citadel")
+	if err != nil || !carry || label != "owner:jadegate" {
+		t.Fatalf("a --deps abbreviation: (%q, %v, %v), want owner:jadegate carried", label, carry, err)
+	}
+	if !reflect.DeepEqual(asked, []string{"d0"}) {
+		t.Fatalf("bd was asked to resolve %q, want [d0]", asked)
+	}
+	// An exact id goes through bd's resolver too (bd's create resolves every
+	// --deps target) and reads the same bead.
+	asked = nil
+	if label, carry, err := bdCreateOwnerLabel(exactRead, func(id string) (string, error) { asked = append(asked, id); return id, nil }, []string{"create", "child", "--deps", "parent-child:demo-0"}, "owner:citadel"); err != nil || !carry || label != "owner:jadegate" || !reflect.DeepEqual(asked, []string{"demo-0"}) {
+		t.Fatalf("an exact --deps id: (%q, %v, %v) asked=%q", label, carry, err, asked)
+	}
+	// A --parent is never resolved: bd's create takes it as typed.
+	asked = nil
+	if _, _, err := bdCreateOwnerLabel(exactRead, resolve, []string{"create", "child", "--parent", "d0"}, "owner:citadel"); err == nil || len(asked) != 0 {
+		t.Fatalf("an abbreviated --parent: err=%v asked=%q, want a refusal with nothing resolved", err, asked)
+	}
+	// A target bd cannot resolve refuses the create, naming it.
+	if _, _, err := bdCreateOwnerLabel(exactRead, resolve, []string{"create", "child", "--deps", "parent-child:zz"}, "owner:citadel"); err == nil || !strings.Contains(err.Error(), `"zz"`) {
+		t.Fatalf("an unresolvable --deps target: err=%v, want a refusal naming zz", err)
+	}
+	// With no resolver (a database override reads nothing anyway) the id is read as typed.
+	if _, _, err := bdCreateOwnerLabel(exactRead, nil, []string{"create", "child", "--deps", "parent-child:d0"}, "owner:citadel"); err == nil {
+		t.Fatalf("no resolver: err=%v, want the exact read's refusal", err)
+	}
+}
+
+// TestBdResolveCreateDepTarget pins the resolver's bd call: `show --json
+// <target>` positionally behind the create's leading globals (so the same
+// database answers), the first row's id as the answer, bd's non-zero exit
+// or an answer without a bead as the error.
+func TestBdResolveCreateDepTarget(t *testing.T) {
+	var got [][]string
+	run := func(_ context.Context, args []string, stdout, stderr io.Writer) int {
+		got = append(got, args)
+		switch args[len(args)-1] {
+		case "d0":
+			io.WriteString(stdout, "[{\"id\":\"demo-0\",\"title\":\"t\",\"labels\":[\"owner:jadegate\"]}]\n") //nolint:errcheck // test
+			return 0
+		case "zz":
+			io.WriteString(stderr, "Error: no issue found matching \"zz\"\n") //nolint:errcheck // test
+			return 1
+		default:
+			io.WriteString(stdout, "[]\n") //nolint:errcheck // test
+			return 0
+		}
+	}
+	id, err := bdResolveCreateDepTarget(context.Background(), run, []string{"--actor", "bob"}, "d0")
+	if err != nil || id != "demo-0" {
+		t.Fatalf("resolve d0 = (%q, %v), want demo-0", id, err)
+	}
+	if want := []string{"--actor", "bob", "show", "--json", "d0"}; !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("bd ran %q, want %q", got[0], want)
+	}
+	if _, err := bdResolveCreateDepTarget(context.Background(), run, nil, "zz"); err == nil || !strings.Contains(err.Error(), "no issue found matching") {
+		t.Fatalf("resolve zz: err=%v, want bd's stderr in the error", err)
+	}
+	if _, err := bdResolveCreateDepTarget(context.Background(), run, nil, "empty"); err == nil {
+		t.Fatal("an answer without a bead must be an error")
 	}
 }
 

@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -363,8 +364,10 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //   - a create under a parent carries the PARENT's owner when the parent has
 //     one, read through parentRead — the store's live handle — before
 //     anything is created. A parent is every relationship bd's create wires
-//     (bdCreateParentIDs): the --parent, and each --deps entry of type
-//     parent-child. A parent that cannot be read refuses the create with
+//     (bdCreateParents): the --parent, and each --deps entry of type
+//     parent-child, the latter resolved first through resolveDep — the
+//     scoped bd's own resolver, as bd's create resolves it — to the id the
+//     live handle reads exactly. A parent that cannot be read refuses the create with
 //     that error (finding 1d's rule); parents whose lanes differ name no one
 //     lane and refuse the create, as a plan node's do (finding 1l; an
 //     unowned parent is in this city's lane); a nil parentRead means the
@@ -372,7 +375,7 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //     override), and such a create carries nothing; --no-inherit-labels
 //     switches the parents' lane off too, and the child is this city's;
 //   - every other create carries this city's owner.
-func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs []string, owner string) (label string, carry bool, err error) {
+func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), resolveDep func(id string) (string, error), bdArgs []string, owner string) (label string, carry bool, err error) {
 	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
 		return "", false, nil
 	}
@@ -393,7 +396,7 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	var first beads.Bead
 	lane := ""
 	for i, p := range parents {
-		parent, err := bdReadCreateParent(parentRead, p)
+		parent, err := bdReadCreateParent(parentRead, resolveDep, p)
 		if err != nil {
 			return "", false, fmt.Errorf("reading parent %q for the owner label: %w", p.ID, err)
 		}
@@ -481,21 +484,59 @@ func bdCreateParents(bdArgs []string) []bdCreateParent {
 }
 
 // bdReadCreateParent reads one parent of a create through parentRead, the
-// store's live handle. A --parent id is read exactly, as bd's create wires
-// it: a read that resolved to another bead (beads.IDCollisionError) is the
-// refusal it always was. A --deps target is read the way bd's create
-// resolves it: when the exact read reports that bd resolved the id to
-// another bead — a unique abbreviation, by bd's own resolver — THAT bead is
-// read, exactly, and is the parent whose lane the child joins (the lane's
-// codex round 2 on finding 1n: the exact-id guard had refused a create bd
-// itself accepts).
-func bdReadCreateParent(parentRead func(id string) (beads.Bead, error), p bdCreateParent) (beads.Bead, error) {
-	parent, err := parentRead(p.ID)
-	var collision *beads.IDCollisionError
-	if err == nil || !p.Resolved || !errors.As(err, &collision) || collision.Resolved == "" || collision.Resolved == p.ID {
-		return parent, err
+// store's live handle, which reads an id EXACTLY whatever the store (the
+// bd-backed store's Get guards against bd's resolver answering with another
+// bead; the native Dolt and DoltLite readers look the id up as given). A
+// --parent id is read as typed, as bd's create wires it. A --deps target is
+// first resolved through resolveDep — the scoped bd's own resolver
+// (bdResolveCreateDepTarget), the one bd's create runs on that target — and
+// the id bd names is the one read; a target bd cannot resolve (absent,
+// ambiguous, a bd that cannot answer) refuses the create as an unreadable
+// parent does. (The lane's codex rounds 2 and 3 on finding 1n: the exact-id
+// guard had refused a create bd itself accepts, and a fallback on the
+// bd-backed store's collision report served only that store.)
+func bdReadCreateParent(parentRead func(id string) (beads.Bead, error), resolveDep func(id string) (string, error), p bdCreateParent) (beads.Bead, error) {
+	id := p.ID
+	if p.Resolved && resolveDep != nil {
+		resolved, err := resolveDep(p.ID)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		if resolved != "" {
+			id = resolved
+		}
 	}
-	return parentRead(collision.Resolved)
+	return parentRead(id)
+}
+
+// bdShowIDRow is the part of a `bd show --json` row the resolver reads.
+type bdShowIDRow struct {
+	ID string `json:"id"`
+}
+
+// bdResolveCreateDepTarget resolves one --deps target the way bd's create
+// does: by asking the scoped bd — the binary and environment the create
+// itself will run under, with the create's leading global flags so the
+// same database answers — to show the target, positionally, so bd's own
+// partial-id resolver (utils.ResolvePartialID: the exact id, else a unique
+// leading abbreviation under a known prefix) names the bead; the id of the
+// row bd returns is the parent. bd's refusal (no match, an ambiguous
+// abbreviation, a store it cannot reach) is the error, with bd's stderr.
+func bdResolveCreateDepTarget(ctx context.Context, run bdWatchRunFunc, globals []string, target string) (string, error) {
+	args := append(append([]string{}, globals...), "show", "--json", target)
+	var out, errOut bytes.Buffer
+	if code := run(ctx, args, &out, &errOut); code != 0 {
+		msg := strings.TrimSpace(errOut.String())
+		if msg == "" {
+			msg = fmt.Sprintf("bd show exited %d", code)
+		}
+		return "", fmt.Errorf("resolving --deps target %q through bd: %s", target, msg)
+	}
+	var rows []bdShowIDRow
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &rows); err != nil || len(rows) == 0 || strings.TrimSpace(rows[0].ID) == "" {
+		return "", fmt.Errorf("resolving --deps target %q through bd: no bead in bd's answer", target)
+	}
+	return strings.TrimSpace(rows[0].ID), nil
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`

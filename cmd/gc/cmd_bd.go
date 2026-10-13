@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -747,6 +748,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			return beads.HandlesFor(store).Live.Get(id)
 		}
 	}
+	// A --deps parent is resolved the way bd's create resolves it, by the
+	// scoped bd itself (bdResolveCreateDepTarget), before the exact read.
+	var resolveDep func(string) (string, error)
+	if !override {
+		var leading []string
+		if i, hidden := bdVerbIndexAfterGlobals(bdArgs); !hidden && i > 0 {
+			leading = bdArgs[:i]
+		}
+		runner := &bdWatchRunner{bdPath: bdPath, dir: target.ScopeRoot, env: env, cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr}
+		resolveDep = func(id string) (string, error) {
+			return bdResolveCreateDepTarget(context.Background(), runner.run, leading, id)
+		}
+	}
 	var carried bool
 	if form, path := bdCreateBatchFile(bdArgs); form != bdBatchNone {
 		rewrite, err := bdCreateBatchWithOwner(bdArgs, target.ScopeRoot, form, path, owner, parentRead)
@@ -757,7 +771,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		defer rewrite.cleanup()
 		bdArgs, carried = rewrite.args, rewrite.carried
 	} else {
-		label, single, err := bdCreateOwnerLabel(parentRead, bdArgs, owner)
+		label, single, err := bdCreateOwnerLabel(parentRead, resolveDep, bdArgs, owner)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
