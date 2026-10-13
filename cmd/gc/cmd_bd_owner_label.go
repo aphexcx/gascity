@@ -73,11 +73,24 @@ const (
 // or, when nothing is attached, the next token (`-qf issues.md`); a shorthand
 // gc does not know ends the walk of that token.
 func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline bool)) {
-	valueFlags := bdflags.ValueFlags("create")
-	for flag := range bdCreateHiddenValueFlags {
-		valueFlags[flag] = true
+	bdCommandFlagTokens(bdArgs, "create", visit)
+}
+
+// bdCommandFlagTokens walks flags using the selected command's pflag types.
+func bdCommandFlagTokens(bdArgs []string, command string, visit func(i int, name, value string, inline bool)) {
+	valueFlags := bdflags.ValueFlags(command)
+	if valueFlags == nil {
+		valueFlags = bdflags.GlobalValueFlags()
 	}
-	boolFlags := bdflags.BoolFlags("create")
+	if command == "create" {
+		for flag := range bdCreateHiddenValueFlags {
+			valueFlags[flag] = true
+		}
+	}
+	boolFlags := bdflags.BoolFlags(command)
+	if boolFlags == nil {
+		boolFlags = bdflags.GlobalBoolFlags()
+	}
 	for i := 0; i < len(bdArgs); i++ {
 		tok := bdArgs[i]
 		if tok == "--" {

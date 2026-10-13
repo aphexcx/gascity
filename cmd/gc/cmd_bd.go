@@ -1137,11 +1137,16 @@ func extractRigFlag(args []string) (string, []string) {
 // args, or "" if not present. The flag is left in args so bd itself still sees it.
 func extractBdDirectoryFlag(args []string) string {
 	value := ""
+	command := ""
 	// Cobra removes the verb before pflag parses shorthand clusters.
 	if i, hidden := bdVerbIndexAfterGlobals(args); !hidden && i >= 0 {
+		command = args[i]
+		if command == "new" {
+			command = "create"
+		}
 		args = append(append([]string{}, args[:i]...), args[i+1:]...)
 	}
-	bdFlagTokens(args, func(i int, name, v string, inline bool) {
+	bdCommandFlagTokens(args, command, func(i int, name, v string, inline bool) {
 		if name != "-C" && name != "--directory" {
 			return
 		}

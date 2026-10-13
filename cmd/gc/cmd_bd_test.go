@@ -157,6 +157,10 @@ func TestExtractBdDirectoryFlag(t *testing.T) {
 		{"last selector wins", []string{"create", "-C", "/old", "--directory=/new"}, "/new"},
 		{"description value", []string{"create", "--description", "-C/tmp/packs"}, ""},
 		{"after terminator", []string{"create", "--", "-C/tmp/packs"}, ""},
+		{"list boolean deps", []string{"list", "--deps", "-C", "/tmp/packs"}, "/tmp/packs"},
+		{"close force", []string{"close", "-f", "-C/tmp/packs"}, "/tmp/packs"},
+		{"delete force cluster", []string{"delete", "-fC/tmp/packs"}, "/tmp/packs"},
+		{"new description value", []string{"new", "--description", "-C/tmp/packs"}, ""},
 		{"absent", []string{"create", "--json"}, ""},
 		{"short flag at end no value", []string{"create", "-C"}, ""},
 	}
