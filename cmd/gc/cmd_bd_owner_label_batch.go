@@ -49,9 +49,10 @@ const (
 // bdCreateBatchFile reports the file-backed form a create argv names and the
 // path it names, as bd will read them: the LAST occurrence of a flag wins in
 // pflag, and -f and --file are one flag, so the two spellings are resolved in
-// one ordered walk of the argv (`-f old.md --file new.md` names new.md). bd
-// refuses --file beside --graph, so a create naming both is handed to bd
-// unchanged to refuse.
+// one ordered walk of the argv (`-f old.md --file new.md` names new.md); the
+// value is bd's byte for byte, never trimmed (` plan.json` is a file of that
+// name). bd refuses --file beside --graph, so a create naming both is handed
+// to bd unchanged to refuse.
 func bdCreateBatchFile(bdArgs []string) (bdBatchCreateForm, string) {
 	graph, markdown := "", ""
 	bdFlagTokens(bdArgs, func(i int, name, value string, inline bool) {
@@ -67,9 +68,9 @@ func bdCreateBatchFile(bdArgs []string) (bdBatchCreateForm, string) {
 			value = bdArgs[i+1]
 		}
 		if name == "--graph" {
-			graph = strings.TrimSpace(value)
+			graph = value
 		} else {
-			markdown = strings.TrimSpace(value)
+			markdown = value
 		}
 	})
 	switch {
@@ -185,11 +186,15 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 // that is not a JSON object with a "nodes" array is returned as nil: bd parses
 // it the same way, refuses it and mints nothing. An existing parent a node
 // names (parent_id) is read through parentRead; a read failure refuses the
-// create. With parentRead nil (the configured store cannot be read for this
-// create) a node naming an existing parent is left as authored — and so is
-// every in-plan descendant of it that names no owner of its own: their lane
-// is the unread parent's, which this create cannot know, and stamping this
-// city's owner on them would make a foreign subtree claimable here.
+// create. A parent_id that names another node of the SAME plan by its
+// explicit "id" is an in-plan parent (bd creates the nodes before it wires
+// them, so that shape is valid and the parent is not in the store yet) and
+// is resolved in-plan, never read. With parentRead nil (the configured store
+// cannot be read for this create) a node naming an existing parent is left
+// as authored — and so is every in-plan descendant of it that names no owner
+// of its own: their lane is the unread parent's, which this create cannot
+// know, and stamping this city's owner on them would make a foreign subtree
+// claimable here.
 func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) (beads.Bead, error)) ([]byte, bool, error) {
 	var plan map[string]json.RawMessage
 	if err := json.Unmarshal(data, &plan); err != nil || plan == nil {
@@ -201,6 +206,7 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 	}
 	type nodeView struct {
 		Key       string   `json:"key"`
+		ID        string   `json:"id"`
 		Labels    []string `json:"labels"`
 		Parent    string   `json:"parent"`
 		ParentKey string   `json:"parent_key"`
@@ -208,7 +214,8 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 	}
 	views := make([]nodeView, len(rawNodes))
 	members := make([]map[string]json.RawMessage, len(rawNodes))
-	index := make(map[string]int, len(rawNodes))
+	index := make(map[string]int, len(rawNodes)) // by key
+	byID := make(map[string]int, len(rawNodes))  // by explicit id
 	for i, raw := range rawNodes {
 		if err := json.Unmarshal(raw, &views[i]); err != nil {
 			return nil, false, nil
@@ -218,6 +225,9 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		}
 		if views[i].Key != "" {
 			index[views[i].Key] = i
+		}
+		if id := strings.TrimSpace(views[i].ID); id != "" {
+			byID[id] = i
 		}
 	}
 	read := make(map[string][]string)
@@ -236,6 +246,10 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 			}
 		case strings.TrimSpace(v.ParentID) != "":
 			id := strings.TrimSpace(v.ParentID)
+			if p, ok := byID[id]; ok && p != i {
+				pn.ParentIndex = p // the parent is another node of this plan, by its explicit id
+				break
+			}
 			if parentRead == nil {
 				unresolved[i] = !federation.HasOwnerLabel(v.Labels)
 				break

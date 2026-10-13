@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Regression coverage for gf-xid finding 1j (the Opus read's Major on gf-pu2
@@ -336,6 +338,39 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 			t.Errorf("unread parent: node %s labels = %v, want %v", n.Key, n.Labels, wantUnread[n.Key])
 		}
 	}
+	// A parent_id naming another node of the same plan by its explicit id is
+	// an in-plan parent: resolved in-plan (the store is never asked, which
+	// would refuse the create because bd has not persisted the node yet), and
+	// the owner flows down from it like any in-plan parent's.
+	readCalls := 0
+	inPlan, carriedInPlan, err := bdGraphPlanWithOwner([]byte(`{"nodes":[
+		{"key":"root","id":"hw-root-1","title":"R","labels":["owner:boomtown"]},
+		{"key":"child","title":"C","parent_id":"hw-root-1"},
+		{"key":"other","title":"O","parent_id":"hw-elsewhere"}]}`), "owner:citadel", func(id string) (beads.Bead, error) {
+		readCalls++
+		if id != "hw-elsewhere" {
+			t.Errorf("parentRead(%q): an in-plan explicit id must never be read from the store", id)
+		}
+		return beads.Bead{ID: id, Labels: []string{"owner:jadegate"}}, nil
+	})
+	if err != nil || !carriedInPlan || readCalls != 1 {
+		t.Fatalf("in-plan explicit id: carried=%v err=%v reads=%d, want carried, no error, one store read (the existing parent)", carriedInPlan, err, readCalls)
+	}
+	var inPlanPlan struct {
+		Nodes []struct {
+			Key    string   `json:"key"`
+			Labels []string `json:"labels"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(inPlan, &inPlanPlan); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range inPlanPlan.Nodes {
+		want := map[string][]string{"root": {"owner:boomtown"}, "child": {"owner:boomtown"}, "other": {"owner:jadegate"}}[n.Key]
+		if !reflect.DeepEqual(n.Labels, want) {
+			t.Errorf("in-plan explicit id: node %s labels = %v, want %v", n.Key, n.Labels, want)
+		}
+	}
 	var plan struct {
 		Nodes []map[string]json.RawMessage `json:"nodes"`
 	}
@@ -380,6 +415,7 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 		{[]string{"create", "-f", "old.md", "--file", "new.md"}, bdBatchMarkdown, "new.md"},
 		{[]string{"create", "-fold.md", "--file=new.md"}, bdBatchMarkdown, "new.md"},
 		{[]string{"create", "--graph", "a.json", "--graph=b.json"}, bdBatchGraph, "b.json"},
+		{[]string{"create", "--graph", " plan.json "}, bdBatchGraph, " plan.json "}, // bd's value, byte for byte
 		{[]string{"create", "--graph", "p.json", "--file", "i.md"}, bdBatchNone, ""},
 		{[]string{"create", "t", "--description", "--graph"}, bdBatchNone, ""},
 	} {
