@@ -2,7 +2,6 @@ package beads
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/federation"
 )
@@ -46,8 +45,8 @@ func GraphPlanParents(plan *GraphApplyPlan) [][]GraphPlanParent {
 		case node.ParentKey != "":
 			p, ok := index[node.ParentKey]
 			add(i, GraphPlanParent{Index: p}, ok)
-		case strings.TrimSpace(node.ParentID) != "":
-			add(i, GraphPlanParent{Index: -1, ID: strings.TrimSpace(node.ParentID)}, true)
+		case node.ParentID != "": // raw, as bd wires it (graph_apply.go:1008)
+			add(i, GraphPlanParent{Index: -1, ID: node.ParentID}, true)
 		}
 	}
 	for _, edge := range plan.Edges {

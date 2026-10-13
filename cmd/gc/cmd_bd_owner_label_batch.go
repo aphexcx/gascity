@@ -138,6 +138,18 @@ type bdBatchOwnerRewrite struct {
 // not an unowned one. A plan gc cannot stamp refuses the create too.
 func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreateForm, path, owner string, parentRead func(id string) (beads.Bead, error)) (bdBatchOwnerRewrite, error) {
 	unchanged := bdBatchOwnerRewrite{args: bdArgs, cleanup: func() {}}
+	if form == bdBatchMarkdown {
+		// bd's own checks on the path (validateMarkdownPath, cmd/bd
+		// markdown.go:107-121), applied to the OPERATOR's path: the rewrite
+		// hands bd a temporary copy, which would otherwise let a path bd
+		// refuses (a `..` component, a non-markdown extension) through.
+		if clean := filepath.Clean(path); strings.Contains(clean, "..") {
+			return unchanged, fmt.Errorf("invalid file path: directory traversal not allowed (bd refuses %q)", path)
+		}
+		if ext := strings.ToLower(filepath.Ext(path)); ext != ".md" && ext != ".markdown" {
+			return unchanged, fmt.Errorf("invalid file type: only .md and .markdown files are supported (bd refuses %q)", path)
+		}
+	}
 	source := path
 	if scopeRoot != "" && !filepath.IsAbs(source) {
 		source = filepath.Join(scopeRoot, source)
@@ -158,7 +170,10 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 			return unchanged, err
 		}
 	case bdBatchMarkdown:
-		rewritten, carried = bdMarkdownBatchWithOwner(data, owner)
+		rewritten, carried, err = bdMarkdownBatchWithOwner(data, owner)
+		if err != nil {
+			return unchanged, err
+		}
 	default:
 		return unchanged, nil
 	}
@@ -381,8 +396,8 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		if views[i].Key != "" {
 			index[views[i].Key] = i
 		}
-		if id := strings.TrimSpace(views[i].ID); id != "" {
-			byID[id] = i
+		if views[i].ID != "" { // raw, as bd keys the created issue (graph_apply.go:539)
+			byID[views[i].ID] = i
 		}
 	}
 	var edges []edgeView
@@ -415,8 +430,8 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 		case parentKey != "":
 			p, ok := index[parentKey]
 			add(i, beads.GraphPlanParent{Index: p}, ok)
-		case strings.TrimSpace(v.ParentID) != "":
-			add(i, ref(strings.TrimSpace(v.ParentID)), true)
+		case v.ParentID != "": // raw, as bd wires it (graph_apply.go:1008)
+			add(i, ref(v.ParentID), true)
 		}
 	}
 	for _, e := range edges {
@@ -507,6 +522,24 @@ func bdGraphPlanWithOwner(data []byte, owner string, parentRead func(id string) 
 	return out.Bytes(), carried, nil
 }
 
+// bdMarkdownListFields splits one line of a Labels (or Dependencies) section
+// the way bd's parseStringList does (cmd/bd markdown.go:43-57): the content
+// is split on commas, spaces and newlines — a TAB is NOT a separator — and
+// each field is TrimSpace'd, empty ones dropped. So `foo<TAB>owner:x` is one
+// label to bd, which carries no owner, while `<TAB>owner:x` is the owner
+// after the trim. gc judges an authored owner by exactly that reading (the
+// Opus read's MAJOR 1(b) on gf-xid: gc had split on tabs too and believed an
+// owner was present that bd never stored).
+func bdMarkdownListFields(line string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 var (
 	// bdMarkdownIssueRE and bdMarkdownSectionRE are bd's own h2Regex and
 	// h3Regex (cmd/bd markdown.go): an H2 opens an issue, an H3 opens a
@@ -523,14 +556,17 @@ var (
 // header and everything to the next H2; a section is an H3 header, matched by
 // name case-insensitively; a repeated section REPLACES the earlier one unless
 // its content is blank, which bd ignores — so an issue's effective labels are
-// its LAST NONEMPTY Labels section, split on commas, spaces and newlines. The
+// its LAST NONEMPTY Labels section, split on commas, spaces and newlines
+// (bdMarkdownListFields; never on tabs). The
 // owner goes as a new line right after that section's header (its other lines
 // untouched); an issue whose Labels sections are all blank gets it in the last
 // of them (they were nothing to bd); an issue without one gets a `### Labels`
 // section appended at the END of its block, after its last section, so no
 // existing line changes the section it was in. Text before the first H2 is
-// bd's to ignore and is left alone. A file with no issue is returned as nil.
-func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
+// bd's to ignore and is left alone. A file with no issue is REFUSED: there is
+// nothing gc can rewrite the way bd would accept, and bd creates nothing
+// from it either.
+func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 	lines := strings.Split(string(data), "\n")
 	if strings.HasSuffix(string(data), "\n") {
 		lines = lines[:len(lines)-1]
@@ -554,7 +590,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 		}
 	}
 	if len(issues) == 0 {
-		return nil, false
+		return nil, false, fmt.Errorf("the markdown batch names no issue bd would create (bd expects '## Issue Title'; it refuses the file the same way)")
 	}
 	for k := range issues {
 		it := &issues[k]
@@ -572,7 +608,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 			}
 			sec := &it.sections[len(it.sections)-1]
 			sec.nonempty = true
-			for _, l := range strings.FieldsFunc(lines[i], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+			for _, l := range bdMarkdownListFields(lines[i]) {
 				if federation.HasOwnerLabel([]string{l}) {
 					sec.hasOwner = true
 				}
@@ -620,5 +656,5 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool) {
 	var buf bytes.Buffer
 	buf.WriteString(strings.Join(out, "\n"))
 	buf.WriteString("\n")
-	return buf.Bytes(), true
+	return buf.Bytes(), true, nil
 }

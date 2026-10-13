@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestBdGraphPlanWithOwnerMatchesKeysAsBdDoes pins gf-c7n finding 1m (the
@@ -120,5 +122,62 @@ func TestGcBdCreateCarriesTheOwnerInABatchSpelledAsBdReadsIt(t *testing.T) {
 	}
 	if !strings.Contains(string(rewritten), `"Nodes"`) || !strings.Contains(string(rewritten), `"Parent_Key"`) {
 		t.Errorf("the plan's own spellings must be carried through:\n%s", rewritten)
+	}
+}
+
+// TestBdCreateBatchWithOwnerAppliesBdsPathChecksToTheOperatorsPath pins the
+// Opus read's MINOR 2 (taken in part): the rewrite hands bd a temporary copy,
+// so bd's own checks on the markdown path (validateMarkdownPath: a cleaned
+// path with `..`, an extension other than .md/.markdown) are applied by gc to
+// the OPERATOR's path first, and such a create is refused as bd would refuse
+// it — never read, never copied.
+func TestBdCreateBatchWithOwnerAppliesBdsPathChecksToTheOperatorsPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "x.md"), []byte("## A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("## A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scope := filepath.Join(root, "scope")
+	if err := os.MkdirAll(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct{ path, want string }{
+		{"../x.md", "directory traversal"},
+		{filepath.Join(root, "x.txt"), "only .md and .markdown"},
+	} {
+		rewrite, err := bdCreateBatchWithOwner([]string{"create", "-f", tt.path}, scope, bdBatchMarkdown, tt.path, "owner:citadel", nil)
+		if err == nil || !strings.Contains(err.Error(), tt.want) || !reflect.DeepEqual(rewrite.args, []string{"create", "-f", tt.path}) {
+			t.Errorf("path %q: err = %v (args %v), want a refusal mentioning %q and the argv untouched", tt.path, err, rewrite.args, tt.want)
+		}
+	}
+	// The same file through a plain path is rewritten as before.
+	rewrite, err := bdCreateBatchWithOwner([]string{"create", "-f", "../x.md"}, root, bdBatchMarkdown, filepath.Join(root, "x.md"), "owner:citadel", nil)
+	if err != nil || !rewrite.carried {
+		t.Fatalf("plain path: err = %v carried = %v", err, rewrite.carried)
+	}
+	rewrite.cleanup()
+}
+
+// TestBdGraphPlanWithOwnerUsesIDsRawLikeBd pins the Opus read's NIT 1: bd
+// keys a created issue by its node "id" and wires "parent_id" as written
+// (graph_apply.go:539, :1008), so gc resolves an in-plan explicit id on the
+// raw bytes too — a whitespace-padded parent_id names no in-plan node and is
+// read from the store, as bd would wire it.
+func TestBdGraphPlanWithOwnerUsesIDsRawLikeBd(t *testing.T) {
+	reads := 0
+	got, carried, err := bdGraphPlanWithOwner([]byte(`{"nodes":[{"key":"root","id":"hw-root","title":"R","labels":["owner:boomtown"]},{"key":"padded","title":"P","parent_id":" hw-root "},{"key":"exact","title":"E","parent_id":"hw-root"}]}`), "owner:citadel", func(id string) (beads.Bead, error) {
+		reads++
+		if id != " hw-root " {
+			t.Errorf("parentRead(%q): only the padded id is a store read", id)
+		}
+		return beads.Bead{ID: id, Labels: []string{"owner:jadegate"}}, nil
+	})
+	if err != nil || !carried || reads != 1 {
+		t.Fatalf("carried=%v err=%v reads=%d", carried, err, reads)
+	}
+	if labels := planNodeLabels(t, got); !reflect.DeepEqual(labels, map[string][]string{"root": {"owner:boomtown"}, "padded": {"owner:jadegate"}, "exact": {"owner:boomtown"}}) {
+		t.Errorf("labels = %v", labels)
 	}
 }

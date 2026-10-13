@@ -281,7 +281,12 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 		want    string
 		rewrite bool
 	}{
-		{"no issue", "just text\n", "", false},
+		// bd splits a Labels line on commas, spaces and newlines, never on
+		// tabs (markdown.go:43-57), and trims each field: an owner after a
+		// TAB is part of a longer label and no owner; a TAB before it is.
+		{"an owner after a tab is no owner to bd: this city's is injected", "## A\n### Labels\nfoo\towner:jadegate\n", "## A\n### Labels\nowner:citadel\nfoo\towner:jadegate\n", true},
+		{"an owner behind a leading tab is one after bd's trim", "## A\n### Labels\n\towner:jadegate\n", "## A\n### Labels\n\towner:jadegate\n", true},
+		{"an owner after a comma or a space is one", "## A\n### Labels\nfoo,owner:jadegate bar\n", "## A\n### Labels\nfoo,owner:jadegate bar\n", true},
 		{"one issue, no sections", "## Only\n", "## Only\n\n### Labels\nowner:citadel\n", true},
 		{"one issue, description only", "## Only\nSome text\n", "## Only\nSome text\n\n### Labels\nowner:citadel\n", true},
 		{"labels section present", "## A\n\n### Labels\nx, y\n", "## A\n\n### Labels\nowner:citadel\nx, y\n", true},
@@ -298,14 +303,19 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 		{"preamble left alone, h1 is not an issue", "# Title\n## A\n", "# Title\n## A\n\n### Labels\nowner:citadel\n", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := bdMarkdownBatchWithOwner([]byte(tt.in), "owner:citadel")
-			if ok != tt.rewrite {
-				t.Fatalf("rewrite = %v, want %v", ok, tt.rewrite)
+			got, ok, err := bdMarkdownBatchWithOwner([]byte(tt.in), "owner:citadel")
+			if err != nil || ok != tt.rewrite {
+				t.Fatalf("rewrite = %v err = %v, want %v", ok, err, tt.rewrite)
 			}
 			if tt.rewrite && string(got) != tt.want {
 				t.Fatalf("got\n%s\nwant\n%s", got, tt.want)
 			}
 		})
+	}
+	// A file with no issue is refused: nothing gc can rewrite the way bd
+	// would accept, and bd creates nothing from it.
+	if got, ok, err := bdMarkdownBatchWithOwner([]byte("just text\n"), "owner:citadel"); err == nil || ok || got != nil {
+		t.Fatalf("no issue: (%s, %v, %v), want a refusal", got, ok, err)
 	}
 }
 
