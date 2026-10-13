@@ -22,6 +22,15 @@ import (
 // workspace name or the directory would refuse the own case (wrong identity) or
 // claim the foreign case. The last row pins the opt-in: with no [federation]
 // table the city is not federated and a foreign-labeled bead is claimed.
+//
+// Two foreign rows, because the fence has two layers that meet the production
+// wiring differently since gf-xid finding 1h: the GENERATED work query filters
+// a foreign-owned row out of every tier before the hook ever sees it (the
+// identity reaches the generated jq; the session drains no_work with no claim
+// write and no hook-level refusal line, because nothing was refused by the
+// hook), while a custom work_query is returned verbatim, so its foreign row
+// reaches the hook and the hook's own fence refuses and LOGS it with the
+// [federation] identity.
 func TestHookCommandClaimCrossCityFenceUsesFederationIdentity(t *testing.T) {
 	const (
 		thisIdentity = "jadegate"
@@ -32,13 +41,19 @@ func TestHookCommandClaimCrossCityFenceUsesFederationIdentity(t *testing.T) {
 		return label
 	}
 	cases := []struct {
-		name      string
-		beadID    string
-		labels    []string
-		federated bool
-		wantClaim bool
+		name       string
+		beadID     string
+		labels     []string
+		federated  bool
+		wantClaim  bool
+		workQuery  string // a custom work_query: returned verbatim, so its rows reach the hook unfiltered
+		wantRefuse bool   // the hook's own refusal line is expected on stderr
 	}{
-		{name: "foreign owner refused", beadID: "hw-foreign", labels: []string{ownerLabel(foreign)}, federated: true, wantClaim: false},
+		{name: "foreign owner filtered by the generated read", beadID: "hw-foreign", labels: []string{ownerLabel(foreign)}, federated: true, wantClaim: false},
+		{
+			name: "foreign owner refused by the hook behind a custom work_query", beadID: "hw-foreign", labels: []string{ownerLabel(foreign)}, federated: true, wantClaim: false,
+			workQuery: "bd ready --json --metadata-field gc.routed_to=worker", wantRefuse: true,
+		},
 		{name: "own identity claimed", beadID: "jg-own", labels: []string{ownerLabel(thisIdentity)}, federated: true, wantClaim: true},
 		{name: "handoff to this identity claimed", beadID: "hw-handed", labels: []string{ownerLabel(foreign), federation.HandoffLabel(thisIdentity)}, federated: true, wantClaim: true},
 		{name: "legacy unlabeled claimed", beadID: "hw-legacy", labels: nil, federated: true, wantClaim: true},
@@ -58,6 +73,9 @@ name = "test-city"
 [[agent]]
 name = "worker"
 `
+			if tc.workQuery != "" {
+				cityToml += fmt.Sprintf("work_query = %q\n", tc.workQuery)
+			}
 			if tc.federated {
 				cityToml += fmt.Sprintf("\n[federation]\nidentity = %q\n", thisIdentity)
 			}
@@ -131,6 +149,18 @@ esac
 			}
 			if strings.Contains(string(logData), claimWrite) {
 				t.Fatalf("REGRESSION jg-66rdw8: bd received a claim write for foreign bead %s; log:\n%s", tc.beadID, logData)
+			}
+			if !tc.wantRefuse {
+				// The generated read filtered the row before the hook (finding
+				// 1h): nothing reached the hook's fence, so nothing was refused
+				// there — the read ran, though, which the fake bd's log shows.
+				if strings.Contains(stderr.String(), "cross-city-fence refused") {
+					t.Fatalf("the generated read must filter the foreign row before the hook, not hand it to the hook's fence:\n%s", stderr.String())
+				}
+				if !strings.Contains(string(logData), "gc.routed_to=worker") {
+					t.Fatalf("the routed read never ran; log:\n%s", logData)
+				}
+				return
 			}
 			for _, want := range []string{
 				"cross-city-fence refused",
