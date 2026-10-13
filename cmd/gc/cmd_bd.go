@@ -1222,7 +1222,7 @@ func bdDirectoryFlag(args []string) (value string, slot int, attached bool) {
 // absoluteBdDirectoryFlag anchors the selector before gc changes the child's cwd.
 func absoluteBdDirectoryFlag(args []string) ([]string, error) {
 	value, slot, attached := bdDirectoryFlag(args)
-	if slot < 0 || value == "" || filepath.IsAbs(value) {
+	if slot < 0 || strings.TrimSpace(value) == "" || filepath.IsAbs(value) {
 		return args, nil
 	}
 	absolute, err := filepath.Abs(value)

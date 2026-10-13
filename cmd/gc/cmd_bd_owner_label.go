@@ -583,13 +583,12 @@ func bdHasBoolFlag(bdArgs []string, flag string) bool {
 // to name the same store. A directory selector is safe only when its final
 // destination has been verified to resolve to the opened rig scope.
 func bdOwnerLabelDatabaseOverride(bdArgs, env []string, directoryMatchesScope bool) bool {
-	overridden := false
+	directory, _, _ := bdDirectoryFlag(bdArgs)
+	overridden := strings.TrimSpace(directory) != "" && !directoryMatchesScope
 	bdFlagTokens(bdArgs, func(_ int, name, value string, inline bool) {
 		switch name {
 		case "--database", "--db", "--repo":
 			overridden = true
-		case "-C", "--directory":
-			overridden = overridden || !directoryMatchesScope
 		case "--global":
 			if !inline {
 				overridden = true

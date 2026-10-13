@@ -869,3 +869,32 @@ func TestGcBdCreateRelativeDirectoryKeepsCallerDestination(t *testing.T) {
 		})
 	}
 }
+
+func TestGcBdCreateBlankDirectoryKeepsParentOwner(t *testing.T) {
+	for _, selector := range [][]string{{"-C", ""}, {"-C="}, {"--directory="}, {"-C", " \t "}, {"-C/other", "-C="}} {
+		t.Run(strings.Join(selector, " "), func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			args := append([]string{"create", "child", "--deps", "parent-child:demo-0"}, selector...)
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			found := false
+			for _, call := range calls {
+				if strings.HasPrefix(call, "create --labels=owner:jadegate child --deps parent-child:demo-0") {
+					found = true
+				}
+			}
+			if !found || strings.Contains(stderr.String(), "owner label not applied") {
+				t.Fatalf("blank directory lost parent owner: calls=%q stderr=%q", calls, stderr.String())
+			}
+			forwarded, err := absoluteBdDirectoryFlag(args)
+			if err != nil || !slices.Equal(forwarded, args) {
+				t.Fatalf("blank selector changed: %q, %v", forwarded, err)
+			}
+		})
+	}
+}
