@@ -23,6 +23,11 @@ func TestStripBdNoOwnerLabel(t *testing.T) {
 		{"bare", []string{"create", "t", "--no-owner-label"}, []string{"create", "t"}, true},
 		{"inline true", []string{"create", "--no-owner-label=true", "t"}, []string{"create", "t"}, true},
 		{"inline false is not an opt-out", []string{"create", "t", "--no-owner-label=false"}, []string{"create", "t"}, false},
+		// gf-d7b (the gf-c7n re-gate's Minor at cmd_bd_owner_label.go:136): a
+		// repeated opt-out resolves as every other boolean flag does — the
+		// last occurrence wins — so an explicit final =false restores the label.
+		{"a repeated opt-out resolves to its last value (false last)", []string{"create", "t", "--no-owner-label", "--no-owner-label=false"}, []string{"create", "t"}, false},
+		{"a repeated opt-out resolves to its last value (bare last)", []string{"create", "t", "--no-owner-label=false", "--no-owner-label"}, []string{"create", "t"}, true},
 		{"after -- it is bd's positional", []string{"create", "--", "--no-owner-label"}, []string{"create", "--", "--no-owner-label"}, false},
 		{"ambiguous rest is left alone", []string{"create", "t", "--no-owner-label", "-p1"}, []string{"create", "t", "-p1"}, true},
 		{"a value flag's value is not a flag", []string{"create", "t", "--description", "--no-owner-label"}, []string{"create", "t", "--description", "--no-owner-label"}, false},
@@ -230,6 +235,26 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 		{"the -m alias value that spells a parent is a description", federatedDemoCityTOML, []string{"create", "t", "-m", "--parent=p-1"}, "", "", "create --labels=owner:citadel t -m --parent=p-1", false, "", false},
 		{"a child of a foreign parent carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0", false, "", false},
 		{"a child of a foreign parent carries the parent's owner (inline parent)", federatedDemoCityTOML, []string{"create", "child", "--parent=demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent=demo-0", false, "", false},
+		// gf-d7b finding 1n (the gf-c7n re-gate's Major at
+		// cmd_bd_owner_label.go:375): bd's create also makes the new bead a
+		// child through `--deps parent-child:<id>` (cmd/bd create_deps.go
+		// parseDepSpec; create_atomic.go addDepSpecEdges), in every spelling
+		// bd accepts — inline or as the next token, one of a CSV list, a
+		// repeated flag, whitespace around the type and the id — and such a
+		// child of a foreign parent carries the PARENT's owner, read first.
+		{"a child under a foreign parent through --deps parent-child carries the parent's owner", federatedDemoCityTOML, []string{"create", "child", "--deps", "parent-child:demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps parent-child:demo-0", false, "", false},
+		{"a --deps parent-child parent given inline", federatedDemoCityTOML, []string{"create", "child", "--deps=parent-child:demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps=parent-child:demo-0", false, "", false},
+		{"a --deps parent-child parent inside a CSV list", federatedDemoCityTOML, []string{"create", "child", "--deps", "blocked-by:demo-9,parent-child:demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps blocked-by:demo-9,parent-child:demo-0", false, "", false},
+		{"a --deps parent-child parent on a repeated flag", federatedDemoCityTOML, []string{"create", "child", "--deps", "demo-9", "--deps", "parent-child:demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps demo-9 --deps parent-child:demo-0", false, "", false},
+		{"a --deps parent-child parent with bd's whitespace trimming", federatedDemoCityTOML, []string{"create", "child", "--deps", "parent-child: demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --deps parent-child: demo-0", false, "", false},
+		{"--parent and a --deps parent-child naming the same parent agree", federatedDemoCityTOML, []string{"create", "child", "--parent", "demo-0", "--deps", "parent-child:demo-0"}, "hold:mayor,owner:jadegate", "", "create --labels=owner:jadegate child --parent demo-0 --deps parent-child:demo-0", false, "", false},
+		{"no-inherit-labels makes a --deps parent-child child this city's", federatedDemoCityTOML, []string{"create", "child", "--deps", "parent-child:demo-0", "--no-inherit-labels"}, "", "", "create --labels=owner:citadel child --deps parent-child:demo-0 --no-inherit-labels", false, "", false},
+		{"a --deps edge of another type is not a parent", federatedDemoCityTOML, []string{"create", "t", "--deps", "blocked-by:demo-0"}, "", "", "create --labels=owner:citadel t --deps blocked-by:demo-0", false, "", false},
+		{"a bare --deps id is not a parent", federatedDemoCityTOML, []string{"create", "t", "--deps", "demo-0"}, "", "", "create --labels=owner:citadel t --deps demo-0", false, "", false},
+		{"a value that spells a --deps parent is a value", federatedDemoCityTOML, []string{"create", "t", "--description", "--deps=parent-child:demo-0"}, "", "", "create --labels=owner:citadel t --description --deps=parent-child:demo-0", false, "", false},
+		// The re-gate's Minor at cmd_bd_owner_label.go:136: the last opt-out wins.
+		{"a repeated opt-out resolves to its last value (false last)", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label", "--no-owner-label=false"}, "", "", "create --labels=owner:citadel t", false, "", false},
+		{"a repeated opt-out resolves to its last value (bare last)", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label=false", "--no-owner-label"}, "", "", "create t", false, "", false},
 		{"opt-out stripped, nothing carried, no stamp", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label"}, "", "", "create t", false, "", false},
 		{"inline false opt-out is not an opt-out", federatedDemoCityTOML, []string{"create", "t", "--no-owner-label=false"}, "", "", "create --labels=owner:citadel t", false, "", false},
 		{"dry run creates nothing and carries nothing", federatedDemoCityTOML, []string{"create", "t", "--dry-run"}, "", "⚠ [DRY RUN] Would create issue:\n  ID: demo-1\n  Title: t", "create t --dry-run", false, "", false},
@@ -265,7 +290,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 				t.Setenv("IGNORE_CREATE_LABELS", "")
 			}
 			parent := ""
-			if slices.ContainsFunc(tt.args, func(a string) bool { return strings.HasPrefix(a, "--parent") }) {
+			if slices.ContainsFunc(tt.args, func(a string) bool {
+				return strings.HasPrefix(a, "--parent") || (strings.Contains(a, "parent-child") && strings.Contains(a, "demo-0"))
+			}) {
 				parent = "demo-0"
 			}
 			t.Setenv("PARENT", parent)
@@ -283,6 +310,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			}
 			if parent != "" && createAt == 0 && strings.Contains(tt.wantArgv, "--labels=owner:jadegate") {
 				t.Fatalf("the parent's owner was carried without reading the parent first: calls=%q", calls)
+			}
+			if createAt != 0 && strings.Contains(tt.wantArgv, "--labels=owner:citadel") {
+				t.Fatalf("a create carrying this city's owner read a parent first: calls=%q", calls)
 			}
 			stamped := false
 			for _, c := range calls[createAt+1:] {
@@ -434,6 +464,89 @@ func TestGcBdCreateRefusesAnUnreadableParent(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want nothing from a refused create", stdout.String())
+	}
+}
+
+// TestGcBdCreateRefusesParentsInDifferentLanes (gf-d7b finding 1n): a single
+// create whose parents — the --parent and every --deps parent-child — sit in
+// different lanes names no one lane, as a plan node's parents do (finding 1l,
+// beads.GraphPlanOwnerLabels): the create is refused before bd runs. An
+// unowned parent is in THIS city's lane. A --deps parent-child parent that
+// cannot be read refuses the create like an unreadable --parent (finding 1d).
+func TestGcBdCreateRefusesParentsInDifferentLanes(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		labels     string // what show reports on every parent but demo-0 (owner:jadegate)
+		unreadable string
+		args       []string
+		want       string
+	}{
+		{"--parent in one lane, a --deps parent-child parent in another", "owner:boomtown", "", []string{"create", "child", "--parent", "demo-0", "--deps", "parent-child:demo-2"}, "different lanes"},
+		{"two --deps parent-child parents in different lanes", "owner:boomtown", "", []string{"create", "child", "--deps", "parent-child:demo-0,parent-child:demo-2"}, "different lanes"},
+		{"a foreign parent beside an unowned one (this city's lane)", "", "", []string{"create", "child", "--parent", "demo-0", "--deps", "parent-child:demo-3"}, "different lanes"},
+		{"a --deps parent-child parent that cannot be read", "", "1", []string{"create", "child", "--deps", "parent-child:demo-0"}, "demo-0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("LABELS", tt.labels)
+			t.Setenv("CREATE_OUT", "")
+			t.Setenv("PARENT", "demo-0")
+			t.Setenv("PARENT_UNREADABLE", tt.unreadable)
+
+			var stdout, stderr bytes.Buffer
+			if got := doBd(tt.args, &stdout, &stderr); got != 1 {
+				t.Fatalf("doBd(%v) = %d, want 1 (refused); stderr=%q", tt.args, got, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "refusing to create") || !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("stderr = %q, want a refusal containing %q", stderr.String(), tt.want)
+			}
+			for _, c := range fakeBdCalls(t, capture) {
+				if !strings.HasPrefix(c, "show ") {
+					t.Fatalf("bd ran %q; nothing but the parent reads may run for a refused create", c)
+				}
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want nothing from a refused create", stdout.String())
+			}
+		})
+	}
+}
+
+// TestBdCreateParentIDs pins the parent set a single create names, read the
+// way bd's create wires it (gf-d7b finding 1n): the --parent value first,
+// then every --deps entry of type parent-child in each spelling bd's
+// parseDepSpec accepts (cmd/bd create_deps.go) — pflag's CSV split of each
+// value, a repeated flag appending, the entry and its two halves TrimSpace'd
+// around the first colon; a bare id or another type is no parent; a value
+// that spells the flag is a value; after `--` everything is positional.
+func TestBdCreateParentIDs(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"create", "t"}, nil},
+		{[]string{"create", "t", "--parent", "p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--parent=p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", "parent-child:p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps=parent-child:p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", " parent-child : p-1 "}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", "blocked-by:p-9,parent-child:p-1,discovered-from:p-8"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", "\"parent-child:p-1\",p-9"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", "p-9", "--deps", "parent-child:p-1", "--deps", "parent-child:p-2"}, []string{"p-1", "p-2"}},
+		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-2"}, []string{"p-1", "p-2"}},
+		{[]string{"create", "t", "--parent", "p-1", "--deps", "parent-child:p-1"}, []string{"p-1"}},
+		{[]string{"create", "t", "--deps", "p-1"}, nil},
+		{[]string{"create", "t", "--deps", "blocks:p-1"}, nil},
+		{[]string{"create", "t", "--deps", "parent-child:"}, nil},
+		{[]string{"create", "t", "--description", "--deps=parent-child:p-1"}, nil},
+		{[]string{"create", "t", "--", "--deps", "parent-child:p-1"}, nil},
+		{[]string{"create", "t", "--deps"}, nil},
+	} {
+		if got := bdCreateParentIDs(tt.args); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("bdCreateParentIDs(%q) = %q, want %q", tt.args, got, tt.want)
+		}
 	}
 }
 

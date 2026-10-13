@@ -44,7 +44,8 @@ const (
 //     --file batch is rewritten into a temporary copy with the owner on every
 //     node or issue and bd is pointed at the copy (cmd_bd_owner_label_batch.go).
 //     Only what the label needs is read from bd's create surface — the label
-//     flags, the parent, the batch file, the inheritance switch, the value
+//     flags, the parents (--parent and the --deps entries of type
+//     parent-child), the batch file, the inheritance switch, the value
 //     flags whose values must be skipped — by the generated flag manifests
 //     (internal/bdflags); everything else reaches bd as typed, minus the
 //     gc-owned opt-out.
@@ -118,8 +119,10 @@ func bdFlagTokens(bdArgs []string, visit func(i int, name, value string, inline 
 
 // stripBdNoOwnerLabel removes the gc-owned opt-out in every boolean spelling
 // bd's flag parser accepts (bare, =true, =false, =1, =0 …) and reports whether
-// the operator opted out — which `=false` does not. A value it cannot parse is
-// left in place for bd to reject, never read as an opt-out.
+// the operator opted out — which `=false` does not. A repeated flag resolves
+// as pflag resolves every boolean: the last occurrence wins, so an explicit
+// final `=false` restores the label. A value it cannot parse is left in place
+// for bd to reject, never read as an opt-out.
 func stripBdNoOwnerLabel(bdArgs []string) ([]string, bool) {
 	drop := make(map[int]bool)
 	optOut := false
@@ -132,8 +135,7 @@ func stripBdNoOwnerLabel(bdArgs []string) ([]string, bool) {
 			return
 		}
 		if v, err := strconv.ParseBool(value); err == nil {
-			drop[i] = true
-			optOut = optOut || v
+			drop[i], optOut = true, v
 		}
 	})
 	if len(drop) == 0 {
@@ -357,13 +359,17 @@ func bdCreateArgvWithLabel(bdArgs []string, label string) []string {
 //     label flag beside either (rejectSingleIssueFlagsForGraph /
 //     rejectSingleIssueFlagsForMarkdown in cmd/bd), so their rows carry the
 //     owner in the batch file instead (bdCreateBatchWithOwner);
-//   - a create under a --parent carries the PARENT's owner when the parent
-//     has one, read through parentRead — the store's live handle — before
-//     anything is created; a parent that cannot be read refuses the create
-//     with that error (finding 1d's rule); a nil parentRead means the
+//   - a create under a parent carries the PARENT's owner when the parent has
+//     one, read through parentRead — the store's live handle — before
+//     anything is created. A parent is every relationship bd's create wires
+//     (bdCreateParentIDs): the --parent, and each --deps entry of type
+//     parent-child. A parent that cannot be read refuses the create with
+//     that error (finding 1d's rule); parents whose lanes differ name no one
+//     lane and refuse the create, as a plan node's do (finding 1l; an
+//     unowned parent is in this city's lane); a nil parentRead means the
 //     configured store cannot be read for this create (a bd database
 //     override), and such a create carries nothing; --no-inherit-labels
-//     switches the parent's lane off too, and the child is this city's;
+//     switches the parents' lane off too, and the child is this city's;
 //   - every other create carries this city's owner.
 func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs []string, owner string) (label string, carry bool, err error) {
 	if len(federation.OwnerLabels(bdCreateLabelValues(bdArgs))) > 0 {
@@ -372,8 +378,8 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	if form, _ := bdCreateBatchFile(bdArgs); form != bdBatchNone {
 		return "", false, nil
 	}
-	parentID := strings.TrimSpace(bdCreateValueFlag(bdArgs, "--parent"))
-	if parentID == "" || bdHasBoolFlag(bdArgs, "--no-inherit-labels") {
+	parents := bdCreateParentIDs(bdArgs)
+	if len(parents) == 0 || bdHasBoolFlag(bdArgs, "--no-inherit-labels") {
 		// No parent, or the operator switched inheritance off for this
 		// create: the child is this city's, as the follow-up stamp always
 		// made it when bd copied nothing.
@@ -382,15 +388,76 @@ func bdCreateOwnerLabel(parentRead func(id string) (beads.Bead, error), bdArgs [
 	if parentRead == nil {
 		return "", false, nil
 	}
-	parent, err := parentRead(parentID)
-	if err != nil {
-		return "", false, fmt.Errorf("reading parent %q for the owner label: %w", parentID, err)
+	thisLane := federation.OwnerOf([]string{owner})
+	var first beads.Bead
+	lane := ""
+	for i, id := range parents {
+		parent, err := parentRead(id)
+		if err != nil {
+			return "", false, fmt.Errorf("reading parent %q for the owner label: %w", id, err)
+		}
+		parentLane := federation.OwnerOf(parent.Labels)
+		if parentLane == "" {
+			parentLane = thisLane
+		}
+		if i == 0 {
+			first, lane = parent, parentLane
+			continue
+		}
+		if parentLane != lane {
+			return "", false, fmt.Errorf("the create names parents in different lanes (%q owner %q, %q owner %q): the owner label cannot be resolved", parents[0], lane, id, parentLane)
+		}
 	}
-	owners := federation.OwnerLabels(federation.OwnerLabelForChild(nil, parent.Labels, owner))
+	owners := federation.OwnerLabels(federation.OwnerLabelForChild(nil, first.Labels, owner))
 	if len(owners) != 1 {
 		return owner, true, nil
 	}
 	return owners[0], true, nil
+}
+
+// bdDepParentChild is bd's parent-child dependency type
+// (internal/types types.DepParentChild), the one spelling of it `bd create
+// --deps` accepts: parseDepSpec's alias map (cmd/bd create_deps.go) folds
+// depends-on and blocked-by into blocks and passes every other type through
+// unchanged.
+const bdDepParentChild = "parent-child"
+
+// bdCreateParentIDs returns every parent a single create names, in the
+// order bd wires them (cmd/bd create_atomic.go: the --parent edge, then the
+// --deps edges): the --parent value, then each --deps entry of type
+// parent-child in every spelling bd's parseDepSpec accepts — the flag inline
+// or with the next token, its value split as pflag's StringSlice splits it
+// (a CSV record; a repeated flag appends), each entry TrimSpace'd, its type
+// and its id TrimSpace'd around the first colon (cmd/bd create_deps.go
+// parseDepSpecs / parseDepSpec). A bare id (blocks) or an entry of any other
+// type is not a parent. Duplicates are dropped; an empty id is no parent.
+func bdCreateParentIDs(bdArgs []string) []string {
+	var ids []string
+	add := func(id string) {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	add(bdCreateValueFlag(bdArgs, "--parent"))
+	bdFlagTokens(bdArgs, func(i int, name, value string, inline bool) {
+		if name != "--deps" {
+			return
+		}
+		if !inline {
+			if i+1 >= len(bdArgs) {
+				return
+			}
+			value = bdArgs[i+1]
+		}
+		for _, raw := range bdSliceFlagValues(value) {
+			depType, target, ok := strings.Cut(strings.TrimSpace(raw), ":")
+			if !ok || strings.TrimSpace(depType) != bdDepParentChild {
+				continue
+			}
+			add(target)
+		}
+	})
+	return ids
 }
 
 // bdHasBoolFlag reports whether a boolean flag is set before a `--`
