@@ -255,18 +255,16 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		}
 	}
 
-	maxSeq, err := ReadLatestSeq(path)
-	if err != nil {
-		return nil, err
-	}
-
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
 
 	r.file = file
-	r.seq = maxSeq
+	if err := r.seedSequenceLocked(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -577,16 +575,18 @@ func (r *FileRecorder) reopenActiveLogLocked() error {
 		fmt.Fprintf(r.stderr, "events: follow rotation: close rotated handle: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	r.file = reopened
-	// The owner's rotation is rename, then reopen, then the anchor write; a
-	// follower that lands between the rename and the anchor sees an EMPTY
-	// active log, and writeRecordLocked's by-path tail read would then fall
-	// back to this recorder's cached sequence — the owner's events this
-	// recorder never saw are not in it, so the next append could reuse a
-	// sequence number the archive already holds (codex round 1, gf-4c9 row
-	// 6). Re-seed the cached sequence the way the constructor does, from the
-	// active log, the .gz archives AND the not-yet-compressed rotating-*
-	// file the rename just produced.
-	if floor := latestSeqIncludingInFlight(r.path); floor > r.seq {
+	return r.seedSequenceLocked()
+}
+
+// seedSequenceLocked establishes the sequence floor on initial attachment and
+// reopen, including segments renamed away but not yet archived or anchored.
+// With r.mu held, or before the recorder is published to callers.
+func (r *FileRecorder) seedSequenceLocked() error {
+	floor, err := latestSeqIncludingInFlight(r.path)
+	if err != nil {
+		return err
+	}
+	if floor > r.seq {
 		r.seq = floor
 	}
 	return nil
@@ -594,8 +594,8 @@ func (r *FileRecorder) reopenActiveLogLocked() error {
 
 // latestSeqIncludingInFlight is ReadLatestSeq plus the rotating-* files a
 // rotation leaves between its rename and its gzip: the sequence floor a
-// writer must respect while the owner is mid-rotation. Errors read as 0 so a
-// caller only ever moves its sequence forward.
+// writer must respect while the owner is mid-rotation. Active-log read errors
+// propagate just as they do from ReadLatestSeq.
 //
 // The rotating-* files are read FIRST and the archives (ReadLatestSeq)
 // second: gzipAndArchive publishes the archive (rename of its temp file)
@@ -604,7 +604,7 @@ func (r *FileRecorder) reopenActiveLogLocked() error {
 // first, or the archive by the second. The other order could miss the
 // segment on both reads and hand a follower an archived sequence number
 // (codex round 5, gf-4c9 row 6).
-func latestSeqIncludingInFlight(path string) uint64 {
+func latestSeqIncludingInFlight(path string) (uint64, error) {
 	var floor uint64
 	if entries, err := os.ReadDir(filepath.Dir(path)); err == nil {
 		for _, e := range entries {
@@ -616,10 +616,14 @@ func latestSeqIncludingInFlight(path string) uint64 {
 			}
 		}
 	}
-	if seq, err := ReadLatestSeq(path); err == nil && seq > floor {
+	seq, err := ReadLatestSeq(path)
+	if err != nil {
+		return 0, err
+	}
+	if seq > floor {
 		floor = seq
 	}
-	return floor
+	return floor, nil
 }
 
 // maybeAutoRotateLocked is the size-gated rotation hook on the

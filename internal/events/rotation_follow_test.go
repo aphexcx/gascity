@@ -2,6 +2,8 @@ package events
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,5 +148,39 @@ func TestFollowRotationReopenContinuesSequencePastRenamedLog(t *testing.T) {
 	}
 	if active[0].Seq != 11 {
 		t.Fatalf("mid-rotation event seq = %d, want 11 (past the renamed log's last sequence)", active[0].Seq)
+	}
+}
+
+func TestFollowRotationInitialAttachmentContinuesPastRenamedLog(t *testing.T) {
+	for _, activeExists := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active-exists=%v", activeExists), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "events.jsonl")
+			writeJSONLEvents(t, path, 1, 10)
+			if err := os.Rename(path, filepath.Join(dir, formatRotatingBasename(time.Now().UTC(), 1, 10))); err != nil {
+				t.Fatal(err)
+			}
+			if activeExists {
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Attach only after rename, before either the archive or anchor exists.
+			follower, err := NewFileRecorder(path, io.Discard, WithoutStartupSweep(), WithFollowRotation())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer follower.Close() //nolint:errcheck // test cleanup
+			if err := follower.RecordAck(Event{Type: WorkerOperation, Subject: "new-follower"}); err != nil {
+				t.Fatal(err)
+			}
+			active, err := ReadFiltered(path, Filter{AfterSeq: 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != 1 || active[0].Seq != 11 {
+				t.Fatalf("watcher after 10 sees %+v, want new follower event 11", active)
+			}
+		})
 	}
 }
