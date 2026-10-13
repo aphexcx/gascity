@@ -566,13 +566,16 @@ func bdHasBoolFlag(bdArgs []string, flag string) bool {
 // selection. Inspect the actual child environment (after gc's projections),
 // not the ambient environment. Conservatively skip the follow-up stamp — and
 // the parent read before the create — even when an explicit override happens
-// to name the same store.
-func bdOwnerLabelDatabaseOverride(bdArgs, env []string) bool {
+// to name the same store. A directory selector is safe only when its final
+// destination has been verified to resolve to the opened rig scope.
+func bdOwnerLabelDatabaseOverride(bdArgs, env []string, directoryMatchesScope bool) bool {
 	overridden := false
 	bdFlagTokens(bdArgs, func(_ int, name, value string, inline bool) {
 		switch name {
 		case "--database", "--db", "--repo":
 			overridden = true
+		case "-C", "--directory":
+			overridden = overridden || !directoryMatchesScope
 		case "--global":
 			if !inline {
 				overridden = true

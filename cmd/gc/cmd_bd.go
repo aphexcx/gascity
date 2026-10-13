@@ -733,7 +733,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// that cannot be read refuses the create. Under a bd database override the
 	// configured store is not the create's store, so no parent is read there
 	// and a create naming one carries nothing (the notice below says so).
-	override := bdOwnerLabelDatabaseOverride(bdArgs, env)
+	directoryMatchesScope := false
+	if dir := extractBdDirectoryFlag(bdArgs); dir != "" {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(target.ScopeRoot, dir)
+		}
+		rig, ok, err := resolveRigForDir(cfg, cityPath, dir)
+		directoryMatchesScope = err == nil && ok && normalizePathForCompare(bdRigScopeTarget(cityPath, rig).ScopeRoot) == normalizePathForCompare(target.ScopeRoot)
+	}
+	override := bdOwnerLabelDatabaseOverride(bdArgs, env, directoryMatchesScope)
 	var store beads.Store
 	var parentRead func(string) (beads.Bead, error)
 	if !override {
@@ -1128,15 +1136,22 @@ func extractRigFlag(args []string) (string, []string) {
 // extractBdDirectoryFlag returns the -C / --directory value from bd passthrough
 // args, or "" if not present. The flag is left in args so bd itself still sees it.
 func extractBdDirectoryFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		switch {
-		case (args[i] == "-C" || args[i] == "--directory") && i+1 < len(args):
-			return args[i+1]
-		case strings.HasPrefix(args[i], "--directory="):
-			return strings.TrimPrefix(args[i], "--directory=")
-		}
+	value := ""
+	// Cobra removes the verb before pflag parses shorthand clusters.
+	if i, hidden := bdVerbIndexAfterGlobals(args); !hidden && i >= 0 {
+		args = append(append([]string{}, args[:i]...), args[i+1:]...)
 	}
-	return ""
+	bdFlagTokens(args, func(i int, name, v string, inline bool) {
+		if name != "-C" && name != "--directory" {
+			return
+		}
+		if inline {
+			value = v
+		} else if i+1 < len(args) {
+			value = args[i+1]
+		}
+	})
+	return value
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.

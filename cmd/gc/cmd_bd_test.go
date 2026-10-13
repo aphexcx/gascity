@@ -151,6 +151,12 @@ func TestExtractBdDirectoryFlag(t *testing.T) {
 		{"short flag", []string{"create", "-C", "/tmp/packs", "--json"}, "/tmp/packs"},
 		{"long flag space", []string{"create", "--directory", "/tmp/packs"}, "/tmp/packs"},
 		{"long flag equals", []string{"create", "--directory=/tmp/packs"}, "/tmp/packs"},
+		{"short attached", []string{"-C/tmp/packs", "create"}, "/tmp/packs"},
+		{"short equals", []string{"-C=/tmp/packs", "create"}, "/tmp/packs"},
+		{"cluster attached", []string{"-qC/tmp/packs", "create"}, "/tmp/packs"},
+		{"last selector wins", []string{"create", "-C", "/old", "--directory=/new"}, "/new"},
+		{"description value", []string{"create", "--description", "-C/tmp/packs"}, ""},
+		{"after terminator", []string{"create", "--", "-C/tmp/packs"}, ""},
 		{"absent", []string{"create", "--json"}, ""},
 		{"short flag at end no value", []string{"create", "-C"}, ""},
 	}

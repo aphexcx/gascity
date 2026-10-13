@@ -738,6 +738,12 @@ func TestGcBdCreateDatabaseOverrideDoesNotStampDefaultStore(t *testing.T) {
 		wantArgv string
 		wantNote bool
 	}{
+		{"directory short", []string{"create", "t", "--parent", "demo-0", "-C", "/unregistered"}, "", "create t --parent demo-0 -C /unregistered", true},
+		{"directory attached", []string{"create", "t", "--parent", "demo-0", "-C/unregistered"}, "", "create t --parent demo-0 -C/unregistered", true},
+		{"directory equals", []string{"create", "t", "--parent", "demo-0", "-C=/unregistered"}, "", "create t --parent demo-0 -C=/unregistered", true},
+		{"directory cluster", []string{"create", "t", "--parent", "demo-0", "-qC/unregistered"}, "", "create t --parent demo-0 -qC/unregistered", true},
+		{"directory long", []string{"create", "t", "--parent", "demo-0", "--directory", "/unregistered"}, "", "create t --parent demo-0 --directory /unregistered", true},
+		{"directory long equals", []string{"create", "t", "--parent", "demo-0", "--directory=/unregistered"}, "", "create t --parent demo-0 --directory=/unregistered", true},
 		{"database before verb", []string{"--database", "other", "create", "t"}, "", "--database other create --labels=owner:citadel t", false},
 		{"database inline", []string{"create", "t", "--database=other"}, "", "create --labels=owner:citadel t --database=other", false},
 		{"db before verb", []string{"--db", "other.db", "create", "t"}, "", "--db other.db create --labels=owner:citadel t", false},
@@ -795,9 +801,27 @@ func TestBdOwnerLabelDatabaseOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := bdOwnerLabelDatabaseOverride(tt.args, tt.env); got != tt.want {
+			if got := bdOwnerLabelDatabaseOverride(tt.args, tt.env, false); got != tt.want {
 				t.Fatalf("database override = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGcBdCreateDirectoryWithinOpenedRigKeepsOwner(t *testing.T) {
+	rigDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "args")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_RIG", "")
+	var stdout, stderr bytes.Buffer
+	args := []string{"create", "child", "--parent", "demo-0", "-C" + rigDir}
+	if code := doBd(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd = %d: %s", code, stderr.String())
+	}
+	calls := fakeBdCalls(t, capture)
+	want := "create --labels=owner:jadegate child --parent demo-0 -C" + rigDir
+	if !slices.Contains(calls, want) {
+		t.Fatalf("bd calls = %q, want %q", calls, want)
 	}
 }
