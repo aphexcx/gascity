@@ -506,10 +506,15 @@ test: test-fsys-darwin-compile check-bd-parent-grammar
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $$pkgs
 
 # Compare against the pinned bd module by default; a clone can validate an upgrade.
-BEADS_SOURCE ?= $(shell go list -m -f '{{.Dir}}' github.com/steveyegge/beads)
+BEADS_SOURCE ?=
 .PHONY: check-bd-parent-grammar
 check-bd-parent-grammar:
-	$(TEST_ENV) python3 scripts/check-bd-parent-grammar.py "$(BEADS_SOURCE)"
+	@source="$(BEADS_SOURCE)"; \
+	if [ -z "$$source" ]; then \
+		go mod download github.com/steveyegge/beads || exit $$?; \
+		source=$$(go list -m -f '{{.Dir}}' github.com/steveyegge/beads) || exit $$?; \
+	fi; \
+	$(TEST_ENV) python3 scripts/check-bd-parent-grammar.py "$$source"
 
 COUNT ?= 1
 RUN ?= .
