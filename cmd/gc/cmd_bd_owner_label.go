@@ -126,6 +126,7 @@ func bdCommandFlagTokens(bdArgs []string, command string, visit func(i int, name
 					visit(i, short, "", false)
 				}
 			default:
+				visit(i, short, "", false)
 				j = len(tok) // a shorthand gc does not know: bd's business
 			}
 		}

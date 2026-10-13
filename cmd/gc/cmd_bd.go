@@ -1150,17 +1150,58 @@ func extractBdDirectoryFlag(args []string) string {
 // bdDirectoryFlag returns the effective directory and its original argv slot.
 func bdDirectoryFlag(args []string) (value string, slot int, attached bool) {
 	slot = -1
-	command, verb := "", -1
-	// Cobra removes the verb before pflag parses shorthand clusters.
-	if i, hidden := bdVerbIndexAfterGlobals(args); !hidden && i >= 0 {
-		verb, command = i, args[i]
-		if command == "new" {
-			command = "create"
-		}
-		args = append(append([]string{}, args[:i]...), args[i+1:]...)
+	command, slots := "", make([]int, len(args))
+	for i := range slots {
+		slots[i] = i
 	}
+	aliases := map[string]string{
+		"new": "create", "done": "close", "view": "show",
+		"protomolecule": "mol", "dep rm": "dep remove",
+	}
+	// Remove each command word as Cobra does, retaining original argv slots.
+	// Only known command paths establish which following tokens are values.
+	for {
+		i, hidden := bdVerbIndexAfterGlobals(args)
+		if hidden || i < 0 {
+			break
+		}
+		next := strings.TrimSpace(command + " " + args[i])
+		if canonical, ok := aliases[next]; ok {
+			next = canonical
+		}
+		hasChildren := false
+		for _, known := range bdflags.Subcommands() {
+			if strings.HasPrefix(known, next+" ") {
+				hasChildren = true
+				break
+			}
+		}
+		if !bdflags.Known(next) && !hasChildren {
+			args, slots = args[:i], slots[:i]
+			break
+		}
+		command = next
+		args = append(append([]string{}, args[:i]...), args[i+1:]...)
+		slots = append(append([]int{}, slots[:i]...), slots[i+1:]...)
+		if !hasChildren {
+			break
+		}
+	}
+	values, bools := bdflags.ValueFlags(command), bdflags.BoolFlags(command)
+	if values == nil {
+		values, bools = bdflags.GlobalValueFlags(), bdflags.GlobalBoolFlags()
+	}
+	if command == "create" {
+		for flag := range bdCreateHiddenValueFlags {
+			values[flag] = true
+		}
+	}
+	uncertain := false
 	bdCommandFlagTokens(args, command, func(i int, name, v string, inline bool) {
-		if name != "-C" && name != "--directory" {
+		if !values[name] && !bools[name] && name != bdNoOwnerLabelFlag {
+			uncertain = true
+		}
+		if uncertain || (name != "-C" && name != "--directory") {
 			return
 		}
 		switch {
@@ -1172,10 +1213,7 @@ func bdDirectoryFlag(args []string) (value string, slot int, attached bool) {
 		default:
 			return
 		}
-		if verb >= 0 && i >= verb {
-			i++
-		}
-		slot, attached = i, inline
+		slot, attached = slots[i], inline
 	})
 	return value, slot, attached
 }

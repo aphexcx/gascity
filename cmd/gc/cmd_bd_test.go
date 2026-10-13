@@ -161,6 +161,12 @@ func TestExtractBdDirectoryFlag(t *testing.T) {
 		{"close force", []string{"close", "-f", "-C/tmp/packs"}, "/tmp/packs"},
 		{"delete force cluster", []string{"delete", "-fC/tmp/packs"}, "/tmp/packs"},
 		{"new description value", []string{"new", "--description", "-C/tmp/packs"}, ""},
+		{"compound file value", []string{"dep", "add", "--file", "-Cdeps.jsonl"}, ""},
+		{"compound directory", []string{"dep", "-Cwork", "add", "--file", "-Cdeps.jsonl"}, "work"},
+		{"alias reason", []string{"done", "--reason", "-C was fixed"}, ""},
+		{"alias directory", []string{"done", "-Cwork", "--reason", "-C was fixed"}, "work"},
+		{"unknown command flag value", []string{"future", "--new-option", "-Cvalue"}, ""},
+		{"unknown create flag value", []string{"create", "--new-option", "-Cvalue"}, ""},
 		{"absent", []string{"create", "--json"}, ""},
 		{"short flag at end no value", []string{"create", "-C"}, ""},
 	}
