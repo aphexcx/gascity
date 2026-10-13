@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -138,5 +141,75 @@ func TestBdGraphPlanWithOwnerFollowsEveryParentRelationshipBdAccepts(t *testing.
 		if got := planNodeLabels(t, out)[key]; !reflect.DeepEqual(got, w) {
 			t.Errorf("unread parents: node %s labels = %v, want %v", key, got, w)
 		}
+	}
+}
+
+// The markdown parser wires Dependencies/Deps directly to existing IDs.
+func TestBdMarkdownBatchOwnerFollowsDependencies(t *testing.T) {
+	for _, tt := range []struct {
+		name, input, want, wantErr string
+		unread, override           bool
+	}{
+		{name: "parent", input: "## Child\n### Dependencies\nparent-child:remote-1\n", want: "owner:other"},
+		{name: "alias CRLF", input: "## Child\r\n### DePs\r\nparent-child:\tremote-1\r\n", want: "owner:other"},
+		{name: "last nonempty dependencies", input: "## Child\n### Dependencies\nparent-child:missing\n### Deps\nparent-child:remote-1\n### Dependencies\n\n", want: "owner:other"},
+		{name: "nonparents", input: "## Child\n### Dependencies\nblocks:missing Parent-Child:missing\n", want: "owner:citadel"},
+		{name: "two lanes", input: "## Child\n### Dependencies\nparent-child:remote-1,parent-child:local-1\n", wantErr: "different lanes"},
+		{name: "authored conflicting lane", input: "## Child\n### Dependencies\nparent-child:remote-1\n### Labels\nowner:citadel\n", wantErr: "different lanes"},
+		{name: "authored agreeing lane", input: "## Child\n### Dependencies\nparent-child:remote-1\n### Labels\nowner:other\n", want: "owner:other"},
+		{name: "read error", input: "## Child\n### Dependencies\nparent-child:remote-1\n", unread: true, wantErr: "offline"},
+		{name: "override", input: "## Child\n### Dependencies\nparent-child:remote-1\n", override: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "issues.md"), []byte(tt.input), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reads := 0
+			read := func(id string) (beads.Bead, error) {
+				reads++
+				if tt.unread {
+					return beads.Bead{}, errors.New("offline")
+				}
+				switch id {
+				case "remote-1":
+					return beads.Bead{ID: id, Labels: []string{"owner:other"}}, nil
+				case "local-1":
+					return beads.Bead{ID: id}, nil
+				default:
+					t.Fatalf("unexpected parent read %q", id)
+					return beads.Bead{}, nil
+				}
+			}
+			if tt.override {
+				read = nil
+			}
+			got, err := bdCreateBatchWithOwner([]string{"create", "--file=issues.md"}, dir, bdBatchMarkdown, "issues.md", "owner:citadel", read)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error=%v, want %s", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer got.cleanup()
+			_, path := bdCreateBatchFile(got.args)
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(dir, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.override {
+				if got.carried || string(data) != tt.input || reads != 0 {
+					t.Fatalf("override: carried=%v reads=%d data=%s", got.carried, reads, data)
+				}
+			} else if !got.carried || !strings.Contains(string(data), tt.want) || (tt.want != "owner:citadel" && strings.Contains(string(data), "owner:citadel")) {
+				t.Fatalf("carried=%v data=%s, want %s", got.carried, data, tt.want)
+			}
+		})
 	}
 }

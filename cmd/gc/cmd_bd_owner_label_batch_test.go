@@ -317,7 +317,7 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 		{"CRLF: a CR-only tail of a label line is no label to bd", "## A\r\n### Labels\r\nowner:jadegate\r\n### Type\r\nbug\r\n", "## A\r\n### Labels\r\nowner:jadegate\r\n### Type\r\nbug\r\n", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok, err := bdMarkdownBatchWithOwner([]byte(tt.in), "owner:citadel")
+			got, ok, err := bdMarkdownBatchWithOwner([]byte(tt.in), "owner:citadel", nil)
 			if err != nil || ok != tt.rewrite {
 				t.Fatalf("rewrite = %v err = %v, want %v", ok, err, tt.rewrite)
 			}
@@ -328,7 +328,7 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 	}
 	// A file with no issue is refused: nothing gc can rewrite the way bd
 	// would accept, and bd creates nothing from it.
-	if got, ok, err := bdMarkdownBatchWithOwner([]byte("just text\n"), "owner:citadel"); err == nil || ok || got != nil {
+	if got, ok, err := bdMarkdownBatchWithOwner([]byte("just text\n"), "owner:citadel", nil); err == nil || ok || got != nil {
 		t.Fatalf("no issue: (%s, %v, %v), want a refusal", got, ok, err)
 	}
 }

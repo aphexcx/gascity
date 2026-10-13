@@ -170,7 +170,7 @@ func bdCreateBatchWithOwner(bdArgs []string, scopeRoot string, form bdBatchCreat
 			return unchanged, err
 		}
 	case bdBatchMarkdown:
-		rewritten, carried, err = bdMarkdownBatchWithOwner(data, owner)
+		rewritten, carried, err = bdMarkdownBatchWithOwner(data, owner, parentRead)
 		if err != nil {
 			return unchanged, err
 		}
@@ -550,9 +550,10 @@ var (
 
 // bdMarkdownBatchWithOwner returns the markdown batch with the owner label in
 // every issue's effective `### Labels` section, and whether every issue
-// carries an owner afterwards (always, once rewritten: a markdown row names no
-// parent, so each row either names its own owner, which is kept, or takes
-// this city's). The rewrite is the one bd's parser reads: an issue is an H2
+// carries an owner afterwards. Dependencies/Deps sections name existing
+// parents; their owners must agree with each other and any authored owner.
+// Unreadable parents refuse the batch; under a database override their rows
+// stay as authored. The rewrite is the one bd's parser reads: an issue is an H2
 // header and everything to the next H2; a section is an H3 header, matched by
 // name case-insensitively; a repeated section REPLACES the earlier one unless
 // its content is blank, which bd ignores — so an issue's effective labels are
@@ -572,7 +573,7 @@ var (
 // changes the section it was in. Text before the first H2 is bd's to ignore
 // and is left alone. A file with no issue is REFUSED: there is nothing gc
 // can rewrite the way bd would accept, and bd creates nothing from it either.
-func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
+func bdMarkdownBatchWithOwner(data []byte, owner string, parentRead func(string) (beads.Bead, error)) ([]byte, bool, error) {
 	lines := strings.Split(string(data), "\n")
 	if strings.HasSuffix(string(data), "\n") {
 		lines = lines[:len(lines)-1]
@@ -592,6 +593,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 	type issue struct {
 		start, end int // [start, end): the H2 line through the line before the next H2
 		sections   []labelsSection
+		parents    []string
 	}
 	var issues []issue
 	for i, line := range read {
@@ -607,14 +609,35 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 	}
 	for k := range issues {
 		it := &issues[k]
-		inLabels := false
+		inLabels, inDeps := false, false
+		var depContent []string
+		finishDeps := func() {
+			content := strings.TrimSpace(strings.Join(depContent, "\n"))
+			if inDeps && content != "" {
+				it.parents = nil // bd replaces the last nonempty Dependencies/Deps section.
+				for _, raw := range bdMarkdownListFields(content) {
+					kind, id, ok := strings.Cut(raw, ":")
+					id = strings.TrimSpace(id)
+					if ok && strings.TrimSpace(kind) == bdDepParentChild && id != "" && !strings.HasPrefix(id, "external:") {
+						it.parents = append(it.parents, id)
+					}
+				}
+			}
+			depContent = nil
+		}
 		for i := it.start + 1; i < it.end; i++ {
 			if m := bdMarkdownSectionRE.FindStringSubmatch(read[i]); m != nil {
-				inLabels = strings.ToLower(strings.TrimSpace(m[1])) == "labels"
+				finishDeps()
+				section := strings.ToLower(strings.TrimSpace(m[1]))
+				inLabels = section == "labels"
+				inDeps = section == "dependencies" || section == "deps"
 				if inLabels {
 					it.sections = append(it.sections, labelsSection{headerAt: i})
 				}
 				continue
+			}
+			if inDeps {
+				depContent = append(depContent, read[i])
 			}
 			if !inLabels || strings.TrimSpace(read[i]) == "" {
 				continue
@@ -627,6 +650,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 				}
 			}
 		}
+		finishDeps()
 	}
 	// effective picks the Labels section bd's parser ends up with: the last
 	// nonempty one; -1 when every one is blank or there is none.
@@ -638,12 +662,34 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 		}
 		return -1
 	}
+	carried := true
 	var out []string
 	for k, it := range issues {
 		if k == 0 {
 			out = append(out, lines[:it.start]...)
 		}
 		target := effective(it)
+		var authored []string
+		if target >= 0 {
+			from := it.sections[target].headerAt + 1
+			to := it.end
+			for i := from; i < to; i++ {
+				if bdMarkdownSectionRE.MatchString(read[i]) {
+					to = i
+					break
+				}
+			}
+			authored = bdMarkdownListFields(strings.Join(read[from:to], "\n"))
+		}
+		label, unresolved, err := bdMarkdownOwnerLabel(authored, it.parents, owner, parentRead)
+		if err != nil {
+			return nil, false, fmt.Errorf("markdown issue %q: %w", read[it.start], err)
+		}
+		if unresolved {
+			carried = false
+			out = append(out, lines[it.start:it.end]...)
+			continue
+		}
 		switch {
 		case target >= 0 && it.sections[target].hasOwner:
 			out = append(out, lines[it.start:it.end]...)
@@ -653,14 +699,14 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 			}
 			at := it.sections[target].headerAt
 			out = append(out, lines[it.start:at+1]...)
-			out = append(out, owner)
+			out = append(out, label)
 			out = append(out, lines[at+1:it.end]...)
 		default:
 			out = append(out, lines[it.start:it.end]...)
 			if strings.TrimSpace(lines[it.end-1]) != "" {
 				out = append(out, "")
 			}
-			out = append(out, "### Labels", owner)
+			out = append(out, "### Labels", label)
 			if k+1 < len(issues) {
 				out = append(out, "")
 			}
@@ -669,5 +715,31 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 	var buf bytes.Buffer
 	buf.WriteString(strings.Join(out, "\n"))
 	buf.WriteString("\n")
-	return buf.Bytes(), true, nil
+	return buf.Bytes(), carried, nil
+}
+
+// bdMarkdownOwnerLabel resolves the lane of one markdown row before publication.
+func bdMarkdownOwnerLabel(labels, parents []string, owner string, parentRead func(string) (beads.Bead, error)) (string, bool, error) {
+	lane := federation.OwnerOf(labels)
+	if len(parents) > 0 && parentRead == nil {
+		return "", lane == "", nil
+	}
+	for _, id := range parents {
+		parent, err := parentRead(id)
+		if err != nil {
+			return "", false, fmt.Errorf("reading parent %q for the owner label: %w", id, err)
+		}
+		parentLane := federation.OwnerOf(parent.Labels)
+		if parentLane == "" {
+			parentLane = federation.OwnerOf([]string{owner})
+		}
+		if lane != "" && lane != parentLane {
+			return "", false, fmt.Errorf("labels and parents name different lanes (owner %q and owner %q)", lane, parentLane)
+		}
+		lane = parentLane
+	}
+	if lane == "" {
+		return owner, false, nil
+	}
+	return "owner:" + lane, false, nil
 }
