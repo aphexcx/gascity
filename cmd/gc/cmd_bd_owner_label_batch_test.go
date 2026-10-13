@@ -456,3 +456,32 @@ func TestBdGraphPlanWithOwner(t *testing.T) {
 		}
 	}
 }
+
+func TestGcBdCreateBatchUsesDirectorySelector(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "args")
+	fakeBdCityTestSetup(t, federatedDemoCityTOML, createFakeBd)
+	city := os.Getenv("GC_CITY_PATH")
+	setCwd(t, city)
+	destination := filepath.Join(city, "other")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string]string{filepath.Join(city, "issues.md"): "## Wrong scope file\n", filepath.Join(destination, "issues.md"): "## Requested file\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("CREATE_OUT", "")
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"create", "-Cother", "-f", "issues.md"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd = %d: %s", code, stderr.String())
+	}
+	got, err := os.ReadFile(capture + ".md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "## Requested file") || strings.Contains(string(got), "Wrong scope") {
+		t.Fatalf("rewrote wrong directory's batch: %s", got)
+	}
+}

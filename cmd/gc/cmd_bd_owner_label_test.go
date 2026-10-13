@@ -825,3 +825,47 @@ func TestGcBdCreateDirectoryWithinOpenedRigKeepsOwner(t *testing.T) {
 		t.Fatalf("bd calls = %q, want %q", calls, want)
 	}
 }
+
+func TestGcBdCreateRelativeDirectoryKeepsCallerDestination(t *testing.T) {
+	for _, selector := range [][]string{{"-Cwork"}, {"-C=work"}, {"-qCwork"}, {"-C", "work"}, {"--directory=work"}, {"--directory", "work"}} {
+		t.Run(strings.Join(selector, " "), func(t *testing.T) {
+			base := t.TempDir()
+			rigDir := filepath.Join(base, "work")
+			if err := os.MkdirAll(rigDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			setCwd(t, base)
+			// Capture bd's effective selector; gc may change its subprocess cwd.
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("GC_RIG", "")
+			var stdout, stderr bytes.Buffer
+			if code := doBd(append([]string{"create", "child", "--parent", "demo-0"}, selector...), &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			found := false
+			for _, call := range calls {
+				if strings.HasPrefix(call, "create ") {
+					found = true
+					got := extractBdDirectoryFlag(strings.Fields(call))
+					if !filepath.IsAbs(got) {
+						t.Fatalf("forwarded relative directory %q after subprocess scope change", got)
+					}
+					want, err := filepath.EvalSymlinks(rigDir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					resolved, err := filepath.EvalSymlinks(got)
+					if err != nil || resolved != want {
+						t.Fatalf("forwarded directory %q, want absolute %q: %v", got, want, err)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("no create in %q", calls)
+			}
+		})
+	}
+}

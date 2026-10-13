@@ -460,6 +460,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	bdArgs, err = absoluteBdDirectoryFlag(bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: resolving directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// A `list` that filters on the wisps tier reaches that tier only with
 	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
 	// molecules. See bd_wisp_tier.go.
@@ -735,9 +741,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// and a create naming one carries nothing (the notice below says so).
 	directoryMatchesScope := false
 	if dir := extractBdDirectoryFlag(bdArgs); dir != "" {
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(target.ScopeRoot, dir)
-		}
 		rig, ok, err := resolveRigForDir(cfg, cityPath, dir)
 		directoryMatchesScope = err == nil && ok && normalizePathForCompare(bdRigScopeTarget(cityPath, rig).ScopeRoot) == normalizePathForCompare(target.ScopeRoot)
 	}
@@ -771,7 +774,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	var carried bool
 	if form, path := bdCreateBatchFile(bdArgs); form != bdBatchNone {
-		rewrite, err := bdCreateBatchWithOwner(bdArgs, target.ScopeRoot, form, path, owner, parentRead)
+		batchDir := target.ScopeRoot
+		if directory := extractBdDirectoryFlag(bdArgs); directory != "" {
+			batchDir = directory
+		}
+		rewrite, err := bdCreateBatchWithOwner(bdArgs, batchDir, form, path, owner, parentRead)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: refusing to create: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1136,11 +1143,17 @@ func extractRigFlag(args []string) (string, []string) {
 // extractBdDirectoryFlag returns the -C / --directory value from bd passthrough
 // args, or "" if not present. The flag is left in args so bd itself still sees it.
 func extractBdDirectoryFlag(args []string) string {
-	value := ""
-	command := ""
+	value, _, _ := bdDirectoryFlag(args)
+	return value
+}
+
+// bdDirectoryFlag returns the effective directory and its original argv slot.
+func bdDirectoryFlag(args []string) (value string, slot int, attached bool) {
+	slot = -1
+	command, verb := "", -1
 	// Cobra removes the verb before pflag parses shorthand clusters.
 	if i, hidden := bdVerbIndexAfterGlobals(args); !hidden && i >= 0 {
-		command = args[i]
+		verb, command = i, args[i]
 		if command == "new" {
 			command = "create"
 		}
@@ -1150,13 +1163,40 @@ func extractBdDirectoryFlag(args []string) string {
 		if name != "-C" && name != "--directory" {
 			return
 		}
-		if inline {
+		switch {
+		case inline:
 			value = v
-		} else if i+1 < len(args) {
-			value = args[i+1]
+		case i+1 < len(args):
+			i++
+			value = args[i]
+		default:
+			return
 		}
+		if verb >= 0 && i >= verb {
+			i++
+		}
+		slot, attached = i, inline
 	})
-	return value
+	return value, slot, attached
+}
+
+// absoluteBdDirectoryFlag anchors the selector before gc changes the child's cwd.
+func absoluteBdDirectoryFlag(args []string) ([]string, error) {
+	value, slot, attached := bdDirectoryFlag(args)
+	if slot < 0 || value == "" || filepath.IsAbs(value) {
+		return args, nil
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]string(nil), args...)
+	if attached {
+		out[slot] = out[slot][:len(out[slot])-len(value)] + absolute
+	} else {
+		out[slot] = absolute
+	}
+	return out, nil
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.
