@@ -114,6 +114,7 @@ go_test(
         "main_test.go",
         "port_resolve_test.go",
         "proxied_scope_test.go",
+        "pull_conflicts_test.go",
         "pull_remote_selection_test.go",
         "pull_test.go",
         "recover_host_test.go",
