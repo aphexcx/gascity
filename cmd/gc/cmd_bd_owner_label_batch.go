@@ -557,19 +557,32 @@ var (
 // name case-insensitively; a repeated section REPLACES the earlier one unless
 // its content is blank, which bd ignores — so an issue's effective labels are
 // its LAST NONEMPTY Labels section, split on commas, spaces and newlines
-// (bdMarkdownListFields; never on tabs). The
-// owner goes as a new line right after that section's header (its other lines
-// untouched); an issue whose Labels sections are all blank gets it in the last
-// of them (they were nothing to bd); an issue without one gets a `### Labels`
-// section appended at the END of its block, after its last section, so no
-// existing line changes the section it was in. Text before the first H2 is
-// bd's to ignore and is left alone. A file with no issue is REFUSED: there is
-// nothing gc can rewrite the way bd would accept, and bd creates nothing
-// from it either.
+// (bdMarkdownListFields; never on tabs). Every line is judged on the bytes
+// bd's scanner hands its parser — bufio.ScanLines drops one trailing CR from
+// each line, so in a CRLF file a bare "### " line is content of the section
+// it sits in, not a header that ends it (gf-d7b finding 1p: gc had read the
+// "\r" as the header's name, closed the Labels section early and injected
+// this city's owner above an authored one bd still read — two owners, a bead
+// claimable by neither city) — while the file's own lines are written back
+// exactly as they were, CR included. The owner goes as a new line right
+// after that section's header (its other lines untouched); an issue whose
+// Labels sections are all blank gets it in the last of them (they were
+// nothing to bd); an issue without one gets a `### Labels` section appended
+// at the END of its block, after its last section, so no existing line
+// changes the section it was in. Text before the first H2 is bd's to ignore
+// and is left alone. A file with no issue is REFUSED: there is nothing gc
+// can rewrite the way bd would accept, and bd creates nothing from it either.
 func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 	lines := strings.Split(string(data), "\n")
 	if strings.HasSuffix(string(data), "\n") {
 		lines = lines[:len(lines)-1]
+	}
+	// read is each line as bd's scanner yields it (bufio.ScanLines: the
+	// end-of-line marker is one optional CR before the LF, and the final
+	// line without an LF is a line too); lines keeps the bytes for the output.
+	read := make([]string, len(lines))
+	for i, line := range lines {
+		read[i] = strings.TrimSuffix(line, "\r")
 	}
 	type labelsSection struct {
 		headerAt int
@@ -581,7 +594,7 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 		sections   []labelsSection
 	}
 	var issues []issue
-	for i, line := range lines {
+	for i, line := range read {
 		if bdMarkdownIssueRE.MatchString(line) {
 			if n := len(issues); n > 0 {
 				issues[n-1].end = i
@@ -596,19 +609,19 @@ func bdMarkdownBatchWithOwner(data []byte, owner string) ([]byte, bool, error) {
 		it := &issues[k]
 		inLabels := false
 		for i := it.start + 1; i < it.end; i++ {
-			if m := bdMarkdownSectionRE.FindStringSubmatch(lines[i]); m != nil {
+			if m := bdMarkdownSectionRE.FindStringSubmatch(read[i]); m != nil {
 				inLabels = strings.ToLower(strings.TrimSpace(m[1])) == "labels"
 				if inLabels {
 					it.sections = append(it.sections, labelsSection{headerAt: i})
 				}
 				continue
 			}
-			if !inLabels || strings.TrimSpace(lines[i]) == "" {
+			if !inLabels || strings.TrimSpace(read[i]) == "" {
 				continue
 			}
 			sec := &it.sections[len(it.sections)-1]
 			sec.nonempty = true
-			for _, l := range bdMarkdownListFields(lines[i]) {
+			for _, l := range bdMarkdownListFields(read[i]) {
 				if federation.HasOwnerLabel([]string{l}) {
 					sec.hasOwner = true
 				}

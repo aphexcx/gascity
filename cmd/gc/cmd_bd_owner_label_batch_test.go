@@ -301,6 +301,20 @@ func TestBdMarkdownBatchWithOwner(t *testing.T) {
 		{"two issues, the second without a section, ends with one", "## A\n### Labels\nx\n## B\ntext\n### Design\nd\n", "## A\n### Labels\nowner:citadel\nx\n## B\ntext\n### Design\nd\n\n### Labels\nowner:citadel\n", true},
 		{"no trailing newline", "## A", "## A\n\n### Labels\nowner:citadel\n", true},
 		{"preamble left alone, h1 is not an issue", "# Title\n## A\n", "# Title\n## A\n\n### Labels\nowner:citadel\n", true},
+		// gf-d7b finding 1p (the Opus read's NIT 1 at cd1ce4316, taken): bd
+		// reads the file through bufio.ScanLines, which drops one trailing CR
+		// from every line, so in a CRLF file a bare "### " line is CONTENT
+		// of the section it sits in (h3Regex needs a name), while gc had kept
+		// the CR and read "### \r" as a header named "\r" that ended the
+		// Labels section — then injected this city's owner above an authored
+		// one bd would still read, and the bead carried TWO owners, claimable
+		// by neither city. gc now judges every line on the bytes bd parses;
+		// the file's own lines are written back untouched, CR included.
+		{"CRLF: a bare '### ' line inside a Labels section is content to bd and the authored owner behind it is kept", "## A\r\n### Labels\r\nfoo\r\n### \r\nowner:jadegate\r\n", "## A\r\n### Labels\r\nfoo\r\n### \r\nowner:jadegate\r\n", true},
+		{"LF: the same bare '### ' line is content for bd and gc alike", "## A\n### Labels\nfoo\n### \nowner:jadegate\n", "## A\n### Labels\nfoo\n### \nowner:jadegate\n", true},
+		{"CRLF: this city's owner goes after the header and the CRLF lines are untouched", "## A\r\n### Labels\r\nfoo\r\n", "## A\r\n### Labels\r\nowner:citadel\nfoo\r\n", true},
+		{"CRLF: an H2 and an H3 are read with the CR dropped as bd's scanner drops it", "## A\r\n### LABELS\r\nowner:boomtown\r\n## B\r\n", "## A\r\n### LABELS\r\nowner:boomtown\r\n## B\r\n\n### Labels\nowner:citadel\n", true},
+		{"CRLF: a CR-only tail of a label line is no label to bd", "## A\r\n### Labels\r\nowner:jadegate\r\n### Type\r\nbug\r\n", "## A\r\n### Labels\r\nowner:jadegate\r\n### Type\r\nbug\r\n", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, ok, err := bdMarkdownBatchWithOwner([]byte(tt.in), "owner:citadel")
