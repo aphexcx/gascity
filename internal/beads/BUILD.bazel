@@ -35,6 +35,7 @@ go_test(
     srcs = [
         "atomic_close_memstore_test.go",
         "bdsql_relocation_internal_test.go",
+        "bdstore_assignment_conditional_test.go",
         "bdstore_batch_test.go",
         "bdstore_conditional_internal_test.go",
         "bdstore_conditional_release_test.go",
@@ -44,6 +45,7 @@ go_test(
         "bdstore_failure_detail_internal_test.go",
         "bdstore_inline_deps_internal_test.go",
         "bdstore_internal_test.go",
+        "bdstore_owner_label_test.go",
         "bdstore_ready_projection_capability_internal_test.go",
         "bdstore_ready_projection_internal_test.go",
         "bdstore_revision_compat_test.go",
@@ -60,6 +62,7 @@ go_test(
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",
+        "caching_store_external_close_test.go",
         "caching_store_graph_ready_test.go",
         "caching_store_internal_test.go",
         "caching_store_observation_test.go",

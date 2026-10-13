@@ -13,6 +13,8 @@ go_library(
         "import_trust.go",
         "liveness.go",
         "mcp.go",
+        "nudge_delivery.go",
+        "nudge_receipt.go",
         "privatedir.go",
         "probe.go",
         "process_control.go",
