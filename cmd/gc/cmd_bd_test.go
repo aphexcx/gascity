@@ -20,6 +20,76 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestResolveBdScopeTargetIgnoresActorValues(t *testing.T) {
+	original := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = original })
+	bdBeadExists = func(_ string, _ *config.City, target execStoreTarget, id string) bool {
+		return target.ScopeKind == "city" && id == "ci-wisp-ilo5c7k" ||
+			target.ScopeKind == "rig" && id == "hw-tdb8s"
+	}
+	for _, args := range [][]string{
+		{"close", "hw-tdb8s", "--actor", "ci-wisp-ilo5c7k"},
+		{"--actor", "ci-wisp-ilo5c7k", "close", "hw-tdb8s"},
+		{"close", "hw-tdb8s", "--actor=ci-wisp-ilo5c7k"},
+		{"close", "hw-tdb8s", "--reason", "ci-wisp-ilo5c7k"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "city", Prefix: "ci"},
+				Rigs:      []config.Rig{{Name: "project", Path: "/city/project", Prefix: "hw"}},
+			}
+			got, err := resolveBdScopeTarget(cfg, "/city", "", args, false, io.Discard)
+			if err != nil || got.ScopeKind != "rig" || got.RigName != "project" {
+				t.Fatalf("scope = %+v, err = %v; want project rig", got, err)
+			}
+		})
+	}
+}
+
+func TestOwnClaimCloseEnv(t *testing.T) {
+	const sessionID = "ci-wisp-ilo5c7k"
+	for _, sessionName := range []string{
+		"houmanoids-www--gc__implementation-worker-1-pool",
+		"implementation-worker-codex-gascity-ci-wisp-ilo5c7k",
+	} {
+		for _, tc := range []struct {
+			name, assignee, currentID, wantActor string
+			args                                 []string
+		}{
+			{"own claim", sessionID, sessionID, sessionID, []string{"close", "hw-tdb8s"}},
+			{"already the actor", sessionName, sessionID, sessionName, []string{"close", "hw-tdb8s"}},
+			{"atomic close", sessionID, sessionID, sessionID, []string{"update", "hw-tdb8s", "--status=closed"}},
+			{"leading globals", sessionID, sessionID, sessionID, []string{"--json", "close", "hw-tdb8s"}},
+			{"another session", "ci-wisp-other", sessionID, sessionName, []string{"close", "hw-tdb8s"}},
+			{"unassigned", "", sessionID, sessionName, []string{"close", "hw-tdb8s"}},
+			{"no session", sessionID, "", sessionName, []string{"close", "hw-tdb8s"}},
+			{"unread target", sessionID, sessionID, sessionName, []string{"close", "hw-unknown"}},
+			{"non-close update", sessionID, sessionID, sessionName, []string{"update", "hw-tdb8s", "--status=open"}},
+			{"explicit actor is preserved", sessionID, sessionID, sessionName, []string{"close", "hw-tdb8s", "--actor", "operator"}},
+			{"leading explicit actor is preserved", sessionID, sessionID, sessionName, []string{"--actor=operator", "close", "hw-tdb8s"}},
+			{"actor-looking reason is not a flag", sessionID, sessionID, sessionID, []string{"close", "hw-tdb8s", "--reason", "--actor=operator"}},
+			{"mixed owners keep refusal", sessionID, sessionID, sessionName, []string{"close", "hw-tdb8s", "hw-other"}},
+			{"shared alias is not an identity", "shared-slot", sessionID, sessionName, []string{"close", "hw-tdb8s"}},
+		} {
+			t.Run(sessionName+"/"+tc.name, func(t *testing.T) {
+				identities := map[string]string{"GC_SESSION_ID": tc.currentID, "GC_SESSION_NAME": "shared-slot", "GC_ALIAS": "shared-slot", "BEADS_ACTOR": "process-actor"}
+				env := []string{"PATH=/bin", "BEADS_ACTOR=old", "BEADS_ACTOR=" + sessionName}
+				targets := map[string]beads.Bead{
+					"hw-tdb8s": {ID: "hw-tdb8s", Assignee: tc.assignee},
+					"hw-other": {ID: "hw-other", Assignee: "ci-wisp-other"},
+				}
+				got := ownClaimCloseEnv(env, tc.args, targets, func(key string) string { return identities[key] })
+				if actor := hookClaimEnvValue(got, "BEADS_ACTOR"); actor != tc.wantActor {
+					t.Fatalf("close actor = %q, want %q", actor, tc.wantActor)
+				}
+				if tc.wantActor == sessionID && strings.Join(got, ",") != "PATH=/bin,BEADS_ACTOR="+sessionID {
+					t.Fatalf("rewritten env = %v; want exactly one canonical actor", got)
+				}
+			})
+		}
+	}
+}
+
 func TestExtractRigFlag(t *testing.T) {
 	tests := []struct {
 		name     string

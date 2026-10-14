@@ -58,6 +58,7 @@ func TestPinnedOutcomeAndFailureClassValues(t *testing.T) {
 // are distinct.
 func TestPinnedVocabularyValues(t *testing.T) {
 	pinned := map[string]string{
+		WorkOutcomeRan:                  "ran",
 		FormulaContractGraphV2:          "graph.v2",
 		ScopeRoleBody:                   "body",
 		ScopeRoleMember:                 "member",

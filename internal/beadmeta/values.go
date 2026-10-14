@@ -70,11 +70,12 @@ const (
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
 // close disposition (ADR-0009). Deliberately disjoint from the control-plane
 // OutcomeMetadataKey vocabulary above so the two never collide on one key. Only
-// WorkOutcomeShipped carries an artifact (a commit on the work branch); the
-// "shipped requires a reachable commit" rule is owned by the close gate in
-// cmd/gc, not declared here.
+// WorkOutcomeShipped carries a commit or absolute artifact path. WorkOutcomeRan
+// records an operational run with no deliverable. Validation belongs to
+// internal/workrecord, not this vocabulary.
 const (
 	WorkOutcomeShipped   = "shipped"
+	WorkOutcomeRan       = "ran"
 	WorkOutcomeNoOp      = "no-op"
 	WorkOutcomeBlocked   = "blocked"
 	WorkOutcomeAbandoned = "abandoned"

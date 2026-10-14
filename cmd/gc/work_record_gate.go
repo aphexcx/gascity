@@ -67,7 +67,7 @@ const workRecordEnforceEnvVar = workrecord.EnforceEnvVar
 // that violate the work-record contract, rather than only warning.
 func workRecordEnforceEnabled() bool { return workrecord.EnforceEnabled() }
 
-// validWorkOutcome reports whether v is one of the four typed work-record close
+// validWorkOutcome reports whether v is a typed work-record close
 // dispositions.
 func validWorkOutcome(v string) bool { return workrecord.ValidOutcome(v) }
 
@@ -182,6 +182,7 @@ func cityRigsLoader(cityPath string) func() []config.Rig {
 // worker formulas use to stamp metadata and close in one call). Ambiguous or
 // ID-less invocations report not-a-close so the gate stays out of the way.
 func workRecordCloseTargets(bdArgs []string) ([]string, bool) {
+	bdArgs = bdCommandFirstArgs(bdArgs)
 	if len(bdArgs) == 0 {
 		return nil, false
 	}
@@ -288,6 +289,7 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 // block work on a config gap. The sibling clauses do not degrade — an outcome-
 // less bead is refused whether or not a repository was found.
 func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, dirs workRecordRepoDirs, enforce bool, stderr io.Writer) (block bool) {
+	bdArgs = bdCommandFirstArgs(bdArgs)
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
