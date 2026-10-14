@@ -1066,7 +1066,18 @@ func bdCommandFirstArgs(args []string) []string {
 	}
 	out := make([]string, 0, len(args))
 	out = append(out, args[i])
-	out = append(out, args[:i]...)
+	globals := args[:i]
+	values := bdflags.GlobalValueFlags()
+	bdCommandFlagTokens(globals, "", func(slot int, name, value string, inline bool) {
+		if inline {
+			out = append(out, name+"="+value)
+			return
+		}
+		out = append(out, name)
+		if values[name] && slot+1 < len(globals) {
+			out = append(out, globals[slot+1])
+		}
+	})
 	return append(out, args[i+1:]...)
 }
 
@@ -1323,6 +1334,23 @@ func absoluteBdDirectoryFlag(args []string) ([]string, error) {
 // stderr receives a best-effort warning when a set-but-unresolvable GC_RIG is
 // discarded (see the GC_RIG block below); pass io.Discard when the caller does
 // not care.
+// bdScopeRoutingArgs excludes identity and close-reason values from store
+// selection while retaining bead selectors such as --id and --parent.
+func bdScopeRoutingArgs(args []string) []string {
+	candidates := slices.Clone(args)
+	verb, _ := bdflags.SplitGlobalFlags(args)
+	bdCommandFlagTokens(args, verb, func(slot int, name, _ string, inline bool) {
+		if name != "--actor" && name != "--reason" && (verb != "close" || name != "-r") {
+			return
+		}
+		candidates[slot] = ""
+		if !inline && slot+1 < len(candidates) {
+			candidates[slot+1] = ""
+		}
+	})
+	return candidates
+}
+
 func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool, stderr io.Writer) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
@@ -1348,10 +1376,9 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	cityPrefix := config.EffectiveHQPrefix(cfg)
-	verb, tail := bdflags.SplitGlobalFlags(args)
-	positionals := bdflags.Positionals(verb, tail)
+	candidates := bdScopeRoutingArgs(args)
 	if cityPrefix != "" {
-		for _, arg := range positionals {
+		for _, arg := range candidates {
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
@@ -1365,7 +1392,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// actually exist in the resolved rig store. This keeps hyphenated flag
 	// values and other non-ID args from silently retargeting the command.
 	// Unbound rigs are skipped so we don't alias them to the city store.
-	for _, arg := range positionals {
+	for _, arg := range candidates {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}

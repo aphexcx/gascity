@@ -32,6 +32,10 @@ func TestResolveBdScopeTargetIgnoresActorValues(t *testing.T) {
 		{"--actor", "ci-wisp-ilo5c7k", "close", "hw-tdb8s"},
 		{"close", "hw-tdb8s", "--actor=ci-wisp-ilo5c7k"},
 		{"close", "hw-tdb8s", "--reason", "ci-wisp-ilo5c7k"},
+		{"show", "--id", "hw-tdb8s"},
+		{"list", "--parent", "hw-tdb8s", "--actor", "ci-wisp-ilo5c7k"},
+		{"create", "child", "--parent", "hw-tdb8s"},
+		{"create", "child", "-p", "hw-tdb8s"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			cfg := &config.City{
@@ -60,6 +64,9 @@ func TestOwnClaimCloseEnv(t *testing.T) {
 			{"already the actor", sessionName, sessionID, sessionName, []string{"close", "hw-tdb8s"}},
 			{"atomic close", sessionID, sessionID, sessionID, []string{"update", "hw-tdb8s", "--status=closed"}},
 			{"leading globals", sessionID, sessionID, sessionID, []string{"--json", "close", "hw-tdb8s"}},
+			{"leading attached directory", sessionID, sessionID, sessionID, []string{"-C/city/project", "close", "hw-tdb8s"}},
+			{"leading short flag cluster", sessionID, sessionID, sessionID, []string{"-qv", "close", "hw-tdb8s"}},
+			{"leading cluster with directory", sessionID, sessionID, sessionID, []string{"-qC/city/project", "close", "hw-tdb8s"}},
 			{"another session", "ci-wisp-other", sessionID, sessionName, []string{"close", "hw-tdb8s"}},
 			{"unassigned", "", sessionID, sessionName, []string{"close", "hw-tdb8s"}},
 			{"no session", sessionID, "", sessionName, []string{"close", "hw-tdb8s"}},
