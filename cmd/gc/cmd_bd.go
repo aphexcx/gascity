@@ -1061,29 +1061,46 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	return ids, true, false
 }
 
-// bdCommandFirstArgs projects leading global flags after the command so the
-// close guards see the same invocation regardless of where --actor is placed.
+// bdCommandFirstArgs projects leading global flags after the command and expands
+// recognized shorthand so the close guards inspect the same flags as bd.
 // The subprocess still receives the caller's original argument order.
 func bdCommandFirstArgs(args []string) []string {
 	i, hidden := bdVerbIndexAfterGlobals(args)
-	if hidden || i <= 0 {
+	if hidden || i < 0 {
 		return args
 	}
-	out := make([]string, 0, len(args))
-	out = append(out, args[i])
-	globals := args[:i]
-	values := bdflags.GlobalValueFlags()
-	bdCommandFlagTokens(globals, "", func(slot int, name, value string, inline bool) {
-		if inline {
-			out = append(out, name+"="+value)
+	values, bools := bdSubcmdValueFlags(args[i]), bdSubcmdBoolFlags(args[i])
+	if values == nil {
+		values = bdflags.GlobalValueFlags()
+	}
+	if bools == nil {
+		bools = bdflags.GlobalBoolFlags()
+	}
+	expanded := make([][]string, len(args))
+	unknown := make([]bool, len(args))
+	bdCommandFlagTokens(args, args[i], func(slot int, name, value string, inline bool) {
+		if !values[name] && !bools[name] {
+			unknown[slot] = true
 			return
 		}
-		out = append(out, name)
-		if values[name] && slot+1 < len(globals) {
-			out = append(out, globals[slot+1])
+		if inline {
+			name += "=" + value
 		}
+		expanded[slot] = append(expanded[slot], name)
 	})
-	return append(out, args[i+1:]...)
+	out := make([]string, 0, len(args))
+	out = append(out, args[i])
+	for slot, arg := range args {
+		if slot == i {
+			continue
+		}
+		if len(expanded[slot]) > 0 && !unknown[slot] {
+			out = append(out, expanded[slot]...)
+		} else {
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 // ownClaimCloseEnv aligns a close with the durable identity recorded by claim.
