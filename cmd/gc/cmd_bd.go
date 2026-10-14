@@ -982,9 +982,8 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
-// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
-// argv to a single pre-validated id with no flags, so its flag sets are empty
-// by design and the lone id is scanned as positional.
+// heartbeat has no command-specific flag manifest; the native verb accepts
+// global flags, including leading flags preserved by rewriteBdHeartbeatArgs.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
@@ -1008,6 +1007,12 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
 	// not in either set trigger ambiguous=true.
 	boolFlags := bdSubcmdBoolFlags(sub)
+	if valueFlags == nil {
+		valueFlags = bdflags.GlobalValueFlags()
+	}
+	if boolFlags == nil {
+		boolFlags = bdflags.GlobalBoolFlags()
+	}
 
 	positional := false // true after "--"
 	for i := 1; i < len(args); i++ {

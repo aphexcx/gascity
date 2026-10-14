@@ -2611,6 +2611,16 @@ func TestBdMutationWriteIDs(t *testing.T) {
 	}{
 		// --- Basic extraction ---
 		{
+			name: "leading json on native heartbeat",
+			args: []string{"--json", "heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
+			name: "leading actor on native heartbeat",
+			args: []string{"--actor", "ci-wisp-worker", "heartbeat", "gcy-dv7"},
+			want: result{ids: []string{"gcy-dv7"}, ok: true},
+		},
+		{
 			name: "single id, no flags",
 			args: []string{"close", "gcy-dv7"},
 			want: result{ids: []string{"gcy-dv7"}, ok: true},
