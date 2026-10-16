@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
@@ -20,7 +21,7 @@ import (
 // pre_start prepared, while preserving work already assigned to this session.
 // Its last claim also identifies a shared continuation workspace until release.
 // The boolean reports skipped candidates for the final drain's diagnostics.
-func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) ([]beads.Bead, bool, error) {
+func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) ([]beads.Bead, bool, error) {
 	if hookClaimEnvValue(opts.Env, "GC_WORKTREE_CLAIM_GUARD") != "1" {
 		return candidates, false, nil
 	}
@@ -47,11 +48,28 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 			return nil, false, fmt.Errorf("reading session claim: %w", err)
 		}
 	}
-	matches := hookWorkspaceBranchBeads(branch, opts.WorkspaceConfig)
 	owners := []string{trigger, last}
 	for _, candidate := range candidates {
 		owners = append(owners, candidate.ID)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	// A root shared by several steps, or an ID repeated in the branch, needs
+	// only one read per store leg's candidate set.
+	type readResult struct {
+		bead beads.Bead
+		err  error
+	}
+	reads := make(map[string]readResult)
+	readBead := func(id string) (beads.Bead, error) {
+		if result, ok := reads[id]; ok {
+			return result.bead, result.err
+		}
+		bead, err := hookWorkspaceReadBead(ctx, dir, opts, ops, id)
+		reads[id] = readResult{bead, err}
+		return bead, err
+	}
+	matches := hookWorkspaceBranchBeads(branch, opts.WorkspaceConfig)
 	for _, id := range owners {
 		if id == "" {
 			continue
@@ -76,6 +94,16 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 		if match.end <= end {
 			continue
 		}
+		// Prefix syntax is only a hint: reusable branches such as gc-worker
+		// must not bind to fictitious beads. Closed real beads still bind.
+		// Only verified longer IDs suppress nested shorter matches.
+		if !slices.Contains(owners, match.id) {
+			if _, err := readBead(match.id); errors.Is(err, beads.ErrNotFound) {
+				continue
+			} else if err != nil {
+				return nil, false, fmt.Errorf("verifying workspace owner %s: %w", match.id, err)
+			}
+		}
 		if bound != "" && bound != match.id {
 			return nil, false, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
 		}
@@ -83,9 +111,27 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 	}
 	before := len(candidates)
 	if bound != "" {
-		candidates = slices.DeleteFunc(candidates, func(b beads.Bead) bool {
-			return b.ID != bound && !hookClaimHasIdentity(b.Assignee, opts.IdentityCandidates)
-		})
+		kept := make([]beads.Bead, 0, len(candidates))
+		for _, b := range candidates {
+			if b.ID == bound || hookClaimHasIdentity(b.Assignee, opts.IdentityCandidates) {
+				kept = append(kept, b)
+				continue
+			}
+			// Drain steps intentionally run in their source member's worktree.
+			// Use the same durable root relationship as resolveDrainSourceWorkDir;
+			// unrelated steps remain excluded even when offered first.
+			root := b
+			if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != b.ID {
+				root, err = readBead(rootID)
+				if err != nil {
+					return nil, false, fmt.Errorf("reading workspace root %s for %s: %w", rootID, b.ID, err)
+				}
+			}
+			if strings.TrimSpace(root.Metadata[beadmeta.DrainMemberIDMetadataKey]) == bound {
+				kept = append(kept, b)
+			}
+		}
+		candidates = kept
 	}
 	skipped := before - len(candidates)
 	if skipped > 0 {
@@ -94,14 +140,38 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 	return candidates, skipped > 0, nil
 }
 
+// hookWorkspaceReadBead resolves ownership through the claim's existing store
+// routes. A closed owner can live outside the leg currently offering work.
+// Only an authoritative not-found permits trying another leg or staying unbound.
+func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOptions, ops hookClaimOps, id string) (beads.Bead, error) {
+	read := ops.ReadWorkMeta
+	if read == nil {
+		read = hookReadClaimedBeadWithBdStore
+	}
+	bead, err := read(ctx, dir, opts.Env, id, opts.Assignee)
+	if !errors.Is(err, beads.ErrNotFound) {
+		return bead, err
+	}
+	current := hookStore{dir: dir, env: opts.Env}
+	for _, leg := range ops.WorkLegs {
+		if sameHookStore(leg, current) || (len(leg.env) == 0 && strings.TrimSpace(leg.dir) == strings.TrimSpace(dir)) {
+			continue
+		}
+		bead, legErr := read(ctx, leg.dir, leg.env, id, opts.Assignee)
+		if !errors.Is(legErr, beads.ErrNotFound) {
+			return bead, legErr
+		}
+	}
+	return beads.Bead{}, err
+}
+
 type hookWorkspaceBeadMatch struct {
 	id         string
 	start, end int
 }
 
-// hookWorkspaceBranchBeads recognizes configured bead IDs without depending on
-// an open-work query or a previous session's receipt. A replacement idle session
-// can inherit an attached branch after its original bead has closed.
+// hookWorkspaceBranchBeads extracts possible configured bead IDs. The caller
+// verifies IDs absent from its trigger, receipt and candidates against the store.
 func hookWorkspaceBranchBeads(branch string, cfg *config.City) []hookWorkspaceBeadMatch {
 	if cfg == nil {
 		return nil
@@ -114,20 +184,29 @@ func hookWorkspaceBranchBeads(branch string, cfg *config.City) []hookWorkspaceBe
 	if len(prefixes) == 0 {
 		return nil
 	}
-	// Prefer a complete longer prefix over a shorter prefix nested inside it.
-	slices.SortFunc(prefixes, func(a, b string) int { return len(b) - len(a) })
-	for i := range prefixes {
-		prefixes[i] = regexp.QuoteMeta(prefixes[i])
-	}
-	pattern := regexp.MustCompile(`(^|[^[:alnum:].])((?:` + strings.Join(prefixes, "|") + `)-[[:alnum:]]{1,12}(?:\.[[:alnum:]_-]+)*)`)
 	var matches []hookWorkspaceBeadMatch
-	for _, match := range pattern.FindAllStringSubmatchIndex(branch, -1) {
-		end := match[5]
-		// A truncated base or hierarchical child is not a complete bead ID.
-		if end < len(branch) && strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.", rune(branch[end])) {
-			continue
+	// Scan every token boundary: a nonexistent longer ID must not hide a real
+	// nested owner or a dotted child followed by a branch-name suffix.
+	// Wisps have their own base-ID form in the same store.
+	const tokenChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789."
+	for _, prefix := range prefixes {
+		for _, kind := range []string{"", "-wisp"} {
+			pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(prefix+kind) + `-[[:alnum:]]{1,12}(?:\.[[:alnum:]_-]+)*$`)
+			for start := range len(branch) {
+				if start > 0 && strings.ContainsRune(tokenChars, rune(branch[start-1])) {
+					continue
+				}
+				for end := start + 1; end <= len(branch); end++ {
+					// A truncated base or hierarchical child is not a complete bead ID.
+					if end < len(branch) && strings.ContainsRune(tokenChars, rune(branch[end])) {
+						continue
+					}
+					if pattern.MatchString(branch[start:end]) {
+						matches = append(matches, hookWorkspaceBeadMatch{id: branch[start:end], start: start, end: end})
+					}
+				}
+			}
 		}
-		matches = append(matches, hookWorkspaceBeadMatch{id: branch[match[4]:end], start: match[4], end: end})
 	}
 	return matches
 }

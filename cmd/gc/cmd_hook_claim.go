@@ -498,7 +498,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
-	candidates, workspaceBound, err := filterHookWorkspaceCandidates(candidates, *opts, *ops, stderr)
+	candidates, workspaceBound, err := filterHookWorkspaceCandidates(candidates, dir, *opts, *ops, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workspace binding: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
@@ -2470,8 +2470,8 @@ func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, b
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
 }
 
-func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
-	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+func hookReadClaimedBeadWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
+	return hookClaimBdStoreContext(ctx, dir, env, assignee).Get(beadID)
 }
 
 // hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It

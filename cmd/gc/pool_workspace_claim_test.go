@@ -131,6 +131,14 @@ func TestPoolWorkspacePinnedSiblingDoesNotStallSecondStart(t *testing.T) {
 
 func claimPreparedPoolStart(t *testing.T, f *deferredSurvivorFixture, call runtime.Call) {
 	t.Helper()
+	// Materialize the pre_start contract using real linked worktrees. The
+	// runtime is fake, but Git itself enforces exclusive branch ownership.
+	mustGit(t, f.path, "worktree", "add", "-b", call.Config.Env["GC_TRIGGER_BEAD_ID"], call.Config.WorkDir)
+	claimPoolStart(t, f, call)
+}
+
+func claimPoolStart(t *testing.T, f *deferredSurvivorFixture, call runtime.Call) {
+	t.Helper()
 	trigger := call.Config.Env["GC_TRIGGER_BEAD_ID"]
 	if trigger == "" || call.Config.Env["GC_WORKTREE_BEAD_ID"] != trigger {
 		t.Fatalf("startup workspace binding does not match trigger %q", trigger)
@@ -161,9 +169,6 @@ func claimPreparedPoolStart(t *testing.T, f *deferredSurvivorFixture, call runti
 	}
 	spy := &stampMetaSpy{}
 	ops := poolClaimOps(string(data), map[string]string{}, trigger, spy)
-	// Materialize the pre_start contract using real linked worktrees. The
-	// runtime is fake, but Git itself enforces exclusive branch ownership.
-	mustGit(t, f.path, "worktree", "add", "-b", trigger, call.Config.WorkDir)
 	ops.CurrentClaim = sessionFrontDoor(f.store).CurrentClaimBeadID
 	ops.DrainPending = func(string) (bool, error) { return false, nil }
 	ops.Claim = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
@@ -185,7 +190,7 @@ func claimPreparedPoolStart(t *testing.T, f *deferredSurvivorFixture, call runti
 		return f.store.Get(id)
 	}
 	ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) {}
-	opts := hookClaimOptions{Assignee: call.Config.Env["GC_SESSION_ID"], SessionID: call.Config.Env["GC_SESSION_ID"], RouteTargets: []string{"helper"}, JSON: true}
+	opts := hookClaimOptions{Assignee: call.Config.Env["GC_SESSION_ID"], SessionID: call.Config.Env["GC_SESSION_ID"], RouteTargets: []string{"helper"}, WorkspaceConfig: f.cfg, JSON: true}
 	for key, value := range call.Config.Env {
 		opts.Env = append(opts.Env, key+"="+value)
 	}
@@ -201,6 +206,38 @@ func claimPreparedPoolStart(t *testing.T, f *deferredSurvivorFixture, call runti
 		t.Fatalf("workspace for %s claimed %s", trigger, result.BeadID)
 	}
 	t.Logf("session=%s dir=%s pre_start_trigger=%s claimed=%s", opts.Assignee, call.Config.WorkDir, trigger, result.BeadID)
+}
+
+func TestPoolWorkspaceDrainLaunchClaimsSourceStep(t *testing.T) {
+	f := newDeferredSurvivorFixture(t)
+	f.cfg.Workspace.Prefix = "gc"
+	hookClaimInitRepo(t, f.path, "main")
+	f.cfg.Agents[0].WorkDir = ".worktrees/lane-{{.AgentBase}}"
+	f.cfg.Agents[0].PreStart = []string{"prepare-worktree"}
+	sourceDir := filepath.Join(f.path, ".worktrees", "source")
+	source := f.create(f.store, beads.Bead{Title: "source", Type: "task", Metadata: map[string]string{beadmeta.LegacyWorkDirMetadataKey: sourceDir}})
+	mustGit(t, f.path, "worktree", "add", "-b", source.ID, sourceDir)
+	root := f.create(f.store, beads.Bead{Title: "drain workflow", Type: "task", Metadata: map[string]string{beadmeta.DrainMemberIDMetadataKey: source.ID}})
+	step := f.work(f.store, "drain-step", "helper", "", false)
+	if err := f.store.SetMetadata(step.ID, beadmeta.RootBeadIDMetadataKey, root.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.tick()
+	f.work(f.store, "unrelated", "helper", "", false)
+	starts := 0
+	for _, call := range f.sp.SnapshotCalls() {
+		if call.Method != "Start" {
+			continue
+		}
+		starts++
+		if call.Config.WorkDir != sourceDir || call.Config.Env["GC_WORKTREE_CLAIM_GUARD"] != "1" {
+			t.Fatalf("drain launch: dir=%s env=%v", call.Config.WorkDir, call.Config.Env)
+		}
+		claimPoolStart(t, f, call)
+	}
+	if starts != 1 {
+		t.Fatalf("starts=%d, want 1\n%s", starts, f.stderr.String())
+	}
 }
 
 func TestHookClaimPreparedWorkspaceDoesNotFallThrough(t *testing.T) {
@@ -292,7 +329,7 @@ func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 					return tc.last, nil
 				},
 			}
-			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: tc.offered, Assignee: tc.assignee}}, opts, ops, io.Discard)
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: tc.offered, Assignee: tc.assignee}}, "/rig", opts, ops, io.Discard)
 			if (err != nil) != tc.failed {
 				t.Fatalf("error=%v want failed=%v", err, tc.failed)
 			}
@@ -340,12 +377,20 @@ func TestHookWorkspaceReplacementWithoutReceipt(t *testing.T) {
 			ops := hookClaimOps{
 				WorkspaceBranch: func(string) (string, error) { return tc.branch, nil },
 				CurrentClaim:    func(string) (string, error) { return "", nil },
+				ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+					for _, known := range []string{"work-1", "work-1.2", "work-2", "work-123456789abc", "hq-abc", "fleet-work-abc", "fleet-work-2", "hq-abc.review-loop"} {
+						if id == known {
+							return beads.Bead{ID: id, Status: "closed"}, nil
+						}
+					}
+					return beads.Bead{}, beads.ErrNotFound
+				},
 			}
 			offered := tc.offered
 			if offered == "" {
 				offered = "work-2"
 			}
-			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: offered}}, opts, ops, io.Discard)
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: offered}}, "/rig", opts, ops, io.Discard)
 			if (err != nil) != tc.failed {
 				t.Fatalf("error=%v want failed=%v", err, tc.failed)
 			}
@@ -353,6 +398,135 @@ func TestHookWorkspaceReplacementWithoutReceipt(t *testing.T) {
 				t.Fatalf("candidates=%v want allow=%v", got, tc.allow)
 			}
 		})
+	}
+}
+
+func TestHookWorkspaceInferredOwnerRequiresProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch, owner, status, action, reason string
+		readError                                   error
+		otherLeg                                    bool
+	}{
+		{name: "reusable agent branch", branch: "gc-worker", action: "work", reason: "claimed"},
+		{name: "ordinary branch", branch: "gc-hotfix", action: "work", reason: "claimed"},
+		{name: "closed bead", branch: "gc-old", status: "closed", action: "drain", reason: "workspace_bound"},
+		{name: "open bead", branch: "gc-old", status: "open", action: "drain", reason: "workspace_bound"},
+		{name: "closed bead in another store", branch: "gc-old", status: "closed", otherLeg: true, action: "drain", reason: "workspace_bound"},
+		{name: "absent longer prefix", branch: "fleet-gc-old", owner: "gc-old", status: "closed", action: "drain", reason: "workspace_bound"},
+		{name: "overlapping same prefix", branch: "gc-gc-old", owner: "gc-old", status: "closed", action: "drain", reason: "workspace_bound"},
+		{name: "closed wisp", branch: "gc-wisp-abc", status: "closed", action: "drain", reason: "workspace_bound"},
+		{name: "closed child with branch suffix", branch: "task/gc-old.review-fix", owner: "gc-old.review", status: "closed", action: "drain", reason: "workspace_bound"},
+		{name: "lookup error", branch: "gc-worker", readError: errors.New("store unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := poolClaimOps(`[{"id":"gc-next","status":"open","metadata":{"gc.routed_to":"worker"}}]`, map[string]string{}, tc.branch, &stampMetaSpy{})
+			ops.WorkspaceBranch = func(string) (string, error) { return tc.branch, nil }
+			ops.CurrentClaim = func(string) (string, error) { return "", nil }
+			ops.DrainPending = func(string) (bool, error) { return false, nil }
+			ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) {}
+			baseRead := ops.ReadWorkMeta
+			owner := tc.owner
+			if owner == "" {
+				owner = tc.branch
+			}
+			reads, drained := 0, false
+			ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, error) {
+				if id == "gc-next" {
+					return baseRead(ctx, dir, env, id, assignee)
+				}
+				reads++
+				if tc.readError != nil {
+					return beads.Bead{}, tc.readError
+				}
+				if id != owner || tc.status == "" || tc.otherLeg && dir != "/other" {
+					return beads.Bead{}, beads.ErrNotFound
+				}
+				return beads.Bead{ID: id, Status: tc.status}, nil
+			}
+			ops.WorkLegs = []hookStore{{dir: "/rig"}, {dir: "/other"}}
+			ops.DrainAck = func(io.Writer) error { drained = true; return nil }
+			opts := poolClaimOpts()
+			opts.WorkspaceConfig = &config.City{Rigs: []config.Rig{{Name: "fleet", Prefix: "fleet-gc"}}}
+			opts.WorkspaceConfig.Workspace.Prefix = "gc"
+			opts.Env = append(opts.Env, "GC_WORKTREE_CLAIM_GUARD=1")
+			opts.DrainAck = true
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
+			if tc.readError != nil {
+				if code != 1 || drained || !strings.Contains(stderr.String(), tc.readError.Error()) {
+					t.Fatalf("code=%d drained=%v stderr=%s", code, drained, stderr.String())
+				}
+				return
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if code != 0 || result.Action != tc.action || result.Reason != tc.reason || reads == 0 {
+				t.Fatalf("code=%d result=%+v reads=%d stderr=%s", code, result, reads, stderr.String())
+			}
+		})
+	}
+}
+
+func TestHookWorkspaceDrainMemberRelationship(t *testing.T) {
+	for _, tc := range []struct {
+		name, rootID, member string
+		readError            error
+		allow                bool
+	}{
+		{name: "shared source", rootID: "root", member: "source", allow: true},
+		{name: "different source", rootID: "root", member: "other"},
+		{name: "ordinary workflow", rootID: "root"},
+		{name: "drain root", rootID: "step", member: "source", allow: true},
+		{name: "missing root", rootID: "root", readError: beads.ErrNotFound},
+		{name: "unreadable root", rootID: "root", readError: errors.New("store unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := hookClaimOptions{Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=source"}}
+			ops := hookClaimOps{
+				WorkspaceBranch: func(string) (string, error) { return "source", nil },
+				ReadWorkMeta: func(_ context.Context, dir string, _ []string, id, _ string) (beads.Bead, error) {
+					if dir != "/rig" || id != tc.rootID {
+						t.Fatalf("read dir=%s id=%s", dir, id)
+					}
+					return beads.Bead{ID: id, Metadata: map[string]string{beadmeta.DrainMemberIDMetadataKey: tc.member}}, tc.readError
+				},
+			}
+			candidate := beads.Bead{ID: "step", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: tc.rootID}}
+			if tc.rootID == candidate.ID {
+				candidate.Metadata[beadmeta.DrainMemberIDMetadataKey] = tc.member
+			}
+			got, skipped, err := filterHookWorkspaceCandidates([]beads.Bead{candidate}, "/rig", opts, ops, io.Discard)
+			if tc.readError != nil {
+				if !errors.Is(err, tc.readError) || len(got) != 0 || skipped {
+					t.Fatalf("got=%v skipped=%v err=%v", got, skipped, err)
+				}
+				return
+			}
+			if err != nil || (len(got) == 1) != tc.allow || skipped == tc.allow {
+				t.Fatalf("got=%v skipped=%v err=%v allow=%v", got, skipped, err, tc.allow)
+			}
+		})
+	}
+}
+
+func TestHookWorkspaceReadHonorsCancellation(t *testing.T) {
+	original := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = original })
+	hookClaimCommandRunnerWithEnvContext = func(ctx context.Context, _ map[string]string) beads.CommandRunner {
+		return func(string, string, ...string) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return []byte(`[{"id":"work-1","status":"closed"}]`), nil
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := hookReadClaimedBeadWithBdStore(ctx, "/rig", nil, "work-1", "worker")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("read error=%v, want cancellation", err)
 	}
 }
 
@@ -418,7 +592,7 @@ func TestHookWorkspaceExplicitAgentWithoutSessionReceipt(t *testing.T) {
 				WorkspaceBranch: func(string) (string, error) { return tc.branch, nil },
 				CurrentClaim:    func(string) (string, error) { return "", errors.New("missing session ID") },
 			}
-			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: "work-2"}}, opts, ops, io.Discard)
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: "work-2"}}, "/rig", opts, ops, io.Discard)
 			if err != nil || len(got) != tc.want {
 				t.Fatalf("candidates=%v err=%v want=%d", got, err, tc.want)
 			}
