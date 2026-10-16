@@ -726,6 +726,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// work but every eligible claim mutation errored, so the shared drain below can
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
+	workspaceBound := false
 	for len(remaining) > 0 {
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
@@ -769,6 +770,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if res.claimsErrored {
 			claimsErrored = true
 		}
+		workspaceBound = workspaceBound || res.workspaceBound
 		// This store reported ready work but the claim acquired nothing — every
 		// claimable row was lost to another claimant, none matched this session, or
 		// every claimable row's claim mutation errored and was skipped. Drop it and
@@ -777,7 +779,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
 	}
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workspaceBound, workDir, stdout, stderr)
 }
 
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures

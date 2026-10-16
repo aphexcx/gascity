@@ -76,7 +76,7 @@ func TestDivergenceIsRecordedOnlyAfterTheDrainResult(t *testing.T) {
 	opts := divergenceOptions(demandSpawnEnv()...)
 
 	code := writeHookClaimNoWork(opts, hookClaimOps{DrainAck: func(io.Writer) error { return nil }},
-		false, "/rig", &stdout, &stderr)
+		false, false, "/rig", &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("drain exit = %d, want 0", code)
@@ -100,7 +100,7 @@ func TestDivergenceIsNotRecordedForAClaimsErroredDrain(t *testing.T) {
 	opts := divergenceOptions(demandSpawnEnv()...)
 
 	writeHookClaimNoWork(opts, hookClaimOps{DrainAck: func(io.Writer) error { return nil }},
-		true, "/rig", &stdout, &stderr)
+		true, false, "/rig", &stdout, &stderr)
 
 	if capture.calls != 0 {
 		t.Fatalf("divergence emitter calls = %d, want 0 for a claims_errored drain", capture.calls)

@@ -42,6 +42,7 @@ const (
 // row is already draining.
 const (
 	hookClaimReasonNoWork                     = "no_work"
+	hookClaimReasonWorkspaceBound             = "workspace_bound"
 	hookClaimReasonClaimsErrored              = "claims_errored"
 	hookClaimReasonStaleSession               = "stale_session"
 	hookClaimReasonNonTurnContext             = "non_turn_context"
@@ -376,6 +377,9 @@ type hookClaimResult struct {
 	// see-but-cannot-claim shape — is not laundered into an idle signal.
 	// Meaningless on a terminal result.
 	claimsErrored bool
+	// workspaceBound reports candidates skipped by the workspace guard. It is
+	// carried across stores so that drain is not diagnosed as an empty queue.
+	workspaceBound bool
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
@@ -383,7 +387,7 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if res.terminal {
 		return res.code
 	}
-	return writeHookClaimNoWork(opts, ops, res.claimsErrored, dir, stdout, stderr)
+	return writeHookClaimNoWork(opts, ops, res.claimsErrored, res.workspaceBound, dir, stdout, stderr)
 }
 
 // tryHookClaim runs the work query for one store (dir, via ops.Runner) and
@@ -494,13 +498,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
-	candidates, err = filterHookWorkspaceCandidates(candidates, *opts, *ops)
+	candidates, workspaceBound, err := filterHookWorkspaceCandidates(candidates, *opts, *ops, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workspace binding: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	if len(candidates) == 0 {
-		return hookClaimResult{}
+		return hookClaimResult{workspaceBound: workspaceBound}
 	}
 
 	// The cross-city claim fence runs HERE, once, on the whole candidate set:
@@ -511,7 +515,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// session takes the remaining candidates or the shared no-work drain.
 	candidates = fenceCrossCityHookCandidates(candidates, *opts, "candidate", stderr)
 	if len(candidates) == 0 {
-		return hookClaimResult{}
+		return hookClaimResult{workspaceBound: workspaceBound}
 	}
 
 	for {
@@ -577,6 +581,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if !eligibleResult.terminal && readyResult.claimsErrored {
 		eligibleResult.claimsErrored = true
 	}
+	eligibleResult.workspaceBound = workspaceBound
 	return eligibleResult
 }
 
@@ -1594,6 +1599,7 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
 // nothing. The reason is "no_work" for a genuinely idle store; it is
+// "workspace_bound" when the workspace guard skipped candidates, or
 // "claims_errored" when claimsErrored is set — ready work existed but every
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
@@ -1602,8 +1608,11 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // used ONLY after the drain has been written. See recordDemandClaimDivergence:
 // a demand-spawned seat draining empty is either correct pull or a broken
 // agreement invariant, and the drain itself cannot tell an operator which.
-func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
+func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored, workspaceBound bool, dir string, stdout, stderr io.Writer) int {
 	reason := hookClaimReasonNoWork
+	if workspaceBound {
+		reason = hookClaimReasonWorkspaceBound
+	}
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}

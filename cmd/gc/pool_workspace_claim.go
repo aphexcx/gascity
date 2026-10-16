@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -15,13 +16,13 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 )
 
-// filterHookWorkspaceCandidates keeps all claim tiers on the bead whose branch
-// pre_start prepared. The launch marker is evidence to check, not a lifetime
-// pin: after detach the session can claim its next continuation. Its last claim
-// also participates so a closed continuation stays bound until release.
-func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps) ([]beads.Bead, error) {
+// filterHookWorkspaceCandidates restricts fresh pulls to the bead whose branch
+// pre_start prepared, while preserving work already assigned to this session.
+// Its last claim also identifies a shared continuation workspace until release.
+// The boolean reports skipped candidates for the final drain's diagnostics.
+func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) ([]beads.Bead, bool, error) {
 	if hookClaimEnvValue(opts.Env, "GC_WORKTREE_CLAIM_GUARD") != "1" {
-		return candidates, nil
+		return candidates, false, nil
 	}
 	trigger := hookClaimEnvValue(opts.Env, "GC_WORKTREE_BEAD_ID")
 	branchProbe := ops.WorkspaceBranch
@@ -30,18 +31,21 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 	}
 	branch, err := branchProbe(hookClaimEnvValue(opts.Env, "GC_DIR"))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if branch == "" {
-		return candidates, nil
+		return candidates, false, nil
 	}
 	currentClaim := ops.CurrentClaim
 	if currentClaim == nil {
 		currentClaim = hookWorkspaceCurrentClaim
 	}
-	last, err := currentClaim(opts.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("reading session claim: %w", err)
+	last := ""
+	if opts.SessionID != "" {
+		last, err = currentClaim(opts.SessionID)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading session claim: %w", err)
+		}
 	}
 	matches := hookWorkspaceBranchBeads(branch, opts.WorkspaceConfig)
 	owners := []string{trigger, last}
@@ -73,14 +77,21 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 			continue
 		}
 		if bound != "" && bound != match.id {
-			return nil, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
+			return nil, false, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
 		}
 		bound, end = match.id, match.end
 	}
+	before := len(candidates)
 	if bound != "" {
-		candidates = slices.DeleteFunc(candidates, func(b beads.Bead) bool { return b.ID != bound })
+		candidates = slices.DeleteFunc(candidates, func(b beads.Bead) bool {
+			return b.ID != bound && !hookClaimHasIdentity(b.Assignee, opts.IdentityCandidates)
+		})
 	}
-	return candidates, nil
+	skipped := before - len(candidates)
+	if skipped > 0 {
+		fmt.Fprintf(stderr, "gc hook --claim: workspace bound to %s (branch %s); %d routed candidate(s) skipped\n", bound, branch, skipped) //nolint:errcheck
+	}
+	return candidates, skipped > 0, nil
 }
 
 type hookWorkspaceBeadMatch struct {
@@ -108,7 +119,7 @@ func hookWorkspaceBranchBeads(branch string, cfg *config.City) []hookWorkspaceBe
 	for i := range prefixes {
 		prefixes[i] = regexp.QuoteMeta(prefixes[i])
 	}
-	pattern := regexp.MustCompile(`(^|[^[:alnum:].])((?i:` + strings.Join(prefixes, "|") + `)-[[:alnum:]]{1,8}(?:\.[[:alnum:]_-]+)*)`)
+	pattern := regexp.MustCompile(`(^|[^[:alnum:].])((?:` + strings.Join(prefixes, "|") + `)-[[:alnum:]]{1,12}(?:\.[[:alnum:]_-]+)*)`)
 	var matches []hookWorkspaceBeadMatch
 	for _, match := range pattern.FindAllStringSubmatchIndex(branch, -1) {
 		end := match[5]
@@ -123,7 +134,7 @@ func hookWorkspaceBranchBeads(branch string, cfg *config.City) []hookWorkspaceBe
 
 func hookWorkspaceCurrentClaim(sessionID string) (string, error) {
 	if sessionID == "" {
-		return "", fmt.Errorf("missing session ID for prepared workspace")
+		return "", nil
 	}
 	front, err := sessionCurrentClaimFrontDoor()
 	if err != nil {

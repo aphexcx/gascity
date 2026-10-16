@@ -33,6 +33,7 @@
         "existing_assignment",
         "ready_assignment",
         "no_work",
+        "workspace_bound",
         "claims_errored",
         "stale_session",
         "non_turn_context",
@@ -104,6 +105,7 @@
           "reason": {
             "enum": [
               "no_work",
+              "workspace_bound",
               "claims_errored",
               "stale_session",
               "non_turn_context",

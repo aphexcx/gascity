@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -240,21 +241,29 @@ func TestHookClaimPreparedWorkspaceDoesNotFallThrough(t *testing.T) {
 			if code != 0 || !drained {
 				t.Fatalf("code=%d drained=%v stderr=%s", code, drained, stderr.String())
 			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Reason != "workspace_bound" || !strings.Contains(stderr.String(), "workspace bound to trigger (branch trigger); 1 routed candidate(s) skipped") {
+				t.Fatalf("reason=%s stderr=%s", result.Reason, stderr.String())
+			}
 		})
 	}
 }
 
 func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 	for _, tc := range []struct {
-		name, branch, last, offered, want string
-		failed                            bool
+		name, branch, last, offered, assignee, want string
+		failed                                      bool
 	}{
 		{name: "idle start later bound", branch: "work-2", last: "work-2", offered: "work-3"},
 		{name: "hierarchical child", branch: "work/work-1.1", last: "work-1", offered: "work-1.1", want: "work-1.1"},
 		{name: "initial", branch: "work/work-1", offered: "work-1", want: "work-1"},
 		{name: "detached continuation", last: "work-1", offered: "work-2", want: "work-2"},
 		{name: "continuation adoption", branch: "work-2", last: "work-2", offered: "work-2", want: "work-2"},
-		{name: "closed continuation still attached", branch: "work-2", last: "work-2", offered: "work-3"},
+		{name: "closed continuation still attached", branch: "work-2", last: "work-2", offered: "work-3", assignee: "session", want: "work-3"},
+		{name: "unassigned sibling still filtered", branch: "work-2", last: "work-2", offered: "work-3"},
 		{name: "reusable agent branch", branch: "agent/worker", offered: "work-2", want: "work-2"},
 		{name: "whole token", branch: "work-10", offered: "work-2", want: "work-2"},
 		{name: "ambiguous branch", branch: "work-1-work-2", offered: "work-2", failed: true},
@@ -262,7 +271,7 @@ func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 		{name: "receipt failed", branch: "work-1", offered: "work-1", failed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := hookClaimOptions{SessionID: "session", Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1", "GC_DIR=/lane"}}
+			opts := hookClaimOptions{SessionID: "session", IdentityCandidates: []string{"session"}, Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1", "GC_DIR=/lane"}}
 			if tc.name == "idle start later bound" {
 				opts.Env = []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_DIR=/lane"}
 			}
@@ -283,7 +292,7 @@ func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 					return tc.last, nil
 				},
 			}
-			got, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: tc.offered}}, opts, ops)
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: tc.offered, Assignee: tc.assignee}}, opts, ops, io.Discard)
 			if (err != nil) != tc.failed {
 				t.Fatalf("error=%v want failed=%v", err, tc.failed)
 			}
@@ -310,6 +319,8 @@ func TestHookWorkspaceReplacementWithoutReceipt(t *testing.T) {
 		allow, failed bool
 	}{
 		{branch: "work-1"},
+		{branch: "work-123456789abc"},
+		{branch: "WORK-1", allow: true},
 		{branch: "task/work-1-fix"},
 		{branch: "work-1.2"},
 		{branch: "hq-abc"},
@@ -334,12 +345,143 @@ func TestHookWorkspaceReplacementWithoutReceipt(t *testing.T) {
 			if offered == "" {
 				offered = "work-2"
 			}
-			got, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: offered}}, opts, ops)
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: offered}}, opts, ops, io.Discard)
 			if (err != nil) != tc.failed {
 				t.Fatalf("error=%v want failed=%v", err, tc.failed)
 			}
 			if !tc.failed && (len(got) == 1) != tc.allow {
 				t.Fatalf("candidates=%v want allow=%v", got, tc.allow)
+			}
+		})
+	}
+}
+
+// Assignment belongs to the session even when its shared continuation workspace
+// still names the previous step. Neither adoption nor promotion may drain it.
+func TestHookClaimPreparedWorkspacePreservesAssignedWork(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, assignee, reason string
+	}{
+		{"adoption", "in_progress", "gc__role-mc-sess1", "existing_assignment"},
+		{"continuation sibling", "open", "mc-sess1", "ready_assignment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []beads.Bead{
+				{
+					ID: "work-2", Status: tc.status, Assignee: tc.assignee,
+					Metadata: map[string]string{"gc.continuation_group": "flow", "gc.routed_to": "worker"},
+				},
+				{ID: "work-3", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			}
+			data, err := json.Marshal(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops := poolClaimOps(string(data), map[string]string{}, "work-1", &stampMetaSpy{})
+			ops.WorkspaceBranch = func(string) (string, error) { return "work-1", nil }
+			ops.CurrentClaim = func(string) (string, error) { return "work-1", nil }
+			ops.DrainPending = func(string) (bool, error) { return false, nil }
+			ops.DrainAck = func(io.Writer) error { t.Fatal("drained with assigned work"); return nil }
+			ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) { return nil, nil }
+			ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) {}
+			opts := poolClaimOpts()
+			opts.SessionID = "mc-sess1"
+			opts.IdentityCandidates = append(opts.IdentityCandidates, opts.SessionID)
+			opts.DrainAck = true
+			opts.Env = append(opts.Env, "GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1")
+			var stdout, stderr bytes.Buffer
+			if code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr); code != 0 {
+				t.Fatalf("claim: %d: %s", code, stderr.String())
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Action != "work" || result.BeadID != "work-2" || result.Reason != tc.reason {
+				t.Fatalf("result=%+v stderr=%s", result, stderr.String())
+			}
+		})
+	}
+}
+
+func TestHookWorkspaceExplicitAgentWithoutSessionReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		branch string
+		want   int
+	}{
+		{"agent/worker", 1},
+		{"work-1", 0},
+	} {
+		t.Run(tc.branch, func(t *testing.T) {
+			opts := hookClaimOptions{Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1"}}
+			ops := hookClaimOps{
+				WorkspaceBranch: func(string) (string, error) { return tc.branch, nil },
+				CurrentClaim:    func(string) (string, error) { return "", errors.New("missing session ID") },
+			}
+			got, _, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: "work-2"}}, opts, ops, io.Discard)
+			if err != nil || len(got) != tc.want {
+				t.Fatalf("candidates=%v err=%v want=%d", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// A workspace refusal in one store must survive the fan-out without hiding a
+// later successful claim or a mutation failure, or counting as queue divergence.
+func TestHookWorkspaceFederatedDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name, later, reason, action string
+		claimError                  bool
+	}{
+		{"only foreign work", "other", "workspace_bound", "drain", false},
+		{"later empty", "", "workspace_bound", "drain", false},
+		{"later lost race", "work-1", "workspace_bound", "drain", false},
+		{"later bound work", "work-1", "claimed", "work", false},
+		{"later write failure", "work-1", "claims_errored", "drain", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			capture := captureDivergenceEmitter(t, &stdout)
+			opts := hookFanoutClaimOpts()
+			opts.Env = []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1"}
+			stores := []hookStore{{dir: "rig-a", env: opts.Env}, {dir: "city", env: opts.Env}}
+			run := func(_ string, dir string, _ []string) (string, error) {
+				id, priority := "other", 0
+				if dir == "city" {
+					id, priority = tc.later, 1
+				}
+				if id == "" {
+					return "[]", nil
+				}
+				// Force the guarded rig leg first; tied stores rotate by clock.
+				data, err := json.Marshal([]beads.Bead{{ID: id, Status: "open", Priority: &priority, Metadata: map[string]string{"gc.routed_to": "worker"}}})
+				return string(data), err
+			}
+			ops := hookFanoutBaseOps(func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+				if id != "work-1" {
+					t.Fatalf("claimed unrelated bead %s", id)
+				}
+				if tc.claimError {
+					return beads.Bead{}, false, errors.New("store write failed")
+				}
+				if tc.name == "later lost race" {
+					return beads.Bead{ID: id, Assignee: "sibling"}, false, nil
+				}
+				return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee}, true, nil
+			})
+			ops.WorkspaceBranch = func(string) (string, error) { return "work-1", nil }
+			ops.CurrentClaim = func(string) (string, error) { return "", nil }
+			code := claimHookWorkWithRunner("query", "city", opts.Env, stores, opts, ops, run,
+				func(string, error) { t.Fatal("query failed") }, &stdout, &stderr)
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stderr.String(), "workspace bound to work-1") {
+				t.Fatalf("guarded rig leg was not attempted first: %s", stderr.String())
+			}
+			if code != 0 || result.Action != tc.action || result.Reason != tc.reason || capture.calls != 0 {
+				t.Fatalf("code=%d result=%+v divergence=%d stderr=%s", code, result, capture.calls, stderr.String())
 			}
 		})
 	}
