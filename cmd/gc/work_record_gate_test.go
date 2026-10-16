@@ -23,6 +23,34 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 		wantViol  string // substring expected in the (single) violation; "" ⇒ no violations
 	}{
 		{
+			name: "non-code run passes without a commit",
+			meta: map[string]string{beadmeta.WorkOutcomeMetadataKey: "ran"},
+		},
+		{
+			name: "absolute artifact passes without a branch",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "/Users/tailor512/city/assets/ops/mayor-tools/tool.sh",
+			},
+		},
+		{
+			name: "absolute artifact ignores a previously stamped branch",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "/city/artifact.txt",
+				beadmeta.WorkBranchMetadataKey:  "old-branch",
+			},
+			reachable: neverReachable,
+		},
+		{
+			name: "relative artifact is not an absolute deliverable",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "assets/report.txt",
+			},
+			wantViol: beadmeta.WorkBranchMetadataKey,
+		},
+		{
 			name:     "no-op close passes",
 			meta:     map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
 			wantViol: "",
@@ -138,7 +166,7 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 
 func TestValidWorkOutcome(t *testing.T) {
 	for _, v := range []string{
-		beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
+		beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeRan, beadmeta.WorkOutcomeNoOp,
 		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned,
 	} {
 		if !validWorkOutcome(v) {
@@ -160,6 +188,14 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 		wantOK  bool
 	}{
 		{"close subcommand", []string{"close", "wr-1"}, []string{"wr-1"}, true},
+		{"leading actor on close", []string{"--actor", "worker", "close", "wr-1"}, []string{"wr-1"}, true},
+		{"leading actor on update", []string{"--actor=worker", "update", "wr-1", "--status=closed"}, []string{"wr-1"}, true},
+		{"attached reason with leading global", []string{"--json", "close", "wr-1", "-rdone"}, []string{"wr-1"}, true},
+		{"clustered reason with separate value", []string{"--json", "close", "wr-1", "-qvr", "done"}, []string{"wr-1"}, true},
+		{"clustered attached status", []string{"--json", "update", "wr-1", "-qsclosed"}, []string{"wr-1"}, true},
+		{"clustered description consumes status-looking value", []string{"--json", "update", "wr-1", "-qd", "-sclosed"}, nil, false},
+		{"unknown short cluster stays ambiguous", []string{"--json", "close", "wr-1", "-qX", "other"}, nil, false},
+		{"terminator keeps short-looking target", []string{"--json", "close", "wr-1", "--", "-rdone"}, []string{"wr-1", "-rdone"}, true},
 		{"close multiple", []string{"close", "wr-1", "wr-2"}, []string{"wr-1", "wr-2"}, true},
 		{"update status=closed", []string{"update", "wr-1", "--status=closed"}, []string{"wr-1"}, true},
 		{"update --status closed", []string{"update", "wr-1", "--status", "closed"}, []string{"wr-1"}, true},
@@ -190,6 +226,8 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 // acceptance (b)/(c) at the integration level.
 func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	beadsList := []beads.Bead{
+		{ID: "wr-artifact", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped, beadmeta.WorkCommitMetadataKey: "/city/report.txt"}},
+		{ID: "wr-ran", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: "ran"}},
 		{ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 		{ID: "wr-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}},
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
@@ -208,6 +246,12 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"non-close subcommand is ignored", []string{"show", "wr-shipped-nocommit"}, true, false, ""},
 		{"control bead is exempt", []string{"close", "wr-control"}, true, false, ""},
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
+		{"absolute artifact close passes without warnings", []string{"close", "wr-artifact"}, true, false, ""},
+		{"run close passes without warnings", []string{"close", "wr-ran"}, true, false, ""},
+		{"atomic run close passes without warnings", []string{"update", "wr-missing", "--set-metadata", "gc.work_outcome=ran", "--status=closed"}, true, false, ""},
+		{"leading actor keeps atomic run metadata", []string{"--actor", "worker", "update", "wr-missing", "--set-metadata", "gc.work_outcome=ran", "--status=closed"}, true, false, ""},
+		{"leading actor keeps close enforcement", []string{"--actor", "worker", "close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
+		{"atomic artifact close passes without warnings", []string{"update", "wr-missing", "--set-metadata", "gc.work_outcome=shipped", "--set-metadata", "gc.work_commit=/city/report.txt", "--status=closed"}, true, false, ""},
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},

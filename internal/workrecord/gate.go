@@ -3,9 +3,9 @@
 // the work produced.
 //
 // The bead must carry a typed gc.work_outcome, and a "shipped" outcome must
-// point at a commit that is reachable on the stamped gc.work_branch. This turns
-// the recurring "drain-without-commit" close (a close that leaves no artifact at
-// all) into a machine-checkable violation.
+// point at a commit reachable on gc.work_branch or an absolute artifact path.
+// A "ran" outcome records an operational run without a deliverable. A shipped
+// close without a delivery record is a machine-checkable violation.
 //
 // The contract ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
@@ -53,12 +53,12 @@ func EnforceEnabled() bool {
 	}
 }
 
-// ValidOutcome reports whether v is one of the four typed work-record close
+// ValidOutcome reports whether v is a typed work-record close
 // dispositions. The vocabulary is owned here (the consumer), not in beadmeta,
 // per that package's data-only convention.
 func ValidOutcome(v string) bool {
 	switch v {
-	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
+	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeRan, beadmeta.WorkOutcomeNoOp,
 		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned:
 		return true
 	default:
@@ -90,24 +90,27 @@ func Gated(bead beads.Bead) bool {
 func ValidateOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
-		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
+		return []string{fmt.Sprintf("missing %s (want one of shipped|ran|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
 	}
 	if !ValidOutcome(outcome) {
-		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}
+		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|ran|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}
 	}
 	if outcome != beadmeta.WorkOutcomeShipped {
-		// no-op / blocked / abandoned carry their reason in the close-reason; no
+		// ran / no-op / blocked / abandoned carry their result in the close-reason; no
 		// commit artifact is required.
 		return nil
 	}
 	commit := strings.TrimSpace(bead.Metadata[beadmeta.WorkCommitMetadataKey])
+	if strings.HasPrefix(commit, "/") {
+		return nil // an artifact path is a work record, not a git revision
+	}
 	branch := strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey])
 	var violations []string
 	if commit == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the commit that satisfied the bead)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey))
+		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (a commit or absolute artifact path starting with /); use %s=ran for a completed run without a deliverable", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey, beadmeta.WorkOutcomeMetadataKey))
 	}
 	if branch == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
+		violations = append(violations, fmt.Sprintf("%s=shipped requires %s for a git commit (not for an absolute artifact path in %s)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey, beadmeta.WorkCommitMetadataKey))
 	}
 	if commit != "" && branch != "" && !commitReachable(commit, branch) {
 		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))

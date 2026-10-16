@@ -334,19 +334,19 @@ const (
 //     worker is on; the durable handle from the bead to its work. Stamped at
 //     claim time alongside WorkDirMetadataKey and read by the close gate.
 //   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
-//     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
+//     one of "shipped" | "ran" | "no-op" | "blocked" | "abandoned". Deliberately NOT
 //     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
 //     result ("pass"/"fail"/"skipped") read by internal/dispatch, a disjoint
 //     vocabulary that must not be overloaded.
-//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA that satisfied
-//     the bead; required when the outcome is "shipped" and validated reachable
-//     on WorkBranchMetadataKey by the close gate. Named in the gc.work_* family
+//   - WorkCommitMetadataKey ("gc.work_commit") — the commit SHA or absolute
+//     artifact path that satisfied the bead; required for "shipped". A commit
+//     must be reachable on WorkBranchMetadataKey; an absolute path needs no
+//     branch. Named in the gc.work_* family
 //     (not a bare "gc.commit") to avoid collision with future commit concepts.
 //   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
 //     record (gate result, "manual", or a link) backing a shipped outcome.
 //
-// The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
-// commit on the branch" rule live with the close gate in cmd/gc.
+// Valid outcomes and delivery-record validation live in internal/workrecord.
 
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a

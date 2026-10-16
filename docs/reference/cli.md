@@ -329,6 +329,25 @@ The bead bd reports created is then read back, and only a bead that came
 out unowned is labeled afterwards. A create whose output names no bead is
 said out loud on stderr. With the identity unset, create is untouched.
 
+Closing your own claim uses its recorded assignee as the bd actor when it
+matches GC_SESSION_ID. Unaliased sessions claim under this durable session
+ID; a runtime session name may be reused by a later pool occupant. Claims
+already held by the effective BEADS_ACTOR keep that actor. Another session's
+claim keeps bd's normal refusal. An explicit --actor is honored and its
+value does not select the bead store.
+
+A work bead records gc.work_outcome before closing: shipped, ran, no-op,
+blocked, or abandoned. For shipped code, set gc.work_commit to the commit
+and gc.work_branch to a branch containing it. For a non-git deliverable,
+set gc.work_commit to its absolute artifact path (starting with /); no
+branch is required and git reachability is not checked. The path records
+the deliverable; the gate does not check whether it exists on this host.
+Use ran for a completed operational run that intentionally produces no
+code or artifact, and describe its result in --reason. Use no-op when no
+work was needed. Keep gc.outcome=pass|fail as the separate run/step result.
+The work-record gate warns by default; GC_WORK_RECORD_ENFORCE=1 blocks
+invalid records. It also validates atomic update --status=closed calls.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
@@ -347,6 +366,9 @@ gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
 gc bd heartbeat my-project-abc     # refresh the claim lease you hold
 gc bd release-if-current my-project-abc worker-1
+gc bd update my-project-abc --set-metadata 'gc.work_outcome=ran'
+gc bd close my-project-abc --reason 'Completed the operational sweep'
+gc bd update my-project-abc --set-metadata 'gc.work_outcome=shipped' --set-metadata 'gc.work_commit=/city/reports/result.txt'
 gc bd create "title" --no-owner-label   # skip the owner:<identity> stamp on a federated city
 ```
 

@@ -142,6 +142,25 @@ The bead bd reports created is then read back, and only a bead that came
 out unowned is labeled afterwards. A create whose output names no bead is
 said out loud on stderr. With the identity unset, create is untouched.
 
+Closing your own claim uses its recorded assignee as the bd actor when it
+matches GC_SESSION_ID. Unaliased sessions claim under this durable session
+ID; a runtime session name may be reused by a later pool occupant. Claims
+already held by the effective BEADS_ACTOR keep that actor. Another session's
+claim keeps bd's normal refusal. An explicit --actor is honored and its
+value does not select the bead store.
+
+A work bead records gc.work_outcome before closing: shipped, ran, no-op,
+blocked, or abandoned. For shipped code, set gc.work_commit to the commit
+and gc.work_branch to a branch containing it. For a non-git deliverable,
+set gc.work_commit to its absolute artifact path (starting with /); no
+branch is required and git reachability is not checked. The path records
+the deliverable; the gate does not check whether it exists on this host.
+Use ran for a completed operational run that intentionally produces no
+code or artifact, and describe its result in --reason. Use no-op when no
+work was needed. Keep gc.outcome=pass|fail as the separate run/step result.
+The work-record gate warns by default; GC_WORK_RECORD_ENFORCE=1 blocks
+invalid records. It also validates atomic update --status=closed calls.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.`,
@@ -152,6 +171,9 @@ auto-export behavior, invoke bd directly.`,
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
   gc bd heartbeat my-project-abc     # refresh the claim lease you hold
   gc bd release-if-current my-project-abc worker-1
+  gc bd update my-project-abc --set-metadata 'gc.work_outcome=ran'
+  gc bd close my-project-abc --reason 'Completed the operational sweep'
+  gc bd update my-project-abc --set-metadata 'gc.work_outcome=shipped' --set-metadata 'gc.work_commit=/city/reports/result.txt'
   gc bd create "title" --no-owner-label   # skip the owner:<identity> stamp on a federated city`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -693,7 +715,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	// Work-record close gate (ADR-0009): a close routed through the SDK seam
 	// must satisfy the typed work-record contract (gc.work_outcome present;
-	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
+	// shipped ⇒ reachable commit or absolute artifact path). Warn-only by default;
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set. Reuses the
 	// store/beads the write-ID guard above already opened and read, and the
 	// config the caller already loaded.
@@ -724,6 +746,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	env = workQueryEnvForDir(env, target.ScopeRoot)
+	env = ownClaimCloseEnv(env, bdArgs, guardBeads, os.Getenv)
 
 	if !stampOwner {
 		return runBdSubprocess(bdPath, bdArgs, cityPath, target, env, stdout, stderr)
@@ -959,13 +982,13 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
-// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
-// argv to a single pre-validated id with no flags, so its flag sets are empty
-// by design and the lone id is scanned as positional.
+// heartbeat has no command-specific flag manifest; the native verb accepts
+// global flags, including leading flags preserved by rewriteBdHeartbeatArgs.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
 func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
+	args = bdCommandFirstArgs(args)
 	if len(args) == 0 {
 		return nil, false, false
 	}
@@ -984,6 +1007,12 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
 	// not in either set trigger ambiguous=true.
 	boolFlags := bdSubcmdBoolFlags(sub)
+	if valueFlags == nil {
+		valueFlags = bdflags.GlobalValueFlags()
+	}
+	if boolFlags == nil {
+		boolFlags = bdflags.GlobalBoolFlags()
+	}
 
 	positional := false // true after "--"
 	for i := 1; i < len(args); i++ {
@@ -1030,6 +1059,89 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		return nil, true, true
 	}
 	return ids, true, false
+}
+
+// bdCommandFirstArgs projects leading global flags after the command and expands
+// recognized shorthand so the close guards inspect the same flags as bd.
+// The subprocess still receives the caller's original argument order.
+func bdCommandFirstArgs(args []string) []string {
+	i, hidden := bdVerbIndexAfterGlobals(args)
+	if hidden || i < 0 {
+		return args
+	}
+	values, bools := bdSubcmdValueFlags(args[i]), bdSubcmdBoolFlags(args[i])
+	if values == nil {
+		values = bdflags.GlobalValueFlags()
+	}
+	if bools == nil {
+		bools = bdflags.GlobalBoolFlags()
+	}
+	expanded := make([][]string, len(args))
+	unknown := make([]bool, len(args))
+	bdCommandFlagTokens(args, args[i], func(slot int, name, value string, inline bool) {
+		if !values[name] && !bools[name] {
+			unknown[slot] = true
+			return
+		}
+		if inline {
+			name += "=" + value
+		}
+		expanded[slot] = append(expanded[slot], name)
+	})
+	out := make([]string, 0, len(args))
+	out = append(out, args[i])
+	for slot, arg := range args {
+		if slot == i {
+			continue
+		}
+		if len(expanded[slot]) > 0 && !unknown[slot] {
+			out = append(out, expanded[slot]...)
+		} else {
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
+// ownClaimCloseEnv aligns a close with the durable identity recorded by claim.
+// Only the session bead ID and the child's effective actor are own identities:
+// a session name or alias alone may name a pool slot's previous occupant.
+func ownClaimCloseEnv(env, args []string, targets map[string]beads.Bead, getenv func(string) string) []string {
+	args = bdCommandFirstArgs(args)
+	ids, isClose := workRecordCloseTargets(args)
+	sessionID := strings.TrimSpace(getenv("GC_SESSION_ID"))
+	if !isClose || sessionID == "" {
+		return env
+	}
+	explicitActor := false
+	bdCommandFlagTokens(args, args[0], func(_ int, name, _ string, _ bool) {
+		if name == "--actor" {
+			explicitActor = true
+		}
+	})
+	if explicitActor {
+		return env
+	}
+	effectiveActor := hookClaimEnvValue(env, "BEADS_ACTOR")
+	actor := ""
+	for _, id := range ids {
+		bead, ok := targets[id]
+		if !ok {
+			return env // let bd decide when a target could not be read
+		}
+		assignee := strings.TrimSpace(bead.Assignee)
+		if assignee == "" {
+			continue
+		}
+		if (assignee != sessionID && assignee != effectiveActor) || (actor != "" && actor != assignee) {
+			return env
+		}
+		actor = assignee
+	}
+	if actor == "" || actor == effectiveActor {
+		return env
+	}
+	return append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+actor)
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in
@@ -1244,6 +1356,23 @@ func absoluteBdDirectoryFlag(args []string) ([]string, error) {
 // stderr receives a best-effort warning when a set-but-unresolvable GC_RIG is
 // discarded (see the GC_RIG block below); pass io.Discard when the caller does
 // not care.
+// bdScopeRoutingArgs excludes identity and close-reason values from store
+// selection while retaining bead selectors such as --id and --parent.
+func bdScopeRoutingArgs(args []string) []string {
+	candidates := slices.Clone(args)
+	verb, _ := bdflags.SplitGlobalFlags(args)
+	bdCommandFlagTokens(args, verb, func(slot int, name, _ string, inline bool) {
+		if name != "--actor" && name != "--reason" && (verb != "close" || name != "-r") {
+			return
+		}
+		candidates[slot] = ""
+		if !inline && slot+1 < len(candidates) {
+			candidates[slot+1] = ""
+		}
+	})
+	return candidates
+}
+
 func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []string, cityExplicit bool, stderr io.Writer) (execStoreTarget, error) {
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if rigName != "" {
@@ -1269,8 +1398,9 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	}
 
 	cityPrefix := config.EffectiveHQPrefix(cfg)
+	candidates := bdScopeRoutingArgs(args)
 	if cityPrefix != "" {
-		for _, arg := range args {
+		for _, arg := range candidates {
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
@@ -1284,7 +1414,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// actually exist in the resolved rig store. This keeps hyphenated flag
 	// values and other non-ID args from silently retargeting the command.
 	// Unbound rigs are skipped so we don't alias them to the city store.
-	for _, arg := range args {
+	for _, arg := range candidates {
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
