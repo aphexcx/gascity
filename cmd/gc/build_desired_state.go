@@ -3785,7 +3785,13 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	}
 	// Pure path computation: this feeds a metadata patch, so it must never
 	// create directories (gc-r9fx dry-run purity).
-	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	workAgent := *cfgAgent
+	// The create-time path receives the base config, while template resolution
+	// receives an expanded copy. Carry the same pool provenance on both paths.
+	if workAgent.PoolName == "" && qualifiedName != cfgAgent.QualifiedName() && cfgAgent.SupportsInstanceExpansion() {
+		workAgent.PoolName = cfgAgent.QualifiedName()
+	}
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, &workAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -3943,15 +3949,15 @@ func resolveTemplateForSessionBeadInfo(
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
 		}
-		// A POOL-LEVEL marker, presence only: this seat exists because the
-		// controller counted demand. Nothing on the claim path may read the
-		// trigger id to decide what to claim — the pool is pull, and the
-		// controller does not choose the bead — but a seat that drains no_work
-		// is worth telling apart from one started for any other reason, which is
-		// what the divergence diagnostics key on (demand_divergence.go).
+		// Demand provenance remains diagnostic for ordinary pull sessions.
+		// A configured workspace prepared by pre_start checks this provenance
+		// against its live branch before claiming from the pool.
 		tp.Env["GC_SPAWN_ORIGIN"] = "demand"
 		tp.Env["GC_TRIGGER_BEAD_ID"] = triggerID
 		tp.Env["GC_TRIGGER_WORK_BEAD_ID"] = triggerID
+		if strings.TrimSpace(cfgAgent.WorkDir) != "" && len(cfgAgent.PreStart) > 0 {
+			tp.Env["GC_WORKTREE_BEAD_ID"] = triggerID
+		}
 		if storeRef := strings.TrimSpace(info.TriggerBeadStoreRef); storeRef != "" {
 			tp.Env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
 			tp.Env["GC_TRIGGER_WORK_STORE_REF"] = storeRef

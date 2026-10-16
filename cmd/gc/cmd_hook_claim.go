@@ -210,6 +210,8 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
+	WorkspaceBranch    func(string) (string, error)
+	CurrentClaim       func(string) (string, error)
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
 	ListContinuation   hookListContinuationFunc
@@ -487,6 +489,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
+	}
+	candidates, err = filterHookWorkspaceCandidates(candidates, *opts, *ops)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: workspace binding: %v\n", err) //nolint:errcheck
+		return hookClaimResult{terminal: true, code: 1}
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}

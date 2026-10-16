@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -288,6 +289,15 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		return ResolveDirPath(cityPath, a.Dir), nil
 	}
 	ctx := PathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
+	// Numeric pool slots and explicitly configured agents occupy separate
+	// workspace namespaces. PoolName is set only by pool expansion; a named
+	// sibling such as worker-2 keeps its own work_dir unchanged.
+	if suffix, ok := strings.CutPrefix(qualifiedName, a.PoolName+"-"); a.PoolName != "" && ok && len(a.NamepoolNames) == 0 && a.Namepool == "" {
+		if slot, err := strconv.Atoi(suffix); err == nil && slot > 0 && strconv.Itoa(slot) == suffix {
+			ctx.Agent = a.PoolName + ".pool-" + suffix
+			_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
+		}
+	}
 	expanded, err := ExpandTemplateStrict(a.WorkDir, ctx)
 	if err != nil {
 		return "", fmt.Errorf("expand work_dir %q: %w", a.WorkDir, err)

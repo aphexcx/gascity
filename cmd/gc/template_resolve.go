@@ -486,6 +486,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Workspace bindings belong to this launch, never to the parent process.
+	// resolveTemplateForSessionBeadInfo fills this after resolving its trigger.
+	env["GC_WORKTREE_BEAD_ID"] = ""
+	env["GC_WORKTREE_CLAIM_GUARD"] = ""
+	if strings.TrimSpace(cfgAgent.WorkDir) != "" && len(cfgAgent.PreStart) > 0 {
+		env["GC_WORKTREE_CLAIM_GUARD"] = "1"
+	}
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
