@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 )
 
@@ -42,28 +43,82 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 	if err != nil {
 		return nil, fmt.Errorf("reading session claim: %w", err)
 	}
+	matches := hookWorkspaceBranchBeads(branch, opts.WorkspaceConfig)
 	owners := []string{trigger, last}
 	for _, candidate := range candidates {
 		owners = append(owners, candidate.ID)
 	}
-	bound := ""
 	for _, id := range owners {
-		if id == "" || id == bound {
+		if id == "" {
 			continue
 		}
 		// Match complete IDs, including dotted children: work-1 must not
 		// bind work-10 or work-1.1; task/work-1-fix is a bead branch.
-		if regexp.MustCompile(`(^|[^[:alnum:].])` + regexp.QuoteMeta(id) + `([^[:alnum:].]|$)`).MatchString(branch) {
-			if bound != "" {
-				return nil, fmt.Errorf("branch %q names both %s and %s", branch, bound, id)
-			}
-			bound = id
+		pattern := regexp.MustCompile(`(^|[^[:alnum:].])(` + regexp.QuoteMeta(id) + `)([^[:alnum:].]|$)`)
+		for _, match := range pattern.FindAllStringSubmatchIndex(branch, -1) {
+			matches = append(matches, hookWorkspaceBeadMatch{id: id, start: match[4], end: match[5]})
 		}
+	}
+	// A complete longer ID owns any nested shorter match (fleet-work-2
+	// versus work-2). Distinct occurrences still represent ambiguous owners.
+	slices.SortFunc(matches, func(a, b hookWorkspaceBeadMatch) int {
+		if a.start != b.start {
+			return a.start - b.start
+		}
+		return b.end - a.end
+	})
+	bound, end := "", -1
+	for _, match := range matches {
+		if match.end <= end {
+			continue
+		}
+		if bound != "" && bound != match.id {
+			return nil, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
+		}
+		bound, end = match.id, match.end
 	}
 	if bound != "" {
 		candidates = slices.DeleteFunc(candidates, func(b beads.Bead) bool { return b.ID != bound })
 	}
 	return candidates, nil
+}
+
+type hookWorkspaceBeadMatch struct {
+	id         string
+	start, end int
+}
+
+// hookWorkspaceBranchBeads recognizes configured bead IDs without depending on
+// an open-work query or a previous session's receipt. A replacement idle session
+// can inherit an attached branch after its original bead has closed.
+func hookWorkspaceBranchBeads(branch string, cfg *config.City) []hookWorkspaceBeadMatch {
+	if cfg == nil {
+		return nil
+	}
+	prefixes := []string{config.EffectiveHQPrefix(cfg)}
+	for _, rig := range cfg.Rigs {
+		prefixes = append(prefixes, rig.EffectivePrefix())
+	}
+	prefixes = slices.DeleteFunc(prefixes, func(p string) bool { return p == "" })
+	if len(prefixes) == 0 {
+		return nil
+	}
+	// Prefer a complete longer prefix over a shorter prefix nested inside it.
+	slices.SortFunc(prefixes, func(a, b string) int { return len(b) - len(a) })
+	for i := range prefixes {
+		prefixes[i] = regexp.QuoteMeta(prefixes[i])
+	}
+	pattern := regexp.MustCompile(`(^|[^[:alnum:].])((?i:` + strings.Join(prefixes, "|") + `)-[[:alnum:]]{1,8}(?:\.[[:alnum:]_-]+)*)`)
+	var matches []hookWorkspaceBeadMatch
+	for _, match := range pattern.FindAllStringSubmatchIndex(branch, -1) {
+		end := match[5]
+		// A truncated base or hierarchical child is not a complete bead ID.
+		if end < len(branch) && strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.", rune(branch[end])) {
+			continue
+		}
+		matches = append(matches, hookWorkspaceBeadMatch{id: branch[match[4]:end], start: match[4], end: end})
+	}
+	return matches
 }
 
 func hookWorkspaceCurrentClaim(sessionID string) (string, error) {

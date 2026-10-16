@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/federation"
@@ -160,6 +161,9 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// WorkspaceConfig identifies bead branches even when a replacement session
+	// has neither a launch trigger nor a previous claim receipt.
+	WorkspaceConfig *config.City
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.

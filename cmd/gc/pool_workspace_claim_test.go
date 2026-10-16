@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -295,6 +296,50 @@ func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 			}
 			if len(got) != want || want == 1 && got[0].ID != tc.want {
 				t.Fatalf("got=%v want=%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHookWorkspaceReplacementWithoutReceipt(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "project", Prefix: "work"}, {Name: "fleet", Prefix: "fleet-work"}}}
+	cfg.Workspace.Prefix = "hq"
+	for _, tc := range []struct {
+		branch        string
+		offered       string
+		allow, failed bool
+	}{
+		{branch: "work-1"},
+		{branch: "task/work-1-fix"},
+		{branch: "work-1.2"},
+		{branch: "hq-abc"},
+		{branch: "fleet-work-abc"},
+		{branch: "fleet-work-2"},
+		{branch: "fleet-work-2-work-2", failed: true},
+		{branch: "work-1-work-2", failed: true},
+		{branch: "work-2", allow: true},
+		{branch: "fleet-work-2", offered: "fleet-work-2", allow: true},
+		{branch: "hq-abc.review-loop", offered: "hq-abc.review-loop", allow: true},
+		{branch: "hq-abc.review-loop", offered: "hq-abc.review"},
+		{branch: "agent/worker", allow: true},
+		{branch: "", allow: true},
+	} {
+		t.Run(tc.branch, func(t *testing.T) {
+			opts := hookClaimOptions{SessionID: "replacement", WorkspaceConfig: cfg, Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_DIR=/lane"}}
+			ops := hookClaimOps{
+				WorkspaceBranch: func(string) (string, error) { return tc.branch, nil },
+				CurrentClaim:    func(string) (string, error) { return "", nil },
+			}
+			offered := tc.offered
+			if offered == "" {
+				offered = "work-2"
+			}
+			got, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: offered}}, opts, ops)
+			if (err != nil) != tc.failed {
+				t.Fatalf("error=%v want failed=%v", err, tc.failed)
+			}
+			if !tc.failed && (len(got) == 1) != tc.allow {
+				t.Fatalf("candidates=%v want allow=%v", got, tc.allow)
 			}
 		})
 	}

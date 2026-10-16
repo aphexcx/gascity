@@ -482,6 +482,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			WorkspaceConfig:    cfg,
 			// The cross-city claim fence compares owner:/handoff: labels against
 			// this city's [federation] identity; unset means not federated and
 			// the fence is off (federation.MayClaim).
