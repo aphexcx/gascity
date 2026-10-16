@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // isPoolSlotWorkDirRoot reports whether path is shaped exactly like a pool
@@ -170,4 +171,27 @@ func repairPoolSlotWorkDirClobber(cfg *config.City, workBeads []beads.Bead, work
 			fmt.Fprintf(stderr, "repairPoolSlotWorkDirClobber: %s: %v\n", wb.ID, err) //nolint:errcheck
 		}
 	}
+}
+
+// preserveLegacyPoolWorkspace freezes only a recorded old numeric-slot path.
+// This happens before user-authored pre_start commands are rendered: the later
+// runtime directory override cannot safely rewrite arbitrary shell commands.
+func preserveLegacyPoolWorkspace(bp *agentBuildParams, a *config.Agent, name string, info session.Info) *config.Agent {
+	if a.PoolName == "" {
+		return a
+	}
+	recorded := preparedStartSessionWorkDir(info)
+	if recorded == "" {
+		return a
+	}
+	legacy := *a
+	legacy.PoolName = ""
+	oldDir, oldErr := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, name, &legacy, bp.rigs)
+	newDir, newErr := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, name, a, bp.rigs)
+	if oldErr != nil || newErr != nil || oldDir == newDir || !samePreparedWorkDirPath(resolveWorkDirAgainstCity(bp.cityPath, recorded), oldDir) {
+		return a
+	}
+	preserved := *a
+	preserved.WorkDir = oldDir
+	return &preserved
 }

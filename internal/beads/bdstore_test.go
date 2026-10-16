@@ -400,6 +400,47 @@ func TestBdStoreGetFallsBackToEphemeralForWisps(t *testing.T) {
 	}
 }
 
+// Exact ephemeral reads must preserve hierarchical IDs and never interpolate a
+// query expression supplied as an ID. Nonmatching and partial rows cannot bind.
+func TestBdStoreGetEphemeralExactID(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, output string
+		wantQuery        bool
+		wantNotFound     bool
+		wantError        bool
+	}{
+		{name: "hierarchical ID", id: "gc-wisp-abc.review_1", output: `[{"id":"gc-wisp-abc.review_1","status":"closed"}]`, wantQuery: true},
+		{name: "empty ID", wantError: true},
+		{name: "query expression", id: "gc-a OR id=gc-b", wantError: true},
+		{name: "nonmatching ID", id: "gc-a", output: `[{"id":"gc-aaa","status":"closed"}]`, wantQuery: true, wantError: true, wantNotFound: true},
+		{name: "partial response", id: "gc-a", output: `[{"id":"gc-a","status":"closed"},{"id":"gc-b","priority":"broken"}]`, wantQuery: true, wantError: true},
+		{name: "empty response", id: "gc-a", wantQuery: true, wantError: true},
+		{name: "whitespace response", id: "gc-a", output: " \n\t", wantQuery: true, wantError: true},
+		{name: "null response", id: "gc-a", output: `null`, wantQuery: true, wantError: true},
+		{name: "missing ID", id: "gc-a", output: `[{}]`, wantQuery: true, wantError: true},
+		{name: "null row", id: "gc-a", output: `[null]`, wantQuery: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries := 0
+			store := beads.NewBdStore("/rig", func(_ string, name string, args ...string) ([]byte, error) {
+				queries++
+				want := "query --json ephemeral=true AND id=" + tc.id + " --all --limit 1"
+				if name != "bd" || strings.Join(args, " ") != want {
+					t.Fatalf("unexpected query: %s %v", name, args)
+				}
+				return []byte(tc.output), nil
+			})
+			got, err := store.GetEphemeral(tc.id)
+			if (queries == 1) != tc.wantQuery || (err != nil) != tc.wantError || errors.Is(err, beads.ErrNotFound) != tc.wantNotFound {
+				t.Fatalf("queries=%d bead=%+v err=%v", queries, got, err)
+			}
+			if err == nil && (got.ID != tc.id || !got.Ephemeral || got.Status != "closed") {
+				t.Fatalf("bead=%+v, want exact closed ephemeral %s", got, tc.id)
+			}
+		})
+	}
+}
+
 func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte

@@ -3098,14 +3098,12 @@ func isWispQueryableID(id string) bool {
 }
 
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
-	clause := "ephemeral=true AND id=" + id
-	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runEphemeralByIDQuery(id)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("bd query (wisp by id): %w", err)
+		return nil, err
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
@@ -3117,6 +3115,50 @@ func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 		return result, fmt.Errorf("bd query (wisp by id): %w", parseErr)
 	}
 	return result, nil
+}
+
+// GetEphemeral retrieves an exact ID from the wisps plane, independently of
+// bd show's persistent-ID resolution. Only a successful query without an exact
+// row proves absence; unsupported queries and malformed responses remain errors.
+func (s *BdStore) GetEphemeral(id string) (Bead, error) {
+	if id == "" || strings.ContainsFunc(id, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '.' && r != '_'
+	}) {
+		return Bead{}, fmt.Errorf("getting ephemeral bead: invalid ID %q", id)
+	}
+	out, err := s.runEphemeralByIDQuery(id)
+	if err != nil {
+		return Bead{}, fmt.Errorf("getting ephemeral bead %q: %w", id, err)
+	}
+	var issues []bdIssue
+	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
+		return Bead{}, fmt.Errorf("getting ephemeral bead %q: parsing JSON: %w", id, err)
+	}
+	if issues == nil {
+		return Bead{}, fmt.Errorf("getting ephemeral bead %q: expected a JSON array", id)
+	}
+	for _, issue := range issues {
+		if issue.ID == "" {
+			return Bead{}, fmt.Errorf("getting ephemeral bead %q: query returned a row without an ID", id)
+		}
+	}
+	for _, issue := range issues {
+		if issue.ID == id {
+			b := issue.toBead()
+			b.Ephemeral = true
+			return b, nil
+		}
+	}
+	return Bead{}, fmt.Errorf("getting ephemeral bead %q: %w", id, ErrNotFound)
+}
+
+func (s *BdStore) runEphemeralByIDQuery(id string) ([]byte, error) {
+	clause := "ephemeral=true AND id=" + id
+	out, err := s.runBDTransientRead("query", "--json", clause, "--all", "--limit", "1")
+	if err != nil {
+		return nil, fmt.Errorf("bd query (wisp by id): %w", err)
+	}
+	return out, nil
 }
 
 func isBdQueryUnsupported(err error) bool {

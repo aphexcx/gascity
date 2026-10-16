@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 const (
@@ -192,7 +193,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	rigName := dirCtx.Rig
 	rigRoot := dirCtx.RigRoot
-	agentBase := dirCtx.AgentBase
 
 	// Step 4: Resolve overlay directory.
 	overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, p.cityPath)
@@ -486,6 +486,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Workspace bindings belong to this launch, never to the parent process.
+	// resolveTemplateForSessionBeadInfo fills this after resolving its trigger.
+	env["GC_WORKTREE_BEAD_ID"] = ""
+	env["GC_WORKTREE_CLAIM_GUARD"] = ""
+	if strings.TrimSpace(cfgAgent.WorkDir) != "" && len(cfgAgent.PreStart) > 0 {
+		env["GC_WORKTREE_CLAIM_GUARD"] = "1"
+	}
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
@@ -570,10 +577,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 11: Expand session setup templates. configDir was resolved ahead
 	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
 	// agree (#5315).
+	workspaceCtx := workdirutil.WorkspacePathContextForQualifiedName(p.cityPath, p.cityName, qualifiedName, *cfgAgent, p.rigs)
 	setupCtx := SessionSetupContext{
 		Session:       sessName,
 		Agent:         qualifiedName,
-		AgentBase:     agentBase,
+		AgentBase:     dirCtx.AgentBase,
 		Rig:           rigName,
 		RigRoot:       rigRoot,
 		CityRoot:      p.cityPath,
@@ -586,6 +594,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		expanded := expandSessionSetup([]string{command}, setupCtx)
 		command = expanded[0]
 	}
+	// Provider commands retain logical identity; workspace hooks share the
+	// path namespace so their branch names cannot collide with older slots.
+	setupCtx.Agent = workspaceCtx.Agent
+	setupCtx.AgentBase = workspaceCtx.AgentBase
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
