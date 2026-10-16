@@ -727,6 +727,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	workspaceBound := false
+	rootErrored := false
 	for len(remaining) > 0 {
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
@@ -771,6 +772,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			claimsErrored = true
 		}
 		workspaceBound = workspaceBound || res.workspaceBound
+		rootErrored = rootErrored || res.rootErrored
 		// This store reported ready work but the claim acquired nothing — every
 		// claimable row was lost to another claimant, none matched this session, or
 		// every claimable row's claim mutation errored and was skipped. Drop it and
@@ -778,6 +780,9 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// store is not stranded behind it; claimsErrored carries any write-failure
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
+	}
+	if rootErrored {
+		return 1
 	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workspaceBound, workDir, stdout, stderr)
 }

@@ -258,6 +258,9 @@ type hookClaimOps struct {
 	// the cross-city write fence takes of the one bead about to be written or
 	// served (installCrossCityWriteFence, hookCrossCityRefusedBeforeServe).
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ReadEphemeralWorkMeta probes an exact wisps-plane ID when bd show cannot
+	// disambiguate a persistent prefix during workspace-owner verification.
+	ReadEphemeralWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
 	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
 	// dependencies rather than bd's denormalized is_blocked projection (which
 	// production reads do not carry). Diagnostics-only: the demand/claim
@@ -380,12 +383,19 @@ type hookClaimResult struct {
 	// workspaceBound reports candidates skipped by the workspace guard. It is
 	// carried across stores so that drain is not diagnosed as an empty queue.
 	workspaceBound bool
+	// rootErrored means a skipped candidate's workspace relationship is unknown.
+	// Try other candidates and stores, but never acknowledge drain on this read
+	// failure if the invocation ultimately serves no work.
+	rootErrored bool
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
 	res := tryHookClaim(workQuery, dir, &opts, &ops, stdout, stderr)
 	if res.terminal {
 		return res.code
+	}
+	if res.rootErrored {
+		return 1
 	}
 	return writeHookClaimNoWork(opts, ops, res.claimsErrored, res.workspaceBound, dir, stdout, stderr)
 }
@@ -498,13 +508,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
-	candidates, workspaceBound, err := filterHookWorkspaceCandidates(candidates, dir, *opts, *ops, stderr)
+	workspace, err := filterHookWorkspaceCandidates(candidates, dir, *opts, *ops, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workspace binding: %v\n", err) //nolint:errcheck
 		return hookClaimResult{terminal: true, code: 1}
 	}
+	candidates = workspace.candidates
 	if len(candidates) == 0 {
-		return hookClaimResult{workspaceBound: workspaceBound}
+		return hookClaimResult{workspaceBound: workspace.bound, rootErrored: workspace.rootErrored}
 	}
 
 	// The cross-city claim fence runs HERE, once, on the whole candidate set:
@@ -515,7 +526,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// session takes the remaining candidates or the shared no-work drain.
 	candidates = fenceCrossCityHookCandidates(candidates, *opts, "candidate", stderr)
 	if len(candidates) == 0 {
-		return hookClaimResult{workspaceBound: workspaceBound}
+		return hookClaimResult{workspaceBound: workspace.bound, rootErrored: workspace.rootErrored}
 	}
 
 	for {
@@ -581,7 +592,8 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if !eligibleResult.terminal && readyResult.claimsErrored {
 		eligibleResult.claimsErrored = true
 	}
-	eligibleResult.workspaceBound = workspaceBound
+	eligibleResult.workspaceBound = workspace.bound
+	eligibleResult.rootErrored = workspace.rootErrored
 	return eligibleResult
 }
 

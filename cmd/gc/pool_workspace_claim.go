@@ -20,10 +20,9 @@ import (
 // filterHookWorkspaceCandidates restricts fresh pulls to the bead whose branch
 // pre_start prepared, while preserving work already assigned to this session.
 // Its last claim also identifies a shared continuation workspace until release.
-// The boolean reports skipped candidates for the final drain's diagnostics.
-func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) ([]beads.Bead, bool, error) {
+func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) (hookWorkspaceCandidates, error) {
 	if hookClaimEnvValue(opts.Env, "GC_WORKTREE_CLAIM_GUARD") != "1" {
-		return candidates, false, nil
+		return hookWorkspaceCandidates{candidates: candidates}, nil
 	}
 	trigger := hookClaimEnvValue(opts.Env, "GC_WORKTREE_BEAD_ID")
 	branchProbe := ops.WorkspaceBranch
@@ -32,10 +31,10 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 	}
 	branch, err := branchProbe(hookClaimEnvValue(opts.Env, "GC_DIR"))
 	if err != nil {
-		return nil, false, err
+		return hookWorkspaceCandidates{}, err
 	}
 	if branch == "" {
-		return candidates, false, nil
+		return hookWorkspaceCandidates{candidates: candidates}, nil
 	}
 	currentClaim := ops.CurrentClaim
 	if currentClaim == nil {
@@ -45,7 +44,7 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 	if opts.SessionID != "" {
 		last, err = currentClaim(opts.SessionID)
 		if err != nil {
-			return nil, false, fmt.Errorf("reading session claim: %w", err)
+			return hookWorkspaceCandidates{}, fmt.Errorf("reading session claim: %w", err)
 		}
 	}
 	owners := []string{trigger, last}
@@ -106,15 +105,16 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 			if _, err := readBead(match.id, true); errors.Is(err, beads.ErrNotFound) {
 				continue
 			} else if err != nil {
-				return nil, false, fmt.Errorf("verifying workspace owner %s: %w", match.id, err)
+				return hookWorkspaceCandidates{}, fmt.Errorf("verifying workspace owner %s: %w", match.id, err)
 			}
 		}
 		if bound != "" && bound != match.id {
-			return nil, false, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
+			return hookWorkspaceCandidates{}, fmt.Errorf("branch %q names both %s and %s", branch, bound, match.id)
 		}
 		bound, end = match.id, match.end
 	}
 	before := len(candidates)
+	rootErrored := false
 	if bound != "" {
 		kept := make([]beads.Bead, 0, len(candidates))
 		var rootErrors []error
@@ -143,9 +143,7 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 		// A foreign step's missing root proves no drain relationship. Other
 		// read failures must remain visible, but cannot strand owned work.
 		if len(rootErrors) > 0 {
-			if len(kept) == 0 {
-				return nil, false, errors.Join(rootErrors...)
-			}
+			rootErrored = true
 			for _, rootErr := range rootErrors {
 				fmt.Fprintf(stderr, "gc hook --claim: skipping candidate with unknown workspace relationship: %v\n", rootErr) //nolint:errcheck
 			}
@@ -156,31 +154,43 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 	if skipped > 0 {
 		fmt.Fprintf(stderr, "gc hook --claim: workspace bound to %s (branch %s); %d routed candidate(s) skipped\n", bound, branch, skipped) //nolint:errcheck
 	}
-	return candidates, skipped > 0, nil
+	return hookWorkspaceCandidates{candidates: candidates, bound: skipped > 0, rootErrored: rootErrored}, nil
+}
+
+type hookWorkspaceCandidates struct {
+	candidates  []beads.Bead
+	bound       bool
+	rootErrored bool
 }
 
 // hookWorkspaceReadBead resolves ownership through the claim's existing store
 // routes. A closed owner can live outside the leg currently offering work.
-// Inferred owners also treat bd's partial-ID ambiguity as an exact miss; roots
-// retain that error because their relationship is explicitly recorded.
+// Inferred owners probe the exact ephemeral ID after persistent-ID ambiguity;
+// roots retain that error because their relationship is explicitly recorded.
 func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOptions, ops hookClaimOps, id string, inferredOwner bool) (beads.Bead, error) {
 	read := ops.ReadWorkMeta
 	if read == nil {
 		read = hookReadClaimedBeadWithBdStore
 	}
-	ambiguous := false
-	notFound := func(err error) bool {
-		if errors.Is(err, beads.ErrNotFound) {
-			return true
+	ephemeral := ops.ReadEphemeralWorkMeta
+	if ephemeral == nil {
+		ephemeral = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, error) {
+			return hookClaimBdStoreContext(ctx, dir, env, assignee).GetEphemeral(id)
 		}
+	}
+	ambiguous := false
+	readExact := func(dir string, env []string) (beads.Bead, error) {
+		bead, err := read(ctx, dir, env, id, opts.Assignee)
 		if inferredOwner && hookWorkspaceAmbiguousPartialID(err, id) {
 			ambiguous = true
-			return true
+			// bd show's ambiguity only describes persistent IDs. An exact
+			// wisp may still own the workspace; a failed probe is not absence.
+			return ephemeral(ctx, dir, env, id, opts.Assignee)
 		}
-		return false
+		return bead, err
 	}
-	bead, err := read(ctx, dir, opts.Env, id, opts.Assignee)
-	if !notFound(err) {
+	bead, err := readExact(dir, opts.Env)
+	if !errors.Is(err, beads.ErrNotFound) {
 		return bead, err
 	}
 	current := hookStore{dir: dir, env: opts.Env}
@@ -188,8 +198,8 @@ func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOption
 		if sameHookStore(leg, current) || (len(leg.env) == 0 && strings.TrimSpace(leg.dir) == strings.TrimSpace(dir)) {
 			continue
 		}
-		bead, legErr := read(ctx, leg.dir, leg.env, id, opts.Assignee)
-		if !notFound(legErr) {
+		bead, legErr := readExact(leg.dir, leg.env)
+		if !errors.Is(legErr, beads.ErrNotFound) {
 			return bead, legErr
 		}
 	}
