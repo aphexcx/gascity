@@ -60,13 +60,18 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 		bead beads.Bead
 		err  error
 	}
-	reads := make(map[string]readResult)
-	readBead := func(id string) (beads.Bead, error) {
-		if result, ok := reads[id]; ok {
+	type readKey struct {
+		id            string
+		inferredOwner bool
+	}
+	reads := make(map[readKey]readResult)
+	readBead := func(id string, inferredOwner bool) (beads.Bead, error) {
+		key := readKey{id, inferredOwner}
+		if result, ok := reads[key]; ok {
 			return result.bead, result.err
 		}
-		bead, err := hookWorkspaceReadBead(ctx, dir, opts, ops, id)
-		reads[id] = readResult{bead, err}
+		bead, err := hookWorkspaceReadBead(ctx, dir, opts, ops, id, inferredOwner)
+		reads[key] = readResult{bead, err}
 		return bead, err
 	}
 	matches := hookWorkspaceBranchBeads(branch, opts.WorkspaceConfig)
@@ -98,7 +103,7 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 		// must not bind to fictitious beads. Closed real beads still bind.
 		// Only verified longer IDs suppress nested shorter matches.
 		if !slices.Contains(owners, match.id) {
-			if _, err := readBead(match.id); errors.Is(err, beads.ErrNotFound) {
+			if _, err := readBead(match.id, true); errors.Is(err, beads.ErrNotFound) {
 				continue
 			} else if err != nil {
 				return nil, false, fmt.Errorf("verifying workspace owner %s: %w", match.id, err)
@@ -112,6 +117,7 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 	before := len(candidates)
 	if bound != "" {
 		kept := make([]beads.Bead, 0, len(candidates))
+		var rootErrors []error
 		for _, b := range candidates {
 			if b.ID == bound || hookClaimHasIdentity(b.Assignee, opts.IdentityCandidates) {
 				kept = append(kept, b)
@@ -122,13 +128,26 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 			// unrelated steps remain excluded even when offered first.
 			root := b
 			if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != b.ID {
-				root, err = readBead(rootID)
+				root, err = readBead(rootID, false)
 				if err != nil {
-					return nil, false, fmt.Errorf("reading workspace root %s for %s: %w", rootID, b.ID, err)
+					if !errors.Is(err, beads.ErrNotFound) {
+						rootErrors = append(rootErrors, fmt.Errorf("reading workspace root %s for %s: %w", rootID, b.ID, err))
+					}
+					continue
 				}
 			}
 			if strings.TrimSpace(root.Metadata[beadmeta.DrainMemberIDMetadataKey]) == bound {
 				kept = append(kept, b)
+			}
+		}
+		// A foreign step's missing root proves no drain relationship. Other
+		// read failures must remain visible, but cannot strand owned work.
+		if len(rootErrors) > 0 {
+			if len(kept) == 0 {
+				return nil, false, errors.Join(rootErrors...)
+			}
+			for _, rootErr := range rootErrors {
+				fmt.Fprintf(stderr, "gc hook --claim: skipping candidate with unknown workspace relationship: %v\n", rootErr) //nolint:errcheck
 			}
 		}
 		candidates = kept
@@ -142,14 +161,26 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, dir string, opts hoo
 
 // hookWorkspaceReadBead resolves ownership through the claim's existing store
 // routes. A closed owner can live outside the leg currently offering work.
-// Only an authoritative not-found permits trying another leg or staying unbound.
-func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOptions, ops hookClaimOps, id string) (beads.Bead, error) {
+// Inferred owners also treat bd's partial-ID ambiguity as an exact miss; roots
+// retain that error because their relationship is explicitly recorded.
+func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOptions, ops hookClaimOps, id string, inferredOwner bool) (beads.Bead, error) {
 	read := ops.ReadWorkMeta
 	if read == nil {
 		read = hookReadClaimedBeadWithBdStore
 	}
+	ambiguous := false
+	notFound := func(err error) bool {
+		if errors.Is(err, beads.ErrNotFound) {
+			return true
+		}
+		if inferredOwner && hookWorkspaceAmbiguousPartialID(err, id) {
+			ambiguous = true
+			return true
+		}
+		return false
+	}
 	bead, err := read(ctx, dir, opts.Env, id, opts.Assignee)
-	if !errors.Is(err, beads.ErrNotFound) {
+	if !notFound(err) {
 		return bead, err
 	}
 	current := hookStore{dir: dir, env: opts.Env}
@@ -158,11 +189,34 @@ func hookWorkspaceReadBead(ctx context.Context, dir string, opts hookClaimOption
 			continue
 		}
 		bead, legErr := read(ctx, leg.dir, leg.env, id, opts.Assignee)
-		if !errors.Is(legErr, beads.ErrNotFound) {
+		if !notFound(legErr) {
 			return bead, legErr
 		}
 	}
-	return beads.Bead{}, err
+	// The class-route wrapper only escalates typed not-found, so ambiguity
+	// may have suppressed its binding probe. All work legs have now proved
+	// an exact miss; check that same binding before declaring no owner.
+	if ambiguous && ops.ClassRoute != nil {
+		held, err := ops.ClassRoute.holds(id)
+		if err != nil {
+			return beads.Bead{}, err
+		}
+		if held {
+			return ops.ClassRoute.graph.Get(id)
+		}
+	}
+	return beads.Bead{}, fmt.Errorf("workspace bead %q: %w", id, beads.ErrNotFound)
+}
+
+// bd resolves exact IDs before reporting this partial-ID ambiguity. Keep this
+// compatibility check local to inferred owners until BdStore exposes a typed
+// exact-miss error for ambiguity; infrastructure errors must not become misses.
+func hookWorkspaceAmbiguousPartialID(err error, id string) bool {
+	if err == nil {
+		return false
+	}
+	pattern := regexp.MustCompile(`(?m)(?:^|: )ambiguous issue ID: ` + regexp.QuoteMeta(fmt.Sprintf("%q", id)) + ` matches [1-9][0-9]* issues: \[[^\r\n]*\]\nUse more characters to disambiguate(?:\r?\n|$)`)
+	return pattern.MatchString(err.Error())
 }
 
 type hookWorkspaceBeadMatch struct {

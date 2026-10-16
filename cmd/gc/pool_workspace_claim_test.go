@@ -409,6 +409,10 @@ func TestHookWorkspaceInferredOwnerRequiresProvenance(t *testing.T) {
 	}{
 		{name: "reusable agent branch", branch: "gc-worker", action: "work", reason: "claimed"},
 		{name: "ordinary branch", branch: "gc-hotfix", action: "work", reason: "claimed"},
+		{name: "ambiguous short token", branch: "fix/gc-2f", action: "work", reason: "claimed", readError: errors.New("getting bead \"gc-2f\": exit status 1: Error fetching gc-2f: ambiguous issue ID: \"gc-2f\" matches 2 issues: [gc-2fa gc-2fb]\nUse more characters to disambiguate")},
+		{name: "ambiguous here exact in another store", branch: "gc-a", status: "closed", otherLeg: true, action: "drain", reason: "workspace_bound", readError: errors.New("ambiguous issue ID: \"gc-a\" matches 2 issues: [gc-aaa gc-aab]\nUse more characters to disambiguate")},
+		{name: "ambiguity for another ID", branch: "gc-a", readError: errors.New("ambiguous issue ID: \"gc-b\" matches 2 issues: [gc-baa gc-bab]\nUse more characters to disambiguate")},
+		{name: "ambiguous infrastructure", branch: "gc-a", readError: errors.New("ambiguous issue ID service unavailable")},
 		{name: "closed bead", branch: "gc-old", status: "closed", action: "drain", reason: "workspace_bound"},
 		{name: "open bead", branch: "gc-old", status: "open", action: "drain", reason: "workspace_bound"},
 		{name: "closed bead in another store", branch: "gc-old", status: "closed", otherLeg: true, action: "drain", reason: "workspace_bound"},
@@ -435,7 +439,7 @@ func TestHookWorkspaceInferredOwnerRequiresProvenance(t *testing.T) {
 					return baseRead(ctx, dir, env, id, assignee)
 				}
 				reads++
-				if tc.readError != nil {
+				if tc.readError != nil && (!tc.otherLeg || dir != "/other") {
 					return beads.Bead{}, tc.readError
 				}
 				if id != owner || tc.status == "" || tc.otherLeg && dir != "/other" {
@@ -452,7 +456,7 @@ func TestHookWorkspaceInferredOwnerRequiresProvenance(t *testing.T) {
 			opts.DrainAck = true
 			var stdout, stderr bytes.Buffer
 			code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
-			if tc.readError != nil {
+			if tc.readError != nil && tc.action == "" {
 				if code != 1 || drained || !strings.Contains(stderr.String(), tc.readError.Error()) {
 					t.Fatalf("code=%d drained=%v stderr=%s", code, drained, stderr.String())
 				}
@@ -464,6 +468,52 @@ func TestHookWorkspaceInferredOwnerRequiresProvenance(t *testing.T) {
 			}
 			if code != 0 || result.Action != tc.action || result.Reason != tc.reason || reads == 0 {
 				t.Fatalf("code=%d result=%+v reads=%d stderr=%s", code, result, reads, stderr.String())
+			}
+		})
+	}
+}
+
+func TestHookWorkspaceAmbiguousOwnerChecksClassBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		present   bool
+		readError error
+	}{
+		{name: "closed exact owner", present: true},
+		{name: "no exact owner"},
+		{name: "binding unavailable", readError: errors.New("binding unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			class := newClaimRouteClassStore(t)
+			if tc.present {
+				mintClaimRouteBead(t, class, "gc-a", nil)
+				if err := class.Close("gc-a"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.readError != nil {
+				class = claimRouteFailingStore{Store: class, err: tc.readError}
+			}
+			route := newClaimRouteFor(t, class)
+			route.workLegs = []hookStore{{dir: "/rig"}, {dir: "/other"}}
+			ops := classRoutedHookClaimOps(hookClaimOps{
+				WorkspaceBranch: func(string) (string, error) { return "gc-a", nil },
+				ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					return beads.Bead{}, errors.New("ambiguous issue ID: \"gc-a\" matches 2 issues: [gc-aaa gc-aab]\nUse more characters to disambiguate")
+				},
+				WorkLegs: route.workLegs,
+			}, route)
+			opts := hookClaimOptions{Env: []string{"GC_WORKTREE_CLAIM_GUARD=1"}, WorkspaceConfig: &config.City{}}
+			opts.WorkspaceConfig.Workspace.Prefix = "gc"
+			got, skipped, err := filterHookWorkspaceCandidates([]beads.Bead{{ID: "gc-next"}}, "/rig", opts, ops, io.Discard)
+			if tc.readError != nil {
+				if !errors.Is(err, tc.readError) || len(got) != 0 {
+					t.Fatalf("got=%v err=%v, want binding error", got, err)
+				}
+				return
+			}
+			if err != nil || skipped != tc.present || (len(got) == 0) != tc.present {
+				t.Fatalf("got=%v skipped=%v err=%v, owner present=%v", got, skipped, err, tc.present)
 			}
 		})
 	}
@@ -481,6 +531,7 @@ func TestHookWorkspaceDrainMemberRelationship(t *testing.T) {
 		{name: "drain root", rootID: "step", member: "source", allow: true},
 		{name: "missing root", rootID: "root", readError: beads.ErrNotFound},
 		{name: "unreadable root", rootID: "root", readError: errors.New("store unavailable")},
+		{name: "ambiguous root", rootID: "gc-a", readError: errors.New("ambiguous issue ID: \"gc-a\" matches 2 issues: [gc-aaa gc-aab]\nUse more characters to disambiguate")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := hookClaimOptions{Env: []string{"GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=source"}}
@@ -498,7 +549,7 @@ func TestHookWorkspaceDrainMemberRelationship(t *testing.T) {
 				candidate.Metadata[beadmeta.DrainMemberIDMetadataKey] = tc.member
 			}
 			got, skipped, err := filterHookWorkspaceCandidates([]beads.Bead{candidate}, "/rig", opts, ops, io.Discard)
-			if tc.readError != nil {
+			if tc.readError != nil && !errors.Is(tc.readError, beads.ErrNotFound) {
 				if !errors.Is(err, tc.readError) || len(got) != 0 || skipped {
 					t.Fatalf("got=%v skipped=%v err=%v", got, skipped, err)
 				}
@@ -506,6 +557,76 @@ func TestHookWorkspaceDrainMemberRelationship(t *testing.T) {
 			}
 			if err != nil || (len(got) == 1) != tc.allow || skipped == tc.allow {
 				t.Fatalf("got=%v skipped=%v err=%v allow=%v", got, skipped, err, tc.allow)
+			}
+		})
+	}
+}
+
+// A foreign workflow's read failure must not strand work that the workspace
+// can already prove it owns. Unknown relationships remain excluded.
+func TestHookWorkspaceForeignRootDoesNotBlockOwnedWork(t *testing.T) {
+	for _, tc := range []struct {
+		name, ownedID, status, assignee, reason string
+		readError                               error
+	}{
+		{name: "missing root before trigger", ownedID: "work-1", status: "open", reason: "claimed", readError: beads.ErrNotFound},
+		{name: "unreadable root before trigger", ownedID: "work-1", status: "open", reason: "claimed", readError: errors.New("store unavailable")},
+		{name: "unreadable root before adoption", ownedID: "work-2", status: "in_progress", assignee: "gc__role-mc-sess1", reason: "existing_assignment", readError: errors.New("store unavailable")},
+		{name: "unreadable root before continuation", ownedID: "work-2", status: "open", assignee: "mc-sess1", reason: "ready_assignment", readError: errors.New("store unavailable")},
+		{name: "missing root alone", reason: "workspace_bound", readError: beads.ErrNotFound},
+		{name: "unreadable root alone", readError: errors.New("store unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []beads.Bead{{ID: "work-foreign", Status: "open", Metadata: map[string]string{
+				"gc.routed_to": "worker", beadmeta.RootBeadIDMetadataKey: "foreign-root",
+			}}}
+			if tc.ownedID != "" {
+				rows = append(rows, beads.Bead{
+					ID: tc.ownedID, Status: tc.status, Assignee: tc.assignee,
+					Metadata: map[string]string{"gc.routed_to": "worker"},
+				})
+			}
+			data, err := json.Marshal(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops := poolClaimOps(string(data), map[string]string{}, "work-1", &stampMetaSpy{})
+			ops.WorkspaceBranch = func(string) (string, error) { return "work-1", nil }
+			ops.CurrentClaim = func(string) (string, error) { return "", nil }
+			ops.DrainPending = func(string) (bool, error) { return false, nil }
+			ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) { return nil, nil }
+			ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) {}
+			baseRead := ops.ReadWorkMeta
+			ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, error) {
+				if id == "foreign-root" {
+					return beads.Bead{}, tc.readError
+				}
+				return baseRead(ctx, dir, env, id, assignee)
+			}
+			drained := false
+			ops.DrainAck = func(io.Writer) error { drained = true; return nil }
+			opts := poolClaimOpts()
+			opts.SessionID = "mc-sess1"
+			opts.IdentityCandidates = append(opts.IdentityCandidates, opts.SessionID)
+			opts.DrainAck = true
+			opts.Env = append(opts.Env, "GC_WORKTREE_CLAIM_GUARD=1", "GC_WORKTREE_BEAD_ID=work-1")
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, ops, &stdout, &stderr)
+			if !errors.Is(tc.readError, beads.ErrNotFound) && !strings.Contains(stderr.String(), tc.readError.Error()) {
+				t.Fatalf("root read error not reported: %s", stderr.String())
+			}
+			if tc.reason == "" {
+				if code != 1 || drained || stdout.Len() != 0 {
+					t.Fatalf("code=%d drained=%v stdout=%s stderr=%s", code, drained, &stdout, &stderr)
+				}
+				return
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("code=%d stderr=%s: %v", code, &stderr, err)
+			}
+			if code != 0 || result.BeadID != tc.ownedID || result.Reason != tc.reason || drained != (tc.ownedID == "") {
+				t.Fatalf("code=%d result=%+v drained=%v stderr=%s", code, result, drained, &stderr)
 			}
 		})
 	}
