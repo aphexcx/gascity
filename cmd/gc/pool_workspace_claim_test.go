@@ -249,6 +249,7 @@ func TestHookWorkspaceBindingLifecycle(t *testing.T) {
 		failed                            bool
 	}{
 		{name: "idle start later bound", branch: "work-2", last: "work-2", offered: "work-3"},
+		{name: "hierarchical child", branch: "work/work-1.1", last: "work-1", offered: "work-1.1", want: "work-1.1"},
 		{name: "initial", branch: "work/work-1", offered: "work-1", want: "work-1"},
 		{name: "detached continuation", last: "work-1", offered: "work-2", want: "work-2"},
 		{name: "continuation adoption", branch: "work-2", last: "work-2", offered: "work-2", want: "work-2"},

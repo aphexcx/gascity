@@ -3941,6 +3941,7 @@ func resolveTemplateForSessionBeadInfo(
 ) (TemplateParams, error) {
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: info.SessionNameMetadata}
+	cfgAgent = preserveLegacyPoolWorkspace(&local, cfgAgent, qualifiedName, info)
 	tp, err := resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
 	if err != nil {
 		return tp, err

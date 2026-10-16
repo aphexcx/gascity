@@ -51,9 +51,9 @@ func filterHookWorkspaceCandidates(candidates []beads.Bead, opts hookClaimOption
 		if id == "" || id == bound {
 			continue
 		}
-		// Same whole-token convention as the lane preparation script: work-1
-		// must not bind work-10, but task/work-1-fix is a bead branch.
-		if regexp.MustCompile(`(^|[^[:alnum:]])` + regexp.QuoteMeta(id) + `([^[:alnum:]]|$)`).MatchString(branch) {
+		// Match complete IDs, including dotted children: work-1 must not
+		// bind work-10 or work-1.1; task/work-1-fix is a bead branch.
+		if regexp.MustCompile(`(^|[^[:alnum:].])` + regexp.QuoteMeta(id) + `([^[:alnum:].]|$)`).MatchString(branch) {
 			if bound != "" {
 				return nil, fmt.Errorf("branch %q names both %s and %s", branch, bound, id)
 			}
