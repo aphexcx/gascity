@@ -9,8 +9,13 @@
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
-PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/assets/scripts/runtime.sh"
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}"
+# Startup must reach the provider even when the previous runtime publication
+# points at a dead server. runtime.sh requires a live query port, which only
+# makes sense after startup. Preserve the bd-owned topology guard separately.
+. "$PACK_DIR/assets/scripts/proxied_scope.sh"
+exit_zero_if_bd_owns_proxied_scope
+GC_BEADS_BD_SCRIPT="${GC_BEADS_BD_SCRIPT:-$GC_CITY_PATH/.gc/scripts/gc-beads-bd.sh}"
 
 if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
   echo "gc dolt start: gc-beads-bd not found" >&2

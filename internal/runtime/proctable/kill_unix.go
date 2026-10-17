@@ -5,6 +5,7 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 
@@ -31,12 +32,51 @@ func KillByPID(pid int) error {
 	termLive, runLive := killLivenessFuncsForPID(pid)
 	return killByPID(
 		pid,
-		syscall.Kill,
+		func(target int, sig syscall.Signal) error {
+			return signalRuntimeWith(target, sig, SnapshotProcesses, rootArgv, syscall.Kill)
+		},
 		termLive,
 		runLive,
 		runtime.ManagedProcessStopGrace,
 		runtime.ManagedProcessReapGrace,
 	)
+}
+
+var errUnsafeRuntimeGroup = errors.New("process group contains infrastructure or cannot be safely inspected")
+
+// signalRuntimeWith refuses group signals that could hit city infrastructure.
+// Legacy nohup launches can share an agent's group even after reparenting to
+// init. The refusal must also prevent an exact-PID fallback: killing only the
+// agent root could leave its ordinary children racing a replacement session.
+// Reinspect before each signal wave so escalation has the same protection.
+func signalRuntimeWith(target int, sig syscall.Signal, snapshot func() ([]ProcessRecord, error), argv func(int) ([]string, error), kill func(int, syscall.Signal) error) error {
+	if target < 0 {
+		records, err := snapshot()
+		if err != nil {
+			return fmt.Errorf("%w: %w", errUnsafeRuntimeGroup, err)
+		}
+		for _, record := range records {
+			if record.PGID != -target {
+				continue
+			}
+			args, err := argv(record.PID)
+			if err != nil || IsCityInfrastructureArgv(args) {
+				return fmt.Errorf("%w: group %d member PID %d", errUnsafeRuntimeGroup, -target, record.PID)
+			}
+		}
+	} else {
+		args, err := argv(target)
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			return syscall.ESRCH
+		}
+		if err != nil {
+			return fmt.Errorf("proctable: inspecting PID %d before signal: %w", target, err)
+		}
+		if IsCityInfrastructureArgv(args) {
+			return fmt.Errorf("proctable: refusing to signal infrastructure PID %d", target)
+		}
+	}
+	return kill(target, sig)
 }
 
 // killLivenessFuncsForPID builds the two liveness probes KillByPID signals
@@ -152,6 +192,8 @@ func waitUntil(done func() bool, timeout time.Duration) bool {
 func signalPIDWith(pid int, sig syscall.Signal, kill func(int, syscall.Signal) error) error {
 	if err := kill(-pid, sig); err == nil {
 		return nil
+	} else if errors.Is(err, errUnsafeRuntimeGroup) {
+		return err
 	}
 	err := kill(pid, sig)
 	if errors.Is(err, syscall.ESRCH) {

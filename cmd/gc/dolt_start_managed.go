@@ -1259,7 +1259,7 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 
 // managedDoltSessionScopedEnvKeys are the per-session identity variables the
 // session lifecycle injects into an agent runtime
-// (session.RuntimeEnvWithSessionContext), plus the provider's own session id.
+// (session.RuntimeEnvWithSessionContext), plus provider and terminal identity.
 // A managed server started from inside an agent session would otherwise
 // inherit them, and its scope watchdog reparents to init, so the session
 // reconciler's orphan sweep (sweepProcessTableOrphans) would reap the watchdog
@@ -1279,6 +1279,10 @@ var managedDoltSessionScopedEnvKeys = []string{
 	"BEADS_HOLDER_TOKEN",
 	"BEADS_ACTOR",
 	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_SESSION_ID",
+	"CLAUDECODE",
+	"TMUX",
+	"TMUX_PANE",
 }
 
 // withoutSessionIdentityEnv returns env with every

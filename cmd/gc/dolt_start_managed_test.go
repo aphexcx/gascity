@@ -93,7 +93,10 @@ func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 // or unrelated must survive, so the scrub stays targeted rather than a blanket
 // GC_* strip.
 func TestDoltServerEnv_ScrubsSessionIdentity(t *testing.T) {
-	parent := []string{"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test"}
+	parent := []string{
+		"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test",
+		"TMUX=stamped", "TMUX_PANE=stamped", "CLAUDECODE=stamped", "CLAUDE_SESSION_ID=stamped",
+	}
 	for _, key := range managedDoltSessionScopedEnvKeys {
 		parent = append(parent, key+"=stamped")
 	}

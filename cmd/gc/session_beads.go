@@ -3445,8 +3445,8 @@ func sweepProcessTableOrphans(
 		// here: bead is closed, or confirmed absent (ErrNotFound), and the
 		// snapshot agrees it is not open — reap below,
 		// unless the root is city infrastructure that merely inherited the
-		// session's environment (a managed Dolt scope watchdog or bd's
-		// db-proxy-child started from an agent shell). Terminating it signals
+		// session's environment (a Dolt server, its managed scope watchdog, or
+		// bd's db-proxy-child started from an agent shell). Terminating it signals
 		// its process group and takes the city's Dolt server down with it
 		// (#6316). The fence is per-process argv, so it also covers watchdogs
 		// stamped before doltServerEnv began scrubbing session identity, and bd
@@ -3455,7 +3455,7 @@ func sweepProcessTableOrphans(
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {
-				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: city infrastructure (managed Dolt watchdog or bd proxy)\n", live.PID, live.SessionID) //nolint:errcheck
+				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: city infrastructure (Dolt server, managed watchdog or bd proxy)\n", live.PID, live.SessionID) //nolint:errcheck
 			}
 			continue
 		}

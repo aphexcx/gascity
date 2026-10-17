@@ -122,6 +122,7 @@ go_test(
         "runtime_bounded_test.go",
         "sql_test.go",
         "stale_db_formula_test.go",
+        "start_test.go",
         "status_test.go",
         "sync_ffclassify_test.go",
         "sync_test.go",

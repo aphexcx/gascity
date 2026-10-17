@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"slices"
@@ -11,6 +12,73 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRuntimeSignalsPreserveInfrastructureInAgentGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		peerArgv    []string
+		peerGroup   int
+		inspectErr  error
+		snapshotErr error
+		wantTarget  int
+		groupErr    error
+	}{
+		{"legacy dolt shares agent group", []string{"/opt/bin/dolt", "sql-server"}, 100, nil, nil, 0, nil},
+		{"watchdog shares agent group", []string{"gc", ManagedDoltScopeWatchdogVerb}, 100, nil, nil, 0, nil},
+		{"isolated dolt", []string{"dolt", "sql-server"}, 200, nil, nil, -100, nil},
+		{"ordinary agent child", []string{"sh", "-c", "work"}, 100, nil, nil, -100, nil},
+		{"unreadable group member", nil, 100, errors.New("unreadable argv"), nil, 0, nil},
+		{"unavailable process table", nil, 100, nil, errors.New("snapshot failed"), 0, nil},
+		{"ordinary group syscall failure permits PID fallback", []string{"agent"}, 100, nil, nil, 100, syscall.EPERM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var targets []int
+			var signals []syscall.Signal
+			snapshot := func() ([]ProcessRecord, error) {
+				return []ProcessRecord{{PID: 100, PGID: 100}, {PID: 101, PGID: tc.peerGroup}, {PID: 102, PPID: 100, PGID: 100}}, tc.snapshotErr
+			}
+			argv := func(pid int) ([]string, error) {
+				if pid == 100 || pid == 102 {
+					return []string{"agent"}, nil
+				}
+				return tc.peerArgv, tc.inspectErr
+			}
+			kill := func(pid int, sig syscall.Signal) error {
+				targets = append(targets, pid)
+				signals = append(signals, sig)
+				if pid < 0 {
+					return tc.groupErr
+				}
+				return nil
+			}
+			guarded := func(pid int, sig syscall.Signal) error {
+				return signalRuntimeWith(pid, sig, snapshot, argv, kill)
+			}
+			// The ordinary child is hidden inside its parent's scan envelope.
+			// A mixed group must fail before signaling, not kill just the root
+			// and claim cleanup succeeded while that child is still running.
+			err := killByPID(100, guarded, func(int) bool { return true }, func(int) bool { return false }, 0, 0)
+			if tc.wantTarget == 0 {
+				if !errors.Is(err, errUnsafeRuntimeGroup) || len(targets) != 0 {
+					t.Fatalf("unsafe group cleanup: err=%v targets=%v, want refusal without signals", err, targets)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTargets := []int{tc.wantTarget, tc.wantTarget}
+			wantSignals := []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}
+			if tc.groupErr != nil {
+				wantTargets = []int{-100, tc.wantTarget, -100, tc.wantTarget}
+				wantSignals = []syscall.Signal{syscall.SIGTERM, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGKILL}
+			}
+			if !slices.Equal(targets, wantTargets) || !slices.Equal(signals, wantSignals) {
+				t.Fatalf("targets=%v signals=%v; want targets=%v signals=%v", targets, signals, wantTargets, wantSignals)
+			}
+		})
+	}
+}
 
 func TestKillByPIDRefusesLowPIDs(t *testing.T) {
 	for _, pid := range []int{-1, 0, 1} {

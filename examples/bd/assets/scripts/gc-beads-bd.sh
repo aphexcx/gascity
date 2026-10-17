@@ -2755,9 +2755,25 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file. Close the startup lock fd in
-        # the child so the flock is released when this starter exits.
-        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
+        # The fallback server belongs to the city, not the calling session.
+        # Drop session identity, detach the session/process group, and close
+        # caller input and the startup lock. exec preserves the published PID;
+        # the child reparents to init when this short-lived starter exits.
+        # setsid ships with util-linux; macOS uses Python's POSIX adapter.
+        nohup sh -c '
+            exec 9>&-
+            unset GC_SESSION_ID GC_SESSION_NAME GC_ALIAS GC_AGENT GC_TEMPLATE \
+                GC_SESSION_ORIGIN GC_RUNTIME_EPOCH GC_CONTINUATION_EPOCH \
+                GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN BEADS_ACTOR \
+                CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDECODE TMUX TMUX_PANE
+            if command -v setsid >/dev/null 2>&1; then
+                exec setsid dolt sql-server --config "$1"
+            elif command -v python3 >/dev/null 2>&1; then
+                exec python3 -c "import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])" dolt sql-server --config "$1"
+            fi
+            echo "cannot detach dolt sql-server: setsid or python3 is required" >&2
+            exit 1
+        ' sh "$CONFIG_FILE" </dev/null >> "$LOG_FILE" 2>&1 &
         local server_pid=$!
 
         # Write PID file.
