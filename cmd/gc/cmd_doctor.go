@@ -64,7 +64,8 @@ listed.`,
   gc doctor --check controller --check events-log
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.UseCheckTimeouts = !cmd.Flags().Changed("check-timeout")
 			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -85,10 +86,11 @@ listed.`,
 // parameter list because the flags are mostly booleans, and a fifth one makes
 // the call sites unreadable.
 type doctorOpts struct {
-	Fix          bool
-	Verbose      bool
-	JSON         bool
-	CheckTimeout time.Duration
+	Fix              bool
+	Verbose          bool
+	JSON             bool
+	CheckTimeout     time.Duration
+	UseCheckTimeouts bool
 	// Checks holds the raw --check values, still unsplit. Empty runs every
 	// registered check, which is what a plain `gc doctor` does.
 	Checks []string
@@ -651,7 +653,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// outlives the process, and ctx holds no handle a late writer can corrupt --
 	// an abandoned check writes only to its own private buffer. A future caller
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
-	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout, UseCheckTimeouts: opts.UseCheckTimeouts}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {

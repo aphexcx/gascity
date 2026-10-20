@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -134,19 +135,23 @@ func classifyOrderOutcome(order orders.Order, streak int, threshold int, lastMes
 // every time leaves order-firing-current green, so the failure is invisible: the
 // only trace is order.failed in the event log, which nobody reads unprompted.
 type OrderOutcomeHealthyCheck struct {
-	cfg       *config.City
-	cityPath  string
-	threshold int
-	grace     time.Duration
+	cfg        *config.City
+	cityPath   string
+	threshold  int
+	grace      time.Duration
+	scanOrders func(string, *config.City) ([]orders.Order, error)
+	walkEvents func(context.Context, string, func(events.Event) error) error
 }
 
 // NewOrderOutcomeHealthyCheck creates the repeated-order-failure check.
 func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcomeHealthyCheck {
 	return &OrderOutcomeHealthyCheck{
-		cfg:       cfg,
-		cityPath:  cityPath,
-		threshold: orderOutcomeFailureThreshold,
-		grace:     orderOutcomeStartGrace,
+		cfg:        cfg,
+		cityPath:   cityPath,
+		threshold:  orderOutcomeFailureThreshold,
+		grace:      orderOutcomeStartGrace,
+		scanOrders: scanOrderFiringCurrentOrders,
+		walkEvents: events.WalkContext,
 	}
 }
 
@@ -160,11 +165,16 @@ func (c *OrderOutcomeHealthyCheck) CanFix() bool { return false }
 // Fix is a no-op for the reason given on CanFix.
 func (c *OrderOutcomeHealthyCheck) Fix(_ *CheckContext) error { return nil }
 
-// Run counts each scheduled order's trailing consecutive failures.
-//
-// Unlike order-firing-current this needs no goroutine-plus-timeout guard: that
-// check wraps its work because the order-history resolver opens the beads/Dolt
-// store without accepting a context. This one reads only the event log.
+// DefaultTimeout bounds the archive diagnostic. On citadel (gf-s6z), the
+// first of three history reads was still decompressing 3.53 GB of retained
+// archives after 110s; the earlier full probe exceeded 10m. Like the sibling
+// freshness check, spend at most 15s before reporting an inconclusive result.
+// The runner reports this budget and honors an explicit --check-timeout.
+func (c *OrderOutcomeHealthyCheck) DefaultTimeout() time.Duration { return 15 * time.Second }
+
+// Run counts each scheduled order's trailing consecutive failures. The runner
+// bounds the scan and reports its phase; the event walker observes cancellation
+// within archives so abandoned reads stop consuming CPU and memory.
 func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	// This check is advisory on every path: a failing order must not gate gc doctor.
 	// Blocking would fail gc doctor outright and gate every clean-doctor dependency
@@ -189,7 +199,8 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Same helper order-firing-current uses, so the two checks can never
 	// disagree about which orders are in scope.
-	allOrders, err := scanOrderFiringCurrentOrders(cityPath, c.cfg)
+	ctx.SetPhase("scan orders")
+	allOrders, err := c.scanOrders(cityPath, c.cfg)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("scan orders: %v", err)
@@ -197,18 +208,18 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	outcomes, err := readOrderOutcomeEvents(eventPath)
+	workCtx := context.Background()
+	if ctx != nil && ctx.Context != nil {
+		workCtx = ctx.Context
+	}
+	ctx.SetPhase("read order outcome and controller start events")
+	outcomes, starts, err := readOrderOutcomeHistory(workCtx, eventPath, c.walkEvents)
 	if err != nil {
 		result.Status = StatusError
-		result.Message = fmt.Sprintf("read order outcome events: %v", err)
+		result.Message = fmt.Sprintf("read order outcome and controller start events: %v", err)
 		return result
 	}
-	starts, err := controllerStartTimes(eventPath)
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read controller start events: %v", err)
-		return result
-	}
+	ctx.SetPhase("classify order outcomes")
 
 	worst := StatusOK
 	monitored := 0
@@ -262,37 +273,25 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	return result
 }
 
-// readOrderOutcomeEvents returns order.completed and order.failed merged in Seq
-// order. events.Filter matches a single Type, hence two reads.
-func readOrderOutcomeEvents(eventPath string) ([]events.Event, error) {
-	completed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderCompleted})
+// readOrderOutcomeHistory collects all three event types in one retained-history
+// traversal. Only relevant events remain in memory; errors discard partial
+// history so an incomplete scan can never produce a healthy verdict.
+func readOrderOutcomeHistory(ctx context.Context, path string, walk func(context.Context, string, func(events.Event) error) error) ([]events.Event, []time.Time, error) {
+	var outcomes []events.Event
+	var starts []time.Time
+	err := walk(ctx, path, func(event events.Event) error {
+		switch event.Type {
+		case events.OrderCompleted, events.OrderFailed:
+			outcomes = append(outcomes, event)
+		case events.ControllerStarted:
+			starts = append(starts, event.Ts)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	failed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFailed})
-	if err != nil {
-		return nil, err
-	}
-	merged := make([]events.Event, 0, len(completed)+len(failed))
-	merged = append(merged, completed...)
-	merged = append(merged, failed...)
-	// Seq, not Ts: the log is append-only and seq-ordered, and two events in the
-	// same second would otherwise sort arbitrarily.
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Seq < merged[j].Seq })
-	return merged, nil
-}
-
-// controllerStartTimes returns every controller.started timestamp. The sibling
-// check's latestControllerStartedAt returns only the newest, which is not enough
-// here — see nearControllerStart.
-func controllerStartTimes(eventPath string) ([]time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]time.Time, 0, len(startEvents))
-	for _, event := range startEvents {
-		out = append(out, event.Ts)
-	}
-	return out, nil
+	// Sequence, not timestamp, determines order even for events in the same second.
+	sort.Slice(outcomes, func(i, j int) bool { return outcomes[i].Seq < outcomes[j].Seq })
+	return outcomes, starts, nil
 }

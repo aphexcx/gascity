@@ -2,10 +2,13 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +35,9 @@ type Report struct {
 	// by Run so callers that need structured output (e.g. `gc doctor --json`)
 	// can project every result without re-running checks.
 	Results []*CheckResult
+	// CheckBudgets names checks that used their own default instead of the
+	// runner's fallback budget.
+	CheckBudgets []string
 }
 
 // Doctor runs registered health checks and reports results.
@@ -48,6 +54,9 @@ type Doctor struct {
 	// unconfirmed remediation. Call Wait before releasing resources that a
 	// timed execution may still be using.
 	CheckTimeout time.Duration
+	// UseCheckTimeouts enables measured per-check defaults. Leave it false
+	// when CheckTimeout was explicitly supplied, including zero to disable.
+	UseCheckTimeouts bool
 }
 
 // Register adds a check to the doctor's check list.
@@ -99,6 +108,9 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 
 	r := &Report{}
 	for _, c := range d.checks {
+		if timeout, own := d.checkTimeout(c); own {
+			r.CheckBudgets = append(r.CheckBudgets, fmt.Sprintf("%s=%s", c.Name(), timeout))
+		}
 		result := d.boundedRun(c, ctx)
 
 		// abandoned is true when a goroutine for this check may still be
@@ -132,6 +144,15 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 	return r
 }
 
+func (d *Doctor) checkTimeout(c Check) (time.Duration, bool) {
+	if d.UseCheckTimeouts {
+		if budget, ok := c.(CheckBudget); ok && budget.DefaultTimeout() > 0 {
+			return budget.DefaultTimeout(), true
+		}
+	}
+	return d.CheckTimeout, false
+}
+
 // tally folds one check result into the report's running counts. A fixed
 // check counts as passed; a failing check increments BlockingFailed only when
 // its severity gates.
@@ -160,12 +181,32 @@ func (r *Report) tally(result *CheckResult) {
 // goroutine is abandoned with its private buffer, so a still-running check
 // can never interleave writes with — or race against — the rest of the run.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
-	if d.CheckTimeout <= 0 {
+	timeout, _ := d.checkTimeout(c)
+	if timeout <= 0 {
 		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
 	checkCtx := *ctx
 	checkCtx.Output = &buf
+	parent := ctx.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	runCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	checkCtx.Context = runCtx
+	checkCtx.phase = &atomic.Value{}
+	checkCtx.phase.Store("")
+	timedOut := func() *CheckResult {
+		state := "was abandoned (outcome unknown)"
+		if phase := checkCtx.phase.Load().(string); phase != "" {
+			state = "was abandoned during: " + phase
+		}
+		return &CheckResult{
+			Name: c.Name(), Status: StatusError, Severity: SeverityAdvisory, TimedOut: true,
+			Message: fmt.Sprintf("timed out after %s and %s; re-run alone or raise --check-timeout", timeout, state),
+		}
+	}
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {
@@ -174,18 +215,15 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	}()
 	select {
 	case result := <-done:
+		if runCtx.Err() != nil {
+			return timedOut()
+		}
 		if buf.Len() > 0 && ctx.Output != nil {
 			buf.WriteTo(ctx.Output) //nolint:errcheck // best-effort output
 		}
 		return result
-	case <-time.After(d.CheckTimeout):
-		return &CheckResult{
-			Name:     c.Name(),
-			Status:   StatusError,
-			Severity: SeverityAdvisory,
-			TimedOut: true,
-			Message:  fmt.Sprintf("timed out after %s and was abandoned (outcome unknown); re-run alone or raise --check-timeout", d.CheckTimeout),
-		}
+	case <-runCtx.Done():
+		return timedOut()
 	}
 }
 
@@ -225,8 +263,9 @@ func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
 func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*CheckResult, bool) {
 	switch err := d.boundedFix(c, ctx); {
 	case errors.Is(err, errFixTimedOut):
+		timeout, _ := d.checkTimeout(c)
 		res.FixAttempted = true
-		res.FixError = fmt.Sprintf("fix timed out after %s and was abandoned; remediation unconfirmed", d.CheckTimeout)
+		res.FixError = fmt.Sprintf("fix timed out after %s and was abandoned; remediation unconfirmed", timeout)
 		return res, true
 	case err != nil:
 		res.FixError = err.Error()
@@ -258,7 +297,8 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 // fix is not interrupted mid-mutation. errFixTimedOut is returned on timeout;
 // otherwise Fix's own error (or nil) is returned.
 func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
-	if d.CheckTimeout <= 0 {
+	timeout, _ := d.checkTimeout(c)
+	if timeout <= 0 {
 		return runFixRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
@@ -276,7 +316,7 @@ func (d *Doctor) boundedFix(c Check, ctx *CheckContext) error {
 			buf.WriteTo(ctx.Output) //nolint:errcheck // best-effort output
 		}
 		return err
-	case <-time.After(d.CheckTimeout):
+	case <-time.After(timeout):
 		return errFixTimedOut
 	}
 }
@@ -336,6 +376,9 @@ func PrintSummary(w io.Writer, r *Report) {
 	}
 	if r.Fixed > 0 {
 		parts = append(parts, fmt.Sprintf("%d fixed", r.Fixed))
+	}
+	if len(r.CheckBudgets) > 0 {
+		parts = append(parts, "check budgets: "+strings.Join(r.CheckBudgets, ", "))
 	}
 	if len(parts) == 0 {
 		fmt.Fprintln(w, "\nNo checks ran.") //nolint:errcheck // best-effort output

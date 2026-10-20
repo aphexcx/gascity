@@ -3,7 +3,12 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"context"
+	"io"
+	"sync/atomic"
+	"time"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -53,6 +58,10 @@ type Check interface {
 
 // CheckContext carries shared state for all checks during a doctor run.
 type CheckContext struct {
+	// Context carries the running check's cancellation deadline, when bounded.
+	// A nil value means no cancellation was supplied.
+	Context context.Context
+	phase   *atomic.Value
 	// CityPath is the absolute path to the city root directory.
 	CityPath string
 	// Verbose enables extra diagnostic output in check results.
@@ -61,6 +70,20 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+}
+
+// SetPhase records the current operation for an abandonment diagnostic.
+// It is safe to call while the runner is observing a timed-out check.
+func (c *CheckContext) SetPhase(phase string) {
+	if c != nil && c.phase != nil {
+		c.phase.Store(phase)
+	}
+}
+
+// CheckBudget is implemented by checks with a measured default time budget.
+// An explicit caller timeout takes precedence over this default.
+type CheckBudget interface {
+	DefaultTimeout() time.Duration
 }
 
 // Renderer is implemented by checks that produce additional, optional

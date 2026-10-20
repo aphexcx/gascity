@@ -239,17 +239,17 @@ func TestPoolIdleRoutedWorkCheckFixIsNoop(t *testing.T) {
 // bead that is blocked in the BACKING store. mapBdStatus collapses bd's blocked
 // status into Gas City's "open", so a non-Live read returns it (routedCollapsed)
 // while a Live read reaches bd's raw --status=open filter and excludes it
-// (routedLive). Only the routed-work query carries a metadata filter; the
+// (routedLive). The routed-work query carries an open-status filter; the
 // session enumeration is label-only and delegates to the embedded store, as do
 // Get and every write. Mirrors blockedDemandStore.
 type poolIdleRoutedWorkBlockedStore struct {
 	beads.Store
-	routedCollapsed []beads.Bead // metadata-filtered, non-Live: blocked row present, collapsed to "open"
-	routedLive      []beads.Bead // metadata-filtered, Live: bd's raw filter excluded it
+	routedCollapsed []beads.Bead // work query, non-Live: blocked row present, collapsed to "open"
+	routedLive      []beads.Bead // work query, Live: bd's raw filter excluded it
 }
 
 func (s poolIdleRoutedWorkBlockedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if len(q.Metadata) == 0 {
+	if q.Label == "gc:session" {
 		return s.Store.List(q)
 	}
 	if q.Live {
@@ -292,7 +292,7 @@ type poolIdleRoutedWorkTierStore struct {
 }
 
 func (s poolIdleRoutedWorkTierStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if len(q.Metadata) == 0 {
+	if q.Label == "gc:session" {
 		return s.Store.List(q)
 	}
 	if q.TierMode != beads.TierBoth {
@@ -322,5 +322,57 @@ func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
 	}
 	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "GA-1") {
 		t.Fatalf("details missing wisp-tier routed bead:\n%s", details)
+	}
+}
+
+// poolIdleWorkCountingStore records physical queries before their in-memory filters.
+type poolIdleWorkCountingStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *poolIdleWorkCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, q)
+	return s.Store.List(q)
+}
+
+func TestPoolIdleRoutedWorkQueriesOncePerStore(t *testing.T) {
+	cfg := &config.City{}
+	var rows []beads.Bead
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("worker-%d", i)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: name})
+		sess := poolIdleWorkSessionBead(name, "active", "")
+		sess.ID = "session-" + name
+		item := poolIdleWorkRoutedBead(name, "")
+		item.ID = "work-" + name
+		rows = append(rows, sess, item)
+	}
+	// Unrelated and suspended templates must not become findings when queries broaden.
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "paused", Suspended: true})
+	for _, name := range []string{"unconfigured", "paused"} {
+		sess := poolIdleWorkSessionBead(name, "active", "")
+		sess.ID = "session-" + name
+		item := poolIdleWorkRoutedBead(name, "")
+		item.ID = "work-" + name
+		rows = append(rows, sess, item)
+	}
+	store := &poolIdleWorkCountingStore{Store: beads.NewMemStoreFrom(0, rows, nil)}
+	findings, err := newPoolIdleRoutedWorkCheck(cfg, "", nil).collectStoreFindings(store, "city")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 8 {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if len(store.queries) != 2 {
+		t.Fatalf("got %d queries for 8 templates, want one sessions list and one work list", len(store.queries))
+	}
+	if store.queries[0].Label != "gc:session" {
+		t.Fatalf("sessions query=%+v", store.queries[0])
+	}
+	work := store.queries[1]
+	if !work.Live || work.Status != "open" || work.TierMode != beads.FederatedReadTier {
+		t.Fatalf("work query lost live/open/federated semantics: %+v", work)
 	}
 }

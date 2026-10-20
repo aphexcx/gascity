@@ -116,74 +116,65 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 	return findings, skipped
 }
 
-// collectStoreFindings checks every generic-ephemeral pool template in cfg
-// against one store: a targeted session-class list for idle live instances,
-// and (only when at least one is idle) a targeted gc.routed_to metadata
-// lookup for unclaimed work — never a full-store scan.
+// collectStoreFindings lists session projections once per store and open work
+// once when any eligible pool is idle. Templates are matched in memory because
+// session.Store.List already reads the same session-label query for each one.
 func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
-	sessStore := cliSessionFrontDoor(store, c.cfg, c.cityPath)
-
-	var findings []poolIdleRoutedWorkFinding
+	templates := make(map[string]bool)
 	for i := range c.cfg.Agents {
 		agent := &c.cfg.Agents[i]
-		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+		if !agent.Suspended && agent.SupportsGenericEphemeralSessions() && agent.QualifiedName() != "" {
+			templates[agent.QualifiedName()] = true
+		}
+	}
+	if len(templates) == 0 {
+		return nil, nil
+	}
+	sessions, err := cliSessionFrontDoor(store, c.cfg, c.cityPath).List("", "")
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	idleByTemplate := make(map[string][]string)
+	for _, info := range sessions {
+		if !templates[info.Template] || !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
 			continue
 		}
-		template := agent.QualifiedName()
-		if template == "" {
-			continue
+		name := strings.TrimSpace(info.SessionName)
+		if name == "" {
+			name = info.ID
 		}
+		idleByTemplate[info.Template] = append(idleByTemplate[info.Template], name)
+	}
+	if len(idleByTemplate) == 0 {
+		return nil, nil
+	}
 
-		sessions, err := sessStore.List("", template)
-		if err != nil {
-			return findings, fmt.Errorf("listing sessions for %s: %w", template, err)
-		}
-		var idle []string
-		for _, info := range sessions {
-			if !poolSessionIsLiveInfo(info) || strings.TrimSpace(info.TriggerBeadID) != "" {
-				continue
-			}
-			name := strings.TrimSpace(info.SessionName)
-			if name == "" {
-				name = info.ID
-			}
-			idle = append(idle, name)
-		}
-		if len(idle) == 0 {
+	// Live preserves bd's raw --status=open filter before blocked/deferred rows
+	// are collapsed to open. Both tiers remain necessary for relocated stores.
+	items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "open",
+		TierMode: beads.FederatedReadTier,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing routed work: %w", err)
+	}
+	workByTemplate := make(map[string][]string)
+	for _, b := range items {
+		template := b.Metadata[beadmeta.RoutedToMetadataKey]
+		if len(idleByTemplate[template]) == 0 || strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
 			continue
 		}
-
-		// Live so bd's raw --status=open filter drops blocked/deferred rows
-		// before mapBdStatus collapses them into "open" and the check reports
-		// work the instance is correct to leave alone (same tradeoff as
-		// listOpenForControllerDemandLive). FederatedReadTier because a
-		// relocated class leg answers at exactly the tier asked.
-		items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-			Status:   "open",
-			TierMode: beads.FederatedReadTier,
-			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
-		})
-		if err != nil {
-			return findings, fmt.Errorf("listing routed work for %s: %w", template, err)
-		}
-		var beadIDs []string
-		for _, b := range items {
-			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
-				continue
-			}
-			beadIDs = append(beadIDs, b.ID)
-		}
-		if len(beadIDs) == 0 {
-			continue
-		}
+		workByTemplate[template] = append(workByTemplate[template], b.ID)
+	}
+	var findings []poolIdleRoutedWorkFinding
+	for template, beadIDs := range workByTemplate {
+		idle := idleByTemplate[template]
 		sort.Strings(beadIDs)
 		sort.Strings(idle)
 		findings = append(findings, poolIdleRoutedWorkFinding{
-			scope:         label,
-			template:      template,
-			beadIDs:       beadIDs,
-			idleInstances: idle,
+			scope: label, template: template, beadIDs: beadIDs, idleInstances: idle,
 		})
 	}
+	sort.Slice(findings, func(i, j int) bool { return findings[i].template < findings[j].template })
 	return findings, nil
 }
