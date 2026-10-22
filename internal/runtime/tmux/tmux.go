@@ -352,7 +352,7 @@ func tmuxClientEnv(environ []string) []string {
 	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case "GC_SESSION_ID", "GC_SESSION_NAME", "GC_INSTANCE_TOKEN",
+		case "GC_SESSION_ID", "GC_SESSION_NAME", "GC_SESSION_KEY", "GC_INSTANCE_TOKEN",
 			"GC_AGENT", "GC_ALIAS", "GC_TEMPLATE", "GC_SESSION_ORIGIN",
 			"GC_RUNTIME_EPOCH", "GC_CONTINUATION_EPOCH":
 			continue

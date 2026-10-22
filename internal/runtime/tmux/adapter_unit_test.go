@@ -2,10 +2,15 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 func TestBuildLaunchCommandUnsetsColorKillersForInteractiveExecutables(t *testing.T) {
@@ -168,5 +173,83 @@ func TestProviderAttachReportsHasSessionError(t *testing.T) {
 		if strings.Contains(strings.Join(call, " "), "attach-session") {
 			t.Fatalf("Attach attempted tmux attach-session after has-session error: %v", fe.calls)
 		}
+	}
+}
+
+// Native transcript writes keep a quiet pane active without borrowing another
+// conversation's writes from the same working directory.
+func TestProviderActivityIncludesExactClaudeTranscript(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	project := filepath.Join(root, "projects", sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(filepath.Join(project, "own", "subagents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pane := time.Unix(1700000000, 0)
+	main := pane.Add(time.Minute)
+	child := main.Add(time.Minute)
+	write := func(path string, stamp time.Time) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(project, "own.jsonl"), main)
+	write(filepath.Join(project, "foreign.jsonl"), child.Add(time.Hour))
+	write(filepath.Join(project, "old.jsonl"), pane.Add(-time.Minute))
+	for _, tc := range []struct {
+		name, provider, key string
+		want                time.Time
+		unknown             bool
+	}{
+		{"claude", "claude", "own", main, false},
+		{"opus", "claude-opus", "own", main, false},
+		{"pane newer", "claude", "old", pane, false},
+		{"missing key", "claude", "", time.Time{}, true},
+		{"missing transcript", "claude", "missing", time.Time{}, true},
+		{"non claude", "codex", "own", pane, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProviderWithConfig(Config{SocketName: "activity-test"})
+			p.tm.exec = &fakeExecutor{outs: []string{
+				fmt.Sprint(pane.Unix()),
+				fmt.Sprintf("GC_PROVIDER=%s\nGC_SESSION_KEY=%s\nGC_DIR=%s\nCLAUDE_CONFIG_DIR=%s", tc.provider, tc.key, workDir, root),
+			}}
+			got, err := p.GetLastActivity("worker")
+			if tc.unknown {
+				if err == nil || !got.IsZero() {
+					t.Fatalf("activity = %v, %v; want unknown", got, err)
+				}
+			} else if err != nil || !got.Equal(tc.want) {
+				t.Fatalf("activity = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+	write(filepath.Join(project, "own", "subagents", "agent-child.jsonl"), child)
+	p := NewProviderWithConfig(Config{SocketName: "activity-test"})
+	p.tm.exec = &fakeExecutor{outs: []string{fmt.Sprint(pane.Unix()), fmt.Sprintf("GC_PROVIDER=claude\nGC_SESSION_KEY=own\nGC_DIR=%s\nCLAUDE_CONFIG_DIR=%s", workDir, root)}}
+	got, err := p.GetLastActivity("worker")
+	if err != nil || !got.Equal(child) {
+		t.Fatalf("child activity = %v, %v; want %v", got, err, child)
+	}
+	// An unreadable subagent directory must not silently become stale activity.
+	if err := os.MkdirAll(filepath.Join(project, "broken"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(project, "broken.jsonl"), main)
+	write(filepath.Join(project, "broken", "subagents"), main)
+	_, err = claudeTranscriptActivity(map[string]string{"GC_SESSION_KEY": "broken", "GC_DIR": workDir, "CLAUDE_CONFIG_DIR": root})
+	if err == nil {
+		t.Fatal("unreadable subagent directory was treated as quiet")
+	}
+}
+
+func TestTmuxClientDoesNotInheritConversationIdentity(t *testing.T) {
+	got := tmuxClientEnv([]string{"GC_SESSION_KEY=old-conversation", "PATH=/bin"})
+	if len(got) != 1 || got[0] != "PATH=/bin" {
+		t.Fatalf("client environment = %v", got)
 	}
 }

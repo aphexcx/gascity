@@ -136,3 +136,12 @@ func TestSyncRuntimeAliasRollsBackOnPartialFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEnvPublishesExactProviderSessionKey(t *testing.T) {
+	for _, key := range []string{"provider-key", ""} {
+		env := RuntimeEnvWithSessionContext(Info{ID: "bead-id", SessionKey: key}, 1, 1, "token")
+		if got := env["GC_SESSION_KEY"]; got != key {
+			t.Fatalf("GC_SESSION_KEY = %q, want %q", got, key)
+		}
+	}
+}

@@ -1268,6 +1268,7 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // of any session.
 var managedDoltSessionScopedEnvKeys = []string{
 	"GC_SESSION_ID",
+	"GC_SESSION_KEY",
 	"GC_SESSION_NAME",
 	"GC_ALIAS",
 	"GC_AGENT",

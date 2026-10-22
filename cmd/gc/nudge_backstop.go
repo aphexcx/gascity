@@ -48,7 +48,10 @@ type backstopPredicate interface {
 	// write failed and the provider must not be nudged.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
-	// exhausted is invoked once attempts reach the shared max attempts.
+	// delivered records positive runtime evidence after a reserved attempt.
+	delivered(store beads.Store, s *beads.Bead, stdout io.Writer)
+
+	// exhausted is invoked at the attempt cap or when no content is available.
 	exhausted(store beads.Store, s *beads.Bead, target backstopTarget, stdout io.Writer)
 
 	// clear wipes persisted state once nothing is outstanding.
@@ -194,21 +197,8 @@ func runNudgeBackstop(
 			}
 			content := pred.content(*s)
 			if content == "" {
-				// Nothing is deliverable for this session — an ordinary path
-				// rather than an exotic one in every lane, though for different
-				// reasons. The lanes that resolve content through the
-				// default-nudge fallback (the claim and execution backstops)
-				// reach it only when the template or agent cannot be resolved
-				// at all; the continuation lane reads the configured nudge
-				// directly, and `agent.Nudge` is optional and routinely unset.
-				// Skipping silently parks the state machine on its observe
-				// marker forever: no attempt is ever reserved, the cap is never
-				// reached, and the predicate's terminal action never runs —
-				// which for the execution backstop is the drain that is the only
-				// thing that releases the claim. The bounded attempts exist to
-				// give the agent a chance to ANSWER a nudge; with no nudge to
-				// send there is nothing to wait for, so go straight to the
-				// terminal action after the same grace window.
+				// Let the predicate report undeliverable work after the grace
+				// window. Exhaustion alone is not proof of successful contact.
 				pred.exhausted(store, s, target, stdout)
 				continue
 			}
@@ -218,7 +208,21 @@ func runNudgeBackstop(
 			if !pred.reserve(store, s, target, attempts+1, now, stdout) {
 				continue
 			}
-			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
+			var err error
+			if voucher, ok := sp.(runtime.NudgeVouchingProvider); ok {
+				var receipt runtime.NudgeDelivery
+				receipt, err = voucher.NudgeDelivered(sessName, runtime.TextContent(content))
+				if receipt.Landed() {
+					pred.delivered(store, s, stdout)
+				}
+				if err == nil {
+					err = receipt.UnconfirmedSubmitError(sessName)
+				}
+			} else {
+				// Best-effort nil errors do not prove the payload reached a session.
+				err = sp.Nudge(sessName, runtime.TextContent(content))
+			}
+			if err != nil {
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
 				continue
 			}

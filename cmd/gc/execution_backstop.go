@@ -1,46 +1,9 @@
 package main
 
-// The execution backstop: a claim that never becomes execution.
-//
-// Every backstop that came before this one ends at the CLAIM. nudgeStalledPoolClaims
-// clears the instant its trigger bead flips to in_progress ("the slot is doing
-// its job"), and nudgeStalledPoolContinuations only ever looks at the OPEN
-// successor of a step that already completed. So the one state neither covers is
-// the one the incident produced: a pool slot holding an in-progress bead, idle at
-// its prompt, having claimed and then ended its turn without starting the work.
-// From there nothing in the fleet converges — the bead is not open, so no claim
-// probe wants it; the session is alive, so no crash lane touches it — until the
-// session is recycled 15-85 minutes later and the dead-assignee reopen releases
-// the claim.
-//
-// This predicate closes that with the same bounded shape as its two siblings:
-// observe, nudge, back off, give up. It re-delivers the agent's OWN configured
-// claim nudge, which is idempotent by construction — re-running `gc hook --claim`
-// on a bead this session already owns returns action=work
-// reason=existing_assignment (the ga-i44k invariant), so a slot that was merely
-// slow re-reads its assignment instead of being handed a second one.
-//
-// # The churn guard is provider idleness, and it is the predicate's job
-//
-// The shared engine does not consult the runtime; it keys purely on bead state.
-// That is enough for the sibling predicates, because their outstanding condition
-// (a bead still OPEN) is structurally invisible to a working agent — the moment
-// it claims, the predicate stops matching. This one's condition is the exact
-// opposite: an in-progress bead is what a working agent looks like. So the
-// predicate holds unless the runtime itself reports no activity for at least the
-// grace window, and an UNKNOWN activity signal (an error, or a runtime that
-// reports none) holds too. That is the #312 lesson stated in the one place it
-// applies: never nudge on "we cannot tell".
-//
-// # Exhaustion hands the session to a lane that already converges
-//
-// At the attempt cap the stall becomes a typed event and the session is handed
-// to the ordinary drain path, whose recycle -> dead-assignee-reopen chain is the
-// one that converges today — only now in a bounded ~11 minutes rather than on
-// recycle roulette. Restart-with-backoff is established framework liveness (the
-// same shape as health patrol); the decision about the WORK is still the agent's.
-// The escalation is latched on the session bead so it fires once per stalled
-// claim, not once per tick.
+// The execution backstop observes quiet pool sessions holding a single claim,
+// retries their configured nudge within a bounded budget, and reports exhaustion
+// once per claim. Draining requires positive evidence that a nudge reached the
+// session. Unknown activity and undeliverable nudges hold the claim.
 
 import (
 	"encoding/json"
@@ -65,11 +28,12 @@ import (
 // reason the sibling backstops persist theirs: a controller restart must resume
 // the state machine, never replay it (test-5il).
 const (
-	executionClaimNudgeWorkKey     = "execution_claim_nudge_work"
-	executionClaimNudgeRootKey     = "execution_claim_nudge_root"
-	executionClaimNudgeStoreRefKey = "execution_claim_nudge_store_ref"
-	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
-	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
+	executionClaimNudgeWorkKey      = "execution_claim_nudge_work"
+	executionClaimNudgeRootKey      = "execution_claim_nudge_root"
+	executionClaimNudgeStoreRefKey  = "execution_claim_nudge_store_ref"
+	executionClaimNudgeCountKey     = "execution_claim_nudge_count"
+	executionClaimNudgeDeliveredKey = "execution_claim_nudge_delivered"
+	executionClaimNudgeAtKey        = "execution_claim_nudge_at"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
@@ -77,7 +41,7 @@ const (
 )
 
 // nudgeStalledPoolExecution re-delivers the configured claim nudge to a pool slot
-// that HOLDS an in-progress claim it never started executing, and escalates once
+// that holds an in-progress claim while quiet, and reports once
 // the bounded attempts are spent.
 //
 // work/workStores/workStoreRefs are the reconciler's index-aligned assigned-work
@@ -208,8 +172,7 @@ func (s executionClaimSnapshot) forIdentities(identities []string) []executionCl
 	return out
 }
 
-// poolExecutionBackstop is the backstopPredicate for a pool slot that claimed a
-// bead and never executed it.
+// poolExecutionBackstop observes a quiet pool slot holding a claim.
 type poolExecutionBackstop struct {
 	refusals     *claimRefusalLog
 	cfg          *config.City
@@ -356,9 +319,13 @@ func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target 
 	return writeExecutionClaimMarker(store, s, target, attempts, now, stdout)
 }
 
-// exhausted turns a spent attempt budget into one observable fact and one drain
-// request, latched so both happen exactly once for this claim however many ticks
-// the session survives.
+func (p poolExecutionBackstop) delivered(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	writeSessionMetadata(store, s, map[string]string{
+		executionClaimNudgeDeliveredKey: strconv.Itoa(atoiOr0(s.Metadata[executionClaimNudgeDeliveredKey]) + 1),
+	}, stdout)
+}
+
+// exhausted reports once and drains only when runtime evidence proves contact.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, target backstopTarget, stdout io.Writer) {
 	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" {
 		return
@@ -379,32 +346,41 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, targe
 		return
 	}
 	sessName := strings.TrimSpace(s.Metadata["session_name"])
+	last, err := p.sp.GetLastActivity(sessName)
+	if err != nil || last.IsZero() || p.now.Sub(last) < idleClaimNudgeGrace {
+		return
+	}
 	// Latch FIRST. A failed event write or a failed drain must not leave the
 	// escalation armed to repeat on every subsequent tick; the marker itself is
 	// the durable record that this claim was escalated, and the operator sees the
 	// failure on stdout.
 	if !writeSessionMetadata(store, s, map[string]string{
 		executionClaimNudgeStalledKey: p.now.UTC().Format(time.RFC3339),
-	}, "execution-claim-nudge", stdout) {
+	}, stdout) {
 		return
 	}
-	// Report the attempts actually DELIVERED, not the cap. An agent with no
-	// configured nudge escalates at 0/3 having never been contacted, and an
-	// operator reading "after 3 attempts" there would go looking for three
-	// nudges that were never sent.
-	attempts := atoiOr0(s.Metadata[executionClaimNudgeCountKey])
-	p.emitStepStalled(s, beadID, attempts)
-	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-		"execution-claim-nudge: %s still holds %s unexecuted after %d/%d nudge attempts; draining (%s)\n",
-		sessName, beadID, attempts, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
+	delivered := max(0, atoiOr0(s.Metadata[executionClaimNudgeDeliveredKey]))
+	p.emitStepStalled(s, beadID, delivered)
+	provider := strings.TrimSpace(s.Metadata["provider"])
+	if provider == "" {
+		if agent := findAgentByTemplate(p.cfg, normalizedSessionTemplate(*s, p.cfg)); agent != nil {
+			provider = strings.TrimSpace(agent.Provider)
+		}
+	}
+	if provider == "" {
+		provider = strings.TrimSpace(p.cfg.Workspace.Provider)
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	if delivered == 0 {
+		fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, 0 of %d nudges deliverable (provider %s); holding claim\n", sessName, beadID, p.now.Sub(last).Seconds(), idleClaimNudgeMaxAttempts, provider) //nolint:errcheck // best-effort
+		return
+	}
+	fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %d of %d nudges delivered (provider %s); draining (%s)\n", sessName, beadID, p.now.Sub(last).Seconds(), delivered, idleClaimNudgeMaxAttempts, provider, executionStalledDrainReason) //nolint:errcheck // best-effort
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}
-	// The drain is the CONVERGENCE step, not a notification. Nothing else will
-	// release this claim: the session is alive and awake, so no crash lane
-	// touches it, and it holds in_progress work, so the wake machinery keeps it
-	// alive by design. The tracked drain is what turns "we gave up nudging" into
-	// stop -> close -> dead-assignee reopen -> the row is claimable again.
 	if err := p.requestDrain(*s); err != nil {
 		fmt.Fprintf(stdout, "execution-claim-nudge: draining %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
 	}
@@ -439,13 +415,18 @@ func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io
 }
 
 func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
-	return writeSessionMetadata(store, s, map[string]string{
+	kvs := map[string]string{
 		executionClaimNudgeWorkKey:     target.ID,
 		executionClaimNudgeRootKey:     target.RootID,
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
-	}, "execution-claim-nudge", stdout)
+	}
+	if attempts == 0 {
+		kvs[executionClaimNudgeDeliveredKey] = ""
+		kvs[executionClaimNudgeStalledKey] = ""
+	}
+	return writeSessionMetadata(store, s, kvs, stdout)
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
@@ -457,6 +438,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeRootKey,
 		executionClaimNudgeStoreRefKey,
 		executionClaimNudgeCountKey,
+		executionClaimNudgeDeliveredKey,
 		executionClaimNudgeAtKey,
 		executionClaimNudgeStalledKey,
 	}
@@ -474,7 +456,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 	for _, key := range keys {
 		kvs[key] = ""
 	}
-	if !writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout) {
+	if !writeSessionMetadata(store, s, kvs, stdout) {
 		return
 	}
 	for _, key := range keys {
@@ -484,9 +466,9 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 
 // writeSessionMetadata persists a marker patch and mirrors it into the in-memory
 // session bead so the rest of this tick reads the just-written values.
-func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]string, label string, stdout io.Writer) bool {
+func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]string, stdout io.Writer) bool {
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
-		fmt.Fprintf(stdout, "%s: marking %s failed: %v\n", label, s.ID, err) //nolint:errcheck // best-effort
+		fmt.Fprintf(stdout, "execution-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
 		return false
 	}
 	if s.Metadata == nil {
@@ -499,7 +481,7 @@ func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]strin
 }
 
 // requestExecutionStalledDrain begins a TRACKED drain of a seat that claimed
-// work and never executed it.
+// work, remained quiet, and received at least one backstop nudge.
 //
 // Tracked, not a bare runtime flag: the drainTracker is the machinery that
 // actually converges a session — it defers the interrupt one tick so a

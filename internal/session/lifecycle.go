@@ -67,6 +67,8 @@ func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, conti
 func RuntimeEnvWithSessionContext(info Info, generation, continuationEpoch int, instanceToken string) map[string]string {
 	publicAlias := runtimePublicAlias(info)
 	env := RuntimeEnvWithAlias(info.ID, info.SessionName, publicAlias, generation, continuationEpoch, instanceToken)
+	// Empty explicitly clears a key inherited from a previous incarnation.
+	env["GC_SESSION_KEY"] = strings.TrimSpace(info.SessionKey)
 	if template := strings.TrimSpace(info.Template); template != "" {
 		env["GC_TEMPLATE"] = template
 	}

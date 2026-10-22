@@ -126,6 +126,14 @@ func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) erro
 	return p.base.Nudge(name, content)
 }
 
+// NudgeDelivered preserves delivery evidence through the bounded status wrapper.
+func (p *statusProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if voucher, ok := p.base.(runtime.NudgeVouchingProvider); ok {
+		return voucher.NudgeDelivered(name, content)
+	}
+	return runtime.NudgeDelivery{}, p.base.Nudge(name, content)
+}
+
 func (p *statusProvider) SetMeta(name, key, value string) error {
 	return p.base.SetMeta(name, key, value)
 }
