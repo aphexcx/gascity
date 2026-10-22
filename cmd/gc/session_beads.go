@@ -1736,6 +1736,24 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 	}
 
+	// A supervisor restart preserves running sessions. Publish their persisted
+	// conversation identity without requiring a relaunch or another prime hook.
+	for sn, b := range bySessionName {
+		if strings.TrimSpace(b.Metadata["session_key"]) == "" || sp == nil || !sp.IsRunning(sn) {
+			continue
+		}
+		info, err := sessFront.Get(b.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: reading provider identity for %s: %v\n", sn, err) //nolint:errcheck
+			continue
+		}
+		if !info.Closed {
+			if err := session.SyncRuntimeSessionKey(sp, info); err != nil {
+				fmt.Fprintf(stderr, "session beads: syncing provider identity for %s: %v\n", sn, err) //nolint:errcheck
+			}
+		}
+	}
+
 	// Track open bead IDs for the returned index.
 	openIndex := make(map[string]string, len(desiredState))
 	desiredNames := make(map[string]bool, len(desiredState))

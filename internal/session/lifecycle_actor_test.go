@@ -152,6 +152,7 @@ func TestSyncRuntimeSessionKeyRejectsReplacementRuntime(t *testing.T) {
 		wantErr                bool
 	}{
 		{"same instance", "session-id", "instance", false},
+		{"unowned runtime", "", "", false},
 		{"reused name", "replacement-id", "instance", true},
 		{"restarted instance", "session-id", "replacement", true},
 	} {
@@ -168,7 +169,7 @@ func TestSyncRuntimeSessionKeyRejectsReplacementRuntime(t *testing.T) {
 			}
 			got, err := sp.GetMeta("worker", "GC_SESSION_KEY")
 			want := "captured"
-			if tc.wantErr {
+			if tc.wantErr || tc.runtimeID == "" {
 				want = ""
 			}
 			if err != nil || got != want {

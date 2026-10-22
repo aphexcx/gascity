@@ -95,9 +95,20 @@ func SyncRuntimeSessionKey(sp runtime.Provider, info Info) error {
 	if sp == nil || info.SessionName == "" || info.SessionKey == "" {
 		return nil
 	}
+	key, err := sp.GetMeta(info.SessionName, "GC_SESSION_KEY")
+	if err != nil {
+		return fmt.Errorf("reading runtime provider session key: %w", err)
+	}
+	if key == info.SessionKey {
+		return nil
+	}
 	id, err := sp.GetMeta(info.SessionName, "GC_SESSION_ID")
 	if err != nil {
 		return fmt.Errorf("reading runtime session identity: %w", err)
+	}
+	// Unowned runtimes have no identity to fence; leave their activity unknown.
+	if id == "" {
+		return nil
 	}
 	if id != info.ID {
 		return fmt.Errorf("runtime session identity changed for %q", info.SessionName)

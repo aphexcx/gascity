@@ -882,10 +882,11 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 	}
 	if info.SessionName != "" {
 		sp, err := newSessionProviderForCity(cfg, cityPath)
-		if err == nil {
-			err = sessionpkg.SyncRuntimeSessionKey(sp, info)
-		}
 		if err != nil {
+			warn("constructing runtime for session %q: %v", gcSessionID, err)
+			return
+		}
+		if err := sessionpkg.SyncRuntimeSessionKey(sp, info); err != nil {
 			warn("syncing runtime session_key for session %q: %v", gcSessionID, err)
 		}
 	}
