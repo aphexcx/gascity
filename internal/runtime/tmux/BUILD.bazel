@@ -98,6 +98,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
+        "//internal/sessionlog",
         "//internal/shellquote",
         "//internal/testenv",
         "//internal/worker/workertest",

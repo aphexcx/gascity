@@ -3504,13 +3504,38 @@ func (t *Tmux) GetSessionActivity(session string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	return t.discountSessionActivity(session, wa), nil
+}
+
+func (t *Tmux) discountSessionActivity(session string, wa time.Time) time.Time {
 	t.pokeMu.Lock()
 	pk, ok := t.pokes[session]
 	t.pokeMu.Unlock()
 	if !ok {
-		return wa, nil
+		return wa
 	}
-	return discountPokeActivity(wa, pk, time.Now()), nil
+	return discountPokeActivity(wa, pk, time.Now())
+}
+
+// Read the provider with the pane timestamp so non-Claude sessions need no
+// extra tmux round trip to decide whether native activity is available.
+func (t *Tmux) sessionActivityAndProvider(session string) (time.Time, string, error) {
+	out, err := t.run("list-windows", "-t", session, "-F", "#{window_activity}\t#{GC_PROVIDER}")
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	var stamps []string
+	var provider string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		stamp, name, _ := strings.Cut(line, "\t")
+		stamps = append(stamps, stamp)
+		provider = strings.TrimSpace(name)
+	}
+	timestamp, err := latestActivityTimestamp(strings.Join(stamps, "\n"))
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	return t.discountSessionActivity(session, time.Unix(timestamp, 0)), provider, nil
 }
 
 // rawSessionActivity returns the most recent tmux per-window activity timestamp.

@@ -411,6 +411,9 @@ func TestExecutionBackstopHoldsWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
 	if stalled != 1 {
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
 	}
+	if strings.Count(f.stdout.String(), "no nudge configured") != 1 || strings.Contains(f.stdout.String(), "nudges deliverable") {
+		t.Fatalf("missing once-only no-nudge diagnostic: %s", f.stdout.String())
+	}
 }
 
 func TestExecutionBackstopSkipsPinnedHumanCheckpoint(t *testing.T) {

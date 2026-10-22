@@ -752,17 +752,17 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // Claude transcript reads are scoped to the exact provider session key; missing
 // identity or unreadable native activity is unknown, never proof of idleness.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	pane, err := p.tm.GetSessionActivity(name)
+	pane, provider, err := p.tm.sessionActivityAndProvider(name)
 	if err != nil {
 		return time.Time{}, err
+	}
+	provider = sessionlog.ProviderFamily(provider)
+	if provider != "claude" && !strings.HasPrefix(provider, "claude-") {
+		return pane, nil
 	}
 	env, err := p.tm.GetAllEnvironment(name)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("%w: reading activity environment for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
-	}
-	provider := sessionlog.ProviderFamily(env["GC_PROVIDER"])
-	if provider != "claude" && !strings.HasPrefix(provider, "claude-") {
-		return pane, nil
 	}
 	native, err := claudeTranscriptActivity(env)
 	if err != nil {
@@ -787,9 +787,15 @@ func claudeTranscriptActivity(env map[string]string) (time.Time, error) {
 		}
 		root = filepath.Join(home, ".claude")
 	}
-	path := sessionlog.FindSessionFileByID([]string{filepath.Join(root, "projects")}, workDir, key)
-	if path == "" {
-		return time.Time{}, fmt.Errorf("exact transcript is unavailable")
+	path, err := sessionlog.FindSessionFileByIDWithError([]string{filepath.Join(root, "projects")}, workDir, key)
+	if errors.Is(err, os.ErrNotExist) {
+		// Claude creates this file on its first conversation write. Until then,
+		// a keyed session is governed by pane activity alone. Only confirmed
+		// absence takes this path; unreadable or invalid identity stays unknown.
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
 	}
 	info, err := os.Stat(path)
 	if err != nil {

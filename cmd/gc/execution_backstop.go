@@ -374,7 +374,11 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, targe
 		provider = "unknown"
 	}
 	if delivered == 0 {
-		fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, 0 of %d nudges deliverable (provider %s); holding claim\n", sessName, beadID, p.now.Sub(last).Seconds(), idleClaimNudgeMaxAttempts, provider) //nolint:errcheck // best-effort
+		condition := fmt.Sprintf("0 of %d nudges deliverable", idleClaimNudgeMaxAttempts)
+		if p.content(*s) == "" {
+			condition = "no nudge configured"
+		}
+		fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %s (provider %s); holding claim\n", sessName, beadID, p.now.Sub(last).Seconds(), condition, provider) //nolint:errcheck // best-effort
 		return
 	}
 	fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %d of %d nudges delivered (provider %s); draining (%s)\n", sessName, beadID, p.now.Sub(last).Seconds(), delivered, idleClaimNudgeMaxAttempts, provider, executionStalledDrainReason) //nolint:errcheck // best-effort
