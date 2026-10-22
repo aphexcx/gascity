@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -359,21 +360,8 @@ func TestExecutionStepStalledStaysOffTheExportAllowlist(t *testing.T) {
 	}
 }
 
-// TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured is the
-// production row this backstop was missing. `agent.Nudge` is optional, and in a
-// real city every workflow pool template leaves it unset — maintainer-city had
-// it on 18 of 260 agents and on none of its four pool roles. The shared engine
-// skipped empty content with a bare `continue`, so the state machine parked on
-// its observe marker forever: it never reserved an attempt, never reached the
-// attempt cap, and so never ran the drain that is the ONLY thing that releases
-// the claim. A seat holding an in-progress bead still satisfies poolDesired, so
-// no replacement spawns and the whole pool starves behind it. Observed: 20 of 21
-// live markers frozen at count=0, the oldest claim held 3.5 days.
-//
-// With nothing to deliver there is nothing to wait for — the bounded attempts
-// exist to give the agent a chance to ANSWER a nudge. The grace window still
-// applies, and then it escalates.
-func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
+// A quiet claim cannot be drained when no nudge could be delivered.
+func TestExecutionBackstopHoldsWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 	f.idleFor(t, 10*time.Minute)
@@ -393,21 +381,21 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	if got := f.nudgeCount(); got != 0 {
 		t.Fatalf("delivered nudges with no configured nudge = %d, want 0", got)
 	}
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v, want none; stdout=%s", f.drained, f.stdout.String())
 	}
 	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
 		t.Fatal("escalation was not latched; a later tick would drain the session all over again")
 	}
 
-	// Latched: however many ticks follow, exactly one drain and one event.
+	// Latched: further ticks hold the claim and emit no duplicate event.
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
-	if len(f.drained) != 1 {
-		t.Fatalf("drain requests after further ticks = %v, want exactly one", f.drained)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after further ticks = %v, want none", f.drained)
 	}
 	stalled := 0
 	for _, e := range f.rec.Events {
@@ -668,5 +656,29 @@ func TestExecutionClaimOwnerFenceRevalidate(t *testing.T) {
 	p := poolExecutionBackstop{cfg: f.cfg, now: f.now}
 	if got := p.revalidate(backstopTarget{ID: f.work.ID, Assignee: f.sessName, Store: f.store}); got != backstopResolutionClear {
 		t.Errorf("revalidation=%v, want clear for changed foreign owner", got)
+	}
+}
+
+// Failed delivery reservations are not evidence that the agent heard a nudge.
+func TestExecutionBackstopHoldsWhenNudgeDeliveryIsUnsupported(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.sp.NudgeErrors = map[string]error{f.sessName: errors.New("live delivery is unsupported for claude-opus")}
+	f.idleFor(t, 10*time.Minute)
+	for i := 0; i < idleClaimNudgeMaxAttempts+4; i++ {
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v with zero delivered nudges; stdout=%s", f.drained, f.stdout.String())
+	}
+	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
+		t.Fatal("undeliverable nudge was not latched")
+	}
+	if got := len(f.rec.Events); got != 1 {
+		t.Fatalf("events = %d, want one stalled event", got)
+	}
+	if !strings.Contains(f.stdout.String(), "0 of 3 nudges deliverable") || strings.Contains(f.stdout.String(), "unexecuted") {
+		t.Fatalf("log must describe delivery evidence: %s", f.stdout.String())
 	}
 }
