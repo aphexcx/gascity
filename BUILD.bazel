@@ -270,6 +270,7 @@ filegroup(
         "//internal/executionevent:bazel_repo_srcs",
         "//internal/extmsg:bazel_repo_srcs",
         "//internal/featureflags:bazel_repo_srcs",
+        "//internal/federation:bazel_repo_srcs",
         "//internal/formula:bazel_repo_srcs",
         "//internal/formulatest:bazel_repo_srcs",
         "//internal/fsys:bazel_repo_srcs",
