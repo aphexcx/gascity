@@ -220,7 +220,7 @@ func TestProviderActivityIncludesExactClaudeTranscript(t *testing.T) {
 			}}
 			got, err := p.GetLastActivity("worker")
 			if tc.unknown {
-				if err == nil || !got.IsZero() {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !got.IsZero() {
 					t.Fatalf("activity = %v, %v; want unknown", got, err)
 				}
 			} else if err != nil || !got.Equal(tc.want) {
@@ -228,6 +228,14 @@ func TestProviderActivityIncludesExactClaudeTranscript(t *testing.T) {
 			}
 		})
 	}
+	t.Run("production wrapper preserves uncertainty", func(t *testing.T) {
+		p := NewSeamBackedWithConfig(Config{SocketName: "activity-test"}).(*seamBackedProvider)
+		p.tm.exec = &fakeExecutor{outs: []string{fmt.Sprint(pane.Unix()), "GC_PROVIDER=claude"}}
+		got, err := p.GetLastActivity("worker")
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !got.IsZero() {
+			t.Fatalf("wrapped activity = %v, %v; want unknown", got, err)
+		}
+	})
 	write(filepath.Join(project, "own", "subagents", "agent-child.jsonl"), child)
 	p := NewProviderWithConfig(Config{SocketName: "activity-test"})
 	p.tm.exec = &fakeExecutor{outs: []string{fmt.Sprint(pane.Unix()), fmt.Sprintf("GC_PROVIDER=claude\nGC_SESSION_KEY=own\nGC_DIR=%s\nCLAUDE_CONFIG_DIR=%s", workDir, root)}}

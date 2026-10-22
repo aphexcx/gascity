@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // primeCaptureTestStore stands up a file-backed city store the same way
@@ -16,6 +18,7 @@ func primeCaptureTestStore(t *testing.T) (cityDir string, store beads.Store) {
 	t.Helper()
 	cityDir = t.TempDir()
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
 	}
@@ -46,6 +49,20 @@ func createCaptureSessionBead(t *testing.T, store beads.Store, providerKind stri
 		t.Fatalf("create session bead: %v", err)
 	}
 	return b.ID
+}
+
+func primeCaptureRuntime(t *testing.T, id, name string) *runtime.Fake {
+	t.Helper()
+	sp := runtime.NewFake()
+	if err := sp.SetMeta(name, "GC_SESSION_ID", id); err != nil {
+		t.Fatal(err)
+	}
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	return sp
 }
 
 // isolateProviderSessionEnv clears the ambient provider-session env so the test
@@ -155,6 +172,29 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T)
 	}
 }
 
+func TestPersistPrimeHookProviderSessionKey_RefreshesRuntimeIdentity(t *testing.T) {
+	for _, existing := range []string{"", "captured-key"} {
+		t.Run("existing="+existing, func(t *testing.T) {
+			_, store := primeCaptureTestStore(t)
+			id := createCaptureSessionBead(t, store, "claude")
+			for key, value := range map[string]string{"session_name": "worker", "session_key": existing} {
+				if err := store.SetMetadata(id, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("GC_SESSION_ID", id)
+			isolateProviderSessionEnv(t)
+			sp := primeCaptureRuntime(t, id, "worker")
+			var stderr bytes.Buffer
+			persistPrimeHookProviderSessionKey("captured-key", &stderr)
+			got, err := sp.GetMeta("worker", "GC_SESSION_KEY")
+			if err != nil || got != "captured-key" {
+				t.Fatalf("runtime key = %q, %v; stderr=%s", got, err, &stderr)
+			}
+		})
+	}
+}
+
 // TestProviderAcceptsHookStdinSessionID locks the allowlist boundary: only the
 // families whose SessionStart hook delivers their authoritative resume id on
 // stdin (codex, cursor, claude) are accepted; every other family is not.
@@ -254,6 +294,7 @@ func TestPersistPrimeHookProviderSessionKey_QuietWithoutDebug(t *testing.T) {
 	t.Setenv("GC_SESSION_ID", id)
 	isolateProviderSessionEnv(t)
 	t.Setenv("GC_DEBUG", "")
+	primeCaptureRuntime(t, id, "s-"+id)
 
 	const claudeSessionID = "8273e9ca-ff09-4260-a03a-1f8534cc1ba5"
 	var stderr bytes.Buffer

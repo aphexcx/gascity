@@ -212,7 +212,9 @@ func runNudgeBackstop(
 			if voucher, ok := sp.(runtime.NudgeVouchingProvider); ok {
 				var receipt runtime.NudgeDelivery
 				receipt, err = voucher.NudgeDelivered(sessName, runtime.TextContent(content))
-				if receipt.Landed() {
+				// Routers may infer Delivered from a legacy nil error. Only an
+				// explicit submit verdict identifies a provider-vouched receipt.
+				if receipt.Submit != "" && receipt.Landed() {
 					pred.delivered(store, s, stdout)
 				}
 				if err == nil {

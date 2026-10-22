@@ -82,7 +82,9 @@ func (s *seamBackedProvider) ListRunning(prefix string) ([]string, error) {
 }
 
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
-	return s.seams.GetLastActivity(name)
+	// Keep the error-bearing activity boundary: the combined seam observation
+	// cannot distinguish unknown activity from a failed attachment lookup.
+	return s.Provider.GetLastActivity(name)
 }
 
 func (s *seamBackedProvider) ClearScrollback(name string) error {

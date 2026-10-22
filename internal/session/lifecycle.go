@@ -89,6 +89,34 @@ func runtimePublicAlias(info Info) string {
 	return strings.TrimSpace(info.ConfiguredNamedIdentity)
 }
 
+// SyncRuntimeSessionKey publishes a captured provider identity to the matching
+// live runtime, so native activity follows the current conversation.
+func SyncRuntimeSessionKey(sp runtime.Provider, info Info) error {
+	if sp == nil || info.SessionName == "" || info.SessionKey == "" {
+		return nil
+	}
+	id, err := sp.GetMeta(info.SessionName, "GC_SESSION_ID")
+	if err != nil {
+		return fmt.Errorf("reading runtime session identity: %w", err)
+	}
+	if id != info.ID {
+		return fmt.Errorf("runtime session identity changed for %q", info.SessionName)
+	}
+	if info.InstanceToken != "" {
+		token, err := sp.GetMeta(info.SessionName, "GC_INSTANCE_TOKEN")
+		if err != nil {
+			return fmt.Errorf("reading runtime instance identity: %w", err)
+		}
+		if token != info.InstanceToken {
+			return fmt.Errorf("runtime instance identity changed for %q", info.SessionName)
+		}
+	}
+	if err := sp.SetMeta(info.SessionName, "GC_SESSION_KEY", info.SessionKey); err != nil {
+		return fmt.Errorf("publishing runtime provider session key: %w", err)
+	}
+	return nil
+}
+
 // SyncRuntimeAlias updates live runtime metadata from the session's current
 // public alias and durable ownership identity. Clearing an alias therefore
 // falls back to the same raw session name or bead ID that API assignment uses.

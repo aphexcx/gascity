@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -358,6 +359,11 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, err
 	}
 	cfg.Command = freshCmd
+	cfg.Env = maps.Clone(cfg.Env)
+	if cfg.Env == nil {
+		cfg.Env = make(map[string]string)
+	}
+	cfg.Env["GC_SESSION_KEY"] = ""
 	// Refuse the fresh start if a prior escaped process for this session could
 	// not be confirmed dead: a survivor would race this replacement for the
 	// same work bead. This path reuses the existing bead ID, so there is no

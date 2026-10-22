@@ -758,7 +758,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	}
 	env, err := p.tm.GetAllEnvironment(name)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading activity environment for %q: %w", name, err)
+		return time.Time{}, fmt.Errorf("%w: reading activity environment for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	provider := sessionlog.ProviderFamily(env["GC_PROVIDER"])
 	if provider != "claude" && !strings.HasPrefix(provider, "claude-") {
@@ -766,7 +766,7 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	}
 	native, err := claudeTranscriptActivity(env)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading Claude activity for %q: %w", name, err)
+		return time.Time{}, fmt.Errorf("%w: reading Claude activity for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	if native.After(pane) {
 		return native, nil

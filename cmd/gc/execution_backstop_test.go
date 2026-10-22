@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -692,7 +694,7 @@ type executionDeliveryRuntime struct{ *runtime.Fake }
 
 func (p executionDeliveryRuntime) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
 	err := p.Nudge(name, content)
-	return runtime.NudgeDelivery{Delivered: err == nil && p.IsRunning(name)}, err
+	return runtime.NudgeDelivery{Delivered: err == nil && p.IsRunning(name), Submit: runtime.NudgeSubmitUnverified}, err
 }
 
 func TestExecutionBackstopRequiresPositiveDeliveryEvidence(t *testing.T) {
@@ -705,6 +707,7 @@ func TestExecutionBackstopRequiresPositiveDeliveryEvidence(t *testing.T) {
 	}{
 		{name: "zero receipt"},
 		{name: "legacy nil is not proof", legacy: true},
+		{name: "inferred delivery is not proof", receipt: runtime.NudgeDelivery{Delivered: true}},
 		{name: "landed despite error", receipt: runtime.NudgeDelivery{Bytes: 1, Submit: runtime.NudgeSubmitUnconfirmed}, err: errors.New("submit failed"), wantDrains: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -713,7 +716,8 @@ func TestExecutionBackstopRequiresPositiveDeliveryEvidence(t *testing.T) {
 			if tc.legacy {
 				base = f.sp
 			}
-			f.provider = newBoundedStatusProvider(base)
+			// Both routers synthesize inferred receipts for legacy backends.
+			f.provider = newBoundedStatusProvider(auto.New(hybrid.New(base, base, func(string) bool { return false }), base))
 			for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
 				f.idleFor(t, 10*time.Minute)
 				f.tick(t)
