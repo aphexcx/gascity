@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -139,7 +140,7 @@ func rigNameForQualifiedAgent(cityPath, qualifiedName string, a config.Agent, ri
 	return ""
 }
 
-// PathContextForQualifiedName builds template context for work_dir expansion.
+// PathContextForQualifiedName builds the logical agent identity context.
 func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) PathContext {
 	rigName := rigNameForQualifiedAgent(cityPath, qualifiedName, a, rigs)
 	_, agentBase := config.ParseQualifiedName(qualifiedName)
@@ -155,8 +156,29 @@ func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a con
 	}
 }
 
-// ExpandCommandTemplate renders command using the same PathContext surface as
-// work_dir and session_setup templates. When cityName is empty, it falls back
+// WorkspacePathContextForQualifiedName shares the numeric-slot namespace between
+// work_dir and workspace setup commands, without changing routing identities.
+// A fixed path retains its configured setup identity, including resumed legacy
+// slots whose recorded work_dir has been frozen before template rendering.
+func WorkspacePathContextForQualifiedName(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) PathContext {
+	ctx := PathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
+	if !strings.Contains(a.WorkDir, "{{") {
+		return ctx
+	}
+	// Numeric pool slots and explicitly configured agents occupy separate
+	// workspace namespaces. PoolName is set only by pool expansion; a named
+	// sibling such as worker-2 keeps its own work_dir unchanged.
+	if suffix, ok := strings.CutPrefix(qualifiedName, a.PoolName+"-"); a.PoolName != "" && ok && len(a.NamepoolNames) == 0 && a.Namepool == "" {
+		if slot, err := strconv.Atoi(suffix); err == nil && slot > 0 && strconv.Itoa(slot) == suffix {
+			ctx.Agent = a.PoolName + ".pool-" + suffix
+			_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
+		}
+	}
+	return ctx
+}
+
+// ExpandCommandTemplate renders a command with the logical agent identity.
+// When cityName is empty, it falls back
 // to the city directory basename so callers don't have to duplicate that logic.
 func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
 	if command == "" || !strings.Contains(command, "{{") {
@@ -287,7 +309,7 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		}
 		return ResolveDirPath(cityPath, a.Dir), nil
 	}
-	ctx := PathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
+	ctx := WorkspacePathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
 	expanded, err := ExpandTemplateStrict(a.WorkDir, ctx)
 	if err != nil {
 		return "", fmt.Errorf("expand work_dir %q: %w", a.WorkDir, err)

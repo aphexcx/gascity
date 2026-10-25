@@ -9002,7 +9002,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 	if got.Env["GC_AGENT"] != got.SessionName {
 		t.Fatalf("GC_AGENT = %q, want session name %q", got.Env["GC_AGENT"], got.SessionName)
 	}
-	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "ops.worker-1")
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "ops.worker.pool-1")
 	if got.WorkDir != wantWorkDir {
 		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, wantWorkDir)
 	}

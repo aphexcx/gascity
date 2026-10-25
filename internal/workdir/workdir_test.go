@@ -12,6 +12,31 @@ import (
 
 func intPtr(n int) *int { return &n }
 
+func TestPoolWorkDirDoesNotCollideWithNamedSibling(t *testing.T) {
+	const city = "/city"
+	const pattern = ".worktrees/{{.Rig}}/lane-{{.AgentBase}}"
+	rigs := []config.Rig{{Name: "demo", Path: "/repos/demo"}}
+	pool := config.Agent{Name: "worker-2", PoolName: "demo/worker", Dir: "demo", WorkDir: pattern, MaxActiveSessions: intPtr(2)}
+	named := config.Agent{Name: "worker-2", Dir: "demo", WorkDir: pattern, MaxActiveSessions: intPtr(1)}
+	pooledPath, err := ResolveWorkDirPathStrict(city, "city", "demo/worker-2", pool, rigs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedPath, err := ResolveWorkDirPathStrict(city, "city", "demo/worker-2", named, rigs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pooledPath == namedPath {
+		t.Fatalf("pool slot and named sibling share %s", pooledPath)
+	}
+	if want := "/city/.worktrees/demo/lane-worker.pool-2"; pooledPath != want {
+		t.Fatalf("pool path = %s, want %s", pooledPath, want)
+	}
+	if want := "/city/.worktrees/demo/lane-worker-2"; namedPath != want {
+		t.Fatalf("named path = %s, want %s", namedPath, want)
+	}
+}
+
 func TestResolveWorkDirPathUsesWorkDirTemplate(t *testing.T) {
 	cityPath := t.TempDir()
 	cityName := "gastown"

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func writeTemplateResolveCityConfig(t *testing.T, cityPath, beadsProvider string) {
@@ -548,5 +549,46 @@ func TestRediscoveredNamedBeadWorkDirUsesAliasNotTemplate(t *testing.T) {
 	sharedWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "worker")
 	if tp.WorkDir == sharedWorkDir {
 		t.Fatalf("WorkDir collapsed onto the shared template path %q", sharedWorkDir)
+	}
+}
+
+func TestPoolWorkspaceSetupKeepsPathAndBranchNamespaceTogether(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		legacy, rebind bool
+	}{
+		{name: "fresh"}, {name: "resume", legacy: true}, {name: "rebind", legacy: true, rebind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeTemplateResolveCityConfig(t, cityPath, "file")
+			params := &agentBuildParams{cityName: "city", cityPath: cityPath, workspace: &config.Workspace{Provider: "test"}, providers: map[string]config.ProviderSpec{"test": {Command: "echo {{.Agent}} {{.AgentBase}}", PromptMode: "none"}}, lookPath: func(string) (string, error) { return "/bin/echo", nil }, fs: fsys.OSFS{}, beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard}
+			agent := &config.Agent{Name: "worker-1", PoolName: "worker", WorkDir: ".worktrees/{{.AgentBase}}", PreStart: []string{"setup {{.Agent}} {{.AgentBase}} {{.WorkDir}}"}}
+			info := session.Info{SessionNameMetadata: "session-1", TriggerBeadID: "work-1", PoolSlot: "1"}
+			wantBase := "worker.pool-1"
+			if tc.legacy {
+				info.WorkDir = filepath.Join(cityPath, ".worktrees", "worker-1")
+				wantBase = "worker-1"
+			}
+			if tc.rebind {
+				// A genuinely new task migrates both setup identity and path; the old
+				// agent branch may remain held at its old worktree without collision.
+				info.State = session.StateAsleep
+				info = info.ApplyPatch(computePoolTriggerBindingPatch(info, SessionRequest{WorkBeadID: "work-2"}, filepath.Join(cityPath, ".worktrees", "worker.pool-1")))
+				wantBase = "worker.pool-1"
+			}
+			tp, err := resolveTemplateForSessionBeadInfo(params, agent, "worker-1", nil, info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tp.Command != "echo worker-1 worker-1" {
+				t.Fatalf("provider identity changed: %s", tp.Command)
+			}
+			wantDir := filepath.Join(cityPath, ".worktrees", wantBase)
+			wantCommand := "setup " + wantBase + " " + wantBase + " " + wantDir
+			if tp.WorkDir != wantDir || len(tp.Hints.PreStart) != 1 || tp.Hints.PreStart[0] != wantCommand {
+				t.Fatalf("dir=%s pre_start=%v want %s", tp.WorkDir, tp.Hints.PreStart, wantCommand)
+			}
+		})
 	}
 }

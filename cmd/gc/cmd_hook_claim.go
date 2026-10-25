@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/federation"
@@ -41,6 +42,7 @@ const (
 // row is already draining.
 const (
 	hookClaimReasonNoWork                     = "no_work"
+	hookClaimReasonWorkspaceBound             = "workspace_bound"
 	hookClaimReasonClaimsErrored              = "claims_errored"
 	hookClaimReasonStaleSession               = "stale_session"
 	hookClaimReasonNonTurnContext             = "non_turn_context"
@@ -160,6 +162,9 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// WorkspaceConfig identifies bead branches even when a replacement session
+	// has neither a launch trigger nor a previous claim receipt.
+	WorkspaceConfig *config.City
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.
@@ -210,6 +215,8 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
+	WorkspaceBranch    func(string) (string, error)
+	CurrentClaim       func(string) (string, error)
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
 	ListContinuation   hookListContinuationFunc
@@ -251,6 +258,9 @@ type hookClaimOps struct {
 	// the cross-city write fence takes of the one bead about to be written or
 	// served (installCrossCityWriteFence, hookCrossCityRefusedBeforeServe).
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ReadEphemeralWorkMeta probes an exact wisps-plane ID when bd show cannot
+	// disambiguate a persistent prefix during workspace-owner verification.
+	ReadEphemeralWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
 	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
 	// dependencies rather than bd's denormalized is_blocked projection (which
 	// production reads do not carry). Diagnostics-only: the demand/claim
@@ -370,6 +380,13 @@ type hookClaimResult struct {
 	// see-but-cannot-claim shape — is not laundered into an idle signal.
 	// Meaningless on a terminal result.
 	claimsErrored bool
+	// workspaceBound reports candidates skipped by the workspace guard. It is
+	// carried across stores so that drain is not diagnosed as an empty queue.
+	workspaceBound bool
+	// rootErrored means a skipped candidate's workspace relationship is unknown.
+	// Try other candidates and stores, but never acknowledge drain on this read
+	// failure if the invocation ultimately serves no work.
+	rootErrored bool
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
@@ -377,7 +394,10 @@ func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps,
 	if res.terminal {
 		return res.code
 	}
-	return writeHookClaimNoWork(opts, ops, res.claimsErrored, dir, stdout, stderr)
+	if res.rootErrored {
+		return 1
+	}
+	return writeHookClaimNoWork(opts, ops, res.claimsErrored, res.workspaceBound, dir, stdout, stderr)
 }
 
 // tryHookClaim runs the work query for one store (dir, via ops.Runner) and
@@ -488,8 +508,14 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
+	workspace, err := filterHookWorkspaceCandidates(candidates, dir, *opts, *ops, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: workspace binding: %v\n", err) //nolint:errcheck
+		return hookClaimResult{terminal: true, code: 1}
+	}
+	candidates = workspace.candidates
 	if len(candidates) == 0 {
-		return hookClaimResult{}
+		return hookClaimResult{workspaceBound: workspace.bound, rootErrored: workspace.rootErrored}
 	}
 
 	// The cross-city claim fence runs HERE, once, on the whole candidate set:
@@ -500,7 +526,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// session takes the remaining candidates or the shared no-work drain.
 	candidates = fenceCrossCityHookCandidates(candidates, *opts, "candidate", stderr)
 	if len(candidates) == 0 {
-		return hookClaimResult{}
+		return hookClaimResult{workspaceBound: workspace.bound, rootErrored: workspace.rootErrored}
 	}
 
 	for {
@@ -566,6 +592,8 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	if !eligibleResult.terminal && readyResult.claimsErrored {
 		eligibleResult.claimsErrored = true
 	}
+	eligibleResult.workspaceBound = workspace.bound
+	eligibleResult.rootErrored = workspace.rootErrored
 	return eligibleResult
 }
 
@@ -1583,6 +1611,7 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
 // nothing. The reason is "no_work" for a genuinely idle store; it is
+// "workspace_bound" when the workspace guard skipped candidates, or
 // "claims_errored" when claimsErrored is set — ready work existed but every
 // eligible claim mutation errored — so an operational write failure stays
 // distinguishable from idle even though both still drain and reclaim next tick.
@@ -1591,8 +1620,11 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 // used ONLY after the drain has been written. See recordDemandClaimDivergence:
 // a demand-spawned seat draining empty is either correct pull or a broken
 // agreement invariant, and the drain itself cannot tell an operator which.
-func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored bool, dir string, stdout, stderr io.Writer) int {
+func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored, workspaceBound bool, dir string, stdout, stderr io.Writer) int {
 	reason := hookClaimReasonNoWork
+	if workspaceBound {
+		reason = hookClaimReasonWorkspaceBound
+	}
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
 	}
@@ -2450,8 +2482,8 @@ func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, b
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
 }
 
-func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
-	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+func hookReadClaimedBeadWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
+	return hookClaimBdStoreContext(ctx, dir, env, assignee).Get(beadID)
 }
 
 // hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It

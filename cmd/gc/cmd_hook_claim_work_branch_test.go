@@ -1187,3 +1187,27 @@ func TestHookClaimPinnedBranchReadKeepsRelativeConfigSemantics(t *testing.T) {
 		t.Errorf("branch = %q, want %q; the pinned read resolved its relative config against the process directory", got, hookClaimFixtureWorkerBranch)
 	}
 }
+
+func TestHookWorkspaceBranchProbe(t *testing.T) {
+	dir := t.TempDir()
+	if branch, err := hookWorkspaceBranch(dir); err != nil || branch != "" {
+		t.Fatalf("non-repository: branch=%q err=%v", branch, err)
+	}
+	if _, err := hookWorkspaceBranch(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing directory authorized as unbound")
+	}
+	hookClaimInitRepo(t, dir, "work-1")
+	if branch, err := hookWorkspaceBranch(dir); err != nil || branch != "work-1" {
+		t.Fatalf("attached: branch=%q err=%v", branch, err)
+	}
+	mustGit(t, dir, "switch", "--detach")
+	if branch, err := hookWorkspaceBranch(dir); err != nil || branch != "" {
+		t.Fatalf("detached: branch=%q err=%v", branch, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hookWorkspaceBranch(dir); err == nil {
+		t.Fatal("broken Git config authorized as unbound")
+	}
+}
