@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -168,11 +167,9 @@ func WorkspacePathContextForQualifiedName(cityPath, cityName, qualifiedName stri
 	// Numeric pool slots and explicitly configured agents occupy separate
 	// workspace namespaces. PoolName is set only by pool expansion; a named
 	// sibling such as worker-2 keeps its own work_dir unchanged.
-	if suffix, ok := strings.CutPrefix(qualifiedName, a.PoolName+"-"); a.PoolName != "" && ok && len(a.NamepoolNames) == 0 && a.Namepool == "" {
-		if slot, err := strconv.Atoi(suffix); err == nil && slot > 0 && strconv.Itoa(slot) == suffix {
-			ctx.Agent = a.PoolName + ".pool-" + suffix
-			_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
-		}
+	if slot := config.NumericPoolSlot(a.PoolName, qualifiedName); slot > 0 && len(a.NamepoolNames) == 0 && a.Namepool == "" {
+		ctx.Agent = fmt.Sprintf("%s.pool-%d", a.PoolName, slot)
+		_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
 	}
 	return ctx
 }

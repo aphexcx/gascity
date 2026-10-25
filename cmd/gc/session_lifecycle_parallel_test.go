@@ -31,7 +31,56 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/testutil"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
+
+func TestRepairConcretePoolTemplateWorkDirFallback(t *testing.T) {
+	const cityPath = "/city"
+	const pattern = ".worktrees/{{.Rig}}/lane-{{.AgentBase}}"
+	capacity := 2
+	pool := config.Agent{Name: "worker", Dir: "demo", WorkDir: pattern, MaxActiveSessions: &capacity}
+	named := config.Agent{Name: "worker-2", Dir: "demo", WorkDir: pattern}
+	cfg := &config.City{Agents: []config.Agent{pool, named}, Rigs: []config.Rig{{Name: "demo", Path: "/repos/demo"}}}
+	templateDir := workdirutil.ResolveWorkDirPath(cityPath, "city", pool.QualifiedName(), pool, cfg.Rigs)
+	namedDir := workdirutil.ResolveWorkDirPath(cityPath, "city", named.QualifiedName(), named, cfg.Rigs)
+	for _, identity := range []string{"demo/worker-2", "demo/worker-02", "demo/worker-unknown"} {
+		t.Run(identity, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: sessionBeadType, Metadata: map[string]string{
+				"template": pool.QualifiedName(), "agent_name": identity, "pool_slot": "2",
+				poolManagedMetadataKey:      boolMetadata(true),
+				beadmeta.WorkDirMetadataKey: templateDir, beadmeta.LegacyWorkDirMetadataKey: templateDir,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := startCandidate{info: sessiontest.SeedBead(t, b), tp: TemplateParams{TemplateName: pool.QualifiedName(), InstanceName: identity}}
+			repaired, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store)
+			persisted, getErr := store.Get(b.ID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+				got := persisted.Metadata[key]
+				if identity != "demo/worker-2" {
+					if repaired || err == nil || !strings.Contains(err.Error(), "pool instance") || got != templateDir {
+						t.Fatalf("invalid pool identity: repaired=%v err=%v %s=%q", repaired, err, key, got)
+					}
+					continue
+				}
+				if err != nil || !repaired {
+					t.Fatalf("repair = %v, %v", repaired, err)
+				}
+				if got == namedDir {
+					t.Errorf("persisted %s is named sibling's dir %q", key, got)
+				}
+				if want := "/city/.worktrees/demo/lane-worker.pool-2"; got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
 
 type failingMetadataBatchStore struct {
 	*beads.MemStore

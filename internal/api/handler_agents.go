@@ -525,29 +525,18 @@ func multiSessionSharesWorkDir(cityPath, cityName, target string, a config.Agent
 
 	maxSess := a.EffectiveMaxActiveSessions()
 	isUnlimited := maxSess == nil || *maxSess < 0
+	probeCount := 2
 	if !isUnlimited {
-		for slot := 1; slot <= *maxSess; slot++ {
-			if workdirutil.ResolveWorkDirPath(cityPath, cityName, poolQualifiedNameForSlot(a, slot), a, rigs) == target {
-				return true
-			}
-		}
-		return false
+		probeCount = *maxSess
 	}
 
-	for _, qualifiedName := range []string{
-		poolQualifiedNameForSlot(a, 1),
-		poolQualifiedNameForSlot(a, 2),
-	} {
-		if workdirutil.ResolveWorkDirPath(cityPath, cityName, qualifiedName, a, rigs) == target {
+	for slot := 1; slot <= probeCount; slot++ {
+		instance := a.PoolSlotInstance(slot)
+		if workdirutil.ResolveWorkDirPath(cityPath, cityName, instance.QualifiedName(), instance, rigs) == target {
 			return true
 		}
 	}
 	return false
-}
-
-func poolQualifiedNameForSlot(a config.Agent, slot int) string {
-	name := poolInstanceNameForAPI(a.Name, slot, a)
-	return a.QualifiedInstanceName(name)
 }
 
 // isMultiSessionAgent reports whether the agent can have more than one
@@ -582,16 +571,6 @@ func isCrewDir(dir string) bool {
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	if a.UsesCanonicalSingletonPoolIdentity() {
-		return base
-	}
-	if slot >= 1 && slot <= len(a.NamepoolNames) {
-		return a.NamepoolNames[slot-1]
-	}
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
-		return base
-	}
-	return fmt.Sprintf("%s-%d", base, slot)
+	a.Name = base
+	return a.PoolSlotInstance(slot).Name
 }

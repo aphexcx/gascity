@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,26 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
+
+func TestMultiSessionSharesWorkDirUsesPoolSlotNamespace(t *testing.T) {
+	const pattern = ".worktrees/{{.Rig}}/lane-{{.AgentBase}}"
+	rigs := []config.Rig{{Name: "demo", Path: "/repos/demo"}}
+	named := config.Agent{Name: "worker-2", Dir: "demo", WorkDir: pattern}
+	target := workdirutil.ResolveWorkDirPath("/city", "city", named.QualifiedName(), named, rigs)
+	for _, capacity := range []int{2, -1} {
+		t.Run(fmt.Sprint(capacity), func(t *testing.T) {
+			pool := config.Agent{Name: "worker", Dir: "demo", WorkDir: pattern, MaxActiveSessions: &capacity}
+			if multiSessionSharesWorkDir("/city", "city", target, pool, rigs) {
+				t.Fatalf("pool shares named sibling work_dir %q", target)
+			}
+			if !multiSessionSharesWorkDir("/city", "city", "/city/.worktrees/demo/lane-worker.pool-2", pool, rigs) {
+				t.Fatal("pool slot 2's actual work_dir was not recognized")
+			}
+		})
+	}
+}
 
 type partialAgentSessionLister struct {
 	running []string

@@ -3785,13 +3785,8 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	}
 	// Pure path computation: this feeds a metadata patch, so it must never
 	// create directories (gc-r9fx dry-run purity).
-	workAgent := *cfgAgent
-	// The create-time path receives the base config, while template resolution
-	// receives an expanded copy. Carry the same pool provenance on both paths.
-	if workAgent.PoolName == "" && qualifiedName != cfgAgent.QualifiedName() && cfgAgent.SupportsInstanceExpansion() {
-		workAgent.PoolName = cfgAgent.QualifiedName()
-	}
-	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, &workAgent, bp.rigs)
+	workAgent := sessionBeadConfigAgent(cfgAgent, qualifiedName)
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, workAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -3869,10 +3864,8 @@ func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return cfgAgent, qualifiedName, 0
 	}
-	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
-	instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
-	return &instanceAgent, qualifiedInstance, slot
+	instanceAgent := cfgAgent.PoolSlotInstance(slot)
+	return &instanceAgent, instanceAgent.QualifiedName(), slot
 }
 
 // staleNonExpandingPoolSessionBeadInfo is the session.Info mirror of
@@ -4165,6 +4158,10 @@ func normalizeSessionBeadQualifiedName(cfgAgent *config.Agent, identity string) 
 func sessionBeadConfigAgent(cfgAgent *config.Agent, qualifiedName string) *config.Agent {
 	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || strings.TrimSpace(qualifiedName) == "" || qualifiedName == cfgAgent.QualifiedName() {
 		return cfgAgent
+	}
+	if slot := cfgAgent.PoolSlotForIdentity(qualifiedName); slot > 0 {
+		instanceAgent := cfgAgent.PoolSlotInstance(slot)
+		return &instanceAgent
 	}
 	localName := strings.TrimSpace(qualifiedName)
 	if cfgAgent.Dir != "" {

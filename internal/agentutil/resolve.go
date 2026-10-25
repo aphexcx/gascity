@@ -168,13 +168,8 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 		if !IsMultiSessionAgent(&a) {
 			continue
 		}
-		prefix := a.QualifiedName() + "-"
-		if !strings.HasPrefix(input, prefix) {
-			continue
-		}
-		suffix := input[len(prefix):]
-		n, err := strconv.Atoi(suffix)
-		if err != nil || n < 1 {
+		n := config.NumericPoolSlot(a.QualifiedName(), input)
+		if n == 0 {
 			continue
 		}
 		if !a.HasUnlimitedSessionCapacity() {
@@ -183,7 +178,7 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 				continue
 			}
 		}
-		return DeepCopyAgent(&a, a.Name+"-"+suffix, a.Dir), true
+		return DeepCopyAgent(&a, a.Name+"-"+strconv.Itoa(n), a.Dir), true
 	}
 	return config.Agent{}, false
 }
@@ -245,13 +240,8 @@ func NormalizePoolRouteTarget(cfg *config.City, target string) string {
 			continue
 		}
 		base := RoutedToIdentity(&a)
-		prefix := base + "-"
-		if !strings.HasPrefix(target, prefix) {
-			continue
-		}
-		suffix := target[len(prefix):]
-		n, err := strconv.Atoi(suffix)
-		if err != nil || n < 1 {
+		n := config.NumericPoolSlot(base, target)
+		if n == 0 {
 			continue
 		}
 		if !a.HasUnlimitedSessionCapacity() {
@@ -320,13 +310,8 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 	if !IsMultiSessionAgent(&a) {
 		return config.Agent{}, false
 	}
-	prefix := a.Name + "-"
-	if !strings.HasPrefix(input, prefix) {
-		return config.Agent{}, false
-	}
-	suffix := input[len(prefix):]
-	n, err := strconv.Atoi(suffix)
-	if err != nil || n < 1 {
+	n := config.NumericPoolSlot(a.Name, input)
+	if n == 0 {
 		return config.Agent{}, false
 	}
 	if !a.HasUnlimitedSessionCapacity() {
