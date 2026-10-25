@@ -151,7 +151,6 @@ func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcom
 		threshold:  orderOutcomeFailureThreshold,
 		grace:      orderOutcomeStartGrace,
 		scanOrders: scanOrderFiringCurrentOrders,
-		walkEvents: events.WalkContext,
 	}
 }
 
@@ -207,39 +206,56 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
+	var monitoredOrders []orders.Order
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+	for _, order := range allOrders {
+		if (order.Trigger == "cron" || order.Trigger == "cooldown") && !orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			monitoredOrders = append(monitoredOrders, order)
+		}
+	}
+	if len(monitoredOrders) == 0 {
+		result.Status = StatusOK
+		result.Message = "no cron or cooldown orders; history read skipped"
+		return result
+	}
+
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
 	workCtx := context.Background()
 	if ctx != nil && ctx.Context != nil {
 		workCtx = ctx.Context
 	}
 	ctx.SetPhase("read order outcome and controller start events")
-	outcomes, starts, err := readOrderOutcomeHistory(workCtx, eventPath, c.walkEvents)
+	var historyProgress string
+	walk := c.walkEvents
+	if walk == nil {
+		walk = func(workCtx context.Context, path string, visit func(events.Event) error) error {
+			return events.WalkCachedContext(workCtx, path, events.ArchiveCacheOptions{
+				Dir:      filepath.Join(cityPath, citylayout.RuntimeRoot, "doctor-cache", "order-outcome"),
+				Types:    []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted},
+				MaxBytes: 256 << 20,
+				// Order discovery has no creation sequence. The full retained
+				// history is needed for old failure streaks and restart grace.
+				AfterSeq: 0,
+				Progress: func(p events.ArchiveCacheProgress) {
+					historyProgress = fmt.Sprintf("after seq %d, archives %d of %d, cache hits %d, misses %d, %s", p.AfterSeq, p.Index, p.Archives, p.Hits, p.Misses, p.Phase)
+					ctx.SetPhase("read order outcome and controller start events " + historyProgress)
+				},
+			}, visit)
+		}
+	}
+	outcomes, starts, err := readOrderOutcomeHistory(workCtx, eventPath, walk)
 	if err != nil {
 		result.Status = StatusError
-		result.Message = fmt.Sprintf("read order outcome and controller start events: %v", err)
+		result.Message = fmt.Sprintf("read order outcome and controller start events %s: %v", historyProgress, err)
 		return result
 	}
 	ctx.SetPhase("classify order outcomes")
 
 	worst := StatusOK
-	monitored := 0
 	failing := 0
 	var firstFailingHint string
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
-	for _, order := range allOrders {
-		// Manual and event-triggered orders are out of scope by construction,
-		// matching the sibling check. This is what keeps a manual order that was
-		// abandoned mid-failure from alarming forever, with no recency heuristic
-		// needed: it simply is not in the monitored set.
-		if order.Trigger != "cron" && order.Trigger != "cooldown" {
-			continue
-		}
-		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
-			continue
-		}
-		monitored++
-
+	for _, order := range monitoredOrders {
 		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
 		worst = worseStatus(worst, status)
@@ -257,18 +273,15 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if monitored == 0 {
-		result.Status = StatusOK
-		result.Message = "no cron or cooldown orders"
-		return result
-	}
-
 	result.Status = worst
 	if worst == StatusOK {
 		result.Message = "all scheduled orders succeeding"
 	} else {
 		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
 		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
+	}
+	if historyProgress != "" {
+		result.Message += " (" + historyProgress + ")"
 	}
 	return result
 }

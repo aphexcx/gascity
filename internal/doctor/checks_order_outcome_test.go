@@ -450,7 +450,7 @@ func TestOrderOutcomeHealthy_FlagsRigScopedOrderFailureStreak(t *testing.T) {
 	if result.Severity != SeverityAdvisory {
 		t.Fatalf("severity = %v, want SeverityAdvisory", result.Severity)
 	}
-	if result.Message != "1 order(s) failing repeatedly" {
+	if !strings.HasPrefix(result.Message, "1 order(s) failing repeatedly (") {
 		t.Fatalf("message = %q, want it to name exactly 1 failing order", result.Message)
 	}
 	joined := strings.Join(result.Details, "\n")
