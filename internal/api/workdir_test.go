@@ -24,6 +24,10 @@ func TestCanAttributeSessionRetainedPoolWorkDir(t *testing.T) {
 		{"retained canonical", session.Info{Template: "demo/worker", WorkDirCanonical: "/city/.worktrees/demo/lane-worker-2"}, false},
 		{"retained legacy relative", session.Info{Template: "demo/worker", WorkDir: ".worktrees/demo/lane-worker-2"}, false},
 		{"historical transcript", session.Info{Template: "demo/worker", WorkDir: "/city/.worktrees/demo/lane-worker-2", Closed: true}, false},
+		{"codex transcript", session.Info{Template: "demo/worker", Provider: "codex", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, true},
+		{"historical wrapped codex", session.Info{Template: "demo/worker", Provider: "custom", BuiltinAncestor: "codex", WorkDir: "/city/.worktrees/demo/lane-worker-2", Closed: true}, true},
+		{"wrapped claude transcript", session.Info{Template: "demo/worker", Provider: "custom", ProviderKind: "claude", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, false},
+		{"unknown provider transcript", session.Info{Template: "demo/worker", Provider: "custom", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, false},
 		{"migrated", session.Info{Template: "demo/worker", WorkDirCanonical: "/city/.worktrees/demo/lane-worker.pool-2", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, true},
 		{"own session", session.Info{Template: "demo/worker-2", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, true},
 	} {

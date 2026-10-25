@@ -501,8 +501,13 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	// Resumed and historical sessions may retain a directory that the current
 	// template no longer produces. Their transcript files still occupy it.
+	builtinProviders := config.BuiltinProviders()
 	for _, info := range persisted {
 		if info.Template == qualifiedName {
+			continue
+		}
+		family := session.ProviderFamilyFromInfo(info, "")
+		if _, known := builtinProviders[family]; known && family != "claude" {
 			continue
 		}
 		storedDir := strings.TrimSpace(info.WorkDirCanonical)
