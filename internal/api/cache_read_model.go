@@ -58,9 +58,14 @@ func filterEnrichReadModel(mgr *session.Manager, listings []session.ListedSessio
 // status snapshot and the city-pending aggregate filter and probe by Info alone).
 // Same cache-first tier and partial-result envelope.
 func sessionReadModelInfos(sessFront *session.Store) ([]session.Info, []string, error) {
+	return sessionReadModelInfosWithHistory(sessFront, false)
+}
+
+func sessionReadModelInfosWithHistory(sessFront *session.Store, includeClosed bool) ([]session.Info, []string, error) {
 	rows, err := sessFront.ListAll(session.ListAllOptions{
-		Sort:       beads.SortCreatedDesc,
-		CacheFirst: true,
+		Sort:          beads.SortCreatedDesc,
+		CacheFirst:    true,
+		IncludeClosed: includeClosed,
 	})
 	if err == nil {
 		return rows, nil, nil

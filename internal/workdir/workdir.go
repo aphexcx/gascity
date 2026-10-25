@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -168,11 +167,9 @@ func WorkspacePathContextForQualifiedName(cityPath, cityName, qualifiedName stri
 	// Numeric pool slots and explicitly configured agents occupy separate
 	// workspace namespaces. PoolName is set only by pool expansion; a named
 	// sibling such as worker-2 keeps its own work_dir unchanged.
-	if suffix, ok := strings.CutPrefix(qualifiedName, a.PoolName+"-"); a.PoolName != "" && ok && len(a.NamepoolNames) == 0 && a.Namepool == "" {
-		if slot, err := strconv.Atoi(suffix); err == nil && slot > 0 && strconv.Itoa(slot) == suffix {
-			ctx.Agent = a.PoolName + ".pool-" + suffix
-			_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
-		}
+	if slot := config.NumericPoolSlot(a.PoolName, qualifiedName); slot > 0 && len(a.NamepoolNames) == 0 && a.Namepool == "" {
+		ctx.Agent = fmt.Sprintf("%s.pool-%d", a.PoolName, slot)
+		_, ctx.AgentBase = config.ParseQualifiedName(ctx.Agent)
 	}
 	return ctx
 }
@@ -304,7 +301,8 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		// already fails config validation at init time if their work_dir
 		// doesn't vary per instance, so auto-isolating here would just mask
 		// a misconfiguration ValidatePoolWorkDirIsolation is supposed to catch.
-		if a.Dir == "" && qualifiedName != a.QualifiedName() && !RequiresPoolWorkDirIsolationCheck(a) {
+		isInstance := qualifiedName != a.QualifiedName() || (a.PoolName != "" && qualifiedName != a.PoolName)
+		if a.Dir == "" && isInstance && !RequiresPoolWorkDirIsolationCheck(a) {
 			return filepath.Join(WorktreesRoot(cityPath), agent.SanitizeQualifiedNameForSession(qualifiedName)), nil
 		}
 		return ResolveDirPath(cityPath, a.Dir), nil

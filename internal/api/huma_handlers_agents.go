@@ -70,6 +70,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	}
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 
+	var attributionSnapshot *statusSessionSnapshot
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
@@ -208,8 +209,17 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
-				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
+			if running && provider == "claude" && !isMultiSessionAgent(a) {
+				if attributionSnapshot == nil {
+					snapshot := s.sessionSnapshot(ctx, true)
+					attributionSnapshot = &snapshot
+					if len(snapshot.partialErrors) > 0 {
+						log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
+					}
+				}
+				if len(attributionSnapshot.partialErrors) == 0 && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath(), attributionSnapshot.infos...) {
+					s.enrichSessionMeta(&resp, a, ea.qualifiedName)
+				}
 			}
 
 			agents = append(agents, resp)
@@ -233,20 +243,20 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 // humaHandleAgent is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{base} (unqualified form).
-func (s *Server) humaHandleAgent(_ context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.Name)
+func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.Name)
 }
 
 // humaHandleAgentQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
-func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.QualifiedName())
+func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.QualifiedName())
 }
 
 // agentByName is the shared agent-get implementation. Both the qualified
 // and unqualified routes normalize to a single "name" string before
 // dispatching here.
-func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -342,8 +352,13 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	quarantined := s.state.IsQuarantined(sessionName)
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
-	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
-		s.enrichSessionMeta(&resp, agentCfg, name)
+	if running && provider == "claude" && !isMultiSessionAgent(agentCfg) {
+		snapshot := s.sessionSnapshot(ctx, true)
+		if len(snapshot.partialErrors) > 0 {
+			log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
+		} else if canAttributeSession(agentCfg, name, cfg, s.state.CityPath(), snapshot.infos...) {
+			s.enrichSessionMeta(&resp, agentCfg, name)
+		}
 	}
 
 	return &IndexOutput[agentResponse]{

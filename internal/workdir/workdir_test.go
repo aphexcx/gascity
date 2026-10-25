@@ -213,6 +213,34 @@ func TestCityNameFallsBackToCityDirBase(t *testing.T) {
 	}
 }
 
+func TestResolveWorkDirPathStrictPoolSlotIsolation(t *testing.T) {
+	cityPath := t.TempDir()
+	base := config.Agent{Name: "worker"}
+	basePath, err := ResolveWorkDirPathStrict(cityPath, "fixture", base.QualifiedName(), base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		agent config.Agent
+		want  string
+	}{
+		{"default pool slot", base.PoolSlotInstance(2), filepath.Join(cityPath, ".gc", "worktrees", "worker-2")},
+		{"named sibling", config.Agent{Name: "worker-2", WorkDir: ".worktrees/lane-{{.AgentBase}}"}, filepath.Join(cityPath, ".worktrees", "lane-worker-2")},
+		{"configured singleton", (config.Agent{Name: "worker", Dir: "demo", WorkDir: ".worktrees/{{.Rig}}/lane-{{.AgentBase}}", MaxActiveSessions: intPtr(1)}).PoolSlotInstance(1), filepath.Join(cityPath, ".worktrees", "demo", "lane-worker")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveWorkDirPathStrict(cityPath, "fixture", tc.agent.QualifiedName(), tc.agent, []config.Rig{{Name: "demo", Path: "/repos/demo"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want || got == basePath {
+				t.Fatalf("work_dir = %q, want %q, distinct from base %q", got, tc.want, basePath)
+			}
+		})
+	}
+}
+
 func TestResolveWorkDirPathStrictRejectsInvalidTemplate(t *testing.T) {
 	cityPath := t.TempDir()
 	_, err := ResolveWorkDirPathStrict(cityPath, "gastown", "demo/refinery", config.Agent{

@@ -13,6 +13,16 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+func TestPoolTriggerWorkDirDefaultPoolIsolatesSlot(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	bp := newAgentBuildParams("fixture", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &bytes.Buffer{})
+	got := poolTriggerWorkDir(bp, &cfg.Agents[0], "worker-2", SessionRequest{WorkBeadID: "work-1"})
+	want := filepath.Join(bp.cityPath, ".gc", "worktrees", "worker-2")
+	if got != want {
+		t.Fatalf("default pool trigger work_dir = %q, want %q (never city root %q)", got, want, bp.cityPath)
+	}
+}
+
 func TestPoolTriggerWorkDirNonPackUsesConfiguredBase(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "fixture"},

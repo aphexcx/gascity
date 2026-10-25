@@ -1315,7 +1315,10 @@ func preparedStartSessionWorkDir(info sessionpkg.Info) string {
 }
 
 func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
-	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
+	templateDir, concreteDir, ok, err := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
+	if err != nil {
+		return false, err
+	}
 	if !ok {
 		return false, nil
 	}
@@ -1344,7 +1347,10 @@ func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPa
 }
 
 func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
-	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	templateDir, concreteDir, ok, err := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if err != nil {
+		return err
+	}
 	if !ok || strings.TrimSpace(workDir) == "" {
 		return nil
 	}
@@ -1356,36 +1362,45 @@ func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath stri
 		candidate.name(), concretePoolPreparedIdentity(candidate, cfg), templateDir, concreteDir)
 }
 
-func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool) {
+func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool, err error) {
 	if cfg == nil || candidate.info.ManualSession || candidate.tp.ManualSession || !isPoolManagedSessionInfo(candidate.info) {
-		return "", "", false
+		return "", "", false, nil
 	}
 	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
 	if template == "" {
-		return "", "", false
+		return "", "", false, nil
 	}
 	cfgAgent := findAgentByTemplate(cfg, template)
 	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-		return "", "", false
+		return "", "", false, nil
 	}
 	concreteIdentity := concretePoolPreparedIdentity(candidate, cfg)
 	if concreteIdentity == "" || concreteIdentity == template {
-		return "", "", false
+		return "", "", false, nil
+	}
+	templateDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	if err != nil || templateDir == "" {
+		return "", "", false, nil
 	}
 	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
 	if concreteDir == "" {
-		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *cfgAgent, cfg.Rigs); err == nil {
-			concreteDir = resolved
+		slot := cfgAgent.PoolSlotForIdentity(concreteIdentity)
+		if slot == 0 {
+			return "", "", false, fmt.Errorf("resolving concrete pool work_dir: unknown pool instance %q for %q", concreteIdentity, template)
+		}
+		instance := cfgAgent.PoolSlotInstance(slot)
+		concreteDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), instance.QualifiedName(), instance, cfg.Rigs)
+		if err != nil {
+			return "", "", false, fmt.Errorf("resolving work_dir for pool instance %q: %w", concreteIdentity, err)
 		}
 	}
 	if concreteDir == "" {
-		return "", "", false
+		return "", "", false, fmt.Errorf("resolving work_dir for pool instance %q: empty path", concreteIdentity)
 	}
-	templateDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
-	if err != nil || templateDir == "" || samePreparedWorkDirPath(templateDir, concreteDir) {
-		return "", "", false
+	if samePreparedWorkDirPath(templateDir, concreteDir) {
+		return "", "", false, nil
 	}
-	return templateDir, concreteDir, true
+	return templateDir, concreteDir, true, nil
 }
 
 func concretePoolPreparedIdentity(candidate startCandidate, cfg *config.City) string {

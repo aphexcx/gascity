@@ -1,7 +1,6 @@
 package agentutil
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -171,11 +170,6 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 // PoolInstanceName returns the display name for a pool member at the given slot.
 // Uses namepool_names if configured, otherwise "{base}-{slot}".
 func PoolInstanceName(base string, slot int, a config.Agent) string {
-	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
-		return base
-	}
-	if slot >= 1 && slot <= len(a.NamepoolNames) {
-		return a.NamepoolNames[slot-1]
-	}
-	return fmt.Sprintf("%s-%d", base, slot)
+	a.Name = base
+	return a.PoolSlotInstance(slot).Name
 }

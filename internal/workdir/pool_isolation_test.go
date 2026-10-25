@@ -15,6 +15,24 @@ func demoRigs(cityPath string) []config.Rig {
 	return []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
 }
 
+func TestValidatePoolWorkDirIsolationUsesPoolSlotNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name, pattern string
+		wantError     bool
+	}{
+		{"isolated", `{{if eq .AgentBase "worker.pool-1"}}one{{else if eq .AgentBase "worker.pool-2"}}two{{else}}shared{{end}}`, false},
+		{"collision", `{{if eq .AgentBase "worker-1"}}one{{else if eq .AgentBase "worker-2"}}two{{else}}shared{{end}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := config.Agent{Name: "worker", Dir: "demo", WorkDir: tc.pattern, MaxActiveSessions: intPtr(2)}
+			err := ValidatePoolWorkDirIsolation("/city", "city", []config.Agent{a}, demoRigs("/city"))
+			if (err != nil) != tc.wantError {
+				t.Fatalf("ValidatePoolWorkDirIsolation() = %v, wantError %v", err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestValidatePoolWorkDirIsolationRejectsUnsetWorkDirForPooledAgent(t *testing.T) {
 	cityPath := t.TempDir()
 	agents := []config.Agent{{

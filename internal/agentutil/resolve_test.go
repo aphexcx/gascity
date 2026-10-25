@@ -273,6 +273,8 @@ func TestNormalizePoolRouteTarget(t *testing.T) {
 		{"base qualified name is left unchanged", "myrig/polecat", "myrig/polecat"},
 		{"out-of-range slot is left unchanged", "myrig/polecat-9", "myrig/polecat-9"},
 		{"zero slot is left unchanged", "myrig/polecat-0", "myrig/polecat-0"},
+		{"zero padded slot is left unchanged", "myrig/polecat-02", "myrig/polecat-02"},
+		{"signed slot is left unchanged", "myrig/polecat-+2", "myrig/polecat-+2"},
 		{"non-numeric suffix is left unchanged", "myrig/polecat-foo", "myrig/polecat-foo"},
 		{"singleton pool is left unchanged", "myrig/solo-1", "myrig/solo-1"},
 		{"non-pool agent is left unchanged", "mayor", "mayor"},
@@ -285,6 +287,18 @@ func TestNormalizePoolRouteTarget(t *testing.T) {
 				t.Errorf("NormalizePoolRouteTarget(%q) = %q, want %q", tt.target, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizePoolRouteTargetSlotInstances(t *testing.T) {
+	pool := config.Agent{Name: "worker", Dir: "demo", BindingName: "pack", MaxActiveSessions: intPtr(3)}
+	cfg := &config.City{Agents: []config.Agent{pool}}
+	for slot := 1; slot <= 3; slot++ {
+		instance := pool.PoolSlotInstance(slot)
+		identity := instance.QualifiedName()
+		if got := NormalizePoolRouteTarget(cfg, identity); got != instance.PoolName {
+			t.Errorf("NormalizePoolRouteTarget(%q) = %q, want %q", identity, got, instance.PoolName)
+		}
 	}
 }
 

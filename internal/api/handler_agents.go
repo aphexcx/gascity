@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -485,7 +487,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 // for the given agent in its rig. Returns false when multiple Claude agents
 // or multi-session instances share the same rig directory, since we can't
 // reliably determine which session file belongs to which agent.
-func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *config.City, cityPath string) bool {
+func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *config.City, cityPath string, persisted ...session.Info) bool {
 	// Multi-session agents derive per-instance workdirs from the qualified
 	// name, but the API only has the base config when attributing list rows.
 	// Keep them on the safe side and skip attribution.
@@ -496,6 +498,31 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	target := workdirutil.ResolveWorkDirPath(cityPath, cityName, qualifiedName, agentCfg, cfg.Rigs)
 	if target == "" {
 		return false
+	}
+	// Resumed and historical sessions may retain a directory that the current
+	// template no longer produces. Their transcript files still occupy it.
+	builtinProviders := config.BuiltinProviders()
+	for _, info := range persisted {
+		if info.Template == qualifiedName {
+			continue
+		}
+		family := session.ProviderFamilyFromInfo(info, "")
+		if _, known := builtinProviders[family]; known && family != "claude" {
+			continue
+		}
+		storedDir := strings.TrimSpace(info.WorkDirCanonical)
+		if storedDir == "" {
+			storedDir = strings.TrimSpace(info.WorkDir)
+		}
+		if storedDir == "" {
+			continue
+		}
+		if !filepath.IsAbs(storedDir) {
+			storedDir = filepath.Join(cityPath, storedDir)
+		}
+		if filepath.Clean(storedDir) == filepath.Clean(target) {
+			return false
+		}
 	}
 	count := 0
 	for _, a := range cfg.Agents {
@@ -525,29 +552,18 @@ func multiSessionSharesWorkDir(cityPath, cityName, target string, a config.Agent
 
 	maxSess := a.EffectiveMaxActiveSessions()
 	isUnlimited := maxSess == nil || *maxSess < 0
+	probeCount := 2
 	if !isUnlimited {
-		for slot := 1; slot <= *maxSess; slot++ {
-			if workdirutil.ResolveWorkDirPath(cityPath, cityName, poolQualifiedNameForSlot(a, slot), a, rigs) == target {
-				return true
-			}
-		}
-		return false
+		probeCount = *maxSess
 	}
 
-	for _, qualifiedName := range []string{
-		poolQualifiedNameForSlot(a, 1),
-		poolQualifiedNameForSlot(a, 2),
-	} {
-		if workdirutil.ResolveWorkDirPath(cityPath, cityName, qualifiedName, a, rigs) == target {
+	for slot := 1; slot <= probeCount; slot++ {
+		instance := a.PoolSlotInstance(slot)
+		if workdirutil.ResolveWorkDirPath(cityPath, cityName, instance.QualifiedName(), instance, rigs) == target {
 			return true
 		}
 	}
 	return false
-}
-
-func poolQualifiedNameForSlot(a config.Agent, slot int) string {
-	name := poolInstanceNameForAPI(a.Name, slot, a)
-	return a.QualifiedInstanceName(name)
 }
 
 // isMultiSessionAgent reports whether the agent can have more than one
@@ -582,16 +598,6 @@ func isCrewDir(dir string) bool {
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	if a.UsesCanonicalSingletonPoolIdentity() {
-		return base
-	}
-	if slot >= 1 && slot <= len(a.NamepoolNames) {
-		return a.NamepoolNames[slot-1]
-	}
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
-		return base
-	}
-	return fmt.Sprintf("%s-%d", base, slot)
+	a.Name = base
+	return a.PoolSlotInstance(slot).Name
 }

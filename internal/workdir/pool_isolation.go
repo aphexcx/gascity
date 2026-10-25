@@ -33,14 +33,16 @@ func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Age
 			continue
 		}
 
-		firstName := a.QualifiedInstanceName(a.Name + "-1")
-		secondName := a.QualifiedInstanceName(a.Name + "-2")
+		first := a.PoolSlotInstance(1)
+		second := a.PoolSlotInstance(2)
+		firstName := first.QualifiedName()
+		secondName := second.QualifiedName()
 
-		firstPath, err := ResolveWorkDirPathStrict(cityPath, cityName, firstName, a, rigs)
+		firstPath, err := ResolveWorkDirPathStrict(cityPath, cityName, firstName, first, rigs)
 		if err != nil {
 			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), firstName, err)
 		}
-		secondPath, err := ResolveWorkDirPathStrict(cityPath, cityName, secondName, a, rigs)
+		secondPath, err := ResolveWorkDirPathStrict(cityPath, cityName, secondName, second, rigs)
 		if err != nil {
 			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), secondName, err)
 		}

@@ -542,6 +542,7 @@ func (s *Server) countSessions(snapshot statusSessionSnapshot) (active, suspende
 }
 
 type statusSessionSnapshot struct {
+	infos         []session.Info
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
@@ -567,6 +568,11 @@ type statusSessionInfo struct {
 // "sessions: loading session snapshot timed out after 1s" for data sitting in a
 // local store.
 func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
+	return s.sessionSnapshot(ctx, false)
+}
+
+// sessionSnapshot optionally includes historical owners for transcript attribution.
+func (s *Server) sessionSnapshot(ctx context.Context, includeClosed bool) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
@@ -616,7 +622,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		} else if scoped != nil {
 			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
+		infos, partialErrors, err := sessionReadModelInfosWithHistory(session.NewStore(readSessions), includeClosed)
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -640,6 +646,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	for _, partialErr := range partialErrors {
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
+	snapshot.infos = infos
 
 	seenSessionName := make(map[string]bool, len(infos))
 	for _, sessInfo := range infos {
