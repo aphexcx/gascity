@@ -91,6 +91,29 @@ func TestStatusSessionSnapshotReadsSessionClassStore(t *testing.T) {
 	}
 }
 
+func TestStatusSessionSnapshotRetainsHistoricalWorkDirsForAttribution(t *testing.T) {
+	st, _, sessions := splitClassState(t)
+	b := newSessionBead("retired-slot")
+	b.Metadata["work_dir"] = "/city/lane-worker-2"
+	created, err := sessions.Create(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := (&Server{state: st}).statusSessionSnapshot(context.Background())
+	if len(snapshot.partialErrors) != 0 || len(snapshot.infos) != 1 {
+		t.Fatalf("snapshot has %d infos, errors %v", len(snapshot.infos), snapshot.partialErrors)
+	}
+	if got := snapshot.infos[0].WorkDir; got != "/city/lane-worker-2" {
+		t.Fatalf("historical work_dir = %q", got)
+	}
+	if len(snapshot.bySessionName) != 0 {
+		t.Fatal("historical transcript owner must not appear as a live session")
+	}
+}
+
 // TestStatusSessionSnapshotNeverQueriesTheWorkLedger is the cost test. The work
 // ledger is stalled the way maintainer-city's is effectively stalled — a read
 // there costs multiples of statusStoreReadTimeout — so a session read routed to

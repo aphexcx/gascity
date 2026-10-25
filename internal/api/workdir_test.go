@@ -5,7 +5,35 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestCanAttributeSessionRetainedPoolWorkDir(t *testing.T) {
+	const pattern = ".worktrees/{{.Rig}}/lane-{{.AgentBase}}"
+	named := config.Agent{Name: "worker-2", Dir: "demo", WorkDir: pattern, MaxActiveSessions: intPtr(1)}
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "claude"},
+		Rigs:      []config.Rig{{Name: "demo", Path: "/repos/demo"}},
+		Agents:    []config.Agent{named, {Name: "worker", Dir: "demo", WorkDir: pattern, MaxActiveSessions: intPtr(2)}},
+	}
+	for _, tc := range []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{"retained canonical", session.Info{Template: "demo/worker", WorkDirCanonical: "/city/.worktrees/demo/lane-worker-2"}, false},
+		{"retained legacy relative", session.Info{Template: "demo/worker", WorkDir: ".worktrees/demo/lane-worker-2"}, false},
+		{"historical transcript", session.Info{Template: "demo/worker", WorkDir: "/city/.worktrees/demo/lane-worker-2", Closed: true}, false},
+		{"migrated", session.Info{Template: "demo/worker", WorkDirCanonical: "/city/.worktrees/demo/lane-worker.pool-2", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, true},
+		{"own session", session.Info{Template: "demo/worker-2", WorkDir: "/city/.worktrees/demo/lane-worker-2"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canAttributeSession(named, named.QualifiedName(), cfg, "/city", tc.info); got != tc.want {
+				t.Fatalf("canAttributeSession = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestCanAttributeSessionUsesResolvedWorkDir(t *testing.T) {
 	cityPath := t.TempDir()

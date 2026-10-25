@@ -542,6 +542,7 @@ func (s *Server) countSessions(snapshot statusSessionSnapshot) (active, suspende
 }
 
 type statusSessionSnapshot struct {
+	infos         []session.Info
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
@@ -640,6 +641,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	for _, partialErr := range partialErrors {
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
+	snapshot.infos = infos
 
 	seenSessionName := make(map[string]bool, len(infos))
 	for _, sessInfo := range infos {
