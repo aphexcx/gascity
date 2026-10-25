@@ -51,6 +51,53 @@ func TestOrderOutcomeHistorySinglePass(t *testing.T) {
 	}
 }
 
+func TestOrderOutcomeSkipsHistoryWithoutMonitoredOrders(t *testing.T) {
+	c := NewOrderOutcomeHealthyCheck(&config.City{}, t.TempDir())
+	c.scanOrders = func(string, *config.City) ([]orders.Order, error) {
+		return []orders.Order{{Name: "manual", Trigger: "manual"}}, nil
+	}
+	c.walkEvents = func(context.Context, string, func(events.Event) error) error {
+		t.Fatal("history walked with no monitored orders")
+		return nil
+	}
+	got := c.Run(nil)
+	if got.Status != StatusOK || !strings.Contains(got.Message, "no cron or cooldown orders") {
+		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestOrderOutcomeCachedHistoryPreservesFailuresAndGrace(t *testing.T) {
+	city, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, city, "scheduled", "cooldown", "5m")
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	records := []events.Event{
+		{Seq: 1, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-3 * time.Hour)},
+		{Seq: 2, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-2 * time.Hour)},
+		{Seq: 3, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-time.Hour)},
+		{Seq: 4, Type: events.ControllerStarted, Ts: start},
+		{Seq: 5, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(time.Minute)},
+	}
+	var body bytes.Buffer
+	for _, e := range records {
+		if err := json.NewEncoder(&body).Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeOrderFiringArchive(t, city, "20260801T000100Z", 1, 5, body.String())
+	c := NewOrderOutcomeHealthyCheck(cfg, city)
+	for _, phase := range []string{"cold fill complete", "warm cache"} {
+		got := c.Run(nil)
+		if got.Status != StatusWarning || len(got.Details) != 1 || !strings.Contains(got.Details[0], "3 consecutive failures") || !strings.Contains(got.Message, phase) || !strings.Contains(got.Message, "after seq 0, archives 1 of 1") {
+			t.Fatalf("%s result=%+v", phase, got)
+		}
+	}
+	// Same timestamp, greater Seq: a success still terminates the streak.
+	writeOrderFiringTestEvents(t, city, events.Event{Seq: 6, Type: events.OrderCompleted, Subject: "scheduled", Ts: start.Add(time.Minute)})
+	if got := c.Run(nil); got.Status != StatusOK || !strings.Contains(got.Details[0], "last run succeeded") {
+		t.Fatalf("active success ignored: %+v", got)
+	}
+}
+
 func TestOrderOutcomeAbandonmentNamesPhase(t *testing.T) {
 	for _, phase := range []string{"scan orders", "read order outcome and controller start events"} {
 		t.Run(phase, func(t *testing.T) {
@@ -61,7 +108,7 @@ func TestOrderOutcomeAbandonmentNamesPhase(t *testing.T) {
 					if phase == "scan orders" {
 						<-release
 					}
-					return nil, nil
+					return []orders.Order{{Name: "scheduled", Trigger: "cooldown"}}, nil
 				}
 				c.walkEvents = func(ctx context.Context, _ string, _ func(events.Event) error) error {
 					<-ctx.Done()
@@ -91,7 +138,9 @@ func TestOrderOutcomeExplicitBudgetWins(t *testing.T) {
 		t.Run(budget.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c := NewOrderOutcomeHealthyCheck(&config.City{}, "city")
-				c.scanOrders = func(string, *config.City) ([]orders.Order, error) { return nil, nil }
+				c.scanOrders = func(string, *config.City) ([]orders.Order, error) {
+					return []orders.Order{{Name: "scheduled", Trigger: "cooldown"}}, nil
+				}
 				c.walkEvents = func(ctx context.Context, _ string, _ func(events.Event) error) error {
 					if budget == 0 {
 						if _, ok := ctx.Deadline(); ok {
