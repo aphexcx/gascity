@@ -1378,6 +1378,10 @@ func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg
 	if concreteIdentity == "" || concreteIdentity == template {
 		return "", "", false, nil
 	}
+	templateDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	if err != nil || templateDir == "" {
+		return "", "", false, nil
+	}
 	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
 	if concreteDir == "" {
 		slot := cfgAgent.PoolSlotForIdentity(concreteIdentity)
@@ -1393,8 +1397,7 @@ func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg
 	if concreteDir == "" {
 		return "", "", false, fmt.Errorf("resolving work_dir for pool instance %q: empty path", concreteIdentity)
 	}
-	templateDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
-	if err != nil || templateDir == "" || samePreparedWorkDirPath(templateDir, concreteDir) {
+	if samePreparedWorkDirPath(templateDir, concreteDir) {
 		return "", "", false, nil
 	}
 	return templateDir, concreteDir, true, nil
