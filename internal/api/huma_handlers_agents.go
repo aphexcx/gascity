@@ -211,7 +211,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 			if running && provider == "claude" && !isMultiSessionAgent(a) {
 				if attributionSnapshot == nil {
-					snapshot := s.statusSessionSnapshot(ctx)
+					snapshot := s.sessionSnapshot(ctx, true)
 					attributionSnapshot = &snapshot
 					if len(snapshot.partialErrors) > 0 {
 						log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
@@ -353,7 +353,7 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && !isMultiSessionAgent(agentCfg) {
-		snapshot := s.statusSessionSnapshot(ctx)
+		snapshot := s.sessionSnapshot(ctx, true)
 		if len(snapshot.partialErrors) > 0 {
 			log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
 		} else if canAttributeSession(agentCfg, name, cfg, s.state.CityPath(), snapshot.infos...) {

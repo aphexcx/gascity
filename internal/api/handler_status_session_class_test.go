@@ -102,7 +102,7 @@ func TestStatusSessionSnapshotRetainsHistoricalWorkDirsForAttribution(t *testing
 	if err := sessions.Close(created.ID); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := (&Server{state: st}).statusSessionSnapshot(context.Background())
+	snapshot := (&Server{state: st}).sessionSnapshot(context.Background(), true)
 	if len(snapshot.partialErrors) != 0 || len(snapshot.infos) != 1 {
 		t.Fatalf("snapshot has %d infos, errors %v", len(snapshot.infos), snapshot.partialErrors)
 	}
