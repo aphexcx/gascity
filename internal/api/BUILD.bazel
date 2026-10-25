@@ -510,6 +510,7 @@ go_test(
         "//internal/usage",
         "//internal/webhookverify",
         "//internal/worker",
+        "//internal/workdir",
         "//internal/workrecord",
         "//internal/workspacesvc",
         "@com_github_danielgtaylor_huma_v2//:huma",

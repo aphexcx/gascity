@@ -1,6 +1,17 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestPoolSlotInstanceRejectsNonpositiveSlot(t *testing.T) {
+	for _, slot := range []int{0, -1} {
+		if got := (Agent{Name: "worker"}).PoolSlotInstance(slot); !reflect.DeepEqual(got, Agent{}) {
+			t.Errorf("PoolSlotInstance(%d) = %+v, want empty instance", slot, got)
+		}
+	}
+}
 
 func TestPoolSlotInstance(t *testing.T) {
 	capacity := 3

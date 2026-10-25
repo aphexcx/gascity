@@ -30,12 +30,16 @@ func repoRoot() string {
 //     imports config, so config cannot call back into agentutil without an
 //     import cycle. This is a reviewed, permanent exception, not a pending
 //     migration.
+//   - internal/workdir/workdir.go — compares the instance and pool identities
+//     to isolate implicit workspaces; it does not derive a routing target.
+//     agentutil imports workdir, so calling RoutedToIdentity would cycle.
 func TestRoutedToIdentityDerivationIsCentralized(t *testing.T) {
 	root := repoRoot()
 
 	allowedFiles := []string{
 		filepath.Join("internal", "agentutil", "resolve.go"),
 		filepath.Join("internal", "config", "workquery.go"),
+		filepath.Join("internal", "workdir", "workdir.go"),
 	}
 
 	var violations []string

@@ -301,7 +301,8 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		// already fails config validation at init time if their work_dir
 		// doesn't vary per instance, so auto-isolating here would just mask
 		// a misconfiguration ValidatePoolWorkDirIsolation is supposed to catch.
-		if a.Dir == "" && qualifiedName != a.QualifiedName() && !RequiresPoolWorkDirIsolationCheck(a) {
+		isInstance := qualifiedName != a.QualifiedName() || (a.PoolName != "" && qualifiedName != a.PoolName)
+		if a.Dir == "" && isInstance && !RequiresPoolWorkDirIsolationCheck(a) {
 			return filepath.Join(WorktreesRoot(cityPath), agent.SanitizeQualifiedNameForSession(qualifiedName)), nil
 		}
 		return ResolveDirPath(cityPath, a.Dir), nil

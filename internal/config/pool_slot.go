@@ -6,10 +6,14 @@ import (
 )
 
 // PoolSlotInstance returns an independent runtime configuration for a pool slot.
-// Slot numbers are one-based. Singleton pools retain their configured identity;
+// Slot numbers are one-based; invalid slots return an empty Agent.
+// Singleton pools retain their configured identity;
 // namepools use their configured names before falling back to numeric names.
 // Capacity is enforced by the caller, so existing slots survive a cap decrease.
 func (a Agent) PoolSlotInstance(slot int) Agent {
+	if slot < 1 {
+		return Agent{}
+	}
 	instance := a.Clone()
 	instance.PoolName = a.QualifiedName()
 	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
