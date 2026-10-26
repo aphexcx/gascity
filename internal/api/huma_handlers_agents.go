@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
@@ -70,7 +71,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	}
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 
-	var attributionSnapshot *statusSessionSnapshot
+	var attributionSnapshot *session.WorkDirOwners
 	var agents []agentResponse
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
@@ -211,13 +212,10 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 			if running && provider == "claude" && !isMultiSessionAgent(a) {
 				if attributionSnapshot == nil {
-					snapshot := s.sessionSnapshot(ctx, true)
+					snapshot := s.agentAttributionSnapshot(ctx, cfg)
 					attributionSnapshot = &snapshot
-					if len(snapshot.partialErrors) > 0 {
-						log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
-					}
 				}
-				if len(attributionSnapshot.partialErrors) == 0 && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath(), attributionSnapshot.infos...) {
+				if attributionSnapshot.Complete && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath(), attributionSnapshot.Infos...) {
 					s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 				}
 			}
@@ -353,10 +351,8 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && !isMultiSessionAgent(agentCfg) {
-		snapshot := s.sessionSnapshot(ctx, true)
-		if len(snapshot.partialErrors) > 0 {
-			log.Printf("api: agent session attribution unavailable: %s", strings.Join(snapshot.partialErrors, "; "))
-		} else if canAttributeSession(agentCfg, name, cfg, s.state.CityPath(), snapshot.infos...) {
+		snapshot := s.agentAttributionSnapshot(ctx, cfg)
+		if snapshot.Complete && canAttributeSession(agentCfg, name, cfg, s.state.CityPath(), snapshot.Infos...) {
 			s.enrichSessionMeta(&resp, agentCfg, name)
 		}
 	}
