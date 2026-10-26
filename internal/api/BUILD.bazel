@@ -312,6 +312,7 @@ go_test(
         "handler_extmsg_attachment_mime_test.go",
         "handler_extmsg_default_route_test.go",
         "handler_extmsg_delivery_test.go",
+        "handler_extmsg_envelope_test.go",
         "handler_extmsg_receipt_poll_test.go",
         "handler_extmsg_test.go",
         "handler_formula_write_test.go",
