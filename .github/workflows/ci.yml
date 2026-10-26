@@ -1508,14 +1508,15 @@ jobs:
       # The gastown pack ships via the gascity-packs Go module, so a routine
       # go.mod bump can silently desync the embedded pack bytes from the
       # provenance pins in internal/config/public_packs.go and the
-      # examples/gastown import. This check fails when any pin drifts from
-      # the latest registry release; every in-repo test stays green after
-      # such a drift, so this is the only automated guard.
+      # examples/gastown import. Check the repository-pinned releases so a
+      # newer registry publication cannot invalidate an unchanged checkout.
+      # Registry withdrawal and content/provenance mismatches still fail.
       - name: Bundled gastown pack pin check
         timeout-minutes: 10
         run: |
+          python3 -S -m unittest discover -s scripts -p 'test_*.py'
           for attempt in 1 2 3; do
-            if scripts/update-bundled-gastown-pack --check; then
+            if scripts/update-bundled-gastown-pack --check-pinned; then
               exit 0
             fi
             if [ "$attempt" = "3" ]; then
