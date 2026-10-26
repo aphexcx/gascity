@@ -16,7 +16,7 @@ set -euo pipefail
 cat >/dev/null
 shift 4 # -0 -n1 -P <jobs>
 printf 'probe_log_dir=%s\n' "$LOCAL_TEST_LOG_DIR"
-"$@" 'environment::printf "probe_tmpdir=%s\nprobe_goflags=%s\n" "$TMPDIR" "$GOFLAGS"'
+"$@" 'environment::test "$(command -v go)" = "$GOROOT/bin/go" && test "$(go env GOTOOLDIR)" = "$GOROOT/pkg/tool/$(go env GOHOSTOS)_$(go env GOHOSTARCH)" && printf "probe_toolchain=%s\nprobe_tmpdir=%s\nprobe_goflags=%s\n" "$GOTOOLCHAIN" "$TMPDIR" "$GOFLAGS"'
 cat "$LOCAL_TEST_LOG_DIR/environment.log"
 SH
 cat >"$scratch/bin/uname" <<'SH'
@@ -49,6 +49,7 @@ output="$(LOCAL_TEST_LOG_DIR="$scratch/fresh/nested logs" bash scripts/test-loca
   exit 1
 }
 assert_contains "probe_tmpdir=$scratch/user-tmp"
+assert_contains "probe_toolchain=go$(awk '$1 == "go" { print $2 }' go.mod)"
 test -f "$scratch/fresh/nested logs/environment.log"
 echo 'ok: creates and preserves caller log directory; Darwin per-user TMPDIR'
 

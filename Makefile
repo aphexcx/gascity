@@ -1,11 +1,26 @@
 GOLANGCI_LINT_VERSION := 2.12.0
 BUILDX_VERSION := 0.21.2
 
-# Detect OS and arch for binary download.
-GOOS   := $(shell go env GOOS)
-GOARCH := $(shell go env GOARCH)
+# Resolve once, before any Go probes. The fallback supports make -f from a
+# different module; ordinary recipes and copied Makefile test fixtures use cwd.
+GO_TOOLCHAIN_HELPER := $(firstword $(wildcard scripts/lib/go-toolchain.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/go-toolchain.sh))
+GO_TOOLCHAIN_SELECTION := $(shell . "$(GO_TOOLCHAIN_HELPER)" && gc_go_toolchain "$(CURDIR)" && printf '%s %s' "$$GOTOOLCHAIN" "$$GOROOT")
+ifeq ($(strip $(GO_TOOLCHAIN_SELECTION)),)
+$(error Unable to resolve the Go toolchain)
+endif
+override GOTOOLCHAIN := $(firstword $(GO_TOOLCHAIN_SELECTION))
+override GOROOT := $(wordlist 2,$(words $(GO_TOOLCHAIN_SELECTION)),$(GO_TOOLCHAIN_SELECTION))
+export GOTOOLCHAIN GOROOT
+export PATH := $(GOROOT)/bin:$(PATH)
+# $(shell) probes need explicit assignments on older GNU Make versions, which
+# do not pass newly exported Make variables into their expansion environment.
+GO_TOOLCHAIN_ENV = env GOTOOLCHAIN="$(GOTOOLCHAIN)" GOROOT="$(GOROOT)" PATH="$(PATH)"
 
-BIN_DIR := $(shell go env GOPATH)/bin
+# Detect OS and arch for binary download.
+GOOS   := $(shell $(GO_TOOLCHAIN_ENV) go env GOOS)
+GOARCH := $(shell $(GO_TOOLCHAIN_ENV) go env GOARCH)
+
+BIN_DIR := $(shell $(GO_TOOLCHAIN_ENV) go env GOPATH)/bin
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 
 BINARY     := gc
@@ -427,11 +442,10 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
-GOPATH_VAL    := $(shell go env GOPATH)
-GOCACHE_VAL   := $(shell go env GOCACHE)
-GOMODCACHE_VAL := $(shell go env GOMODCACHE)
-GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
-GOROOT_VAL    := $(shell go env GOROOT)
+GOPATH_VAL    := $(shell $(GO_TOOLCHAIN_ENV) go env GOPATH)
+GOCACHE_VAL   := $(shell $(GO_TOOLCHAIN_ENV) go env GOCACHE)
+GOMODCACHE_VAL := $(shell $(GO_TOOLCHAIN_ENV) go env GOMODCACHE)
+GOTMPDIR_VAL  := $(shell $(GO_TOOLCHAIN_ENV) go env GOTMPDIR)
 TEST_ENV = env -i \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
@@ -451,7 +465,8 @@ TEST_ENV = env -i \
 	GOCACHE="$(GOCACHE_VAL)" \
 	GOMODCACHE="$(GOMODCACHE_VAL)" \
 	GOTMPDIR="$(GOTMPDIR_VAL)" \
-	GOROOT="$${GOROOT:-$(GOROOT_VAL)}" \
+	GOROOT="$(GOROOT)" \
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" \
 	GOENV="$${GOENV-}" \
 	GOFLAGS="$${GOFLAGS-}" \
 	GO111MODULE="$${GO111MODULE-}" \

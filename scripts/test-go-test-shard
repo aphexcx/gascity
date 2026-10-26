@@ -23,6 +23,9 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+source "$repo_root/scripts/lib/go-toolchain.sh"
+gc_go_toolchain "$repo_root"
+
 # One shared seeded gitconfig for every nested test env; resolved once so the
 # env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
 gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
@@ -90,7 +93,8 @@ run_in_test_env() {
     GOCACHE="${gocache_val}" \
     GOMODCACHE="${gomodcache_val}" \
     GOTMPDIR="${gotmpdir_val}" \
-    GOROOT="${GOROOT:-$goroot_val}" \
+    GOROOT="${goroot_val}" \
+    GOTOOLCHAIN="${GOTOOLCHAIN}" \
     GOENV="${GOENV-}" \
     GOFLAGS="${GOFLAGS-}" \
     GO111MODULE="${GO111MODULE-}" \

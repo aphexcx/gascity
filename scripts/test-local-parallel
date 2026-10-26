@@ -30,6 +30,9 @@ mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+source "$repo_root/scripts/lib/go-toolchain.sh"
+gc_go_toolchain "$repo_root"
+
 # One shared seeded gitconfig for every nested test env; resolved once so the
 # env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
 # Exported because the xargs fan-out worker (run_fan_out) expands it in a child
@@ -313,7 +316,7 @@ export TEST_LOCAL_GOPATH="$gopath_val"
 export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
-export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_GOROOT="${goroot_val}"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -422,6 +425,7 @@ run_fan_out() {
     GOMODCACHE="${TEST_LOCAL_GOMODCACHE}" \
     GOTMPDIR="${TEST_LOCAL_GOTMPDIR}" \
     GOROOT="${TEST_LOCAL_GOROOT}" \
+    GOTOOLCHAIN="${GOTOOLCHAIN-}" \
     GOENV="${GOENV-}" \
     CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
     CGO_LDFLAGS="${CGO_LDFLAGS-}" \
@@ -436,7 +440,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?

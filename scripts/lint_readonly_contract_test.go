@@ -143,13 +143,18 @@ func TestLintChangedFailsClosedWhenReadonlyMetadataIsStale(t *testing.T) {
 	writeTestFile(t, filepath.Join(fixture.repoRoot, "go.sum"), "example.com/dependency v1.0.0 h1:before\n")
 	writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
 
-	goTool := filepath.Join(t.TempDir(), "go")
+	goTool := filepath.Join(t.TempDir(), "bin", "go")
+	if err := os.MkdirAll(filepath.Dir(goTool), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeExecutable(t, goTool, `#!/bin/sh
 set -eu
 case "${1-}" in
   env)
     if [ "${2-}" = "GOFLAGS" ]; then
       printf '%s\n' "${GOFLAGS-}"
+    elif [ "${2-}" = "GOROOT" ]; then
+      dirname "$(dirname "$0")"
     fi
     exit 0
     ;;
