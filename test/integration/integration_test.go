@@ -401,10 +401,6 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
-	if err != nil {
-		return "", err
-	}
 	binDir := filepath.Join(tmpDir, "pinned-bd")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return "", fmt.Errorf("create pinned bd directory: %w", err)
@@ -412,10 +408,10 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
+	cmd := exec.Command("bash", filepath.Join(findModuleRoot(), "scripts", "build-pinned-bd.sh"), binDir)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+		return "", fmt.Errorf("build pinned integration bd: %w\n%s", err, out)
 	}
 	return filepath.Join(binDir, "bd"), nil
 }

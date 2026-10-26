@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # check-gomod-replace.sh [go.mod-path]
 #
-# Fails if go.mod contains any replace directive targeting an unreleased
-# version: pseudo-version, local filesystem path, or git branch/ref.
+# Reject unreleased replacements except the named beads fork commit pin below.
 #
 # Policy: gascity is a public project. It must only pin released semver tags.
-# The only override is an explicit human-operator decision (e.g. an emergency
+# The named fork exception below preserves the beads fork's schema lineage;
+# it must pin a commit, never impersonate an upstream release tag.
+# Any other override is an explicit human-operator decision (e.g. an emergency
 # security fix from an unreleased commit). That override is a manual admin
 # bypass of this required CI check — automated workers may NEVER self-authorize
 # an unreleased dependency.
@@ -30,7 +31,10 @@ fi
 
 check_replace_rhs() {
 	local stripped="$1" rhs="$2"
-	local version="" path_part="$rhs"
+	local version="" path_part="$rhs" lhs="${1%%=>*}"
+	lhs="${lhs#replace }"
+	lhs="${lhs#"${lhs%%[![:space:]]*}"}"
+	lhs="${lhs%"${lhs##*[![:space:]]}"}"
 
 	# Strip an inline `// comment` from the RHS before splitting; otherwise the
 	# trailing comment tokens defeat the two-token path/version match below and
@@ -42,9 +46,19 @@ check_replace_rhs() {
 	path_part="$rhs"
 
 	# Split into path and optional version (last space-separated token).
-	if [[ "$rhs" =~ ^([^ ]+)[[:space:]]+([^ ]+)$ ]]; then
+	if [[ "$rhs" =~ ^([^[:space:]]+)[[:space:]]+([^[:space:]]+)$ ]]; then
 		path_part="${BASH_REMATCH[1]}"
 		version="${BASH_REMATCH[2]}"
+	fi
+
+	if [[ "$lhs" == github.com/steveyegge/beads && "$path_part" == github.com/aphexcx/beads ]]; then
+		if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-0\.[0-9]{14}-[0-9a-f]{12}$ ]]; then
+			echo "check-gomod-replace: ALLOWED — named beads fork carve-out preserves schema lineage with a commit pin, never an upstream release tag."
+			return 0
+		fi
+		echo "check-gomod-replace: BLOCKED — the named beads fork carve-out requires a pseudo-version to preserve schema lineage, never a release tag or branch:" >&2
+		echo "  $stripped" >&2
+		return 1
 	fi
 
 	# Local filesystem paths are always unreleased.
@@ -81,7 +95,7 @@ check_replace_rhs() {
 failed=0
 in_replace_block=0
 while IFS= read -r line; do
-	stripped="${line#"${line%%[! ]*}"}"
+	stripped="${line#"${line%%[![:space:]]*}"}"
 
 	# Detect opening of a grouped block: replace (
 	if [[ "$stripped" == "replace (" ]]; then
@@ -100,7 +114,7 @@ while IFS= read -r line; do
 		[[ -z "$stripped" || "$stripped" == //* ]] && continue
 		[[ "$stripped" == *"=>"* ]] || continue
 		rhs="${stripped#*=>}"
-		rhs="${rhs#"${rhs%%[! ]*}"}"
+		rhs="${rhs#"${rhs%%[![:space:]]*}"}"
 		check_replace_rhs "$stripped" "$rhs" || failed=1
 		continue
 	fi
@@ -109,7 +123,7 @@ while IFS= read -r line; do
 	[[ "$stripped" == replace\ * && "$stripped" != "replace (" ]] || continue
 	[[ "$stripped" == *"=>"* ]] || continue
 	rhs="${stripped#*=>}"
-	rhs="${rhs#"${rhs%%[! ]*}"}"
+	rhs="${rhs#"${rhs%%[![:space:]]*}"}"
 	check_replace_rhs "$stripped" "$rhs" || failed=1
 done < "$gomod"
 
@@ -117,4 +131,4 @@ if [[ $failed -ne 0 ]]; then
 	exit 1
 fi
 
-echo "check-gomod-replace: OK (no unreleased replace directives)"
+echo "check-gomod-replace: OK (released replaces or the named beads fork pin)"
