@@ -523,9 +523,11 @@ jobs:
           bd-version: ""
           install-claude-cli: "false"
       - name: Build bd from the linked beads module
+        id: bd
         run: |
           set -euo pipefail
           bash scripts/build-pinned-bd.sh "${HOME}/.local/bin"
+          echo "pin=$(GOWORK=off GOFLAGS= go list -m -f '{{if .Replace}}{{.Replace.Path}}@{{.Replace.Version}}{{else}}{{.Path}}@{{.Version}}{{end}}' github.com/steveyegge/beads)" >> "$GITHUB_OUTPUT"
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       # Fail here rather than inside a test: a bd that is missing or too old is
@@ -574,7 +576,7 @@ jobs:
           {
             echo "## Beads topology acceptance"
             echo
-            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            echo "bd pin: ${{ steps.bd.outputs.pin }}"
             echo
             echo "### Skipped"
             echo

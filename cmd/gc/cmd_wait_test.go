@@ -687,6 +687,10 @@ func TestBuildPinnedBDBinaryForTestsOverride(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("test binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	renamed := filepath.Join(dir, "bd-pinned")
+	if err := os.WriteFile(renamed, []byte("renamed test binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	nonExecutable := filepath.Join(dir, "not-executable")
 	if err := os.WriteFile(nonExecutable, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -697,6 +701,7 @@ func TestBuildPinnedBDBinaryForTestsOverride(t *testing.T) {
 		valid bool
 	}{
 		{"absolute executable", binary, true},
+		{"renamed executable", renamed, true},
 		{"relative", "bd", false},
 		{"missing", filepath.Join(dir, "missing"), false},
 		{"directory", dir, false},
@@ -706,8 +711,29 @@ func TestBuildPinnedBDBinaryForTestsOverride(t *testing.T) {
 			t.Setenv("GC_TEST_BD", tc.path)
 			got, err := buildPinnedBDBinaryForTests(filepath.Join(dir, "no-checkout"))
 			if tc.valid {
-				if err != nil || got != tc.path {
-					t.Fatalf("override = %q, %v; want %q without building", got, err, tc.path)
+				if err != nil {
+					t.Fatalf("override %q: %v", tc.path, err)
+				}
+				if got != tc.path {
+					t.Cleanup(func() {
+						if err := os.RemoveAll(filepath.Dir(got)); err != nil {
+							t.Errorf("remove override shim directory: %v", err)
+						}
+					})
+				}
+				// Managed-city fixtures prepend this directory to PATH and call bd.
+				t.Setenv("PATH", filepath.Dir(got))
+				resolved, err := exec.LookPath("bd")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantInfo, err := os.Stat(tc.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotInfo, err := os.Stat(resolved)
+				if err != nil || !os.SameFile(wantInfo, gotInfo) {
+					t.Fatalf("PATH selected %q, want override %q: %v", resolved, tc.path, err)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), "GC_TEST_BD") {
 				t.Fatalf("invalid override = %q, %v; want explicit GC_TEST_BD error", got, err)
@@ -721,7 +747,8 @@ func TestBuildPinnedBDBinaryForTestsOverride(t *testing.T) {
 // resolves replacements and uses cmd/bd's own dependency graph, which is broader
 // than the storage packages gc imports. It never discovers an ambient bd on PATH.
 func buildPinnedBDBinaryForTests(root string) (string, error) {
-	if override := os.Getenv("GC_TEST_BD"); override != "" {
+	override := os.Getenv("GC_TEST_BD")
+	if override != "" {
 		if !filepath.IsAbs(override) {
 			return "", fmt.Errorf("GC_TEST_BD must be an absolute path: %q", override)
 		}
@@ -732,12 +759,23 @@ func buildPinnedBDBinaryForTests(root string) (string, error) {
 		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			return "", fmt.Errorf("GC_TEST_BD %q must be an executable file", override)
 		}
-		return override, nil
+		if filepath.Base(override) == "bd" {
+			return override, nil
+		}
 	}
 	sweepOrphanPIDPrefixedDirs(os.TempDir(), testBDBinaryDirPrefix)
 	buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testBDBinaryDirPrefix))
 	if err != nil {
 		return "", fmt.Errorf("mktemp bd binary dir: %w", err)
+	}
+	bdPath := filepath.Join(buildDir, "bd")
+	if override != "" {
+		// Fixtures invoke both this exact path and bd through PATH. Give a
+		// renamed override a bd entry so both routes select the same executable.
+		if err := os.Symlink(override, bdPath); err != nil {
+			return "", fmt.Errorf("link GC_TEST_BD %q: %w", override, err)
+		}
+		return bdPath, nil
 	}
 
 	cmd := exec.Command("bash", filepath.Join(root, "scripts", "build-pinned-bd.sh"), buildDir)
@@ -745,7 +783,7 @@ func buildPinnedBDBinaryForTests(root string) (string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build pinned bd: %w\n%s", err, out)
 	}
-	return filepath.Join(buildDir, "bd"), nil
+	return bdPath, nil
 }
 
 // pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
