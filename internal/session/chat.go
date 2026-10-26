@@ -601,11 +601,15 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
 	// exact "old process survives alongside its replacement" scenario. No
 	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
+	// A suspended projection can still have a live named runtime. Let Start
+	// report duplication or a provider error without reaping that runtime.
+	if !m.sp.IsRunning(sessName) {
+		if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {

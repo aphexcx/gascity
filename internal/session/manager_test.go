@@ -4107,6 +4107,44 @@ func TestStartClearsStaleACPKeysOnNonACPProvider(t *testing.T) {
 	}
 }
 
+func TestStartPreservesLiveACPBehindSuspendedProjection(t *testing.T) {
+	for _, configured := range []string{"acp", "tmux"} {
+		t.Run(configured, func(t *testing.T) {
+			store := beads.NewMemStore()
+			terminal := &orphanScanProvider{Fake: runtime.NewFake()}
+			acp := runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+				"session_name": "legacy-session", "template": "worker", "provider": "stub", "state": string(StateSuspended),
+				MCPIdentityMetadataKey: "worker",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := acp.Start(context.Background(), "legacy-session", runtime.Config{Env: map[string]string{"GC_SESSION_ID": b.ID}}); err != nil {
+				t.Fatal(err)
+			}
+			terminal.results = []runtime.LiveRuntime{{PID: 12345, SessionID: b.ID, IsTracked: false}}
+			mgr := NewManagerWithOptions(store, sp, WithTransportResolver(func(_, _ string) string { return configured }))
+			if err := mgr.Start(context.Background(), b.ID, "stub acp", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range terminal.events {
+				if strings.HasPrefix(event, "terminate:") {
+					t.Fatalf("healthy ACP runtime was classified as an orphan: %v", terminal.events)
+				}
+			}
+			stored, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Metadata["state"] != string(StateActive) || !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
+				t.Fatalf("live ACP runtime was not adopted: state=%q", stored.Metadata["state"])
+			}
+		})
+	}
+}
+
 func TestStartPreservesACPMetadataWhenResumeResolutionFails(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
