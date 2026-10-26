@@ -10,24 +10,56 @@ import (
 	"strings"
 )
 
-// metadataPathCandidateSQL is deliberately a superset. Any absolute lexical
-// path resolving to a target contains its final component, even with whitespace
-// or dot segments; every relative path remains a candidate. Matching either
-// key avoids imposing SQL TRIM's narrower whitespace rules on key precedence.
-// Exact normalization and precedence are applied after the bounded page.
-func metadataPathCandidateSQL(q MetadataPathQuery, value func(string) string) (string, []any) {
+// metadataPathCandidateSQL selects exact directory values, plus noncanonical
+// values that require Go's lexical cleanup. It never selects a canonical child
+// merely because a requested directory is its ancestor. Matching either key
+// preserves precedence when the preferred value is whitespace. Final cleanup
+// and key precedence remain the responsibility of matches after the page bound.
+func metadataPathCandidateSQL(q MetadataPathQuery, value func(string) string, sqlite bool) (string, []any) {
 	var clauses []string
 	var args []any
 	for _, key := range q.Keys {
 		expr := value(key)
-		parts := []string{expr + " NOT LIKE '/%'"}
+		var placeholders []string
+		relativeFallback := false
 		for _, path := range q.Paths {
-			parts = append(parts, "INSTR("+expr+", ?) > 0")
-			args = append(args, filepath.Base(filepath.Clean(path)))
+			path = filepath.Clean(path)
+			placeholders = append(placeholders, "?", "?")
+			args = append(args, path, path+"/")
+			if rel, err := filepath.Rel(q.BaseDir, path); err == nil {
+				placeholders = append(placeholders, "?", "?")
+				args = append(args, rel, rel+"/")
+				if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					relativeFallback = true
+				}
+			}
 		}
+		parts := []string{expr + " IN (" + strings.Join(placeholders, ",") + ")"}
+		if relativeFallback {
+			parts = append(parts, expr+" NOT LIKE '/%'")
+		}
+		parts = append(parts, metadataPathNoncanonicalSQL(expr, sqlite))
 		clauses = append(clauses, "("+strings.Join(parts, " OR ")+")")
 	}
 	return "(" + strings.Join(clauses, " OR ") + ")", args
+}
+
+func metadataPathNoncanonicalSQL(expr string, sqlite bool) string {
+	// Unicode White_Space matches strings.TrimSpace, unlike SQL TRIM.
+	const whitespace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+	if !sqlite {
+		// One extraction per key: repeating JSON_EXTRACT in every normalization
+		// check makes an unrelated archive expensive even when no row matches.
+		pattern := "//|/[.][.]?(/|$)|^[.][.]/|^[" + whitespace + "]|[" + whitespace + "]$"
+		return expr + " REGEXP " + metadataSQLLiteral(pattern, false)
+	}
+	// SQLite has GLOB but no built-in REGEXP. These are the same exceptional
+	// path shapes, all narrowed by matches after the bounded backing page.
+	var parts []string
+	for _, pattern := range []string{"*//*", "*/./*", "*/../*", "*/.", "*/..", "../*", "[" + whitespace + "]*", "*[" + whitespace + "]"} {
+		parts = append(parts, expr+" GLOB "+metadataSQLLiteral(pattern, true))
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
 }
 
 func metadataJSONPath(key string) string {
@@ -74,7 +106,7 @@ func (s *SQLiteStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQu
 	}
 	candidate, candidateArgs := metadataPathCandidateSQL(q, func(key string) string {
 		return "(SELECT m.meta_value FROM metadata m WHERE m.bead_id=b.id AND m.meta_key=" + metadataSQLLiteral(key, true) + ")"
-	})
+	}, true)
 	where = append(where, candidate)
 	args = append(args, candidateArgs...)
 	sqlText := "SELECT b.bead_json FROM beads b WHERE " + strings.Join(where, " AND ") + " ORDER BY HEX(b.id) LIMIT 256"
@@ -134,7 +166,7 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 				return expr
 			}
 			return "JSON_UNQUOTE(" + expr + ")"
-		})
+		}, sqlite)
 		for _, arg := range args {
 			candidate = strings.Replace(candidate, "?", literal(arg.(string)), 1)
 		}

@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,63 @@ func TestMetadataPathPageContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMetadataPathCandidateCityRootSelective(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlite := store.(*SQLiteStore)
+	t.Cleanup(func() { _ = sqlite.CloseStore() })
+	for i := 0; i < 600; i++ {
+		if _, err := store.Create(Bead{Title: "closed child", Type: "session", Status: "closed", Metadata: map[string]string{"work_dir": fmt.Sprintf("/city/rig/lane-%d", i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{"/city", "/city/", "."} {
+		if _, err := store.Create(Bead{Title: "city owner", Type: "session", Status: "closed", Metadata: map[string]string{"work_dir": path}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := MetadataPathQuery{Type: "session", Keys: []string{"work_dir"}, BaseDir: "/city", Paths: []string{"/city"}}
+	predicate, args := metadataPathCandidateSQL(q, func(string) string { return "m.meta_value" }, true)
+	var count int
+	if err := sqlite.readDB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM metadata m WHERE m.meta_key='work_dir' AND "+predicate, args...).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("SQL admitted %d candidates; want only 3 city owners, excluding 600 child directories", count)
+	}
+}
+
+func TestMetadataPathCandidatePreservesLexicalMatches(t *testing.T) {
+	store, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlite := store.(*SQLiteStore)
+	t.Cleanup(func() { _ = sqlite.CloseStore() })
+	for _, wanted := range []string{"/city/shared", "/outside/shared", "/"} {
+		q := MetadataPathQuery{Type: "session", Keys: []string{"work_dir"}, BaseDir: "/city", Paths: []string{wanted}}
+		predicate, args := metadataPathCandidateSQL(q, func(string) string { return "path" }, true)
+		if strings.Contains(predicate, "INSTR(") {
+			t.Fatal("candidate query uses substring search")
+		}
+		paths := []string{wanted, wanted + "/", wanted + "/.", wanted + "/retired/..", "/city/../" + wanted, "/city//shared", "./shared", "../outside/shared", "../", "unrelated/../../outside/shared", "\u2003" + wanted + "\u00a0", wanted + "\t"}
+		for _, path := range paths {
+			if !q.matches(Bead{Type: "session", Metadata: map[string]string{"work_dir": path}}) {
+				continue
+			}
+			var candidate bool
+			params := append(append([]any{}, args...), path)
+			if err := sqlite.readDB.QueryRowContext(context.Background(), "SELECT "+predicate+" FROM (SELECT ? AS path)", params...).Scan(&candidate); err != nil {
+				t.Fatal(err)
+			}
+			if !candidate {
+				t.Errorf("lexical owner %q of %q excluded by SQL", path, wanted)
+			}
+		}
 	}
 }

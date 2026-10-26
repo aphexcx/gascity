@@ -23,7 +23,7 @@ func TestBdMetadataPathPageBoundsBackingRead(t *testing.T) {
 				if len(args) != 3 || args[0] != "sql" || !strings.HasSuffix(args[1], "ORDER BY page_id LIMIT 256") {
 					t.Fatalf("unbounded command: %v", args)
 				}
-				if !strings.Contains(args[1], "JSON_EXTRACT") || !strings.Contains(args[1], "INSTR(") || !strings.Contains(args[1], "wisps") {
+				if !strings.Contains(args[1], "JSON_EXTRACT") || strings.Contains(args[1], "INSTR(") || !strings.Contains(args[1], metadataSQLLiteral("/city/shared", false)) || !strings.Contains(args[1], "wisps") {
 					t.Fatalf("unscoped query: %s", args[1])
 				}
 				if !strings.Contains(args[1], "NOT EXISTS (SELECT 1 FROM wisps other") {
