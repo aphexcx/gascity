@@ -30,11 +30,11 @@ func (s *Store) ListWorkDirOwners(ctx context.Context, cityPath string, paths []
 	if !ok {
 		return result, fmt.Errorf("listing work directory owners: %w", beads.ErrMetadataPathPagingUnsupported)
 	}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	// Read repairable owners before typed sessions: RepairType only moves rows
 	// from the former set into the latter, so a repair between reads cannot hide
-	// an owner. The type leg includes sessions regardless of labels; seen removes
-	// any overlap caused by repairs during this census.
+	// an owner. The type leg includes sessions regardless of labels and wins
+	// cross-leg ID collisions, including stale labeled physical copies.
 	for _, q := range []beads.MetadataPathQuery{{Label: LabelSession, UntypedOnly: true}, {Type: BeadType}} {
 		q.Keys = []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey}
 		q.BaseDir, q.Paths = cityPath, paths
@@ -58,9 +58,16 @@ func (s *Store) ListWorkDirOwners(ctx context.Context, cityPath string, paths []
 					return result, fmt.Errorf("work directory owner query incomplete: repeated or empty ID %q", b.ID)
 				}
 				legIDs[b.ID] = true
-				if !seen[b.ID] && IsSessionBeadOrRepairable(b) {
-					seen[b.ID] = true
-					result.Infos = append(result.Infos, infoFromPersistedBead(b))
+				if IsSessionBeadOrRepairable(b) {
+					info := infoFromPersistedBead(b)
+					if index, exists := seen[b.ID]; exists {
+						// Within-leg duplicates already failed above. This is the
+						// typed projection replacing its earlier repairable copy.
+						result.Infos[index] = info
+					} else {
+						seen[b.ID] = len(result.Infos)
+						result.Infos = append(result.Infos, info)
+					}
 				}
 			}
 			if page.Complete {

@@ -52,6 +52,35 @@ func TestDoltliteMetadataPathPagesPreserveLegacyAndDurableWisps(t *testing.T) {
 	}
 }
 
+func TestDoltliteMetadataLedgerCrossLegCollisionWithoutCanonicalLabel(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{ID: "collision", Title: "stale", IssueType: "task", Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "old", "template": "stale"}})
+	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{ID: "collision", Title: "canonical", IssueType: "session", NoHistory: true, Metadata: map[string]string{"work_dir": "actual", "template": "canonical"}})
+	if _, err := writer.Exec("UPDATE issues SET issue_type='' WHERE id='collision'"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		query MetadataPathQuery
+		want  string
+	}{{MetadataPathQuery{Label: "gc:session", UntypedOnly: true}, "stale"}, {MetadataPathQuery{Type: "session"}, "canonical"}} {
+		q := tc.query
+		q.Keys, q.BaseDir, q.Paths = []string{"work_dir"}, "/city", []string{"/city/old", "/city/actual"}
+		query := metadataPathLedgerSQL(q, metadataPathCursor{}, true, []metadataPathTable{{"wisps", "wisp_labels", "COALESCE(i.ephemeral,0)"}, {"issues", "labels", "COALESCE(i.ephemeral,0)"}})
+		rows, err := store.db.QueryContext(context.Background(), query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := readMetadataPathSQLRows(q, rows, metadataPathCursor{}, nil)
+		_ = rows.Close()
+		if err != nil || !page.Complete || len(page.Beads) != 1 || page.Beads[0].Metadata["template"] != tc.want {
+			t.Fatalf("query=%+v page=%+v err=%v; want %s", q, page, err, tc.want)
+		}
+	}
+}
+
 func TestDoltliteMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()

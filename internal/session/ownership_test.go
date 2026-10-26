@@ -165,6 +165,39 @@ func TestListWorkDirOwnersKeepsOwnerDuringTypeRepair(t *testing.T) {
 	}
 }
 
+type ownershipCollisionStore struct {
+	*beads.MemStore
+	canonical beads.Bead
+	stale     beads.Bead
+}
+
+func (s *ownershipCollisionStore) ReadMetadataPathPage(_ context.Context, q beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
+	owner := s.canonical
+	if q.Label != "" {
+		owner = s.stale
+	}
+	return beads.MetadataPathPage{Beads: []beads.Bead{owner}, Complete: true}, nil
+}
+
+func TestListWorkDirOwnersTypedProjectionWinsCrossLegCollision(t *testing.T) {
+	store := &ownershipCollisionStore{
+		MemStore: beads.NewMemStore(),
+		canonical: beads.Bead{ID: "collision", Type: BeadType, Metadata: map[string]string{
+			"template": "canonical", "work_dir": "actual",
+		}},
+		stale: beads.Bead{ID: "collision", Labels: []string{LabelSession}, Metadata: map[string]string{
+			"template": "stale", "work_dir": "old",
+		}},
+	}
+	got, err := NewStore(beads.SessionStore{Store: store}).ListWorkDirOwners(context.Background(), "/city", []string{"/city/actual", "/city/old"})
+	if err != nil || !got.Complete || len(got.Infos) != 1 {
+		t.Fatalf("owners=%+v err=%v", got, err)
+	}
+	if got.Infos[0].Template != "canonical" || got.Infos[0].WorkDir != "actual" {
+		t.Fatalf("stale labeled copy hid the unlabelled typed owner: %+v", got.Infos[0])
+	}
+}
+
 func TestListWorkDirOwnersIncompleteIsNotAbsence(t *testing.T) {
 	spy := &ownershipPageSpy{MemStore: beads.NewMemStore(), failAt: 2}
 	got, err := NewStore(beads.SessionStore{Store: spy}).ListWorkDirOwners(context.Background(), "/city", []string{"/city/shared"})
