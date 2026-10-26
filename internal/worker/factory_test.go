@@ -239,6 +239,49 @@ func TestFactoryTailMetaForProviderUsesCodexSchema(t *testing.T) {
 	}
 }
 
+func TestFactoryPreservesLegacyACPMetadataWithoutResolvedRuntime(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
+		"session_name": "legacy-session", "template": "worker", "provider": "missing-provider", "state": "asleep",
+		"command": "old acp", "resume_command": "old --continue {{.SessionKey}}", "resume_flag": "--old-resume", "session_key": "saved-key",
+		sessionpkg.MCPIdentityMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewFactory(FactoryConfig{
+		Store: store, Provider: sp,
+		ResolveTransport: func(_, _ string) string { return "tmux" },
+		ResolveSessionRuntime: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
+			return nil, nil
+		},
+		StaleKeyDetectionWaiter: func(context.Context, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := factory.SessionByID(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Start(context.Background()); err == nil {
+		t.Fatal("migration must refuse an unresolved provider")
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"command", "resume_command", "resume_flag", "session_key", sessionpkg.MCPIdentityMetadataKey} {
+		if stored.Metadata[key] != b.Metadata[key] {
+			t.Fatalf("unresolved provider changed %s from %q to %q", key, b.Metadata[key], stored.Metadata[key])
+		}
+	}
+	if sp.IsRunning("legacy-session") {
+		t.Fatal("runtime started with unresolved launch settings")
+	}
+}
+
 func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

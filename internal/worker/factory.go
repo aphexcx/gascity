@@ -78,7 +78,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 				return "", sessionpkg.ProviderResume{}, err
 			}
 			if resolved == nil {
-				return "", sessionpkg.ProviderResume{}, nil
+				return "", sessionpkg.ProviderResume{}, fmt.Errorf("%w: provider %q has no resolved runtime for transport migration", ErrHandleConfig, info.Provider)
 			}
 			return resolved.Command, resolved.Resume, nil
 		}))
