@@ -351,7 +351,7 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
 
 	if running && provider == "claude" && !isMultiSessionAgent(agentCfg) {
-		snapshot := s.agentAttributionSnapshot(ctx, cfg)
+		snapshot := s.agentAttributionSnapshot(ctx, cfg, name)
 		if snapshot.Complete && canAttributeSession(agentCfg, name, cfg, s.state.CityPath(), snapshot.Infos...) {
 			s.enrichSessionMeta(&resp, agentCfg, name)
 		}

@@ -200,3 +200,93 @@ func TestAgentAttributionWithholdsIncompleteHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentAttributionRigQualifiedRemovedOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		template   string
+		incomplete bool
+		wantModel  string
+	}{
+		{name: "closed removed owner", template: "alpha/removed"},
+		{name: "own history", template: "alpha/reviewer", wantModel: "claude-opus-4-5-20251101"},
+		{name: "incomplete census", template: "alpha/removed", incomplete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeState(t)
+			rigDir := filepath.Join(st.cityPath, "alpha")
+			st.cfg.Workspace.Provider = "claude"
+			st.cfg.Agents = []config.Agent{{Name: "reviewer", Scope: "rig", Provider: "claude", MaxActiveSessions: intPtr(1)}}
+			st.cfg.Rigs = []config.Rig{{Name: "alpha", Path: rigDir}}
+			store := &attributionPageStore{MemStore: beads.NewMemStore()}
+			st.sessionsBeadStore = store
+			if _, err := store.Create(beads.Bead{
+				Title: "retained session", Type: "session", Status: "closed", Labels: []string{"gc:session"},
+				Metadata: map[string]string{"work_dir": "alpha/../alpha", "template": tc.template, "provider": "claude"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.sp.Start(context.Background(), agentSessionName(st.cityName, "alpha/reviewer", st.cfg.Workspace.SessionTemplate), runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			search := t.TempDir()
+			dir := filepath.Join(search, sessionlog.ProjectSlug(rigDir))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			line := `{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","stop_reason":"tool_use","content":[{"type":"tool_use"}],"usage":{"input_tokens":10000}}}` + "\n"
+			if err := os.WriteFile(filepath.Join(dir, "retained.jsonl"), []byte(line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			srv := New(st)
+			srv.sessionLogSearchPaths = []string{search}
+			// A list census covers the unexpanded generic template. A qualified
+			// GET must not treat that cached result as proof about the rig root.
+			if got := srv.agentAttributionSnapshot(context.Background(), st.cfg); !got.Complete {
+				t.Fatal("initial census incomplete")
+			}
+			initialCalls := store.calls.Load()
+			if tc.incomplete {
+				store.err = &beads.PartialResultError{Op: "history page", Err: errors.New("archive truncated")}
+			}
+			handler := newTestCityHandlerWith(t, st, srv)
+			for i := 0; i < 2; i++ {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(st, "/agent/alpha/reviewer"), nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+				}
+				var body agentResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Model != tc.wantModel {
+					t.Errorf("model=%q want %q", body.Model, tc.wantModel)
+				}
+				if tc.wantModel == "" {
+					if body.ContextPct != nil || body.ContextWindow != nil || body.Activity != "" {
+						t.Errorf("attributed another session's context or activity: %+v", body)
+					}
+				} else if body.ContextPct == nil || body.ContextWindow == nil || body.Activity != "in-turn" {
+					t.Errorf("unique owner's enrichment missing: %+v", body)
+				}
+			}
+			srv.attribution.mu.Lock()
+			snapshot := srv.attribution.value
+			srv.attribution.mu.Unlock()
+			if snapshot.Complete == tc.incomplete {
+				t.Errorf("census Complete=%v, incomplete=%v", snapshot.Complete, tc.incomplete)
+			}
+			if !tc.incomplete && (len(snapshot.Infos) != 1 || snapshot.Infos[0].Template != tc.template) {
+				t.Errorf("rig-qualified history omitted: %+v", snapshot)
+			}
+			wantCalls := initialCalls + 2 // One new type/label union, then a memo hit.
+			if tc.incomplete {
+				wantCalls = initialCalls + 1 // Failed first page is also memoized.
+			}
+			if got := store.calls.Load(); got != wantCalls {
+				t.Errorf("backing calls=%d want %d", got, wantCalls)
+			}
+		})
+	}
+}

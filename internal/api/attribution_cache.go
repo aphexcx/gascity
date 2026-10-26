@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -43,19 +44,30 @@ func (m *attributionMemo) timeNow() time.Time {
 // agentAttributionSnapshot shares one ownership census across agent list and
 // GET. Query all configured singleton directories so either endpoint can reuse
 // it; historical owners are never restricted to currently configured templates.
-func (s *Server) agentAttributionSnapshot(ctx context.Context, cfg *config.City) session.WorkDirOwners {
+// Requested identities also cover directories resolved from generic rig templates.
+func (s *Server) agentAttributionSnapshot(ctx context.Context, cfg *config.City, requestedNames ...string) session.WorkDirOwners {
 	if ctx.Err() != nil {
 		return session.WorkDirOwners{}
 	}
 	var paths []string
 	cityPath := s.state.CityPath()
 	cityName := workdirutil.CityName(cityPath, cfg)
+	addPath := func(a config.Agent, name string) {
+		if path := workdirutil.ResolveWorkDirPath(cityPath, cityName, name, a, cfg.Rigs); path != "" {
+			paths = append(paths, filepath.Clean(path))
+		}
+	}
 	for _, a := range cfg.Agents {
 		if !isMultiSessionAgent(a) {
-			if path := workdirutil.ResolveWorkDirPath(cityPath, cityName, a.QualifiedName(), a, cfg.Rigs); path != "" {
-				paths = append(paths, path)
-			}
+			addPath(a, a.QualifiedName())
 		}
+	}
+	for _, name := range requestedNames {
+		a, ok := findAgent(cfg, name)
+		if !ok || isMultiSessionAgent(a) {
+			return session.WorkDirOwners{}
+		}
+		addPath(a, name)
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)
