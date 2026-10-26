@@ -130,6 +130,7 @@ type Info struct {
 	PoolSlot                string // pool_slot (raw; pool helpers parse it)
 	PoolManaged             bool   // pool_managed == "true"
 	SessionOrigin           string // session_origin (raw; resolved origin is a method)
+	ProviderSessionKind     string `json:"-"` // real_world_app_session_kind (raw, internal only)
 	DependencyOnly          bool   // dependency_only == "true"
 	// DependencyOnlyMetadata is the RAW dependency_only metadata, verbatim and
 	// UNTRIMMED. The pin-awake wake-reason display path (cmd/gc) compares it
@@ -185,7 +186,7 @@ type Info struct {
 
 	// MCPIdentity / MCPServersSnapshot mirror the raw mcp_identity and
 	// mcp_servers_snapshot metadata (verbatim). The ACP-transport classifier
-	// treats a non-empty value on either key as evidence the session speaks ACP,
+	// uses these only when current provider configuration selects ACP,
 	// so the Info form must carry them to stay byte-identical. Additive,
 	// internal-only (absent from the HTTP wire).
 	MCPIdentity        string // mcp_identity (raw)
@@ -643,10 +644,18 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 	}
 	if strings.TrimSpace(b.Metadata[MCPIdentityMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[MCPServersSnapshotMetadataKey]) != "" {
-		return "acp", false
+		if m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata)) == "acp" {
+			return "acp", false
+		}
+		if m.liveACPTransport(sessName) {
+			// Preserve the current process route without pinning the old
+			// transport over the new configuration at its next restart.
+			return "acp", false
+		}
+		return "", false
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
-		transport = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		transport = m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata))
 		if transport != "" {
 			return transport, true
 		}
@@ -677,10 +686,16 @@ func (m *Manager) transportForInfo(info Info) (string, bool) {
 	}
 	if strings.TrimSpace(info.MCPIdentity) != "" ||
 		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return "acp", false
+		if m.resolveConfiguredTransport(info.ProviderResolutionIdentity()) == "acp" {
+			return "acp", false
+		}
+		if m.liveACPTransport(info.SessionName) {
+			return "acp", false
+		}
+		return "", false
 	}
 	if info.PendingCreateClaim {
-		transport = m.resolveConfiguredTransport(info.Template, info.Provider)
+		transport = m.resolveConfiguredTransport(info.ProviderResolutionIdentity())
 		if transport != "" {
 			return transport, true
 		}
@@ -1043,9 +1058,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 				return fmt.Errorf("%w: %q already active in runtime", ErrSessionNameExists, sessName)
 			}
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
-				return errors.Join(fmt.Errorf("starting session: %w", err), rbErr)
+				return errors.Join(sessionStartError("starting session", b, cfg, transport, err), rbErr)
 			}
-			return fmt.Errorf("starting session: %w", err)
+			return sessionStartError("starting session", b, cfg, transport, err)
 		}
 		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {

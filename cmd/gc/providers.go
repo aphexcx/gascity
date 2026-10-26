@@ -434,11 +434,12 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 	}
 	if strings.TrimSpace(bead.Metadata[session.MCPIdentityMetadataKey]) != "" ||
 		strings.TrimSpace(bead.Metadata[session.MCPServersSnapshotMetadataKey]) != "" {
-		return true
+		template, provider := session.ProviderResolutionIdentity(bead.Metadata["template"], providerName, bead.Metadata)
+		return configuredMCPTransportIsACP(cfg, template, provider)
 	}
 	templateName := strings.TrimSpace(bead.Metadata["template"])
 	if cfg != nil {
-		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, ""); ok {
 			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
 				return true
 			}
@@ -483,11 +484,12 @@ func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
 	}
 	if strings.TrimSpace(info.MCPIdentity) != "" ||
 		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return true
+		template, provider := info.ProviderResolutionIdentity()
+		return configuredMCPTransportIsACP(cfg, template, provider)
 	}
 	templateName := strings.TrimSpace(info.Template)
 	if cfg != nil {
-		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
+		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, ""); ok {
 			if strings.TrimSpace(agentCfg.Session) != "" && agentSessionCreateTransport(cfg, agentCfg) == "acp" {
 				return true
 			}
@@ -519,6 +521,16 @@ func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
 		}
 	}
 	return false
+}
+
+func configuredMCPTransportIsACP(cfg *config.City, template, provider string) bool {
+	if cfg == nil {
+		return false
+	}
+	if agentCfg, ok := resolveAgentIdentity(cfg, template, ""); ok {
+		return agentSessionCreateTransport(cfg, agentCfg) == "acp"
+	}
+	return providerLegacyDefaultsToACP(cfg, firstNonEmptyGCString(provider, template))
 }
 
 func configuredACPRouteNames(snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) []string {

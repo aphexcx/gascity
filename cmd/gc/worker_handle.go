@@ -42,9 +42,9 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		searchPaths      []string
 	)
 	if cfg != nil {
-		rigContext := currentRigContext(cfg)
 		resolveTransport = func(template, provider string) string {
-			agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
+			// Persisted templates are canonical identities, independent of cwd.
+			agentCfg, ok := resolveAgentIdentity(cfg, template, "")
 			if ok {
 				resolved, err := config.ResolveProvider(
 					&agentCfg,
@@ -782,8 +782,9 @@ func storedCommandHasSettingsArg(command string) bool {
 
 func storedWorkerSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {
 	if metadata != nil {
-		if strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
-			strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "" {
+		if strings.TrimSpace(configuredTransport) == "acp" &&
+			(strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
+				strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "") {
 			return true
 		}
 		if strings.TrimSpace(configuredTransport) == "acp" && legacyWorkerResumeMetadataProvesACPTransport(metadata) {

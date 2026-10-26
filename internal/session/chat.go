@@ -542,6 +542,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, hints); err != nil {
+		return err
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
@@ -618,7 +621,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return sessionStartError("resuming session", b, cfg, transport, err)
 			}
 			started = retried
 		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
@@ -628,7 +631,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return sessionStartError("resuming session", b, cfg, transport, err)
 		}
 	} else {
 		started = true
@@ -674,6 +677,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, hints); err != nil {
+		return err
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
@@ -744,7 +750,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return sessionStartError("resuming session", b, cfg, transport, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -753,7 +759,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return sessionStartError("resuming session", b, cfg, transport, err)
 		}
 	} else {
 		started = true

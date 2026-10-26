@@ -732,6 +732,20 @@ func TestResolvedWorkerRuntimeTransportUsesConfiguredTmuxForCommandOnlyBead(t *t
 	}
 }
 
+func TestResolvedWorkerRuntimeTransportIgnoresMCPKeysForNonACPProvider(t *testing.T) {
+	for _, key := range []string{session.MCPIdentityMetadataKey, session.MCPServersSnapshotMetadataKey} {
+		for _, transport := range []string{"", "tmux", "acp"} {
+			t.Run(key+"/"+transport, func(t *testing.T) {
+				resolved := &config.ResolvedProvider{Name: "current-provider", Command: "current-command"}
+				got := resolvedWorkerRuntimeTransport(session.Info{Provider: "previous-provider", Command: "old-command"}, resolved, transport, map[string]string{key: "stored"})
+				if got != transport {
+					t.Fatalf("transport = %q, want %q", got, transport)
+				}
+			})
+		}
+	}
+}
+
 func TestResolvedWorkerRuntimeTransportUsesStoredACPCommandBeforeConfiguredTmux(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "kimi",

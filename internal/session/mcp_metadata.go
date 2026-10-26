@@ -102,6 +102,13 @@ func WithStoredMCPMetadata(meta map[string]string, identity string, servers []ru
 	return meta, nil
 }
 
+// ClearStoredMCPMetadata adds an explicit clear of ACP-only session metadata to
+// a lifecycle patch. Applying it through the session store records the change.
+func ClearStoredMCPMetadata(meta map[string]string) {
+	meta[MCPIdentityMetadataKey] = ""
+	meta[MCPServersSnapshotMetadataKey] = ""
+}
+
 func normalizeMCPServersSnapshotForMetadata(servers []runtime.MCPServerConfig) []runtime.MCPServerConfig {
 	normalized := runtime.NormalizeMCPServerConfigs(servers)
 	for i := range normalized {

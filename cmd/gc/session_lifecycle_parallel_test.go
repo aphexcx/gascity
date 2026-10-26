@@ -8289,6 +8289,33 @@ func TestCommitStartResult_PersistsMCPIdentityForACPStart(t *testing.T) {
 	}
 }
 
+func TestCommitStartResultClearsMCPIdentityAfterProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"template": "worker", "agent_name": "worker", "session_name": "worker-1", "state": "creating",
+		sessionpkg.MCPIdentityMetadataKey: "worker", sessionpkg.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, b), tp: TemplateParams{TemplateName: "worker", InstanceName: "worker-1"}}},
+		outcome:  "success", started: time.Unix(100, 0), finished: time.Unix(101, 0),
+	}
+	if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(102, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commit failed")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{sessionpkg.MCPIdentityMetadataKey, sessionpkg.MCPServersSnapshotMetadataKey} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q after non-ACP start", key, got.Metadata[key])
+		}
+	}
+}
+
 func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

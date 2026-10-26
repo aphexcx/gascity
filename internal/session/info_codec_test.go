@@ -64,6 +64,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		PoolSlot:                b.Metadata["pool_slot"],
 		PoolManaged:             strings.TrimSpace(b.Metadata["pool_managed"]) == "true",
 		SessionOrigin:           b.Metadata["session_origin"],
+		ProviderSessionKind:     b.Metadata["real_world_app_session_kind"],
 		DependencyOnly:          strings.TrimSpace(b.Metadata["dependency_only"]) == "true",
 		DependencyOnlyMetadata:  b.Metadata["dependency_only"],
 		ManualSession:           strings.TrimSpace(b.Metadata["manual_session"]) == "true",
