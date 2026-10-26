@@ -63,6 +63,7 @@ type ownershipPageSpy struct {
 	labelRows      int
 	failAt         int
 	repeatID       bool
+	afterRead      func()
 }
 
 func (s *ownershipPageSpy) ReadMetadataPathPage(ctx context.Context, q beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
@@ -74,6 +75,9 @@ func (s *ownershipPageSpy) ReadMetadataPathPage(ctx context.Context, q beads.Met
 		return beads.MetadataPathPage{}, errors.New("archive unavailable")
 	}
 	p, err := s.MemStore.ReadMetadataPathPage(ctx, q)
+	if s.afterRead != nil {
+		s.afterRead()
+	}
 	if q.Label != "" {
 		s.labelRows += len(p.Beads)
 	} else {
@@ -120,6 +124,44 @@ func TestListWorkDirOwnersUnionReadsTypedAndRepairableOnce(t *testing.T) {
 	}
 	if len(want) != 0 || spy.typeRows != 2 || spy.labelRows != 1 {
 		t.Fatalf("missing=%v type rows=%d label rows=%d; want two typed owners and one repairable owner", want, spy.typeRows, spy.labelRows)
+	}
+}
+
+func TestListWorkDirOwnersKeepsOwnerDuringTypeRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		afterPage int
+	}{{"before_queries", 0}, {"between_legs", 1}, {"after_queries", 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			owner, err := mem.Create(beads.Bead{Title: "repairable owner", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"work_dir": "shared"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			empty := ""
+			if err := mem.Update(owner.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+				t.Fatal(err)
+			}
+			store := NewStore(beads.SessionStore{Store: mem})
+			repair := func() {
+				if err := store.RepairType(owner.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			spy := &ownershipPageSpy{MemStore: mem}
+			spy.afterRead = func() {
+				if spy.calls == tc.afterPage {
+					repair()
+				}
+			}
+			if tc.afterPage == 0 {
+				repair()
+			}
+			got, err := NewStore(beads.SessionStore{Store: spy}).ListWorkDirOwners(context.Background(), "/city", []string{"/city/shared"})
+			if err != nil || !got.Complete || len(got.Infos) != 1 || got.Infos[0].ID != owner.ID {
+				t.Fatalf("owner lost or duplicated during type repair: %+v, %v", got, err)
+			}
+		})
 	}
 }
 

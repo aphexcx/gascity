@@ -31,9 +31,11 @@ func (s *Store) ListWorkDirOwners(ctx context.Context, cityPath string, paths []
 		return result, fmt.Errorf("listing work directory owners: %w", beads.ErrMetadataPathPagingUnsupported)
 	}
 	seen := map[string]bool{}
-	// The type leg includes sessions regardless of labels. Only untyped,
-	// repairable rows can add owners in the label leg.
-	for _, q := range []beads.MetadataPathQuery{{Type: BeadType}, {Label: LabelSession, UntypedOnly: true}} {
+	// Read repairable owners before typed sessions: RepairType only moves rows
+	// from the former set into the latter, so a repair between reads cannot hide
+	// an owner. The type leg includes sessions regardless of labels; seen removes
+	// any overlap caused by repairs during this census.
+	for _, q := range []beads.MetadataPathQuery{{Label: LabelSession, UntypedOnly: true}, {Type: BeadType}} {
 		q.Keys = []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey}
 		q.BaseDir, q.Paths = cityPath, paths
 		cursors := map[string]bool{}
