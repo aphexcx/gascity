@@ -44,7 +44,7 @@ assert_contains() {
   fi
 }
 
-output="$(LOCAL_TEST_LOG_DIR="$scratch/fresh/nested logs" bash scripts/test-local-parallel fast 2>&1)" || {
+output="$(GOTOOLCHAIN=auto LOCAL_TEST_LOG_DIR="$scratch/fresh/nested logs" bash scripts/test-local-parallel fast 2>&1)" || {
   printf '%s\n' "$output" >&2
   exit 1
 }

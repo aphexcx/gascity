@@ -1,0 +1,35 @@
+#!/bin/sh
+# Validate build metadata without executing a potentially incompatible linter.
+# The caller supplies the resolved Go environment and a versioned cache path.
+set -eu
+
+lint_bin=${1:?usage: ensure-golangci-lint <binary> <version>}
+lint_version=${2:?usage: ensure-golangci-lint <binary> <version>}
+go_version=$(go env GOVERSION)
+
+matches_toolchain() {
+  [ -x "$1" ] || return 1
+  metadata=$(go version -m "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$metadata" | awk -v go_version="$go_version" -v lint_version="v$lint_version" '
+    NR == 1 && $NF == go_version { compiler = 1 }
+    $1 == "mod" && $2 == "github.com/golangci/golangci-lint/v2" && $3 == lint_version { module = 1 }
+    END { exit !(compiler && module) }
+  '
+}
+
+if matches_toolchain "$lint_bin"; then
+  exit 0
+fi
+
+lint_dir=$(dirname "$lint_bin")
+mkdir -p "$lint_dir"
+lint_stage=$(mktemp -d "$lint_dir/.install.XXXXXX")
+trap 'rm -rf "$lint_stage"' EXIT
+trap 'exit 1' HUP INT TERM
+echo "Installing golangci-lint v$lint_version with $go_version..." >&2
+GOBIN="$lint_stage" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$lint_version"
+if ! matches_toolchain "$lint_stage/golangci-lint"; then
+  echo "golangci-lint build metadata does not match v$lint_version and $go_version" >&2
+  exit 1
+fi
+mv -f "$lint_stage/golangci-lint" "$lint_bin"

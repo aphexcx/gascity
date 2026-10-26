@@ -134,6 +134,8 @@ gocache_val="$(go env GOCACHE)"
 gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
+gotooldir_val="$(go env GOTOOLDIR)"
+printf 'Go toolchain: %s GOROOT=%s GOTOOLDIR=%s\n' "$GOTOOLCHAIN" "$goroot_val" "$gotooldir_val"
 
 test_tmpdir="${TMPDIR:-}"
 cleanup_test_tmpdir=0

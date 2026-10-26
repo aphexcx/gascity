@@ -4,7 +4,7 @@ BUILDX_VERSION := 0.21.2
 # Resolve once, before any Go probes. The fallback supports make -f from a
 # different module; ordinary recipes and copied Makefile test fixtures use cwd.
 GO_TOOLCHAIN_HELPER := $(firstword $(wildcard scripts/lib/go-toolchain.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/go-toolchain.sh))
-GO_TOOLCHAIN_SELECTION := $(shell . "$(GO_TOOLCHAIN_HELPER)" && gc_go_toolchain "$(CURDIR)" && printf '%s %s' "$$GOTOOLCHAIN" "$$GOROOT")
+GO_TOOLCHAIN_SELECTION := $(shell export GOTOOLCHAIN="$(GOTOOLCHAIN)"; . "$(GO_TOOLCHAIN_HELPER)" && gc_go_toolchain "$(CURDIR)" && printf '%s %s' "$$GOTOOLCHAIN" "$$GOROOT")
 ifeq ($(strip $(GO_TOOLCHAIN_SELECTION)),)
 $(error Unable to resolve the Go toolchain)
 endif
@@ -21,7 +21,8 @@ GOOS   := $(shell $(GO_TOOLCHAIN_ENV) go env GOOS)
 GOARCH := $(shell $(GO_TOOLCHAIN_ENV) go env GOARCH)
 
 BIN_DIR := $(shell $(GO_TOOLCHAIN_ENV) go env GOPATH)/bin
-GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+GO_TOOLCHAIN_VERSION := $(shell $(GO_TOOLCHAIN_ENV) go env GOVERSION)
+GOLANGCI_LINT := $(BIN_DIR)/gascity-tools/golangci-lint-v$(GOLANGCI_LINT_VERSION)-$(GO_TOOLCHAIN_VERSION)/golangci-lint
 
 BINARY     := gc
 BUILD_DIR  := bin
@@ -423,6 +424,10 @@ fmt-check-changed: $(GOLANGCI_LINT)
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt ./...
+
+.PHONY: fmt-staged-go
+fmt-staged-go: $(GOLANGCI_LINT)
+	@GOLANGCI_LINT="$(GOLANGCI_LINT)" scripts/precommit-format-staged-go
 
 ## vet: run go vet
 vet:
@@ -960,23 +965,14 @@ cover: test-cover
 ## install-tools: install pinned golangci-lint + oapi-codegen
 install-tools: $(GOLANGCI_LINT) install-oapi-codegen
 
-$(GOLANGCI_LINT):
-	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	@attempt=1; max_attempts=5; delay=2; \
-	while [ $$attempt -le $$max_attempts ]; do \
-		echo "golangci-lint install attempt $$attempt/$$max_attempts"; \
-		if GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
-			exit 0; \
-		fi; \
-		if [ $$attempt -lt $$max_attempts ]; then \
-			echo "golangci-lint install failed; retrying in $${delay}s..." >&2; \
-			sleep $$delay; \
-		fi; \
-		attempt=$$((attempt + 1)); \
-		delay=$$((delay * 2)); \
-	done; \
-	echo "ERROR: failed to install golangci-lint v$(GOLANGCI_LINT_VERSION) after $$max_attempts attempts" >&2; \
-	exit 1
+# Explicit command-line GOLANGCI_LINT overrides remain caller-owned. The default
+# cache is checked every time, so an existing stale binary cannot skip the gate.
+ifeq ($(origin GOLANGCI_LINT),file)
+.PHONY: ensure-golangci-lint
+$(GOLANGCI_LINT): ensure-golangci-lint
+ensure-golangci-lint:
+	@scripts/ensure-golangci-lint "$(GOLANGCI_LINT)" "$(GOLANGCI_LINT_VERSION)"
+endif
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.

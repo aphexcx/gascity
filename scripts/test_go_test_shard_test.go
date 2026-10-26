@@ -143,6 +143,7 @@ func (f goTestShardFixture) commandForShardWithBash(bashPath, shardIndex, shardT
 		"TMPDIR=" + f.tmpDir,
 		"GO_TEST_TIMEOUT=1m",
 		"GC_TEST_NO_SLICE=1",
+		"GOTOOLCHAIN=go1.26.6",
 		"SYS_USR_CGO_FALLBACK=0",
 	}, extraEnv...)
 	return cmd

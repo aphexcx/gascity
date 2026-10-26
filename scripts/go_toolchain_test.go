@@ -2,7 +2,6 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +30,7 @@ printf '%s\n' `+shellQuote(toolRoot)+`
 	writeExecutable(t, filepath.Join(toolRoot, "bin", "go"), "#!/bin/sh\nprintf 'selected\\n'\n")
 	for _, selection := range []string{"", "auto", "go1.26.6"} {
 		t.Run("selection="+selection, func(t *testing.T) {
-			cmd := exec.Command("sh", "-eu", "-c", `. "$1"; gc_go_toolchain "$2"; printf '%s\n' "$GOTOOLCHAIN" "$GOROOT"; go version`, "probe",
+			cmd := testCommand("sh", "-eu", "-c", `. "$1"; gc_go_toolchain "$2"; printf '%s\n' "$GOTOOLCHAIN" "$GOROOT"; go version`, "probe",
 				filepath.Join(root, "scripts", "lib", "go-toolchain.sh"), module)
 			cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "GOROOT=/stale/root", "GOTOOLCHAIN=" + selection}
 			out, err := cmd.CombinedOutput()
@@ -50,7 +49,7 @@ func TestGoToolchainFailureStopsCaller(t *testing.T) {
 	fixture := t.TempDir()
 	writeTestFile(t, filepath.Join(fixture, "go.mod"), "module example.com/toolchain\n\ngo 1.26.6\n")
 	writeExecutable(t, filepath.Join(fixture, "go"), "#!/bin/sh\necho 'toolchain unavailable' >&2\nexit 23\n")
-	cmd := exec.Command("sh", "-eu", "-c", `. "$1"; gc_go_toolchain "$2"; echo MUST_NOT_RUN`, "probe",
+	cmd := testCommand("sh", "-eu", "-c", `. "$1"; gc_go_toolchain "$2"; echo MUST_NOT_RUN`, "probe",
 		filepath.Join(root, "scripts", "lib", "go-toolchain.sh"), fixture)
 	cmd.Env = []string{"PATH=" + fixture + ":" + os.Getenv("PATH")}
 	out, err := cmd.CombinedOutput()
