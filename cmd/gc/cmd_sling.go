@@ -61,6 +61,7 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var formula bool
 	var nudge bool
 	var force bool
+	var allowImplicit bool
 	var title string
 	var vars []string
 	var merge string
@@ -88,6 +89,12 @@ default_sling_targets (or default_sling_target) from config and one is chosen
 at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
+For local dispatch, code beads require --allow-implicit to use a rig's
+implicit claude, codex, or codex-astra provider slot. Use a configured
+role lane for work that needs its worktree and prompt configuration.
+Only city-prefix beads labeled mayor-tool are exempt. --force does not
+bypass this check.
+
 With --formula, the formula is instantiated and its root bead is routed to
 the target. v2 formulas — those declaring [requires]
 formula_compiler = ">=2.0.0" — start a workflow; v1 formulas
@@ -100,8 +107,8 @@ root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
 format and contract details.
 
 Examples:
-  gc sling my-rig/claude BL-42              # route existing bead
-  gc sling my-rig/claude "write a README"   # create bead from text, then route
+  gc sling my-rig/worker BL-42              # route existing bead
+  gc sling my-rig/worker "write a README"   # create bead from text, then route
   gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin`,
 		Args: cobra.ArbitraryArgs,
@@ -132,10 +139,13 @@ Examples:
 			if scopeKind != "" && scopeKind != "city" && scopeKind != "rig" {
 				return argError("gc sling: --scope-kind must be city or rig")
 			}
-			code := 0
-			if jsonOutput {
+			var code int
+			switch {
+			case allowImplicit:
+				code = cmdSlingWithImplicitPolicy(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, true, stdout, stderr)
+			case jsonOutput:
 				code = cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, true, stdout, stderr)
-			} else {
+			default:
 				code = cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 			}
 			return exitForCode(code)
@@ -144,6 +154,7 @@ Examples:
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
 	cmd.Flags().BoolVar(&nudge, "nudge", false, "nudge target after routing")
 	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
+	cmd.Flags().BoolVar(&allowImplicit, "allow-implicit", false, "allow local code work on a rig's implicit provider slot")
 	cmd.Flags().StringVarP(&title, "title", "t", "", "wisp root bead title (with --formula or --on)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
@@ -372,6 +383,10 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 }
 
 func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
+	return cmdSlingWithImplicitPolicy(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, false, stdout, stderr)
+}
+
+func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput, allowImplicit bool, stdout, stderr io.Writer) int {
 	humanStdout := stdout
 	if jsonOutput {
 		humanStdout = io.Discard
@@ -397,6 +412,9 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", rerr))
 	}
 	if isRemote {
+		if allowImplicit {
+			return fail("invalid_arguments", "gc sling: --allow-implicit is supported only for local dispatch")
+		}
 		return cmdSlingRemote(remoteC, remoteTgt, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
 	}
 	// --stdin: read bead text from stdin early (before city resolution)
@@ -449,6 +467,18 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	storeDir, store, errCode, errMsg := openSlingStore(cfg, cityPath, beadOrFormula, sourceBead, a)
 	if errCode != "" {
 		return fail(errCode, errMsg)
+	}
+	if !allowImplicit && !isFormula && guardedImplicitSlingTarget(a) {
+		b := beads.Bead{ID: beadOrFormula}
+		if sourceBead.exists {
+			b, err = store.Get(beadOrFormula)
+			if err != nil {
+				return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: reading bead %q for implicit-slot check: %v", beadOrFormula, err))
+			}
+		}
+		if refusal := implicitSlingRefusal(cfg, a, b); refusal != "" {
+			return fail("implicit_target_refused", refusal)
+		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
