@@ -747,12 +747,27 @@ func TestResolvedWorkerRuntimeTransportIgnoresMCPKeysForNonACPProvider(t *testin
 	}
 }
 
+type migratedResumeProvider struct {
+	*runtime.Fake
+	rejected int
+}
+
+func (p *migratedResumeProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if strings.Contains(cfg.Command, "expired-key") {
+		p.rejected++
+		return runtime.ErrSessionDiedDuringStartup
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
 func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
-	for _, tc := range []struct{ name, command, resume, overrides string }{
+	for _, tc := range []struct{ name, command, resume, overrides, key, currentResume string }{
 		{name: "MCP evidence", command: "/bin/echo"},
 		{name: "stored ACP command", command: "/bin/echo acp --resume old-session"},
 		{name: "stored resume command", command: "/bin/echo", resume: "/bin/echo acp"},
 		{name: "invalid overrides fallback", command: "/bin/echo acp --resume old-session", overrides: "invalid-json"},
+		{name: "expired generated resume", command: "/bin/echo acp", key: "expired-key"},
+		{name: "expired explicit resume", command: "/bin/echo acp", key: "expired-key", currentResume: "/bin/echo --continue {{.SessionKey}}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityDir := t.TempDir()
@@ -761,21 +776,29 @@ func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 				Agents:    []config.Agent{{Name: "worker", Provider: "stub", Session: "tmux"}},
 				Providers: map[string]config.ProviderSpec{"stub": {
 					Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"},
+					ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: tc.currentResume,
 				}},
 			}
 			store := beads.NewMemStore()
 			b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
 				"template": "worker", "provider": "stub", "session_name": "legacy-session", "state": "asleep",
 				"command": tc.command, "resume_command": tc.resume, "template_overrides": tc.overrides, "work_dir": cityDir,
+				"session_key": tc.key, "resume_flag": "--resume", "resume_style": "flag",
 				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
 			}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			terminal, acp := runtime.NewFake(), runtime.NewFake()
+			terminal := &migratedResumeProvider{Fake: runtime.NewFake()}
+			acp := runtime.NewFake()
 			sp := sessionauto.New(terminal, acp)
 			sp.RouteACP("legacy-session")
 			for attempt := 0; attempt < 2; attempt++ {
+				if tc.key != "" {
+					if err := store.SetMetadata(b.ID, "session_key", tc.key); err != nil {
+						t.Fatal(err)
+					}
+				}
 				handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
 				if err != nil {
 					t.Fatal(err)
@@ -799,6 +822,9 @@ func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 				}
 				if updated.Metadata[session.MCPIdentityMetadataKey] != "" || updated.Metadata[session.MCPServersSnapshotMetadataKey] != "" {
 					t.Fatal("restart retained stale MCP metadata")
+				}
+				if tc.key != "" && (updated.Metadata["session_key"] != "" || terminal.rejected != attempt+1) {
+					t.Fatalf("expired key recovery: key=%q rejected=%d, want empty key and %d resumed attempts", updated.Metadata["session_key"], terminal.rejected, attempt+1)
 				}
 				if err := handle.Stop(context.Background()); err != nil {
 					t.Fatal(err)

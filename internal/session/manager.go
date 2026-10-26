@@ -584,6 +584,7 @@ type Manager struct {
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
+	resumeConfigResolver    func(Info, map[string]string) (string, ProviderResume, error)
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 }
@@ -812,6 +813,12 @@ func WithTransportResolver(resolver func(template, provider string) string) Mana
 			return transportResolution{transport: resolver(template, provider)}
 		}
 	}
+}
+
+// WithResumeConfigResolver supplies current launch and resume settings when a
+// legacy transport migration replaces persisted ACP settings before startup.
+func WithResumeConfigResolver(resolver func(Info, map[string]string) (string, ProviderResume, error)) ManagerOption {
+	return func(m *Manager) { m.resumeConfigResolver = resolver }
 }
 
 // WithTransportPolicyResolver lets the Manager infer transport from config and,

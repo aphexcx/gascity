@@ -71,6 +71,18 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
 	}
+	if cfg.ResolveSessionRuntime != nil {
+		opts = append(opts, sessionpkg.WithResumeConfigResolver(func(info sessionpkg.Info, metadata map[string]string) (string, sessionpkg.ProviderResume, error) {
+			resolved, err := cfg.ResolveSessionRuntime(info, strings.TrimSpace(metadata["real_world_app_session_kind"]), cloneStringMap(metadata))
+			if err != nil {
+				return "", sessionpkg.ProviderResume{}, err
+			}
+			if resolved == nil {
+				return "", sessionpkg.ProviderResume{}, nil
+			}
+			return resolved.Command, resolved.Resume, nil
+		}))
+	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
 	}

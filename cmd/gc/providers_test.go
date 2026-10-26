@@ -1364,6 +1364,57 @@ func TestSessionProviderDiscoversLiveLegacyACPAfterLastProviderRemoved(t *testin
 	}
 }
 
+func TestLegacyACPDiscoveryPreservesTerminalOrphanCleanup(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	terminal := newProcessTableSweepProvider()
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return runtime.NewFake(), nil
+		}
+		return terminal, nil
+	}
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"}, Session: config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "plain", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{"plain": {Command: "/bin/echo"}},
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "plain", "command": "old-acp", "state": "asleep",
+		"session_name": "legacy-session", session.MCPIdentityMetadataKey: "legacy-agent",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal.runtimes = []runtime.LiveRuntime{{PID: 999999999, SessionID: b.ID, City: cityDir}}
+	sp, err := newSessionProviderFromContext(sessionProviderContextForCity(cfg, cityDir, ""), newSessionBeadSnapshot([]beads.Bead{b}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(terminal.terminated) != 1 || terminal.terminated[0].SessionID != b.ID {
+		t.Fatalf("terminal orphan cleanup lost through legacy composition: %+v", terminal.terminated)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal.terminateErr[999999999] = errors.New("orphan survived")
+	if err := handle.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "orphan survived") {
+		t.Fatalf("start must fail when the composed scanner cannot stop an orphan: %v", err)
+	}
+	if terminal.IsRunning("legacy-session") {
+		t.Fatal("replacement started alongside an unconfirmed orphan")
+	}
+}
+
 func TestStatusSessionProviderUsesProvidedSnapshotToWrapObservedACPSessions(t *testing.T) {
 	oldBuild := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })

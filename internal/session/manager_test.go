@@ -4107,6 +4107,40 @@ func TestStartClearsStaleACPKeysOnNonACPProvider(t *testing.T) {
 	}
 }
 
+func TestStartPreservesACPMetadataWhenResumeResolutionFails(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": "legacy-session", "template": "worker", "provider": "old", "state": string(StateAsleep),
+		"command": "old acp", "resume_flag": "--old-resume", "session_key": "saved-key",
+		MCPIdentityMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("current resume config unavailable")
+	mgr := NewManagerWithOptions(store, sp,
+		WithTransportResolver(func(_, _ string) string { return "tmux" }),
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, error) {
+			return "", ProviderResume{}, wantErr
+		}))
+	if err := mgr.Start(context.Background(), b.ID, "new", runtime.Config{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Start error = %v, want resolution failure", err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"command", "resume_flag", "session_key", MCPIdentityMetadataKey} {
+		if stored.Metadata[key] != b.Metadata[key] {
+			t.Fatalf("failed migration changed %s from %q to %q", key, b.Metadata[key], stored.Metadata[key])
+		}
+	}
+	if sp.IsRunning("legacy-session") {
+		t.Fatal("runtime started after resume config failure")
+	}
+}
+
 func TestStartUsesProviderSessionIdentityForMCPMigration(t *testing.T) {
 	for _, wantACP := range []bool{false, true} {
 		for _, selector := range []string{"session_origin", "real_world_app_session_kind"} {

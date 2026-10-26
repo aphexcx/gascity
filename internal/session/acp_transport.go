@@ -73,6 +73,17 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 	patch := map[string]string{
 		"command": "", "resume_command": "", "resume_flag": "", "resume_style": "",
 	}
+	if m.resumeConfigResolver != nil {
+		command, resume, err := m.resumeConfigResolver(m.infoFromBead(*b), b.Metadata)
+		if err != nil {
+			return fmt.Errorf("resolving non-ACP resume settings: %w", err)
+		}
+		patch["command"] = command
+		patch["resume_command"] = resume.ResumeCommand
+		patch["resume_flag"] = resume.ResumeFlag
+		patch["resume_style"] = resume.ResumeStyle
+		patch["session_id_flag"] = resume.SessionIDFlag
+	}
 	ClearStoredMCPMetadata(patch)
 	if err := m.store.SetMetadataBatch(id, patch); err != nil {
 		return fmt.Errorf("clearing incompatible ACP keys for provider %q: %w", resolvedStartProvider(*b, cfg), err)

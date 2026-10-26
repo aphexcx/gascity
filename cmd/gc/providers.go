@@ -289,9 +289,19 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 		for _, sessName := range acpRouteNames {
 			autoSP.RouteACP(sessName)
 		}
+		if scanner, ok := base.(runtime.ProcessTableScanner); ok {
+			return &scanningSessionProvider{Provider: autoSP, ProcessTableScanner: scanner}, nil
+		}
 		return autoSP, nil
 	}
 	return base, nil
+}
+
+// scanningSessionProvider preserves host process discovery and termination
+// while session operations route between the default backend and ACP.
+type scanningSessionProvider struct {
+	*sessionauto.Provider
+	runtime.ProcessTableScanner
 }
 
 // hasLegacyMCPSessions keeps the ACP backend available for liveness discovery
