@@ -40,11 +40,20 @@ func TestMetadataPathPageContract(t *testing.T) {
 			if _, err := store.Create(Bead{Title: "ephemeral owner", Type: "session", Ephemeral: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}}); err != nil {
 				t.Fatal(err)
 			}
+			repairable, err := store.Create(Bead{Title: "repairable owner", Type: "task", Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			empty := ""
+			if err := store.Update(repairable.ID, UpdateOpts{Type: &empty}); err != nil {
+				t.Fatal(err)
+			}
 			for _, query := range []MetadataPathQuery{
 				{Type: "session"},
 				{Label: "gc:session"},
 				{Type: "session", IncludeEphemeral: true},
 				{Label: "gc:session", IncludeEphemeral: true},
+				{Label: "gc:session", UntypedOnly: true},
 			} {
 				query.Keys = []string{"work_dir_canonical", "work_dir"}
 				query.BaseDir, query.Paths = "/city", []string{"/city/shared"}
@@ -64,6 +73,9 @@ func TestMetadataPathPageContract(t *testing.T) {
 					if len(page.Beads) > 256 {
 						t.Fatalf("page has %d rows", len(page.Beads))
 					}
+					if query.UntypedOnly && !page.Complete {
+						t.Fatal("untyped filter must run before the backing page limit")
+					}
 					for _, b := range page.Beads {
 						if seen[b.ID] {
 							t.Fatalf("duplicate %s", b.ID)
@@ -81,6 +93,12 @@ func TestMetadataPathPageContract(t *testing.T) {
 				want := 522
 				if query.IncludeEphemeral {
 					want++
+				}
+				if query.Label != "" {
+					want++
+				}
+				if query.UntypedOnly {
+					want = 1
 				}
 				if len(seen) != want {
 					t.Fatalf("got %d owners", len(seen))

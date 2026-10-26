@@ -59,6 +59,8 @@ func TestListWorkDirOwnersPreservesHistoryAndBoundsPages(t *testing.T) {
 type ownershipPageSpy struct {
 	*beads.MemStore
 	calls, maxRows int
+	typeRows       int
+	labelRows      int
 	failAt         int
 	repeatID       bool
 }
@@ -72,10 +74,53 @@ func (s *ownershipPageSpy) ReadMetadataPathPage(ctx context.Context, q beads.Met
 		return beads.MetadataPathPage{}, errors.New("archive unavailable")
 	}
 	p, err := s.MemStore.ReadMetadataPathPage(ctx, q)
+	if q.Label != "" {
+		s.labelRows += len(p.Beads)
+	} else {
+		s.typeRows += len(p.Beads)
+	}
 	if len(p.Beads) > s.maxRows {
 		s.maxRows = len(p.Beads)
 	}
 	return p, err
+}
+
+func TestListWorkDirOwnersUnionReadsTypedAndRepairableOnce(t *testing.T) {
+	mem := beads.NewMemStore()
+	want := map[string]bool{}
+	for _, shape := range []struct {
+		kind     string
+		hasLabel bool
+	}{{BeadType, true}, {BeadType, false}, {"", true}} {
+		b := beads.Bead{Title: "owner", Type: BeadType, Metadata: map[string]string{"work_dir": "shared"}}
+		if shape.hasLabel {
+			b.Labels = []string{LabelSession}
+		}
+		created, err := mem.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shape.kind == "" {
+			if err := mem.Update(created.ID, beads.UpdateOpts{Type: &shape.kind}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want[created.ID] = true
+	}
+	spy := &ownershipPageSpy{MemStore: mem}
+	got, err := NewStore(beads.SessionStore{Store: spy}).ListWorkDirOwners(context.Background(), "/city", []string{"/city/shared"})
+	if err != nil || !got.Complete || len(got.Infos) != len(want) {
+		t.Fatalf("owners=%d complete=%v err=%v", len(got.Infos), got.Complete, err)
+	}
+	for _, info := range got.Infos {
+		if !want[info.ID] {
+			t.Fatalf("unexpected or duplicate owner %q", info.ID)
+		}
+		delete(want, info.ID)
+	}
+	if len(want) != 0 || spy.typeRows != 2 || spy.labelRows != 1 {
+		t.Fatalf("missing=%v type rows=%d label rows=%d; want two typed owners and one repairable owner", want, spy.typeRows, spy.labelRows)
+	}
 }
 
 func TestListWorkDirOwnersIncompleteIsNotAbsence(t *testing.T) {

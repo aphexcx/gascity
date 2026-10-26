@@ -23,12 +23,15 @@ var ErrMetadataPathPagingUnsupported = errors.New("bounded metadata path paging 
 // Relative metadata paths resolve against BaseDir; symlinks are not followed.
 // Cursor is opaque and may only be reused with the same query and provider.
 // IncludeEphemeral preserves the both-tier view used by policy stores.
+// UntypedOnly restricts a label query to rows without a type, after canonical
+// ID collision precedence. It does not change which physical row wins an ID.
 type MetadataPathQuery struct {
 	Type, Label      string
 	Keys, Paths      []string
 	BaseDir          string
 	Cursor           string
 	IncludeEphemeral bool
+	UntypedOnly      bool
 }
 
 // MetadataPathPage contains matching rows from one bounded backing page.
@@ -54,6 +57,9 @@ func (q MetadataPathQuery) validate() error {
 	if (q.Type == "") == (q.Label == "") || len(q.Keys) == 0 || len(q.Paths) == 0 || !filepath.IsAbs(q.BaseDir) {
 		return errors.New("metadata path page requires one type or label, keys, absolute base and paths")
 	}
+	if q.UntypedOnly && q.Label == "" {
+		return errors.New("untyped metadata path pages require a label query")
+	}
 	for _, path := range q.Paths {
 		if !filepath.IsAbs(path) {
 			return errors.New("metadata path page requires absolute paths")
@@ -63,6 +69,9 @@ func (q MetadataPathQuery) validate() error {
 }
 
 func (q MetadataPathQuery) matches(b Bead) bool {
+	if q.UntypedOnly && b.Type != "" {
+		return false
+	}
 	if (!q.IncludeEphemeral && b.Ephemeral) || (q.Type != "" && b.Type != q.Type) || (q.Label != "" && !slices.Contains(b.Labels, q.Label)) {
 		return false
 	}

@@ -104,6 +104,9 @@ func (s *SQLiteStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQu
 		where = append(where, "EXISTS (SELECT 1 FROM labels l WHERE l.bead_id=b.id AND l.label=?)")
 		args = append(args, q.Label)
 	}
+	if q.UntypedOnly {
+		where = append(where, "(b.issue_type = '' OR b.issue_type IS NULL)")
+	}
 	candidate, candidateArgs := metadataPathCandidateSQL(q, func(key string) string {
 		return "(SELECT m.meta_value FROM metadata m WHERE m.bead_id=b.id AND m.meta_key=" + metadataSQLLiteral(key, true) + ")"
 	}, true)
@@ -160,6 +163,9 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 		if q.Label != "" {
 			where = append(where, "EXISTS (SELECT 1 FROM "+table.labels+" l WHERE l.issue_id=i.id AND l.label="+literal(q.Label)+")")
 		}
+		if q.UntypedOnly {
+			where = append(where, "(i.issue_type = '' OR i.issue_type IS NULL)")
+		}
 		candidate, args := metadataPathCandidateSQL(q, func(key string) string {
 			expr := "JSON_EXTRACT(i.metadata," + literal(metadataJSONPath(key)) + ")"
 			if sqlite {
@@ -173,6 +179,8 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 		// Malformed metadata is an error, never evidence that no owner exists.
 		where = append(where, "(NOT JSON_VALID(i.metadata) OR "+candidate+")")
 		if index > 0 {
+			// A typed canonical row must still shadow an untyped physical copy.
+			// UntypedOnly filters the winner; it cannot resurrect the loser.
 			shadow := "other.id=i.id"
 			if !q.IncludeEphemeral {
 				shadow += " AND " + strings.ReplaceAll(tables[0].ephemeral, "i.", "other.") + "=0"
@@ -189,7 +197,7 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 		if sqlite {
 			castType = "TEXT"
 		}
-		legs = append(legs, "SELECT i.id, i.issue_type, i.status, CAST(i.metadata AS "+castType+") AS metadata_json, HEX(i.id) AS page_id, "+table.ephemeral+" AS ephemeral FROM "+table.name+" i WHERE "+strings.Join(where, " AND "))
+		legs = append(legs, "SELECT i.id, COALESCE(i.issue_type,'') AS issue_type, i.status, CAST(i.metadata AS "+castType+") AS metadata_json, HEX(i.id) AS page_id, "+table.ephemeral+" AS ephemeral FROM "+table.name+" i WHERE "+strings.Join(where, " AND "))
 	}
 	return strings.Join(legs, " UNION ALL ") + " ORDER BY page_id LIMIT 256"
 }

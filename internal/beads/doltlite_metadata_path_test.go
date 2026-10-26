@@ -64,7 +64,17 @@ func TestDoltliteMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *tes
 	// A much older canonical wisp must not move the cursor past unread issues.
 	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{ID: "owner-0000", Title: "canonical", IssueType: "session", Status: "closed", CreatedAt: now.Add(-time.Hour), NoHistory: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared", "canonical": "yes"}})
 	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{ID: "ephemeral", Title: "ephemeral", IssueType: "session", Status: "closed", Ephemeral: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
-	for _, q := range []MetadataPathQuery{{Type: "session"}, {Label: "gc:session"}, {Type: "session", IncludeEphemeral: true}, {Label: "gc:session", IncludeEphemeral: true}} {
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{ID: "repairable", Title: "untyped owner", IssueType: "task", Status: "closed", Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
+	insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{ID: "repairable-null", Title: "null type owner", IssueType: "task", Status: "closed", Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
+	// Restricting the label leg must not resurrect the stale untyped copy of
+	// the typed canonical wisp. The independent repairable row remains visible.
+	if _, err := writer.Exec("UPDATE issues SET issue_type='' WHERE id IN ('repairable', 'owner-0000')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec("UPDATE issues SET issue_type=NULL WHERE id='repairable-null'"); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []MetadataPathQuery{{Type: "session"}, {Label: "gc:session"}, {Type: "session", IncludeEphemeral: true}, {Label: "gc:session", IncludeEphemeral: true}, {Label: "gc:session", UntypedOnly: true}} {
 		q.Keys, q.BaseDir, q.Paths = []string{"work_dir"}, "/city", []string{"/city/shared"}
 		seen := map[string]Bead{}
 		for pageNum := 0; ; pageNum++ {
@@ -85,6 +95,9 @@ func TestDoltliteMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
+			if q.UntypedOnly && !page.Complete {
+				t.Fatal("typed rows consumed the repairable backing page")
+			}
 			for _, b := range page.Beads {
 				if _, exists := seen[b.ID]; exists {
 					t.Fatalf("duplicate %s", b.ID)
@@ -96,7 +109,16 @@ func TestDoltliteMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *tes
 			}
 			q.Cursor = page.Next
 		}
+		if q.UntypedOnly {
+			if len(seen) != 2 || seen["repairable"].ID == "" || seen["repairable-null"].ID == "" {
+				t.Fatalf("repairable owners=%v; typed canonical row must still shadow its stale untyped copy", seen)
+			}
+			continue
+		}
 		want := 257
+		if q.Label != "" {
+			want += 2
+		}
 		if q.IncludeEphemeral {
 			want++
 			if !seen["ephemeral"].Ephemeral {
