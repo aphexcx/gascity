@@ -838,6 +838,52 @@ func TestTaskWorkDirLookupAssigneesPreservesOwnedIdentities(t *testing.T) {
 	})
 }
 
+func TestPreparedTaskWorkDirPreservesNamepoolTemplateAlias(t *testing.T) {
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title: "owned task", Assignee: "demo/worker",
+		Metadata: map[string]string{beadmeta.LegacyWorkDirMetadataKey: workDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatal(err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "worker", Dir: "demo", MaxActiveSessions: intPtr(1),
+		NamepoolNames: []string{"worker", "other"},
+	}}}
+	candidate := startCandidate{
+		info: sessionpkg.Info{ID: "session-id", SessionNameMetadata: "runtime-name", Alias: "demo/worker", PoolManaged: true, PoolSlot: "1"},
+		tp:   TemplateParams{TemplateName: "demo/worker", InstanceName: "demo/worker"},
+	}
+	for _, lookup := range []string{"live", "snapshot"} {
+		t.Run(lookup, func(t *testing.T) {
+			var resolver taskWorkDirResolver
+			if lookup == "snapshot" {
+				resolver = newAssignedTaskWorkDirResolver("", []beads.Bead{work})
+			}
+			if got := resolvePreparedTaskWorkDir(candidate, "", cfg, store, resolver); got != workDir {
+				t.Fatalf("namepool-owned work directory = %q, want %q", got, workDir)
+			}
+			sibling := candidate
+			sibling.info.Alias = "demo/other"
+			sibling.info.PoolSlot = "2"
+			sibling.tp.InstanceName = "demo/other"
+			if got := resolvePreparedTaskWorkDir(sibling, "", cfg, store, resolver); got != "" {
+				t.Fatalf("sibling work directory = %q, want no override from the namepool owner", got)
+			}
+		})
+	}
+}
+
 func TestPrepareStartCandidatePoolLaneIgnoresSiblingTaskWorkDir(t *testing.T) {
 	for _, lookup := range []string{"live", "snapshot"} {
 		t.Run(lookup, func(t *testing.T) {
