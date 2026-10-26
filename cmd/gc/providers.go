@@ -275,7 +275,7 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 	// checks and the route registration below, instead of recomputing the
 	// (agent + named-session) x provider-resolution walk up to 3x per call.
 	acpRouteNames := configuredACPRouteNames(sessionBeads, ctx.cityName, ctx.cfg)
-	requireACPWrapper := len(acpRouteNames) > 0
+	requireACPWrapper := len(acpRouteNames) > 0 || hasLegacyMCPSessions(sessionBeads)
 	needsACPWrapper := requireACPWrapper || (ctx.cfg != nil && hasACPProviderTargets(ctx.cfg))
 	if ctx.providerName != "acp" && needsACPWrapper {
 		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
@@ -292,6 +292,20 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 		return autoSP, nil
 	}
 	return base, nil
+}
+
+// hasLegacyMCPSessions keeps the ACP backend available for liveness discovery
+// after a provider switch, without pre-routing stopped sessions to that backend.
+func hasLegacyMCPSessions(snapshot *sessionBeadSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	for _, info := range snapshot.OpenInfos() {
+		if _, hasMCP := session.ResolveMCPTransport("", info.MCPIdentity, info.MCPServersSnapshot); hasMCP {
+			return true
+		}
+	}
+	return false
 }
 
 func agentSessionCreateTransport(cfg *config.City, agentCfg config.Agent) string {

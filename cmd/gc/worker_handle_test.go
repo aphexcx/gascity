@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -743,6 +744,67 @@ func TestResolvedWorkerRuntimeTransportIgnoresMCPKeysForNonACPProvider(t *testin
 				}
 			})
 		}
+	}
+}
+
+func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
+	for _, tc := range []struct{ name, command, resume, overrides string }{
+		{name: "MCP evidence", command: "/bin/echo"},
+		{name: "stored ACP command", command: "/bin/echo acp --resume old-session"},
+		{name: "stored resume command", command: "/bin/echo", resume: "/bin/echo acp"},
+		{name: "invalid overrides fallback", command: "/bin/echo acp --resume old-session", overrides: "invalid-json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", Provider: "stub", Session: "tmux"}},
+				Providers: map[string]config.ProviderSpec{"stub": {
+					Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"},
+				}},
+			}
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "worker", "provider": "stub", "session_name": "legacy-session", "state": "asleep",
+				"command": tc.command, "resume_command": tc.resume, "template_overrides": tc.overrides, "work_dir": cityDir,
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, acp := runtime.NewFake(), runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			sp.RouteACP("legacy-session")
+			for attempt := 0; attempt < 2; attempt++ {
+				handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := handle.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				start := terminal.LastStartConfig("legacy-session")
+				if start == nil {
+					t.Fatal("terminal was not started")
+				}
+				if start.Command != "/bin/echo" || len(start.MCPServers) != 0 {
+					t.Fatalf("terminal command = %q, MCP servers = %d, want interactive command without ACP hints", start.Command, len(start.MCPServers))
+				}
+				if acp.IsRunning("legacy-session") {
+					t.Fatal("restarted on ACP")
+				}
+				updated, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.Metadata[session.MCPIdentityMetadataKey] != "" || updated.Metadata[session.MCPServersSnapshotMetadataKey] != "" {
+					t.Fatal("restart retained stale MCP metadata")
+				}
+				if err := handle.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

@@ -496,6 +496,7 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	info = sessionpkg.ResumeInfoForTransport(info, info.Transport, pr.Metadata)
 	if firstProviderSessionStart(info.State, pr.Metadata) &&
 		h.session.Resume.SessionIDFlag != "" &&
 		strings.TrimSpace(info.SessionKey) != "" {

@@ -611,6 +611,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		return nil, fmt.Errorf("legacy session transport is ambiguous: recreate the stopped session or resume it while ACP metadata can still be persisted")
 	}
 
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	command := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, transport, info.Command, info.Provider, metadata)
 
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -781,12 +782,10 @@ func storedCommandHasSettingsArg(command string) bool {
 }
 
 func storedWorkerSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {
+	if transport, hasMCP := session.ResolveMCPTransport(configuredTransport, metadata[session.MCPIdentityMetadataKey], metadata[session.MCPServersSnapshotMetadataKey]); hasMCP {
+		return transport == "acp"
+	}
 	if metadata != nil {
-		if strings.TrimSpace(configuredTransport) == "acp" &&
-			(strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
-				strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "") {
-			return true
-		}
 		if strings.TrimSpace(configuredTransport) == "acp" && legacyWorkerResumeMetadataProvesACPTransport(metadata) {
 			return true
 		}

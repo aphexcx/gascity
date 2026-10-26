@@ -199,6 +199,23 @@ func (p *statusProvider) RouteACP(name string) {
 	}
 }
 
+// Unroute forwards removal of a stale transport route to the composed provider.
+func (p *statusProvider) Unroute(name string) {
+	if router, ok := p.base.(interface{ Unroute(string) }); ok {
+		router.Unroute(name)
+	}
+}
+
+// DetectTransport bounds discovery of the backend hosting an existing session.
+func (p *statusProvider) DetectTransport(name string) string {
+	return boundedStatusCall(p, "", func() string {
+		if detector, ok := p.base.(interface{ DetectTransport(string) string }); ok {
+			return detector.DetectTransport(name)
+		}
+		return ""
+	})
+}
+
 func (p *statusProvider) GetLastActivity(name string) (time.Time, error) {
 	result := boundedStatusCall(p, struct {
 		value time.Time

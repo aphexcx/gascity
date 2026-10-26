@@ -1,13 +1,78 @@
 package api
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestAPIWorkerRestartAfterACPProviderSwitch(t *testing.T) {
+	for _, tc := range []struct{ name, command, resume, overrides string }{
+		{name: "MCP evidence", command: "/bin/echo"},
+		{name: "stored ACP command", command: "/bin/echo acp --resume old-session"},
+		{name: "stored resume command", command: "/bin/echo", resume: "/bin/echo acp"},
+		{name: "invalid overrides fallback", command: "/bin/echo acp --resume old-session", overrides: "invalid-json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.cfg.Agents[0].Provider = "stub"
+			fs.cfg.Agents[0].Session = "tmux"
+			supportsACP := true
+			fs.cfg.Providers["stub"] = config.ProviderSpec{Command: "/bin/echo", SupportsACP: &supportsACP, ACPArgs: []string{"acp"}}
+			b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "myrig/worker", "provider": "stub", "session_name": "legacy-session", "state": "asleep",
+				"command": tc.command, "resume_command": tc.resume, "template_overrides": tc.overrides, "work_dir": fs.cityPath,
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			acp := runtime.NewFake()
+			sp := sessionauto.New(fs.sp, acp)
+			sp.RouteACP("legacy-session")
+			fs.sessionProvider = sp
+			factory, err := New(fs).workerFactory(fs.cityBeadStore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				handle, err := factory.SessionByID(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := handle.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				start := fs.sp.LastStartConfig("legacy-session")
+				if start == nil {
+					t.Fatal("terminal was not started")
+				}
+				if start.Command != "/bin/echo" || len(start.MCPServers) != 0 {
+					t.Fatalf("terminal command = %q, MCP servers = %d, want interactive command without ACP hints", start.Command, len(start.MCPServers))
+				}
+				if acp.IsRunning("legacy-session") {
+					t.Fatal("restarted on ACP")
+				}
+				updated, err := fs.cityBeadStore.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.Metadata[session.MCPIdentityMetadataKey] != "" || updated.Metadata[session.MCPServersSnapshotMetadataKey] != "" {
+					t.Fatal("restart retained stale MCP metadata")
+				}
+				if err := handle.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 type createTransportCapableProvider struct {
 	*runtime.Fake

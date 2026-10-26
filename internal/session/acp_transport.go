@@ -19,6 +19,31 @@ func storedACPKeys(metadata map[string]string) []string {
 	return keys
 }
 
+// ResolveMCPTransport applies the provider gate to legacy MCP evidence. The
+// boolean reports presence of that evidence, even when it selects no ACP route.
+func ResolveMCPTransport(configuredTransport, identity, snapshot string) (string, bool) {
+	if strings.TrimSpace(identity) == "" && strings.TrimSpace(snapshot) == "" {
+		return "", false
+	}
+	if strings.TrimSpace(configuredTransport) == "acp" {
+		return "acp", true
+	}
+	return "", true
+}
+
+// ResumeInfoForTransport discards a legacy ACP launch shape when the resolved
+// transport is no longer ACP. Callers rebuild command and resume hints from the
+// current provider before handing them to the session start boundary.
+func ResumeInfoForTransport(info Info, transport string, metadata map[string]string) Info {
+	if transport != "acp" && len(storedACPKeys(metadata)) > 0 {
+		info.Command = ""
+		info.ResumeCommand = ""
+		info.ResumeFlag = ""
+		info.ResumeStyle = ""
+	}
+	return info
+}
+
 // liveACPTransport is runtime evidence independent of persisted MCP keys. A
 // config reload does not change the transport of a process already running.
 func (m *Manager) liveACPTransport(name string) bool {
@@ -45,7 +70,9 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 		m.liveACPTransport(name) {
 		return nil
 	}
-	patch := make(map[string]string)
+	patch := map[string]string{
+		"command": "", "resume_command": "", "resume_flag": "", "resume_style": "",
+	}
 	ClearStoredMCPMetadata(patch)
 	if err := m.store.SetMetadataBatch(id, patch); err != nil {
 		return fmt.Errorf("clearing incompatible ACP keys for provider %q: %w", resolvedStartProvider(*b, cfg), err)

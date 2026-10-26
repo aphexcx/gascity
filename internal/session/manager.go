@@ -644,8 +644,9 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 	}
 	if strings.TrimSpace(b.Metadata[MCPIdentityMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[MCPServersSnapshotMetadataKey]) != "" {
-		if m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata)) == "acp" {
-			return "acp", false
+		configured := m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata))
+		if transport, _ := ResolveMCPTransport(configured, b.Metadata[MCPIdentityMetadataKey], b.Metadata[MCPServersSnapshotMetadataKey]); transport != "" {
+			return transport, false
 		}
 		if m.liveACPTransport(sessName) {
 			// Preserve the current process route without pinning the old
@@ -686,8 +687,9 @@ func (m *Manager) transportForInfo(info Info) (string, bool) {
 	}
 	if strings.TrimSpace(info.MCPIdentity) != "" ||
 		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		if m.resolveConfiguredTransport(info.ProviderResolutionIdentity()) == "acp" {
-			return "acp", false
+		configured := m.resolveConfiguredTransport(info.ProviderResolutionIdentity())
+		if transport, _ := ResolveMCPTransport(configured, info.MCPIdentity, info.MCPServersSnapshot); transport != "" {
+			return transport, false
 		}
 		if m.liveACPTransport(info.SessionName) {
 			return "acp", false

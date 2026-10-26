@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -1306,6 +1307,60 @@ func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	}
+}
+
+func TestSessionProviderDiscoversLiveLegacyACPAfterLastProviderRemoved(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	terminal, acp := runtime.NewFake(), runtime.NewFake()
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return acp, nil
+		}
+		return terminal, nil
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"}, Session: config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "plain", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{"plain": {Command: "/bin/echo"}},
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "removed-provider", "command": "old-acp", "state": "active",
+		"session_name": "legacy-session", session.MCPIdentityMetadataKey: "legacy-agent",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cityDir := t.TempDir()
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityDir, newSessionBeadSnapshot([]beads.Bead{b}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := workerSessionCatalogWithConfig(cityDir, store, sp, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := catalog.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Transport != "acp" {
+		t.Fatalf("live transport = %q, want acp", info.Transport)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if acp.IsRunning("legacy-session") {
+		t.Fatal("suspend left the ACP process running")
 	}
 }
 

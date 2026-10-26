@@ -78,6 +78,54 @@ func TestCmdSlingRefusesImplicitCodeSlot(t *testing.T) {
 	}
 }
 
+func TestCmdSlingRejectsCityConvoyOnImplicitRigSlot(t *testing.T) {
+	cityDir := setupCmdSlingBeadExistsFixture(t)
+	configPath := filepath.Join(cityDir, "city.toml")
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = []byte(strings.Replace(string(content), "name = \"demo\"", "name = \"demo\"\nprefix = \"ci\"", 1) + "\n[providers.codex]\nbase = \"builtin:codex\"\n")
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFileStoreBeads(t, cityDir, []beads.Bead{
+		{ID: "ci-1", Title: "Operations", Status: "open", Type: "convoy", Labels: []string{"mayor-tool"}},
+		{ID: "ci-2", ParentID: "ci-1", Title: "Allowed operation", Status: "open", Type: "task", Labels: []string{"mayor-tool"}},
+		{ID: "ci-3", ParentID: "ci-1", Title: "Code change", Status: "open", Type: "task"},
+	})
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, flag, refusal string }{
+		{"exact review command", "", "refusing cross-rig route: bead ci-1"},
+		{"force still cannot cross stores", "--force", "refusing cross-store route: bead ci-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := newSlingCmd(&stdout, &stderr)
+			args := []string{"frontend/codex", "ci-1", "--no-formula"}
+			if tc.flag != "" {
+				args = append(args, tc.flag)
+			}
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); err == nil || !strings.Contains(stderr.String(), tc.refusal) {
+				t.Fatalf("convoy must refuse: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			for _, id := range []string{"ci-1", "ci-2", "ci-3"} {
+				b, err := store.Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if b.Metadata["gc.routed_to"] != "" || b.Assignee != "" || b.Status != "open" {
+					t.Fatalf("refusal mutated %s: %+v", id, b)
+				}
+			}
+		})
+	}
+}
+
 func TestImplicitSlingRefusalCodeRule(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Prefix: "ci"},

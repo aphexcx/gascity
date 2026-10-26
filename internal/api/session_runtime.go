@@ -384,6 +384,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	if ambiguous {
 		return "", runtime.Config{}, fmt.Errorf("%w: recreate the stopped session or resume it while ACP metadata can still be persisted", errAmbiguousLegacyACPTransport)
 	}
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	mcpServers, err := s.resumeSessionMCPServers(info, metadata, resolved, firstNonEmptyString(workDir, info.WorkDir), transport)
 	if err != nil {
 		return "", runtime.Config{}, err
@@ -509,6 +510,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if ambiguous {
 		return nil, fmt.Errorf("%w: recreate the stopped session or resume it while ACP metadata can still be persisted", errAmbiguousLegacyACPTransport)
 	}
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	mcpServers, err := s.resumeSessionMCPServers(info, metadata, resolved, firstNonEmptyString(workDir, info.WorkDir), transport)
 	if err != nil {
 		return nil, err
@@ -544,11 +546,10 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 }
 
 func storedSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {
+	if transport, hasMCP := session.ResolveMCPTransport(configuredTransport, metadata[session.MCPIdentityMetadataKey], metadata[session.MCPServersSnapshotMetadataKey]); hasMCP {
+		return transport == "acp"
+	}
 	if metadata != nil {
-		if strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
-			strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "" {
-			return true
-		}
 		if strings.TrimSpace(configuredTransport) == "acp" && legacyResumeMetadataProvesACPTransport(metadata) {
 			return true
 		}
