@@ -20,6 +20,20 @@ gc_go_toolchain() {
     echo "go-toolchain: resolved GOROOT has no executable bin/go: $gc_go_root" >&2
     return 1
   fi
+  # The host go may be a shim that keeps compiler scratch and cache off tmpfs.
+  # Capture its defaults before PATH selects the real binary; caller values win.
+  if [ "${GOTMPDIR+x}" != x ]; then
+    gc_go_tmpdir=$(unset GOROOT; go env GOTMPDIR) || return
+    if [ -n "$gc_go_tmpdir" ]; then
+      export GOTMPDIR="$gc_go_tmpdir"
+    fi
+  fi
+  if [ "${GOCACHE+x}" != x ]; then
+    gc_go_cache=$(unset GOROOT; go env GOCACHE) || return
+    if [ -n "$gc_go_cache" ]; then
+      export GOCACHE="$gc_go_cache"
+    fi
+  fi
   GOROOT="$gc_go_root"
   case "$PATH" in
     "$GOROOT/bin"|"$GOROOT/bin":*) ;;

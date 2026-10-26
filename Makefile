@@ -11,10 +11,18 @@ endif
 override GOTOOLCHAIN := $(firstword $(GO_TOOLCHAIN_SELECTION))
 override GOROOT := $(wordlist 2,$(words $(GO_TOOLCHAIN_SELECTION)),$(GO_TOOLCHAIN_SELECTION))
 export GOTOOLCHAIN GOROOT
+# Keep the host shim's scratch/cache defaults before replacing PATH, as the
+# shared resolver does. Environment and command-line settings take precedence.
+ifeq ($(origin GOTMPDIR),undefined)
+export GOTMPDIR := $(shell unset GOROOT; GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOTMPDIR)
+endif
+ifeq ($(origin GOCACHE),undefined)
+export GOCACHE := $(shell unset GOROOT; GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOCACHE)
+endif
 export PATH := $(GOROOT)/bin:$(PATH)
 # $(shell) probes need explicit assignments on older GNU Make versions, which
 # do not pass newly exported Make variables into their expansion environment.
-GO_TOOLCHAIN_ENV = env GOTOOLCHAIN="$(GOTOOLCHAIN)" GOROOT="$(GOROOT)" PATH="$(PATH)"
+GO_TOOLCHAIN_ENV = env GOTOOLCHAIN="$(GOTOOLCHAIN)" GOROOT="$(GOROOT)" PATH="$(PATH)" GOTMPDIR="$(GOTMPDIR)" GOCACHE="$(GOCACHE)"
 
 # Detect OS and arch for binary download.
 GOOS   := $(shell $(GO_TOOLCHAIN_ENV) go env GOOS)
