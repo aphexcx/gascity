@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestDoltliteMetadataPathPagesPreserveLegacyAndDurableWisps(t *testing.T) {
@@ -47,6 +48,63 @@ func TestDoltliteMetadataPathPagesPreserveLegacyAndDurableWisps(t *testing.T) {
 		}
 		if count != 521 {
 			t.Fatalf("owners=%d want 521", count)
+		}
+	}
+}
+
+func TestMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck
+	now := time.Now().UTC()
+	for i := 0; i < 257; i++ {
+		insertTestDoltliteIssue(t, writer, "issues", "labels", "dependencies", testDoltliteIssue{ID: fmt.Sprintf("owner-%04d", i), Title: "owner", IssueType: "session", Status: "closed", CreatedAt: now.Add(-time.Duration(i) * time.Second), Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
+	}
+	// A much older canonical wisp must not move the cursor past unread issues.
+	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{ID: "owner-0000", Title: "canonical", IssueType: "session", Status: "closed", CreatedAt: now.Add(-time.Hour), NoHistory: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared", "canonical": "yes"}})
+	insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{ID: "ephemeral", Title: "ephemeral", IssueType: "session", Status: "closed", Ephemeral: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}})
+	for _, q := range []MetadataPathQuery{{Type: "session"}, {Label: "gc:session"}, {Type: "session", IncludeEphemeral: true}, {Label: "gc:session", IncludeEphemeral: true}} {
+		q.Keys, q.BaseDir, q.Paths = []string{"work_dir"}, "/city", []string{"/city/shared"}
+		seen := map[string]Bead{}
+		for pageNum := 0; ; pageNum++ {
+			if pageNum > 2 {
+				t.Fatal("paging did not finish")
+			}
+			cursor, err := decodeMetadataPathCursor(q.Cursor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := metadataPathLedgerSQL(q, cursor, true, []metadataPathTable{{"wisps", "wisp_labels", "COALESCE(i.ephemeral,0)"}, {"issues", "labels", "COALESCE(i.ephemeral,0)"}})
+			rows, err := store.db.QueryContext(context.Background(), query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := readMetadataPathSQLRows(q, rows, cursor, nil)
+			_ = rows.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, b := range page.Beads {
+				if _, exists := seen[b.ID]; exists {
+					t.Fatalf("duplicate %s", b.ID)
+				}
+				seen[b.ID] = b
+			}
+			if page.Complete {
+				break
+			}
+			q.Cursor = page.Next
+		}
+		want := 257
+		if q.IncludeEphemeral {
+			want++
+			if !seen["ephemeral"].Ephemeral {
+				t.Fatal("ephemeral owner lost")
+			}
+		}
+		if len(seen) != want || seen["owner-0000"].Metadata["canonical"] != "yes" || seen["owner-0256"].ID == "" {
+			t.Fatalf("canonical ownership incomplete: %d owners, first=%+v, last=%+v", len(seen), seen["owner-0000"], seen["owner-0256"])
 		}
 	}
 }

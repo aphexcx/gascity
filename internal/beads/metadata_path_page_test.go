@@ -36,8 +36,14 @@ func TestMetadataPathPageContract(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if _, err := store.Create(Bead{Title: "ephemeral owner", Type: "session", Ephemeral: true, Labels: []string{"gc:session"}, Metadata: map[string]string{"work_dir": "shared"}}); err != nil {
+				t.Fatal(err)
+			}
 			for _, query := range []MetadataPathQuery{
-				{Type: "session"}, {Label: "gc:session"},
+				{Type: "session"},
+				{Label: "gc:session"},
+				{Type: "session", IncludeEphemeral: true},
+				{Label: "gc:session", IncludeEphemeral: true},
 			} {
 				query.Keys = []string{"work_dir_canonical", "work_dir"}
 				query.BaseDir, query.Paths = "/city", []string{"/city/shared"}
@@ -71,7 +77,11 @@ func TestMetadataPathPageContract(t *testing.T) {
 					}
 					query.Cursor = page.Next
 				}
-				if len(seen) != 522 {
+				want := 522
+				if query.IncludeEphemeral {
+					want++
+				}
+				if len(seen) != want {
 					t.Fatalf("got %d owners", len(seen))
 				}
 			}

@@ -5,7 +5,6 @@ package beads
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -44,26 +43,5 @@ func (s *DoltliteReadStore) ReadMetadataPathPage(ctx context.Context, q Metadata
 		return MetadataPathPage{}, err
 	}
 	defer rows.Close() //nolint:errcheck
-	var found []Bead
-	for rows.Next() {
-		var b Bead
-		var raw, pageID string
-		if err := rows.Scan(&b.ID, &b.Type, &b.Status, &raw, &pageID); err != nil {
-			return MetadataPathPage{}, err
-		}
-		var metadata StringMap
-		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
-			return MetadataPathPage{}, err
-		}
-		b.Metadata = metadata
-		if q.Label != "" {
-			b.Labels = []string{q.Label}
-		}
-		found = append(found, b)
-		cursor.ID = b.ID
-	}
-	if err := rows.Err(); err != nil {
-		return MetadataPathPage{}, err
-	}
-	return finishMetadataPathPage(q, found, cursor)
+	return readMetadataPathSQLRows(q, rows, cursor, nil)
 }

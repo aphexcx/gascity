@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 )
 
 // MetadataPathPageSize is the maximum backing rows read by one metadata page.
@@ -23,11 +22,13 @@ var ErrMetadataPathPagingUnsupported = errors.New("bounded metadata path paging 
 // Keys are in precedence order: the first nonblank value is authoritative.
 // Relative metadata paths resolve against BaseDir; symlinks are not followed.
 // Cursor is opaque and may only be reused with the same query and provider.
+// IncludeEphemeral preserves the both-tier view used by policy stores.
 type MetadataPathQuery struct {
-	Type, Label string
-	Keys, Paths []string
-	BaseDir     string
-	Cursor      string
+	Type, Label      string
+	Keys, Paths      []string
+	BaseDir          string
+	Cursor           string
+	IncludeEphemeral bool
 }
 
 // MetadataPathPage contains matching rows from one bounded backing page.
@@ -46,8 +47,7 @@ type MetadataPathPageReader interface {
 }
 
 type metadataPathCursor struct {
-	ID        string
-	CreatedAt *time.Time `json:",omitempty"`
+	ID string
 }
 
 func (q MetadataPathQuery) validate() error {
@@ -63,7 +63,7 @@ func (q MetadataPathQuery) validate() error {
 }
 
 func (q MetadataPathQuery) matches(b Bead) bool {
-	if b.Ephemeral || (q.Type != "" && b.Type != q.Type) || (q.Label != "" && !slices.Contains(b.Labels, q.Label)) {
+	if (!q.IncludeEphemeral && b.Ephemeral) || (q.Type != "" && b.Type != q.Type) || (q.Label != "" && !slices.Contains(b.Labels, q.Label)) {
 		return false
 	}
 	for _, key := range q.Keys {
@@ -101,14 +101,10 @@ func decodeMetadataPathCursor(value string) (metadataPathCursor, error) {
 }
 
 func finishMetadataPathPage(q MetadataPathQuery, rows []Bead, cursor metadataPathCursor) (MetadataPathPage, error) {
-	return finishMetadataPathPageAtLimit(q, rows, cursor, MetadataPathPageSize)
-}
-
-func finishMetadataPathPageAtLimit(q MetadataPathQuery, rows []Bead, cursor metadataPathCursor, limit int) (MetadataPathPage, error) {
-	if len(rows) > limit {
+	if len(rows) > MetadataPathPageSize {
 		return MetadataPathPage{}, errors.New("metadata path backing page exceeded row bound")
 	}
-	page := MetadataPathPage{Complete: len(rows) < limit}
+	page := MetadataPathPage{Complete: len(rows) < MetadataPathPageSize}
 	for _, b := range rows {
 		if q.matches(b) {
 			page.Beads = append(page.Beads, b)

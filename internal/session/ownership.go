@@ -15,8 +15,9 @@ type WorkDirOwners struct {
 	Complete bool
 }
 
-// ListWorkDirOwners returns durable sessions whose persisted working directory
+// ListWorkDirOwners returns sessions whose persisted working directory
 // resolves lexically to a requested path, including closed and removed owners.
+// Policy-store composition also preserves its existing ephemeral visibility.
 // Both canonical type and repairable label legs must finish. Backing reads are
 // capped at 256 rows per page; unsupported paging and partial reads fail closed.
 func (s *Store) ListWorkDirOwners(ctx context.Context, cityPath string, paths []string) (WorkDirOwners, error) {

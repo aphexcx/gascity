@@ -7,12 +7,29 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type recordingPolicyReadStore struct {
 	*beads.MemStore
 	listQueries  []beads.ListQuery
 	readyQueries []beads.ReadyQuery
+}
+
+func TestBeadPolicyStorePreservesPagedOwnershipThroughCache(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "retained owner", Type: "session", Metadata: map[string]string{"work_dir": "shared", "template": "removed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Create(beads.Bead{Title: "ephemeral owner", Type: "session", Ephemeral: true, Metadata: map[string]string{"work_dir": "shared", "template": "removed"}}); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := wrapStoreWithBeadPolicies(mem, &config.City{})
+	wrapped = wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(wrapped, nil), &config.City{})
+	owners, err := session.NewStore(beads.SessionStore{Store: wrapped}).ListWorkDirOwners(context.Background(), "/city", []string{"/city/shared"})
+	if err != nil || !owners.Complete || len(owners.Infos) != 2 {
+		t.Fatalf("wrapped ownership: %+v, %v", owners, err)
+	}
 }
 
 func (s *recordingPolicyReadStore) List(query beads.ListQuery) ([]beads.Bead, error) {

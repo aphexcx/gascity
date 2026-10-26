@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -58,7 +59,10 @@ func (s *SQLiteStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQu
 	if err != nil {
 		return MetadataPathPage{}, err
 	}
-	where := []string{"b.tier = 'main'", "HEX(b.id) > ?"}
+	where := []string{"HEX(b.id) > ?"}
+	if !q.IncludeEphemeral {
+		where = append(where, "b.tier = 'main'")
+	}
 	args := []any{strings.ToUpper(hex.EncodeToString([]byte(cursor.ID)))}
 	if q.Type != "" {
 		where = append(where, "b.issue_type = ?")
@@ -98,7 +102,7 @@ func (s *SQLiteStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQu
 	return finishMetadataPathPage(q, found, cursor)
 }
 
-// metadataPathDoltSQL is owned by the bd provider, not the session domain. It
+// metadataPathDoltSQL is shared by the Dolt providers, not the session domain. It
 // reads only a bounded projection, including durable no-history wisps. The
 // canonical wisp wins an ID collision, matching bd's JSON list union.
 func metadataPathDoltSQL(q MetadataPathQuery, cursor metadataPathCursor) string {
@@ -114,7 +118,10 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 	literal := func(value string) string { return metadataSQLLiteral(value, sqlite) }
 	var legs []string
 	for index, table := range tables {
-		where := []string{table.ephemeral + "=0", "HEX(i.id)>" + literal(strings.ToUpper(hex.EncodeToString([]byte(cursor.ID))))}
+		where := []string{"HEX(i.id)>" + literal(strings.ToUpper(hex.EncodeToString([]byte(cursor.ID))))}
+		if !q.IncludeEphemeral {
+			where = append(where, table.ephemeral+"=0")
+		}
 		if q.Type != "" {
 			where = append(where, "i.issue_type="+literal(q.Type))
 		}
@@ -134,7 +141,10 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 		// Malformed metadata is an error, never evidence that no owner exists.
 		where = append(where, "(NOT JSON_VALID(i.metadata) OR "+candidate+")")
 		if index > 0 {
-			shadow := "other.id=i.id AND " + strings.ReplaceAll(tables[0].ephemeral, "i.", "other.") + "=0"
+			shadow := "other.id=i.id"
+			if !q.IncludeEphemeral {
+				shadow += " AND " + strings.ReplaceAll(tables[0].ephemeral, "i.", "other.") + "=0"
+			}
 			if q.Type != "" {
 				shadow += " AND other.issue_type=" + literal(q.Type)
 			}
@@ -147,7 +157,7 @@ func metadataPathLedgerSQL(q MetadataPathQuery, cursor metadataPathCursor, sqlit
 		if sqlite {
 			castType = "TEXT"
 		}
-		legs = append(legs, "SELECT i.id, i.issue_type, i.status, CAST(i.metadata AS "+castType+") AS metadata_json, HEX(i.id) AS page_id FROM "+table.name+" i WHERE "+strings.Join(where, " AND "))
+		legs = append(legs, "SELECT i.id, i.issue_type, i.status, CAST(i.metadata AS "+castType+") AS metadata_json, HEX(i.id) AS page_id, "+table.ephemeral+" AS ephemeral FROM "+table.name+" i WHERE "+strings.Join(where, " AND "))
 	}
 	return strings.Join(legs, " UNION ALL ") + " ORDER BY page_id LIMIT 256"
 }
@@ -170,10 +180,11 @@ func (s *BdStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQuery)
 		return MetadataPathPage{}, fmt.Errorf("reading bd metadata path page: %w", err)
 	}
 	var rows []struct {
-		ID       string `json:"id"`
-		Type     string `json:"issue_type"`
-		Status   string `json:"status"`
-		Metadata string `json:"metadata_json"`
+		ID        string `json:"id"`
+		Type      string `json:"issue_type"`
+		Status    string `json:"status"`
+		Metadata  string `json:"metadata_json"`
+		Ephemeral int    `json:"ephemeral"`
 	}
 	if err := json.Unmarshal(extractJSON(out), &rows); err != nil {
 		return MetadataPathPage{}, err
@@ -191,7 +202,7 @@ func (s *BdStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQuery)
 		if err := json.Unmarshal([]byte(row.Metadata), &metadata); err != nil {
 			return MetadataPathPage{}, fmt.Errorf("metadata for %s: %w", row.ID, err)
 		}
-		b := Bead{ID: row.ID, Type: row.Type, Status: row.Status, Metadata: metadata}
+		b := Bead{ID: row.ID, Type: row.Type, Status: row.Status, Metadata: metadata, Ephemeral: row.Ephemeral != 0}
 		if q.Label != "" {
 			b.Labels = []string{q.Label}
 		}
@@ -199,6 +210,37 @@ func (s *BdStore) ReadMetadataPathPage(ctx context.Context, q MetadataPathQuery)
 		cursor.ID = b.ID
 	}
 	if err := ctx.Err(); err != nil {
+		return MetadataPathPage{}, err
+	}
+	return finishMetadataPathPage(q, found, cursor)
+}
+
+func readMetadataPathSQLRows(q MetadataPathQuery, rows *sql.Rows, cursor metadataPathCursor, observeRow func()) (MetadataPathPage, error) {
+	var found []Bead
+	for rows.Next() {
+		if observeRow != nil {
+			observeRow()
+		}
+		var b Bead
+		var raw, pageID string
+		if err := rows.Scan(&b.ID, &b.Type, &b.Status, &raw, &pageID, &b.Ephemeral); err != nil {
+			return MetadataPathPage{}, err
+		}
+		if b.ID == "" {
+			return MetadataPathPage{}, fmt.Errorf("metadata path page contains an empty ID")
+		}
+		var metadata StringMap
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			return MetadataPathPage{}, fmt.Errorf("metadata for %s: %w", b.ID, err)
+		}
+		b.Metadata = metadata
+		if q.Label != "" {
+			b.Labels = []string{q.Label}
+		}
+		found = append(found, b)
+		cursor.ID = b.ID
+	}
+	if err := rows.Err(); err != nil {
 		return MetadataPathPage{}, err
 	}
 	return finishMetadataPathPage(q, found, cursor)
