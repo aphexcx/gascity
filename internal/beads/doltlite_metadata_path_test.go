@@ -52,7 +52,7 @@ func TestDoltliteMetadataPathPagesPreserveLegacyAndDurableWisps(t *testing.T) {
 	}
 }
 
-func TestMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *testing.T) {
+func TestDoltliteMetadataLedgerPagesResolveCanonicalCollisionsBeforeLimit(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
 	writer := openTestDoltliteWriter(t, store.db)
