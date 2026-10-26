@@ -12,6 +12,10 @@ during the gf-9x2 rebuild onto v1.5.0 (one block per commit, in pick order).
 
 ### Added
 
+- External-message adapters can register `envelope_format: "short"` for
+  compact reminder headers and message/thread labels. Omitted, empty, and
+  `"long"` keep the existing output; unknown formats are rejected.
+
 - **proxy_process services can report advisory degradation without losing
   traffic.** A 2xx `health_path` response may now carry
   `X-GC-Health: degraded` (+ `X-GC-Health-Reason`); the supervisor then

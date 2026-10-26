@@ -184,7 +184,7 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 	conv := b.Conversation
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
 	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, b.ExplicitTarget)
-	replyInstructions := s.extmsgReplyInstructionsForConversation(conv)
+	replyInstructions, envelopeFormat := s.extmsgReminderOptionsForConversation(conv)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -240,6 +240,7 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 			ProviderMessageID:       b.ProviderMessageID,
 			ReplyToMessageID:        b.ReplyToMessageID,
 			ReplyInstructions:       replyInstructions,
+			EnvelopeFormat:          envelopeFormat,
 		})
 		// Expected size and digest are properties of the string gc built, so
 		// they are known here regardless of how the send goes — which is what
@@ -326,24 +327,22 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 	return outcomes, nil
 }
 
-// extmsgReplyInstructionsForConversation returns the reply-instruction
-// template the conversation's adapter registered, or "" when the registry
-// or adapter is missing or the adapter does not provide one — the reminder
-// then falls back to the generic reply-current text.
-func (s *Server) extmsgReplyInstructionsForConversation(conv extmsg.ConversationRef) string {
+// extmsgReminderOptionsForConversation reads both options from one adapter
+// snapshot so concurrent re-registration cannot mix formats and instructions.
+// Missing options select the generic reply instructions and long envelope.
+func (s *Server) extmsgReminderOptionsForConversation(conv extmsg.ConversationRef) (instructions, envelopeFormat string) {
 	reg := s.state.AdapterRegistry()
 	if reg == nil {
-		return ""
+		return "", ""
 	}
 	adapter := reg.LookupByConversation(conv)
-	if adapter == nil {
-		return ""
+	if provider, ok := adapter.(extmsg.ReplyInstructionsProvider); ok {
+		instructions = provider.ReplyInstructions()
 	}
-	provider, ok := adapter.(extmsg.ReplyInstructionsProvider)
-	if !ok {
-		return ""
+	if registered, ok := adapter.(*extmsg.HTTPAdapter); ok {
+		envelopeFormat = registered.EnvelopeFormat()
 	}
-	return provider.ReplyInstructions()
+	return instructions, envelopeFormat
 }
 
 func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
@@ -445,7 +444,7 @@ func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.
 //   - unknown: no fan-out for the message in this process — the first
 //     delivery, or a gc restart took the record, or it aged out of
 //     retention. gc cannot vouch for a prior delivery, so the message keeps
-//     the at-least-once behaviour a message without a provider id has.
+//     the at-least-once behavior a message without a provider id has.
 //     Claimed.
 func (s *Server) extmsgClaimInboundFanout(result *extmsg.InboundResult, msg extmsg.ExternalInboundMessage) (receiptID string, held extmsg.InboundDelivery, isHeld bool) {
 	store := s.inboundReceiptStore()
@@ -638,6 +637,8 @@ type extmsgNotifyReminder struct {
 	// template (see extmsg.ReplyInstructionsProvider); empty selects the
 	// generic reply-current fallback text.
 	ReplyInstructions string
+	// EnvelopeFormat selects compact labels only when explicitly "short".
+	EnvelopeFormat string
 }
 
 // formatExtmsgNotifyReminder builds the inbound-message reminder body.
@@ -652,22 +653,32 @@ type extmsgNotifyReminder struct {
 // a discriminator line is appended so peer sessions can self-silence on
 // messages addressed to a different agent. See gastownhall/gascity#2484.
 func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
+	short := r.EnvelopeFormat == "short"
+	if short {
+		r.Provider = extmsg.SanitizeForSystemReminder(r.Provider)
+		r.ConversationID = extmsg.SanitizeForSystemReminder(r.ConversationID)
+		r.ActorKind = extmsg.SanitizeForSystemReminder(r.ActorKind)
+	}
 	providerCLI := strings.ToLower(r.Provider)
 	providerDisplay := titleCaseProvider(providerCLI)
 	safeActor := extmsg.SanitizeForSystemReminder(r.ActorDisplay)
 	safeText := extmsg.SanitizeForSystemReminder(r.Text)
 
 	var b strings.Builder
-	fmt.Fprintf(&b,
-		"<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-			"- %s (%s): %s\n\n",
-		r.Provider, r.ConversationID,
-		safeActor, r.ActorKind, safeText,
-	)
+	if short {
+		fmt.Fprintf(&b, "<system-reminder>\n%s %s:\n\n", providerDisplay, r.ConversationID)
+	} else {
+		fmt.Fprintf(&b, "<system-reminder>\nNew message in shared conversation %s/%s:\n\n", r.Provider, r.ConversationID)
+	}
+	fmt.Fprintf(&b, "- %s (%s): %s\n\n", safeActor, r.ActorKind, safeText)
 	if messageID := strings.TrimSpace(r.ProviderMessageID); messageID != "" {
-		fmt.Fprintf(&b, "Message id: %s", extmsg.SanitizeForSystemReminder(messageID))
+		messageLabel, threadLabel := "Message id: ", " (in thread "
+		if short {
+			messageLabel, threadLabel = "ts=", " (thread="
+		}
+		fmt.Fprintf(&b, "%s%s", messageLabel, extmsg.SanitizeForSystemReminder(messageID))
 		if threadID := strings.TrimSpace(r.ReplyToMessageID); threadID != "" {
-			fmt.Fprintf(&b, " (in thread %s)", extmsg.SanitizeForSystemReminder(threadID))
+			fmt.Fprintf(&b, "%s%s)", threadLabel, extmsg.SanitizeForSystemReminder(threadID))
 		}
 		b.WriteString("\n\n")
 	}

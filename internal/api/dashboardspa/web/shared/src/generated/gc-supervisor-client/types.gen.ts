@@ -1011,6 +1011,10 @@ export type ExtMsgAdapterRegisterInputBody = {
      */
     capabilities?: AdapterCapabilities;
     /**
+     * Reminder envelope labels: long (default when omitted or empty) or short.
+     */
+    envelope_format?: '' | 'long' | 'short';
+    /**
      * Adapter display name.
      */
     name?: string;

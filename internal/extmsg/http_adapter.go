@@ -26,6 +26,7 @@ type HTTPAdapter struct {
 	callbackURL       string
 	capabilities      AdapterCapabilities
 	replyInstructions string
+	envelopeFormat    string
 	client            *http.Client
 }
 
@@ -47,6 +48,21 @@ func NewHTTPAdapter(name, callbackURL string, caps AdapterCapabilities) *HTTPAda
 func (a *HTTPAdapter) WithReplyInstructions(template string) *HTTPAdapter {
 	a.replyInstructions = template
 	return a
+}
+
+// WithEnvelopeFormat sets the reminder format validated by adapter registration.
+// Empty and "long" preserve the default; "short" uses compact envelope labels.
+func (a *HTTPAdapter) WithEnvelopeFormat(format string) *HTTPAdapter {
+	a.envelopeFormat = format
+	return a
+}
+
+// EnvelopeFormat returns the registered reminder format, defaulting to "long".
+func (a *HTTPAdapter) EnvelopeFormat() string {
+	if a.envelopeFormat == "" {
+		return "long"
+	}
+	return a.envelopeFormat
 }
 
 // Name returns the adapter name.

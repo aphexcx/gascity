@@ -217,6 +217,7 @@ type ExtMsgAdapterRegisterInput struct {
 		// [bracketed segments] are dropped when a placeholder inside
 		// resolves empty. See extmsg.ReplyInstructionsProvider.
 		ReplyInstructions string `json:"reply_instructions,omitempty" doc:"Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle})."`
+		EnvelopeFormat    string `json:"envelope_format,omitempty" enum:",long,short" doc:"Reminder envelope labels: long (default when omitted or empty) or short."`
 	}
 }
 

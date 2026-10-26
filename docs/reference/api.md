@@ -53,6 +53,70 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
+## External-message adapter reminders
+
+Adapters register with `POST /v0/city/{cityName}/extmsg/adapters`. To reduce
+reminder size, opt in per provider/account at registration:
+
+```json
+{
+  "provider": "slack",
+  "account_id": "T123",
+  "envelope_format": "short"
+}
+```
+
+| Field | Values and behavior |
+| --- | --- |
+| `envelope_format` | Omitted, empty, or `long`: original labels. `short`: compact labels. Any other value returns HTTP 422 without replacing the registered adapter. |
+| `reply_instructions` | Optional reply template. Placeholders: `{conversation_id}`, `{message_ts}`, `{thread_ts}`, `{handle}`. Square-bracketed segments are omitted when a placeholder inside is empty. Without a template, the generic reply command is used. |
+
+The default is unchanged. Registration options are kept in memory until the
+adapter is replaced, unregistered, or the orchestrator restarts; adapters must
+send their options again when re-registering. Each registration replaces the
+previous options for that provider/account.
+
+For this threaded, multiline message, `long` renders:
+
+```text
+<system-reminder>
+New message in shared conversation slack/C123:
+
+- alice (human): status?
+ship it
+
+Message id: 1700000002.0002 (in thread 1700000001.0001)
+
+Addressed to: @reviewer — if that is not you, do not reply.
+
+To reply in Slack, write your response to a file and run:
+  gc slack reply-current --conversation-id C123 --body-file <path>
+</system-reminder>
+```
+
+The same message with `short` renders:
+
+```text
+<system-reminder>
+Slack C123:
+
+- alice (human): status?
+ship it
+
+ts=1700000002.0002 (thread=1700000001.0001)
+
+Addressed to: @reviewer — if that is not you, do not reply.
+
+To reply in Slack, write your response to a file and run:
+  gc slack reply-current --conversation-id C123 --body-file <path>
+</system-reminder>
+```
+
+The short header uses the provider's display name, such as `Slack` or
+`Discord`. Without a thread root, the parenthesized thread suffix is omitted;
+without a message ID, the entire ID line is omitted. Author text, addressing,
+reply instructions, and reminder boundaries are preserved.
+
 ## Request and response headers
 
 Every operation's header contract appears in the OpenAPI spec — if a

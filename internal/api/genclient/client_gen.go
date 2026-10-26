@@ -117,6 +117,27 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	}
 }
 
+// Defines values for ExtMsgAdapterRegisterInputBodyEnvelopeFormat.
+const (
+	Empty ExtMsgAdapterRegisterInputBodyEnvelopeFormat = ""
+	Long  ExtMsgAdapterRegisterInputBodyEnvelopeFormat = "long"
+	Short ExtMsgAdapterRegisterInputBodyEnvelopeFormat = "short"
+)
+
+// Valid indicates whether the value is a known member of the ExtMsgAdapterRegisterInputBodyEnvelopeFormat enum.
+func (e ExtMsgAdapterRegisterInputBodyEnvelopeFormat) Valid() bool {
+	switch e {
+	case Empty:
+		return true
+	case Long:
+		return true
+	case Short:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for InboundReceiptStatusState.
 const (
 	InboundReceiptStatusStateConcluded InboundReceiptStatusState = "concluded"
@@ -1846,6 +1867,9 @@ type ExtMsgAdapterRegisterInputBody struct {
 	CallbackUrl  *string              `json:"callback_url,omitempty"`
 	Capabilities *AdapterCapabilities `json:"capabilities,omitempty"`
 
+	// EnvelopeFormat Reminder envelope labels: long (default when omitted or empty) or short.
+	EnvelopeFormat *ExtMsgAdapterRegisterInputBodyEnvelopeFormat `json:"envelope_format,omitempty"`
+
 	// Name Adapter display name.
 	Name *string `json:"name,omitempty"`
 
@@ -1855,6 +1879,9 @@ type ExtMsgAdapterRegisterInputBody struct {
 	// ReplyInstructions Reply-instruction template for inbound nudges (placeholders: {conversation_id}, {message_ts}, {thread_ts}, {handle}).
 	ReplyInstructions *string `json:"reply_instructions,omitempty"`
 }
+
+// ExtMsgAdapterRegisterInputBodyEnvelopeFormat Reminder envelope labels: long (default when omitted or empty) or short.
+type ExtMsgAdapterRegisterInputBodyEnvelopeFormat string
 
 // ExtMsgAdapterRegisterOutputBody defines model for ExtMsgAdapterRegisterOutputBody.
 type ExtMsgAdapterRegisterOutputBody struct {

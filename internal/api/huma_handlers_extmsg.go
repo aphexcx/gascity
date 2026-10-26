@@ -623,7 +623,8 @@ func (s *Server) humaHandleExtMsgAdapterRegister(_ context.Context, input *ExtMs
 			}
 
 			adapter := extmsg.NewHTTPAdapter(resolved, input.Body.CallbackURL, input.Body.Capabilities).
-				WithReplyInstructions(input.Body.ReplyInstructions)
+				WithReplyInstructions(input.Body.ReplyInstructions).
+				WithEnvelopeFormat(input.Body.EnvelopeFormat)
 			key := extmsg.AdapterKey{Provider: input.Body.Provider, AccountID: input.Body.AccountID}
 			reg.Register(key, adapter)
 
