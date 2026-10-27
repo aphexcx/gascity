@@ -3,7 +3,6 @@ package tmux
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,9 +44,11 @@ func TestPreStartMaterializesLaneContextAndDiagnostic(t *testing.T) {
 		t.Fatal("context file copied a non-path variable")
 	}
 	// The worker can restore the binding even when its tool drops launch env.
-	cmd := exec.Command("/bin/sh", "-c", `. "$1"; printf '%s\n' "$GC_CITY_PATH" "$GC_RIG_ROOT" "$GC_RIG" "$BEADS_DIR" "$GC_PRESTART_LOG"`, "sh", filepath.Join(lane, ".gc", "worker-env.sh"))
-	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	recovered, err := cmd.CombinedOutput()
+	cfg.PreStart = []string{`env -i PATH=/usr/bin:/bin /bin/sh -c '. "$1"; printf "%s\n" "$GC_CITY_PATH" "$GC_RIG_ROOT" "$GC_RIG" "$BEADS_DIR" "$GC_PRESTART_LOG" > "$2"' sh "$GC_DIR/.gc/worker-env.sh" "$GC_DIR/recovered"`}
+	if err := runPreStart(context.Background(), ops, "session-1", cfg, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := os.ReadFile(filepath.Join(lane, "recovered"))
 	if err != nil || string(recovered) != "/city\n/repo\nrepo\n/repo/.beads\n"+logPath+"\n" {
 		t.Fatalf("filtered shell failed to restore context: %q, %v", recovered, err)
 	}
