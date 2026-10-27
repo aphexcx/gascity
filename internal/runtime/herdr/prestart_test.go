@@ -61,7 +61,7 @@ func TestRunPreStartMaterializesLaneDiagnostics(t *testing.T) {
 	logPath := filepath.Join(lane, ".gc", "pre-start.log")
 	p := newTestProvider(t, time.Second)
 	cfg := runtime.Config{
-		Env:      map[string]string{"GC_DIR": lane, "GC_PRESTART_LOG": logPath},
+		Env:      map[string]string{"GC_DIR": lane, "GC_PRESTART_LOG": logPath, "GC_RIG": "repo", "BEADS_DIR": "/repo/.beads"},
 		PreStart: []string{"printf prepared"},
 	}
 	if err := p.runPreStart(context.Background(), cfg); err != nil {
@@ -73,6 +73,24 @@ func TestRunPreStartMaterializesLaneDiagnostics(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(lane, ".gc", "worker-env.sh")); err != nil {
 		t.Fatalf("lane environment was not materialized: %v", err)
+	}
+	cfg.Env["GC_RIG"], cfg.Env["BEADS_DIR"] = "next-repo", "/next-repo/.beads"
+	if err := p.runPreStart(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	contextFile, err := os.ReadFile(filepath.Join(lane, ".gc", "worker-env.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"export GC_RIG='next-repo'", "export BEADS_DIR='/next-repo/.beads'"} {
+		if !strings.Contains(string(contextFile), want) {
+			t.Errorf("reused lane context lacks %q: %s", want, contextFile)
+		}
+	}
+	for _, stale := range []string{"export GC_RIG='repo'", "export BEADS_DIR='/repo/.beads'"} {
+		if strings.Contains(string(contextFile), stale) {
+			t.Errorf("reused lane context retains %q: %s", stale, contextFile)
+		}
 	}
 }
 

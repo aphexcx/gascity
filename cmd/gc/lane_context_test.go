@@ -56,22 +56,38 @@ func TestResolveTemplateLanePaths(t *testing.T) {
 }
 
 func TestPreparedStartLanePathsFollowWorkDirOverride(t *testing.T) {
-	for _, tc := range []struct{ source, mode, runtime string }{
-		{"task", "none", "tmux"},
-		{"session", "arg", "herdr"},
-		{"task", "flag", "tmux"},
+	for _, tc := range []struct {
+		source, mode, runtime string
+		skillExists           bool
+	}{
+		{"task", "none", "tmux", true},
+		{"session", "arg", "herdr", true},
+		{"task", "flag", "tmux", false},
 	} {
 		t.Run(tc.source+"-"+tc.mode, func(t *testing.T) {
 			city, rig, configured, overridden := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 			writeTemplateResolveCityConfig(t, city, "file")
+			for _, dir := range []string{configured, overridden} {
+				if dir == overridden && !tc.skillExists {
+					continue
+				}
+				sink := filepath.Join(dir, ".agents", "skills", "planner")
+				if err := os.MkdirAll(sink, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(sink, "SKILL.md"), []byte("plan"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			params := &agentBuildParams{
 				cityName: "city", cityPath: city,
-				workspace: &config.Workspace{Provider: "test"},
-				providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: tc.mode, PromptFlag: "--prompt"}},
+				workspace: &config.Workspace{Provider: "codex"},
+				providers: map[string]config.ProviderSpec{"codex": {Command: "echo", PromptMode: tc.mode, PromptFlag: "--prompt"}},
 				lookPath:  func(string) (string, error) { return "/bin/echo", nil },
 				fs:        fsys.OSFS{}, rigs: []config.Rig{{Name: "repo", Path: rig}},
 				beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
 				sessionProvider: tc.runtime,
+				skillCatalog:    &materialize.CityCatalog{Entries: []materialize.SkillEntry{{Name: "planner", Source: "/absent/cache/planner"}}},
 			}
 			a := &config.Agent{Name: "worker", Dir: "repo", WorkDir: configured, PreStart: []string{"true"}}
 			tp, err := resolveTemplate(params, a, a.QualifiedName(), nil)
@@ -129,6 +145,16 @@ func TestPreparedStartLanePathsFollowWorkDirOverride(t *testing.T) {
 			}
 			if strings.Contains(prompt, configured) {
 				t.Errorf("startup prompt still names configured lane: %s", prompt)
+			}
+			materialized := filepath.Join(overridden, ".agents", "skills", "planner", "SKILL.md")
+			if got := strings.Contains(prompt, materialized); got != tc.skillExists {
+				t.Errorf("final skill hint present = %v, file exists = %v: %s", got, tc.skillExists, prompt)
+			}
+			if strings.Contains(prompt, "/absent/cache") || (!tc.skillExists && strings.Contains(prompt, "SKILL.md")) {
+				t.Errorf("startup prompt names an unavailable skill path: %s", prompt)
+			}
+			if strings.Count(prompt, "## Skills available to this session") != 1 {
+				t.Errorf("startup prompt must retain exactly one skills appendix: %s", prompt)
 			}
 			if _, err := os.Stat(lanectx.LaneEnvironmentPath(overridden)); err != nil {
 				t.Fatal(err)

@@ -292,6 +292,28 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 	return true
 }
 
+// assignedSkillsPromptContext retains catalog inputs so path hints can be
+// rendered again against the final launch directory after a work_dir override.
+type assignedSkillsPromptContext struct {
+	agent     *config.Agent
+	shared    *materialize.CityCatalog
+	assigned  materialize.AgentCatalog
+	sink      string
+	scopeRoot string
+	stage2    bool
+}
+
+func (c *assignedSkillsPromptContext) render(workDir, cityPath string) string {
+	if c == nil {
+		return ""
+	}
+	workDir = canonicaliseFilePath(workDir, cityPath)
+	if !c.stage2 && workDir != c.scopeRoot {
+		return ""
+	}
+	return buildAssignedSkillsPromptFragment(c.agent, c.shared, c.assigned, filepath.Join(workDir, c.sink))
+}
+
 // buildAssignedSkillsPromptFragment renders a markdown appendix that
 // lists every skill the agent sees, partitioned into (assigned-to-this-
 // agent, shared-with-the-current-scope). The goal is that agents

@@ -1108,11 +1108,11 @@ func buildPreparedStartWithWorkDirResolver(
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
-	if tp.laneContextConfigured && tp.WorkDir != agentCfg.WorkDir {
+	if tp.WorkDir != agentCfg.WorkDir && (tp.laneContextConfigured || tp.assignedSkills != nil) {
 		// Re-derive the generated paths and prompt from the final directory before
 		// choosing startup delivery. Keep durable fingerprints and option overrides.
 		tp.WorkDir = agentCfg.WorkDir
-		tp = resolveTemplateLaneContext(tp)
+		tp = resolveTemplateWorkDirContext(tp)
 		finalCfg, finalDelivery, err := templateParamsToConfigWithDelivery(tp)
 		if err != nil {
 			return nil, candidate.info, err

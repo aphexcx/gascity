@@ -50,12 +50,18 @@ func isLaneWorkDir(cityRoot, rigRoot, workDir string) bool {
 	return true
 }
 
-// resolveTemplateLaneContext derives artifacts and their appendix together. A
-// prepared launch calls it again after applying task/session directory overrides.
-func resolveTemplateLaneContext(tp TemplateParams) TemplateParams {
+// resolveTemplateWorkDirContext derives artifacts and workspace appendices
+// together. A prepared launch calls it again after task/session directory overrides.
+func resolveTemplateWorkDirContext(tp TemplateParams) TemplateParams {
 	includePrompt := tp.Prompt != ""
 	tp.Prompt = strings.TrimSuffix(tp.Prompt, tp.laneContextSuffix)
 	tp.laneContextSuffix = ""
+	tp.Prompt = strings.TrimSuffix(tp.Prompt, tp.assignedSkillsSuffix)
+	tp.assignedSkillsSuffix = ""
+	if frag := tp.assignedSkills.render(tp.WorkDir, tp.Env["GC_CITY_PATH"]); includePrompt && frag != "" {
+		tp.assignedSkillsSuffix = "\n\n" + frag
+		tp.Prompt += tp.assignedSkillsSuffix
+	}
 	tp.Env = maps.Clone(tp.Env)
 	tp.Env["GC_DIR"] = tp.WorkDir
 	tp.Env["GC_PRESTART_LOG"] = ""

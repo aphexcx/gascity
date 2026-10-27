@@ -128,6 +128,10 @@ the absolute file path printed in the prompt to restore them. The file
 contains workspace paths and rig identity only. A lane can use the configured
 store without a local `.beads` directory.
 
+A task or session `work_dir` override makes `GC_DIR`, `GC_PRESTART_LOG`, the
+artifact location, the workspace appendix, and skill hints use the overridden
+directory instead of the configured directory.
+
 Pre-start diagnostics retain an output tail of at most 8 KiB per command.
 Gas City buffers the output until preparation finishes, so creating the log
 cannot interfere with a command that needs an empty worktree destination.
