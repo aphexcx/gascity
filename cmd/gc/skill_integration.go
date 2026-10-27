@@ -312,6 +312,7 @@ func buildAssignedSkillsPromptFragment(
 	agent *config.Agent,
 	city *materialize.CityCatalog,
 	agentCat materialize.AgentCatalog,
+	sinkDirs ...string,
 ) string {
 	if agent == nil {
 		return ""
@@ -337,19 +338,23 @@ func buildAssignedSkillsPromptFragment(
 	}
 
 	var b strings.Builder
+	sinkDir := ""
+	if len(sinkDirs) > 0 {
+		sinkDir = sinkDirs[0]
+	}
 	b.WriteString("## Skills available to this session\n\n")
 	fmt.Fprintf(&b, "You are `%s`. The following skills are materialized in your provider's skill directory and load automatically — you don't need to invoke anything extra.\n\n", //nolint:errcheck // fmt.Fprintf into a strings.Builder never errors
 		agent.QualifiedName())
 
 	if len(agentCat.Entries) > 0 {
 		b.WriteString("### Assigned to you\n\n")
-		writeSkillBullets(&b, agentCat.Entries, "")
+		writeSkillBullets(&b, agentCat.Entries, "", sinkDir)
 		b.WriteString("\n")
 	}
 
 	if len(shared) > 0 {
 		b.WriteString("### Shared in this scope\n\n")
-		writeSkillBullets(&b, shared, "origin")
+		writeSkillBullets(&b, shared, "origin", sinkDir)
 		b.WriteString("\n")
 	}
 
@@ -362,7 +367,7 @@ func buildAssignedSkillsPromptFragment(
 // shared entries can show whether they came from the city pack, an
 // import binding, or a compatibility bootstrap pack. Descriptions are included when the
 // SKILL.md frontmatter provided one.
-func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
+func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag, sinkDir string) {
 	for _, e := range entries {
 		b.WriteString("- `")
 		b.WriteString(e.Name)
@@ -375,6 +380,12 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 			b.WriteString(" *(")
 			b.WriteString(e.Origin)
 			b.WriteString(")*")
+		}
+		if sinkDir != "" {
+			materialized := filepath.Join(sinkDir, e.Name, "SKILL.md")
+			if info, err := os.Stat(materialized); err == nil && info.Mode().IsRegular() {
+				b.WriteString(" — `" + materialized + "`")
+			}
 		}
 		b.WriteString("\n")
 	}

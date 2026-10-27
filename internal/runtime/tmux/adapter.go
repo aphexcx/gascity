@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -923,7 +924,7 @@ type startOps interface {
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
-	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
+	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...bool) error
 }
 
 // tmuxStartOps adapts [*Tmux] to the [startOps] interface. runtimeDir is the
@@ -1228,7 +1229,7 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 	return nil
 }
 
-func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
+func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...bool) (result error) {
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget
 	// is activity-aware instead — timeout bounds output SILENCE and
@@ -1264,6 +1265,13 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
+	if len(capturePreStart) > 0 && capturePreStart[0] {
+		defer func() {
+			secrets := runtime.SetupCommandSecrets(env)
+			output := stdout.Detail("stdout", secrets) + "\n" + stderr.Detail("stderr", secrets)
+			result = errors.Join(result, lanectx.AppendPreStartDiagnostic(env, output, result))
+		}()
+	}
 	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
 	// the command's process group first so shell rollback traps — e.g.
 	// worktree-setup.sh restoring content it staged aside — run before the
@@ -1854,11 +1862,11 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 		setupEnv[k] = v
 	}
 	for i, cmd := range cfg.PreStart {
-		if err := ops.runSetupCommand(ctx, cmd, setupEnv, setupTimeout); err != nil {
+		if err := ops.runSetupCommand(ctx, cmd, setupEnv, setupTimeout, true); err != nil {
 			return fmt.Errorf("pre_start[%d]: %w", i, err)
 		}
 	}
-	return nil
+	return lanectx.WriteLaneEnvironment(cfg.Env)
 }
 
 // ensureFreshSession creates a session, handling stale tmux state.

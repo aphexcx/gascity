@@ -25,6 +25,26 @@ func TestRunPreStartNoCommandsIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRunPreStartMaterializesLaneDiagnostics(t *testing.T) {
+	lane := t.TempDir()
+	logPath := filepath.Join(lane, ".gc", "pre-start.log")
+	p := newTestProvider(t, time.Second)
+	cfg := runtime.Config{
+		Env:      map[string]string{"GC_DIR": lane, "GC_PRESTART_LOG": logPath},
+		PreStart: []string{"printf prepared"},
+	}
+	if err := p.runPreStart(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(got), "prepared") {
+		t.Fatalf("pre-start diagnostic = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(lane, ".gc", "worker-env.sh")); err != nil {
+		t.Fatalf("lane environment was not materialized: %v", err)
+	}
+}
+
 // pre_start carries stage-2 skill/MCP materialization, so the commands must
 // actually run — and in order.
 func TestRunPreStartRunsCommandsInOrder(t *testing.T) {

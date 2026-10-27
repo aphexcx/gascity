@@ -19,6 +19,7 @@ go_library(
     deps = [
         "//internal/execgrace",
         "//internal/runtime",
+        "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
         "//internal/shellquote",
     ],
