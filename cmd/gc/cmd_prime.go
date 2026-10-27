@@ -452,6 +452,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		runHookSideEffects()
 	}
 
+	laneContext := ""
 	for _, a := range resolvedAgents {
 		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0, nil
@@ -489,11 +490,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			return 0, nil
 		}
 		var ctx PromptContext
-		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
+		if a.PromptTemplate != "" || hookMode || sessionTemplateContext || a.WorkDir != "" {
 			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 			ctx.InstructionsFile = instructionsFileForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
+		laneContext = primeLaneContextSuffix(&a, cfg, ctx)
 		if a.PromptTemplate != "" {
 			fragments := effectivePromptFragments(
 				cfg.Workspace.GlobalFragments,
@@ -506,6 +508,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				packDirs, fragments, nil)
 			if prompt != "" {
+				prompt += laneContext
 				var budget *promptBudgetJSON
 				if strictMode {
 					var budgetErr error
@@ -547,6 +550,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
 					cfg.PackDirsForRig(ctx.RigName), nil, nil)
 				if content != "" {
+					content += laneContext
 					injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0, nil
@@ -560,7 +564,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
-	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
+	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt+laneContext, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
 }
 

@@ -72,6 +72,7 @@ var envArgvSafe = map[string]bool{
 	"GC_DIR":             true,
 	"GC_DOLT_PORT":       true,
 	"GC_HOME":            true,
+	"GC_PRESTART_LOG":    true,
 	"GC_SKILLS_DIR":      true,
 }
 

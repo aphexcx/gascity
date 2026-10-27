@@ -235,7 +235,7 @@ func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
 	return f.recordUnconfirmedNudgePath
 }
 
-func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
+func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration, _ ...bool) error {
 	f.calls = append(f.calls, startCall{
 		method:  "runSetupCommand",
 		command: cmd,
