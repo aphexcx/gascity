@@ -50,6 +50,9 @@ var defaultWorkDirExportExcludes = []string{
 	// Orchestrator logs, queues, stores, and per-session state.
 	".gc/events.jsonl*",
 	".gc/usage.jsonl*",
+	".gc/pre-start.log",
+	".gc/worker-env.sh",
+	".gc/worker-env-*",
 	".gc/nudges/**",
 	".gc/store/**",
 	".gc/storage/**",

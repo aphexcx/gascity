@@ -128,10 +128,15 @@ the absolute file path printed in the prompt to restore them. The file
 contains workspace paths and rig identity only. A lane can use the configured
 store without a local `.beads` directory.
 
-Pre-start diagnostics append an output tail of at most 8 KiB per command.
-The file stops growing at 1 MiB and records a capacity marker; restarts do
-not erase earlier records. Skill hints name an existing `SKILL.md` in the
-provider's materialized skill directory, or omit the path when it is absent.
+Pre-start diagnostics retain an output tail of at most 8 KiB per command.
+Gas City buffers the output until preparation finishes, so creating the log
+cannot interfere with a command that needs an empty worktree destination.
+Failed preparation appends to an existing log; on a fresh lane, its output
+stays in the startup error and the destination remains untouched for retry.
+The buffer and file each stop growing at 1 MiB and record a capacity marker;
+restarts do not erase earlier records. Skill hints name an existing
+`SKILL.md` in the provider's materialized skill directory, or omit the path
+when it is absent.
 
 ## Move the parts you already repeat
 

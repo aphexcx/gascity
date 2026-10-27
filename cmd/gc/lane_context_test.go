@@ -136,3 +136,36 @@ func TestLaneContextHonorsRuntimeOverride(t *testing.T) {
 		}
 	}
 }
+
+func TestLaneContextRejectsSymlinkedScopeRoots(t *testing.T) {
+	for _, scope := range []string{"city", "rig"} {
+		t.Run(scope, func(t *testing.T) {
+			root := t.TempDir()
+			alias := filepath.Join(t.TempDir(), "scope-link")
+			if err := os.Symlink(root, alias); err != nil {
+				t.Fatal(err)
+			}
+			for _, paths := range [][2]string{{root, alias}, {alias, root}} {
+				city, rig := t.TempDir(), t.TempDir()
+				if scope == "city" {
+					city = paths[0]
+				} else {
+					rig = paths[0]
+				}
+				a := &config.Agent{WorkDir: paths[1], PreStart: []string{"true"}}
+				if hasLaneContext(a, "tmux", city, rig, paths[1]) {
+					t.Errorf("physical %s root advertised as a lane: scope=%s workDir=%s", scope, paths[0], paths[1])
+				}
+				ctx := PromptContext{CityRoot: city, RigRoot: rig, WorkDir: paths[1]}
+				if got := primeLaneContextSuffix(a, &config.City{}, ctx); got != "" {
+					t.Errorf("prime advertises artifacts in a physical scope root: %s", got)
+				}
+			}
+			lane := filepath.Join(alias, "new-lane")
+			a := &config.Agent{WorkDir: lane, PreStart: []string{"true"}}
+			if !hasLaneContext(a, "tmux", t.TempDir(), root, lane) {
+				t.Fatal("a new directory below a symlinked parent should remain eligible")
+			}
+		})
+	}
+}

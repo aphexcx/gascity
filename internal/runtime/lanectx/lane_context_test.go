@@ -11,10 +11,17 @@ func TestLaneDiagnosticIsBoundedAndAppendOnly(t *testing.T) {
 	lane := t.TempDir()
 	env := map[string]string{"GC_DIR": lane, "GC_PRESTART_LOG": filepath.Join(lane, ".gc", "pre-start.log")}
 	chunk := strings.Repeat("x", 32*1024)
+	pending := &PreStartDiagnostics{}
 	for i := 0; i < 150; i++ {
-		if err := AppendPreStartDiagnostic(env, chunk, nil); err != nil {
+		pending.Capture(env, chunk, nil)
+		diagnostic := &PreStartDiagnostics{}
+		diagnostic.Capture(env, chunk, nil)
+		if err := diagnostic.Flush(env, true); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if len(pending.output) > laneDiagnosticLimit || !strings.Contains(pending.output, "capacity reached") {
+		t.Fatalf("in-memory capture exceeded its marked cap: length=%d", len(pending.output))
 	}
 	before, err := os.ReadFile(env["GC_PRESTART_LOG"])
 	if err != nil {
@@ -23,7 +30,9 @@ func TestLaneDiagnosticIsBoundedAndAppendOnly(t *testing.T) {
 	if len(before) > 1024*1024 || !strings.Contains(string(before), "capacity reached") {
 		t.Fatalf("diagnostic must stop at a marked 1 MiB cap; length=%d", len(before))
 	}
-	if err := AppendPreStartDiagnostic(env, "after cap", nil); err != nil {
+	diagnostic := &PreStartDiagnostics{}
+	diagnostic.Capture(env, "after cap", nil)
+	if err := diagnostic.Flush(env, true); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(env["GC_PRESTART_LOG"])
@@ -55,8 +64,12 @@ func TestLaneArtifactsRejectEscapingSymlinks(t *testing.T) {
 				if err := WriteLaneEnvironment(env); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := AppendPreStartDiagnostic(env, "outside write", nil); err == nil {
-				t.Fatal("escaping diagnostic path was accepted")
+			} else {
+				diagnostic := &PreStartDiagnostics{}
+				diagnostic.Capture(env, "outside write", nil)
+				if err := diagnostic.Flush(env, true); err == nil {
+					t.Fatal("escaping diagnostic path was accepted")
+				}
 			}
 			if leaf != ".gc" {
 				got, err := os.ReadFile(outside)

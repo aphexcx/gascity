@@ -159,6 +159,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/acp",
         "//internal/runtime/auto",
+        "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimetest",
         "//internal/session",
