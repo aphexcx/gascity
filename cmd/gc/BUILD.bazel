@@ -1594,6 +1594,7 @@ go_test(
         "//internal/runtime/auto",
         "//internal/runtime/herdr",
         "//internal/runtime/herdr/herdrtest",
+        "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimecontract",
         "//internal/runtime/tmux",

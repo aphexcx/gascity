@@ -1,8 +1,10 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime/lanectx"
@@ -10,12 +12,20 @@ import (
 )
 
 func hasLaneContext(a *config.Agent, sessionProvider, cityRoot, rigRoot, workDir string) bool {
+	return laneContextConfigured(a, sessionProvider) && isLaneWorkDir(cityRoot, rigRoot, workDir)
+}
+
+func laneContextConfigured(a *config.Agent, sessionProvider string) bool {
 	switch effectiveSessionProvider(a.Session, sessionProvider) {
 	case "", "tmux", "herdr":
 	default:
 		return false
 	}
-	if a.WorkDir == "" || len(a.PreStart) == 0 || !filepath.IsAbs(workDir) {
+	return a.WorkDir != "" && len(a.PreStart) > 0
+}
+
+func isLaneWorkDir(cityRoot, rigRoot, workDir string) bool {
+	if !filepath.IsAbs(workDir) {
 		return false
 	}
 	laneInfo, laneErr := os.Stat(workDir)
@@ -38,6 +48,25 @@ func hasLaneContext(a *config.Agent, sessionProvider, cityRoot, rigRoot, workDir
 		}
 	}
 	return true
+}
+
+// resolveTemplateLaneContext derives artifacts and their appendix together. A
+// prepared launch calls it again after applying task/session directory overrides.
+func resolveTemplateLaneContext(tp TemplateParams) TemplateParams {
+	includePrompt := tp.Prompt != ""
+	tp.Prompt = strings.TrimSuffix(tp.Prompt, tp.laneContextSuffix)
+	tp.laneContextSuffix = ""
+	tp.Env = maps.Clone(tp.Env)
+	tp.Env["GC_DIR"] = tp.WorkDir
+	tp.Env["GC_PRESTART_LOG"] = ""
+	if tp.laneContextConfigured && isLaneWorkDir(tp.Env["GC_CITY_PATH"], tp.RigRoot, tp.WorkDir) {
+		tp.Env["GC_PRESTART_LOG"] = lanectx.LanePreStartLogPath(tp.WorkDir)
+		if includePrompt {
+			tp.laneContextSuffix = "\n\n" + laneContextPrompt(tp.Env, lanectx.LaneEnvironmentPath(tp.WorkDir))
+			tp.Prompt += tp.laneContextSuffix
+		}
+	}
+	return tp
 }
 
 func laneContextPrompt(env map[string]string, environmentFile string) string {

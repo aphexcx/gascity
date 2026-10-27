@@ -32,7 +32,6 @@ import (
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -77,6 +76,10 @@ type TemplateParams struct {
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
+	// Lane context is re-derived when preparation overrides WorkDir. Retain the
+	// generated suffix separately so user-authored prompt text is never rewritten.
+	laneContextConfigured bool
+	laneContextSuffix     string
 	// SessionName is the computed tmux session name.
 	SessionName string
 	// Alias is the human-readable session identifier used for commands and mail.
@@ -487,13 +490,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
-	env["GC_PRESTART_LOG"] = ""
-	if hasLaneContext(cfgAgent, p.sessionProvider, p.cityPath, rigRoot, workDir) {
-		env["GC_PRESTART_LOG"] = lanectx.LanePreStartLogPath(workDir)
-		if !suppressStartupPrompt {
-			prompt += "\n\n" + laneContextPrompt(env, lanectx.LaneEnvironmentPath(workDir))
-		}
-	}
 	// Workspace bindings belong to this launch, never to the parent process.
 	// resolveTemplateForSessionBeadInfo fills this after resolving its trigger.
 	env["GC_WORKTREE_BEAD_ID"] = ""
@@ -777,11 +773,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		MCPServers:       mcpServers,
 	}
 	params.SessionOverride = cfgAgent.Session
+	params.laneContextConfigured = laneContextConfigured(cfgAgent, p.sessionProvider)
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}
-	return params, nil
+	return resolveTemplateLaneContext(params), nil
 }
 
 // isOperationalScript reports whether rel (a slash-separated path relative to

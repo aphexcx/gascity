@@ -8,9 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime/lanectx"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestResolveTemplateLanePaths(t *testing.T) {
@@ -48,6 +52,91 @@ func TestResolveTemplateLanePaths(t *testing.T) {
 	}
 	if !strings.Contains(tp.Prompt, filepath.Join(lane, ".gc", "worker-env.sh")) {
 		t.Errorf("prompt does not locate the sourceable lane environment: %s", tp.Prompt)
+	}
+}
+
+func TestPreparedStartLanePathsFollowWorkDirOverride(t *testing.T) {
+	for _, tc := range []struct{ source, mode, runtime string }{
+		{"task", "none", "tmux"},
+		{"session", "arg", "herdr"},
+		{"task", "flag", "tmux"},
+	} {
+		t.Run(tc.source+"-"+tc.mode, func(t *testing.T) {
+			city, rig, configured, overridden := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+			writeTemplateResolveCityConfig(t, city, "file")
+			params := &agentBuildParams{
+				cityName: "city", cityPath: city,
+				workspace: &config.Workspace{Provider: "test"},
+				providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: tc.mode, PromptFlag: "--prompt"}},
+				lookPath:  func(string) (string, error) { return "/bin/echo", nil },
+				fs:        fsys.OSFS{}, rigs: []config.Rig{{Name: "repo", Path: rig}},
+				beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
+				sessionProvider: tc.runtime,
+			}
+			a := &config.Agent{Name: "worker", Dir: "repo", WorkDir: configured, PreStart: []string{"true"}}
+			tp, err := resolveTemplate(params, a, a.QualifiedName(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NewMemStore()
+			meta := map[string]string{"session_name": "worker", "template": "repo/worker", "state": "asleep"}
+			if tc.source == "session" {
+				meta["work_dir"] = overridden
+			}
+			sess, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.source == "task" {
+				task, err := store.Create(beads.Bead{Type: "task", Assignee: sess.ID, Metadata: map[string]string{"work_dir": overridden}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := "in_progress"
+				if err := store.Update(task.ID, beads.UpdateOpts{Status: &status}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			prepared, _, err := buildPreparedStartWithWorkDirResolver(startCandidate{info: sessiontest.SeedBead(t, sess), tp: tp}, city, &config.City{}, store, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.cfg.WorkDir != overridden || prepared.cfg.Env["GC_DIR"] != overridden {
+				t.Fatalf("launch directory = %q, GC_DIR = %q, want %q", prepared.cfg.WorkDir, prepared.cfg.Env["GC_DIR"], overridden)
+			}
+			if got, want := prepared.cfg.Env["GC_PRESTART_LOG"], lanectx.LanePreStartLogPath(overridden); got != want {
+				t.Errorf("GC_PRESTART_LOG = %q, want final lane %q", got, want)
+			}
+			if err := lanectx.WriteLaneEnvironment(prepared.cfg.Env); err != nil {
+				t.Fatalf("materializing launch artifacts: %v", err)
+			}
+			var diagnostics lanectx.PreStartDiagnostics
+			if err := diagnostics.Flush(prepared.cfg.Env, true); err != nil {
+				t.Fatalf("flushing launch diagnostics: %v", err)
+			}
+			prompt := prepared.cfg.Nudge
+			if tc.mode != "none" {
+				parts := shellquote.Split(prepared.cfg.PromptSuffix)
+				if len(parts) != 1 {
+					t.Fatalf("prompt arguments = %v, want one", parts)
+				}
+				prompt = parts[0]
+			}
+			for _, want := range []string{overridden, lanectx.LaneEnvironmentPath(overridden), lanectx.LanePreStartLogPath(overridden)} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("startup prompt lacks final path %q: %s", want, prompt)
+				}
+			}
+			if strings.Contains(prompt, configured) {
+				t.Errorf("startup prompt still names configured lane: %s", prompt)
+			}
+			if _, err := os.Stat(lanectx.LaneEnvironmentPath(overridden)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(lanectx.LaneEnvironmentPath(configured)); !os.IsNotExist(err) {
+				t.Fatalf("configured lane should have no artifact, stat error = %v", err)
+			}
+		})
 	}
 }
 

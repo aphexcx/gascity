@@ -167,8 +167,9 @@ schema = 2
 	}
 
 	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_ALIAS", "")
-	t.Setenv("GC_AGENT", "")
+	for key, value := range map[string]string{"GC_ALIAS": "", "GC_AGENT": ""} {
+		t.Setenv(key, value)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"ada"}, &stdout, &stderr)
@@ -177,6 +178,45 @@ schema = 2
 	}
 	if got := stdout.String(); got != "Agent: ada\n" {
 		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	}
+}
+
+func TestDoPrimeLaneContextWithoutLaunchEnvironment(t *testing.T) {
+	city := t.TempDir()
+	content := `[workspace]
+name = "city"
+provider = "test"
+[beads]
+provider = "file"
+[providers.test]
+command = "echo"
+prompt_mode = "none"
+[[agent]]
+name = "worker"
+work_dir = ".worktrees/{{.AgentBase}}"
+pre_start = ["true"]
+`
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"GC_CITY": city, "GC_DIR": "", "GC_RIG": "", "GC_RIG_ROOT": "",
+		"GC_ALIAS": "worker-one", "GC_AGENT": "", "GC_SESSION_ID": "",
+	} {
+		t.Setenv(key, value)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true); code != 0 {
+		t.Fatalf("gc prime = %d: %s", code, stderr.String())
+	}
+	wantDir := filepath.Join(city, ".worktrees", "worker-one")
+	for _, want := range []string{"## Session workspace paths", "GC_DIR=", wantDir, "GC_CITY_PATH=", city} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("gc prime without GC_DIR omitted %q: %s", want, stdout.String())
+		}
+	}
+	if _, err := os.Stat(wantDir); !os.IsNotExist(err) {
+		t.Fatalf("prime must not create the configured lane: %v", err)
 	}
 }
 

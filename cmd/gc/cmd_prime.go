@@ -989,6 +989,15 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 	// Working directory.
 	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
 		ctx.WorkDir = gcDir
+	} else if a.WorkDir != "" {
+		workDir, err := resolveConfiguredWorkDirPath(cityPath, cityName, ctx.AgentName, a, rigs)
+		if err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "gc prime: resolving work_dir for %q: %v\n", ctx.AgentName, err) //nolint:errcheck
+			}
+		} else {
+			ctx.WorkDir = workDir
+		}
 	}
 
 	// Rig context.
