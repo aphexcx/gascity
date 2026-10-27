@@ -96,6 +96,7 @@ go_test(
     deps = [
         "//internal/citylayout",
         "//internal/runtime",
+        "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
         "//internal/shellquote",
         "//internal/testenv",

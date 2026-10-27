@@ -42,7 +42,7 @@ func WriteLaneEnvironment(env map[string]string) error {
 	if env["GC_PRESTART_LOG"] == "" {
 		return nil
 	}
-	root, err := openLaneArtifactRoot(env)
+	root, err := openLaneArtifactRoot(env, true)
 	if err != nil {
 		return err
 	}
@@ -63,20 +63,56 @@ func WriteLaneEnvironment(env map[string]string) error {
 	return nil
 }
 
-// AppendPreStartDiagnostic retains a redacted 8 KiB output tail per command.
-// The lane log stops at 1 MiB with a capacity marker; existing bytes are never
-// removed or replaced. Failures to retain diagnostics are returned to the caller.
-func AppendPreStartDiagnostic(env map[string]string, output string, commandErr error) (result error) {
+// PreStartDiagnostics buffers redacted command output until preparation ends.
+// It never creates files while a later command may still need an empty lane.
+type PreStartDiagnostics struct {
+	output string
+}
+
+// Capture retains an 8 KiB output tail per command, bounded to 1 MiB in total.
+func (d *PreStartDiagnostics) Capture(env map[string]string, output string, commandErr error) {
+	if env["GC_PRESTART_LOG"] == "" || len(d.output) >= laneDiagnosticLimit {
+		return
+	}
+	status := "completed"
+	if commandErr != nil {
+		status = commandErr.Error()
+	}
+	secrets := runtime.SetupCommandSecrets(env)
+	status, _ = runtime.RedactSecretsTail(status, 1024, secrets)
+	tail, truncated := runtime.RedactSecretsTail(output, 8*1024, secrets)
+	entry := fmt.Sprintf("\n%s session=%s %s\n", time.Now().UTC().Format(time.RFC3339), env["GC_SESSION_ID"], status)
+	if truncated {
+		entry += "[output tail truncated]\n"
+	}
+	d.output += boundedDiagnostic(entry+tail+"\n", int64(laneDiagnosticLimit-len(d.output)))
+}
+
+// Flush appends captured diagnostics without replacing existing bytes. Create
+// must be true only after all pre-start commands succeed. Failed preparation
+// appends to an existing log, but leaves a fresh destination untouched so a
+// retry can prepare it; the setup error already carries the failure's output.
+func (d *PreStartDiagnostics) Flush(env map[string]string, create bool) (result error) {
 	if env["GC_PRESTART_LOG"] == "" {
 		return nil
 	}
-	root, err := openLaneArtifactRoot(env)
+	root, err := openLaneArtifactRoot(env, create)
 	if err != nil {
+		if !create && os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	defer root.Close() //nolint:errcheck // directory handle
-	f, err := root.OpenFile(".gc/pre-start.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	flags := os.O_WRONLY | os.O_APPEND
+	if create {
+		flags |= os.O_CREATE
+	}
+	f, err := root.OpenFile(".gc/pre-start.log", flags, 0o600)
 	if err != nil {
+		if !create && os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("opening pre-start diagnostic: %w", err)
 	}
 	defer func() {
@@ -92,18 +128,13 @@ func AppendPreStartDiagnostic(env map[string]string, output string, commandErr e
 	if remaining <= 0 {
 		return nil
 	}
-	status := "completed"
-	if commandErr != nil {
-		status = commandErr.Error()
+	if _, err := f.WriteString(boundedDiagnostic(d.output, remaining)); err != nil {
+		return fmt.Errorf("appending pre-start diagnostic: %w", err)
 	}
-	secrets := runtime.SetupCommandSecrets(env)
-	status, _ = runtime.RedactSecretsTail(status, 1024, secrets)
-	tail, truncated := runtime.RedactSecretsTail(output, 8*1024, secrets)
-	entry := fmt.Sprintf("\n%s session=%s %s\n", time.Now().UTC().Format(time.RFC3339), env["GC_SESSION_ID"], status)
-	if truncated {
-		entry += "[output tail truncated]\n"
-	}
-	entry += tail + "\n"
+	return nil
+}
+
+func boundedDiagnostic(entry string, remaining int64) string {
 	const marker = "\n[pre_start log capacity reached; no further output retained]\n"
 	if int64(len(entry)+len(marker)) >= remaining {
 		// Reserve the marker on the final append, without truncating old data.
@@ -113,13 +144,10 @@ func AppendPreStartDiagnostic(env map[string]string, output string, commandErr e
 			entry = marker[:remaining]
 		}
 	}
-	if _, err := f.WriteString(entry); err != nil {
-		return fmt.Errorf("appending pre-start diagnostic: %w", err)
-	}
-	return nil
+	return entry
 }
 
-func openLaneArtifactRoot(env map[string]string) (*os.Root, error) {
+func openLaneArtifactRoot(env map[string]string, create bool) (*os.Root, error) {
 	workDir := env["GC_DIR"]
 	if !filepath.IsAbs(workDir) || env["GC_PRESTART_LOG"] != LanePreStartLogPath(workDir) {
 		return nil, fmt.Errorf("lane artifacts require GC_DIR and its resolved GC_PRESTART_LOG")
@@ -144,9 +172,11 @@ func openLaneArtifactRoot(env map[string]string) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lane directory: %w", err)
 	}
-	if err := root.Mkdir(".gc", 0o700); err != nil && !os.IsExist(err) {
-		_ = root.Close()
-		return nil, fmt.Errorf("creating lane artifact directory: %w", err)
+	if create {
+		if err := root.Mkdir(".gc", 0o700); err != nil && !os.IsExist(err) {
+			_ = root.Close()
+			return nil, fmt.Errorf("creating lane artifact directory: %w", err)
+		}
 	}
 	return root, nil
 }

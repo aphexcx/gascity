@@ -452,10 +452,14 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 	if len(cfg.PreStart) == 0 {
 		return nil
 	}
+	diagnostics := &lanectx.PreStartDiagnostics{}
 	for i, cmd := range cfg.PreStart {
-		if err := p.runSetupCommand(ctx, cmd, cfg.Env, true); err != nil {
-			return fmt.Errorf("pre_start[%d]: %w", i, err)
+		if err := p.runSetupCommand(ctx, cmd, cfg.Env, diagnostics); err != nil {
+			return errors.Join(fmt.Errorf("pre_start[%d]: %w", i, err), diagnostics.Flush(cfg.Env, false))
 		}
+	}
+	if err := diagnostics.Flush(cfg.Env, true); err != nil {
+		return err
 	}
 	return lanectx.WriteLaneEnvironment(cfg.Env)
 }
@@ -464,7 +468,7 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 // mirroring tmux's tmuxStartOps.runSetupCommand: `sh -c <cmd>`, cwd from GC_DIR
 // (the workDir a pre_start may itself be creating — so it is intentionally read
 // from env rather than cfg.WorkDir), process env plus cfg.Env.
-func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string, capturePreStart ...bool) (result error) {
+func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string, capturePreStart ...*lanectx.PreStartDiagnostics) (result error) {
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
@@ -507,9 +511,9 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w
-	if len(capturePreStart) > 0 && capturePreStart[0] {
+	if len(capturePreStart) > 0 {
 		defer func() {
-			result = errors.Join(result, lanectx.AppendPreStartDiagnostic(env, out.String(), result))
+			capturePreStart[0].Capture(env, out.String(), result)
 		}()
 	}
 	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts

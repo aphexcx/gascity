@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -224,7 +225,7 @@ func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
 	return f.recordUnconfirmedNudgePath
 }
 
-func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration, _ ...bool) error {
+func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration, _ ...*lanectx.PreStartDiagnostics) error {
 	f.calls = append(f.calls, startCall{
 		method:  "runSetupCommand",
 		command: cmd,

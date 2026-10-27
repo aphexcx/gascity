@@ -15,9 +15,29 @@ func hasLaneContext(a *config.Agent, sessionProvider, cityRoot, rigRoot, workDir
 	default:
 		return false
 	}
-	return a.WorkDir != "" && len(a.PreStart) > 0 &&
-		filepath.IsAbs(workDir) && filepath.Clean(workDir) != filepath.Clean(cityRoot) &&
-		(rigRoot == "" || filepath.Clean(workDir) != filepath.Clean(rigRoot))
+	if a.WorkDir == "" || len(a.PreStart) == 0 || !filepath.IsAbs(workDir) {
+		return false
+	}
+	laneInfo, laneErr := os.Stat(workDir)
+	if laneErr != nil && !os.IsNotExist(laneErr) {
+		return false
+	}
+	for _, scope := range []string{cityRoot, rigRoot} {
+		if scope == "" {
+			continue
+		}
+		if filepath.Clean(workDir) == filepath.Clean(scope) {
+			return false
+		}
+		scopeInfo, scopeErr := os.Stat(scope)
+		if scopeErr != nil && !os.IsNotExist(scopeErr) {
+			return false
+		}
+		if laneErr == nil && scopeErr == nil && os.SameFile(laneInfo, scopeInfo) {
+			return false
+		}
+	}
+	return true
 }
 
 func laneContextPrompt(env map[string]string, environmentFile string) string {

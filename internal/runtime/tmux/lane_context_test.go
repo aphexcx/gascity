@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,36 @@ import (
 )
 
 func TestPreStartMaterializesLaneContextAndDiagnostic(t *testing.T) {
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("worktree_preparation_after_failure_%t", failFirst), func(t *testing.T) {
+			lane, repo := t.TempDir(), t.TempDir()
+			logPath := filepath.Join(lane, ".gc", "pre-start.log")
+			cfg := runtime.Config{Env: map[string]string{
+				"GC_DIR": lane, "GC_RIG_ROOT": repo, "GC_PRESTART_LOG": logPath,
+			}}
+			ops := &tmuxStartOps{tm: &Tmux{}}
+			if failFirst {
+				cfg.PreStart = []string{"printf prerequisite", "echo failed-prepare >&2; exit 3"}
+				if err := runPreStart(context.Background(), ops, "session-1", cfg, 10*time.Second); err == nil || !strings.Contains(err.Error(), "failed-prepare") {
+					t.Fatalf("preparation failure lost its output: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(lane, ".gc")); !os.IsNotExist(err) {
+					t.Fatalf("failed preparation polluted the empty worktree destination: %v", err)
+				}
+			}
+			cfg.PreStart = []string{
+				`git init -q "$GC_RIG_ROOT" && git -C "$GC_RIG_ROOT" -c user.name=Test -c user.email=test@example.invalid commit --allow-empty -qm initial && printf prerequisite`,
+				`git -C "$GC_RIG_ROOT" worktree add --detach "$GC_DIR" && printf prepared-worktree`,
+			}
+			if err := runPreStart(context.Background(), ops, "session-1", cfg, 10*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(logPath)
+			if err != nil || !strings.Contains(string(got), "prerequisite") || !strings.Contains(string(got), "prepared-worktree") {
+				t.Fatalf("completed worktree preparation lost diagnostic output: %q, %v", got, err)
+			}
+		})
+	}
 	lane := t.TempDir()
 	logPath := filepath.Join(lane, ".gc", "pre-start.log")
 	env := map[string]string{

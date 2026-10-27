@@ -924,7 +924,7 @@ type startOps interface {
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
-	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...bool) error
+	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...*lanectx.PreStartDiagnostics) error
 }
 
 // tmuxStartOps adapts [*Tmux] to the [startOps] interface. runtimeDir is the
@@ -1229,7 +1229,7 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 	return nil
 }
 
-func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...bool) (result error) {
+func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration, capturePreStart ...*lanectx.PreStartDiagnostics) (result error) {
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget
 	// is activity-aware instead — timeout bounds output SILENCE and
@@ -1265,11 +1265,11 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
-	if len(capturePreStart) > 0 && capturePreStart[0] {
+	if len(capturePreStart) > 0 {
 		defer func() {
 			secrets := runtime.SetupCommandSecrets(env)
 			output := stdout.Detail("stdout", secrets) + "\n" + stderr.Detail("stderr", secrets)
-			result = errors.Join(result, lanectx.AppendPreStartDiagnostic(env, output, result))
+			capturePreStart[0].Capture(env, output, result)
 		}()
 	}
 	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
@@ -1861,10 +1861,14 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 	for k, v := range cfg.Env {
 		setupEnv[k] = v
 	}
+	diagnostics := &lanectx.PreStartDiagnostics{}
 	for i, cmd := range cfg.PreStart {
-		if err := ops.runSetupCommand(ctx, cmd, setupEnv, setupTimeout, true); err != nil {
-			return fmt.Errorf("pre_start[%d]: %w", i, err)
+		if err := ops.runSetupCommand(ctx, cmd, setupEnv, setupTimeout, diagnostics); err != nil {
+			return errors.Join(fmt.Errorf("pre_start[%d]: %w", i, err), diagnostics.Flush(cfg.Env, false))
 		}
+	}
+	if err := diagnostics.Flush(cfg.Env, true); err != nil {
+		return err
 	}
 	return lanectx.WriteLaneEnvironment(cfg.Env)
 }
