@@ -30,6 +30,7 @@ header_dirs() {
       esac
     fi
     if [ -f "$include/unicode/regex.h" ]; then
+      include=$(CDPATH= cd -P -- "$include" && pwd -P) || exit 1
       printf "%s\n" "$include"
     fi
   done

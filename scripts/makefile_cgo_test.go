@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,7 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		cgoInclude string
 		cgoVars    []string
 		realICU    bool
+		aliasICU   bool
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -103,6 +105,8 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "CXX-only include cannot supply C headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CXXFLAGS"}},
 		{name: "C-only include cannot supply CXX headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS"}},
 		{name: "paired C and CXX includes", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS", "CGO_CXXFLAGS"}, withoutICU: []string{"print-cgo-env"}},
+		{name: "paired includes with trailing slash", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS"}, goEnv: "CGO_CXXFLAGS=-I{root}/manual/include/\n", withoutICU: []string{"print-cgo-env"}},
+		{name: "paired includes with symlink alias", installed: []string{"manual"}, aliasICU: true, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS"}, goEnv: "CGO_CXXFLAGS=-I{root}/manual-alias/include\n", withoutICU: []string{"print-cgo-env"}},
 		{name: "persisted CPP include", installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/manual/include\nCGO_LDFLAGS=-L{root}/manual/lib\n", withoutICU: []string{"print-cgo-env"}},
 		{name: "persisted stale CPP include", goEnv: "CGO_CPPFLAGS=-I{root}/absent/include\n"},
 		{name: "exported CPP wins over persisted stale include", installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/absent/include\n", cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
@@ -129,11 +133,15 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 				probe := testCommand("sh", filepath.Join(repoRoot(t), "scripts/lib/icu-prefix.sh"))
 				out, err := probe.CombinedOutput()
 				if err != nil {
+					exitErr := &exec.ExitError{}
+					if errors.As(err, &exitErr) {
+						t.Skip("real Darwin ICU build requires installed ICU")
+					}
 					t.Fatalf("discover installed ICU for real build: %v\n%s", err, out)
 				}
 				realPrefix = strings.TrimSpace(string(out))
 				if realPrefix == "" {
-					t.Skip("real Darwin ICU build requires installed ICU")
+					t.Fatal("ICU discovery succeeded without an installed prefix")
 				}
 			}
 			tmp := t.TempDir()
@@ -157,6 +165,11 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 				}
 			}
 			writeExecutable(t, filepath.Join(binDir, "uname"), "#!/bin/sh\necho Darwin\n")
+			if tc.aliasICU {
+				if err := os.Symlink(filepath.Join(tmp, "manual"), filepath.Join(tmp, "manual-alias")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			writeExecutable(t, filepath.Join(binDir, "brew"), `#!/bin/sh
 root=$(dirname "$(dirname "$0")")
 case "$*" in
@@ -245,6 +258,25 @@ esac
 			assertContains(t, string(out), "ICU_PREFIX="+prefix)
 			assertContains(t, string(out), "ICU_PREFIX_SOURCE=")
 		})
+	}
+}
+
+func TestMakefileDarwinICURealBuildSkipsUnavailable(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("real Darwin ICU discovery requires macOS")
+	}
+	binDir := t.TempDir()
+	for _, name := range []string{"brew", "pkg-config"} {
+		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nexit 1\n")
+	}
+	cmd := testCommand(os.Args[0], "-test.run=^TestMakefileDarwinICUPrefix$/real", "-test.v")
+	cmd.Env = replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unavailable optional ICU should skip real builds: %v\n%s", err, out)
+	}
+	if count := strings.Count(string(out), "--- SKIP: TestMakefileDarwinICUPrefix/"); count != 5 {
+		t.Fatalf("expected all five real-build cases to skip, got %d:\n%s", count, out)
 	}
 }
 
