@@ -59,6 +59,12 @@ func signalRuntimeWith(target int, sig syscall.Signal, snapshot func() ([]Proces
 			if record.PGID != -target {
 				continue
 			}
+			// A zombie cannot execute and its argv is unreadable on Darwin.
+			// Only a positively identified zombie bypasses inspection; an
+			// unknown state or an unreadable live member still refuses the wave.
+			if record.Zombie {
+				continue
+			}
 			args, err := argv(record.PID)
 			if err != nil || IsCityInfrastructureArgv(args) {
 				return fmt.Errorf("%w: group %d member PID %d", errUnsafeRuntimeGroup, -target, record.PID)

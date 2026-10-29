@@ -76,6 +76,24 @@ func TestDarwinKinfoMissingErrorsRequireGoneProbe(t *testing.T) {
 	}
 }
 
+func TestDarwinProcessRecordZombieState(t *testing.T) {
+	// sys/proc.h: SIDL=1, SRUN=2, SSLEEP=3, SSTOP=4, SZOMB=5.
+	// Unknown, sleeping and stopped processes must still be inspected.
+	for state := int8(0); state <= 5; state++ {
+		process := unix.KinfoProc{
+			Proc: unix.ExternProc{
+				P_pid:       42,
+				P_stat:      state,
+				P_starttime: unix.Timeval{Sec: 123},
+			},
+		}
+		record, ok := darwinProcessRecord(process)
+		if !ok || record.Zombie != (state == 5) {
+			t.Errorf("state %d: record=%+v ok=%t, want zombie=%t", state, record, ok, state == 5)
+		}
+	}
+}
+
 func TestSnapshotProcessIdentityMatchesCurrentReader(t *testing.T) {
 	self := os.Getpid()
 	records, err := SnapshotProcesses()
