@@ -77,8 +77,9 @@ func resolvedStartProvider(b beads.Bead, cfg runtime.Config) string {
 // clearIncompatibleACPMetadata runs under the session operation lock before a
 // start. Provider resolution is required even when persisted transport remains
 // ACP. The persisted clear makes a config-change migration idempotent and records
-// it through the normal bead history, including when startup fails.
-func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, command *string, cfg *runtime.Config) error {
+// it through the normal bead history, including when startup fails. refreshLaunch
+// replaces cached inputs; explicitly prepared startup inputs retain their setup.
+func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, command *string, cfg *runtime.Config, refreshLaunch bool) error {
 	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) || m.sp.IsRunning(name) {
 		return nil
 	}
@@ -109,7 +110,7 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 	for key, value := range patch {
 		b.Metadata[key] = value
 	}
-	if m.resumeConfigResolver != nil {
+	if m.resumeConfigResolver != nil && refreshLaunch {
 		*command = BuildResumeCommand(infoFromPersistedBead(*b))
 		*cfg = resolvedHints
 	}
