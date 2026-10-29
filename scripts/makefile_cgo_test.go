@@ -72,6 +72,7 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		explicit   string
 		want       string
 		withoutICU []string
+		goEnv      string
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -83,6 +84,8 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "command line wins", installed: []string{"icu4c@78"}, explicit: "command line", want: "custom"},
 		{name: "help without ICU", withoutICU: []string{"help"}},
 		{name: "CGO disabled without ICU", withoutICU: []string{"print-cgo-env", "CGO_ENABLED=0"}},
+		{name: "cross compilation without ICU", withoutICU: []string{"print-cgo-env", "GOOS=js", "GOARCH=wasm"}},
+		{name: "persisted CGO setting without ICU", withoutICU: []string{"print-cgo-env"}, goEnv: "CGO_ENABLED=0\n"},
 		{name: "native DoltLite without ICU", withoutICU: []string{"-n", "test-native-doltlite-beads"}},
 		{name: "pack registry without ICU", withoutICU: []string{"-n", "test-pack-registry-live"}},
 		{name: "docs without ICU", withoutICU: []string{"-n", "docs-dev"}},
@@ -129,6 +132,13 @@ esac
 			cmd.Dir = repoRoot(t)
 			env := replaceScriptEnv(filteredMakefileCGOTestEnv(), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = replaceScriptEnv(env, "TEST_ICU_PKG_PREFIX", filepath.Join(tmp, tc.pkgConfig))
+			if tc.goEnv != "" {
+				goEnvFile := filepath.Join(tmp, "goenv")
+				if err := os.WriteFile(goEnvFile, []byte(tc.goEnv), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				env = replaceScriptEnv(env, "GOENV", goEnvFile)
+			}
 			// An inherited prefix must not bypass the automatic resolver cases.
 			for i := len(env) - 1; i >= 0; i-- {
 				if strings.HasPrefix(env[i], "ICU_PREFIX=") {

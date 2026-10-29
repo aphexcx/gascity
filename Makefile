@@ -162,15 +162,16 @@ print-cgo-env:
 		fi; \
 	done'
 
-# Validate at build execution time: docs, help, and explicitly non-CGO test
-# targets must remain usable on hosts without ICU.
+# Validate at build execution time: docs, help, and non-CGO targets must remain
+# usable without ICU. Ask Go for CGO mode so cross-compilation defaults apply.
 .PHONY: check-icu
 build print-cgo-env lint-full lint-new lint-changed lint-affected vet test test-pkg test-fast-parallel: | check-icu
 check-icu:
-ifneq ($(CGO_ENABLED),0)
 ifneq ($(ICU_DISCOVERY_ERROR),)
-	@printf '%s\n' '$(ICU_DISCOVERY_ERROR)' >&2; exit 1
-endif
+	@cgo_enabled="$$(go env CGO_ENABLED)" || exit $$?; \
+	if [ "$$cgo_enabled" != 0 ]; then \
+		printf '%s\n' '$(ICU_DISCOVERY_ERROR)' >&2; exit 1; \
+	fi
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
