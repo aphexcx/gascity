@@ -834,6 +834,58 @@ func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 	}
 }
 
+func TestWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
+	cityDir := t.TempDir()
+	missingCommand := filepath.Join(cityDir, "unavailable-terminal")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "replacement", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{
+			"replacement": {Command: missingCommand},
+			"previous":    {Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
+		},
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
+		"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": cityDir,
+		"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag",
+		session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, acp := runtime.NewFake(), runtime.NewFake()
+	sp := sessionauto.New(terminal, acp)
+	sp.RouteACP("legacy-session")
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+	if err == nil {
+		err = handle.Start(context.Background())
+	}
+	if err == nil || !strings.Contains(err.Error(), missingCommand) || !strings.Contains(err.Error(), "replacement") {
+		t.Errorf("restart error = %v, want unavailable replacement provider and executable", err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range b.Metadata {
+		if stored.Metadata[key] != value {
+			t.Errorf("refused migration changed %s from %q to %q", key, value, stored.Metadata[key])
+		}
+	}
+	if terminal.LastStartConfig("legacy-session") != nil || acp.LastStartConfig("legacy-session") != nil {
+		t.Fatal("refused migration started a runtime")
+	}
+	// A direct start probes the retained route independently of bead metadata.
+	if err := sp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
+		t.Fatal("refused migration removed the ACP route")
+	}
+}
+
 func TestResolvedWorkerRuntimeTransportUsesStoredACPCommandBeforeConfiguredTmux(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "kimi",
