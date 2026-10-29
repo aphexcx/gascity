@@ -348,6 +348,11 @@ def run_static_checks(
     lint_flags: list[str],
     packages: list[str],
 ) -> int:
+    icu_helper = os.environ.get("GC_ICU_CHECK_HELPER")
+    if icu_helper:
+        result = run_tool(["sh", icu_helper, "--lint", *lint_flags, "--", *packages])
+        if result != 0:
+            return result
     lint_result = run_tool([lint_tool, "run", *lint_flags, *packages])
     if lint_result != 0:
         return lint_result

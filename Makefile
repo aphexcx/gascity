@@ -58,11 +58,23 @@ unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstw
 
 # macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
 # keg-only under Homebrew, so its headers/libs are not on the default CGO
-# search path. Point CGO at them when icu4c is present. This is a no-op on
-# Linux and other platforms (where system ICU, e.g. libicu-dev, is found
-# normally) and a no-op on macOS when icu4c is not installed.
+# search path. Prefer an explicit prefix; otherwise require installed headers,
+# since Homebrew can advertise a newer formula that is not installed. Linux
+# and other platforms keep their existing system ICU discovery.
 ifeq ($(shell uname),Darwin)
-ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+ifeq ($(origin ICU_PREFIX),undefined)
+ICU_PREFIX_HELPER := $(firstword $(wildcard scripts/lib/icu-prefix.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/icu-prefix.sh))
+ICU_DETECTED_PREFIX := $(shell sh "$(ICU_PREFIX_HELPER)")
+ifeq ($(strip $(ICU_DETECTED_PREFIX)),)
+ICU_DISCOVERY_ERROR := ICU headers not found: brew install icu4c or set ICU_PREFIX=/path/to/installed/icu
+ICU_PREFIX_SOURCE := unavailable
+else
+ICU_PREFIX_SOURCE := installed header (Homebrew versions newest first, then pkg-config icu-uc)
+endif
+else
+ICU_PREFIX_SOURCE := explicit $(origin ICU_PREFIX)
+endif
+ICU_PREFIX ?= $(ICU_DETECTED_PREFIX)
 ifneq ($(ICU_PREFIX),)
 CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
@@ -127,24 +139,45 @@ endif
 endif
 endif
 
+# Only missing automatic discovery needs a preflight. Call this in the same
+# environment as the build, with the packages (and test/build flags) it uses.
+ICU_CHECK_HELPER := $(firstword $(wildcard scripts/lib/check-icu.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/check-icu.sh))
+CHECK_ICU = $(if $(ICU_DISCOVERY_ERROR),sh "$(ICU_CHECK_HELPER)",true)
+# Selection-owning runners receive the same helper, without shell evaluation.
+ICU_CHECK_ENV = GC_ICU_CHECK_HELPER="$(if $(ICU_DISCOVERY_ERROR),$(abspath $(ICU_CHECK_HELPER)))"
+
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-pkg test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: print-cgo-env
 
 ## build: compile gc binary with version metadata
 build:
+	@$(CHECK_ICU) ./cmd/gc
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif
 
-## print-cgo-env: print Bash assignments for exported CGO flags without building
+## print-cgo-env: print Bash assignments for ICU selection and CGO flags without building
+ifeq ($(shell uname),Darwin)
+print-cgo-env: export ICU_PREFIX := $(ICU_PREFIX)
+print-cgo-env: export ICU_PREFIX_SOURCE := $(ICU_PREFIX_SOURCE)
+endif
 print-cgo-env:
-	@bash -eu -c 'for cgo_name in CGO_CPPFLAGS CGO_LDFLAGS; do \
+	@bash -eu -c 'for cgo_name in ICU_PREFIX ICU_PREFIX_SOURCE CGO_CPPFLAGS CGO_LDFLAGS; do \
 		if declare -p "$$cgo_name" >/dev/null 2>&1; then \
 			printf "%s=%q\n" "$$cgo_name" "$${!cgo_name}"; \
 		fi; \
 	done'
+
+# Explicit discovery reports missing ICU. Build, vet and serial test recipes
+# check their selected dependencies. Lint checks its selected test/build load;
+# ci-static-select owns affected selection, and test-local-parallel checks the
+# fast suite's package union before starting any shard.
+.PHONY: check-icu
+print-cgo-env: | check-icu
+check-icu:
+	@$(CHECK_ICU)
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
 ## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
@@ -368,11 +401,15 @@ lint: lint-full
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
 	pkgs="$(LINT_PKGS)" || exit $$?; \
+	[ -n "$$pkgs" ] || exit 0; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
 	pkgs="$(LINT_PKGS)" || exit $$?; \
+	[ -n "$$pkgs" ] || exit 0; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files $$pkgs
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
@@ -415,11 +452,12 @@ lint-changed: $(GOLANGCI_LINT)
 		exit 0; \
 	fi; \
 	echo "lint-changed: $$(printf '%s\n' "$$pkgs" | tr '\n' ' ')"; \
+	$(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(ICU_CHECK_ENV) "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
@@ -440,6 +478,7 @@ fmt-staged-go: $(GOLANGCI_LINT)
 ## vet: run go vet
 vet:
 	pkgs="$(PKGS)" || exit $$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) -test $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet $$pkgs
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
@@ -510,6 +549,9 @@ TEST_ENV = env -i \
 	ZCODE_NODE_BIN="$${ZCODE_NODE_BIN-}" \
 	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
+	CGO_CFLAGS="$${CGO_CFLAGS-}" \
+	CGO_CXXFLAGS="$${CGO_CXXFLAGS-}" \
+	CGO_ENABLED="$${CGO_ENABLED-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
 
@@ -532,6 +574,7 @@ test-ci-policy:
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile check-bd-parent-grammar
 	pkgs="$(PKGS)" || exit $$?; \
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 $(CHECK_ICU) -test $$pkgs || exit $$?; \
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $$pkgs
 
 # Compare against the pinned bd module by default; a clone can validate an upgrade.
@@ -551,6 +594,7 @@ RUN ?= .
 ## test-pkg: fast tests for required PKG, optional RUN regexp and COUNT (default: 1)
 test-pkg:
 	@if [ -z '$(strip $(PKG))' ]; then echo 'PKG is required: make test-pkg PKG=./internal/doctor' >&2; exit 1; fi
+	@$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 $(CHECK_ICU) -test $(PKG)
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test-pkg -- -p=4 -count=$(COUNT) -timeout 15m -run '$(subst ','"'"',$(value RUN))' $(PKG)
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
@@ -588,7 +632,7 @@ GO_TEST_TIMEOUT ?=
 
 ## test-fast-parallel: run the default fast suite with core packages and cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) TMPDIR="$${TMPDIR-}" GC_TEST_INNER_P="$${GC_TEST_INNER_P-}" LOCAL_TEST_LOG_DIR="$${LOCAL_TEST_LOG_DIR-}" GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" CORE_SHARD_TOTAL=$(CORE_SHARD_TOTAL) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
+	$(TEST_ENV) $(ICU_CHECK_ENV) TMPDIR="$${TMPDIR-}" GC_TEST_INNER_P="$${GC_TEST_INNER_P-}" LOCAL_TEST_LOG_DIR="$${LOCAL_TEST_LOG_DIR-}" GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" CORE_SHARD_TOTAL=$(CORE_SHARD_TOTAL) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.

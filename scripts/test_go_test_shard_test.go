@@ -367,6 +367,9 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"RUNNER_OS=ignored-control",
 		"SHOULD_NOT_LEAK=ignored-control",
 		"GC_TEST_BD=/test/pinned-bd",
+		"CGO_ENABLED=0",
+		"CGO_CFLAGS=-O1",
+		"CGO_CXXFLAGS=-I/manual/include",
 	)
 	status, output := runShardCommand(t, cmd)
 	if status != 23 {
@@ -390,6 +393,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
+		"CGO_ENABLED": "0", "CGO_CFLAGS": "-O1", "CGO_CXXFLAGS": "-I/manual/include",
 	}
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
 	fixture.assertSeededGitConfig(t, got)

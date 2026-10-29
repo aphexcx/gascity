@@ -185,6 +185,24 @@ func TestGoTestObservableRecordsValidFailureWithoutChangingProductStatus(t *test
 	}
 }
 
+func TestGoTestObservablePrintsBuildFailureDiagnostics(t *testing.T) {
+	t.Parallel()
+	events := strings.Join([]string{
+		`{"Action":"build-output","ImportPath":"example/icu","Output":"fatal error: unicode/regex.h: No such file or directory\n"}`,
+		`{"Action":"build-fail","ImportPath":"example/icu"}`,
+		`{"Action":"output","Package":"example/app","Output":"FAIL example/app [build failed]\n"}`,
+		`{"Action":"fail","Package":"example/app","FailedBuild":"example/icu","Elapsed":0}`,
+	}, "\n") + "\n"
+	// Dependent packages can push the compiler error out of the output tail.
+	events += strings.Repeat(`{"Action":"output","Package":"example/dependent","Output":"package build failed\n"}`+"\n", 300)
+	status, out := runObservableCommand(t, t.TempDir(), "", events, 1)
+	if status != 1 {
+		t.Fatalf("product status = %d, want 1:\n%s", status, out)
+	}
+	assertContains(t, string(out), "fatal error: unicode/regex.h: No such file or directory")
+	assertContains(t, string(out), "package build failed")
+}
+
 func TestGoTestObservableSkipsTimingWhenModuleIdentityIsUnavailable(t *testing.T) {
 	t.Parallel()
 

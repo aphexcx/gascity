@@ -302,6 +302,12 @@ fi
 inner_p="$(gc_inner_parallelism "$local_jobs" "${#jobspecs[@]}")"
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-p=${inner_p}"
 
+# The fast suite covers the union of all module packages (core plus cmd/gc).
+# Check once before fan-out, with the same CGO environment the jobs preserve.
+if [[ ( "$mode" == fast || "$mode" == full ) && -n "${GC_ICU_CHECK_HELPER:-}" ]]; then
+  GC_FAST_UNIT=1 sh "$GC_ICU_CHECK_HELPER" -test ./...
+fi
+
 cleanup_log_dir=1
 if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
   log_dir="$LOCAL_TEST_LOG_DIR"
@@ -430,6 +436,9 @@ run_fan_out() {
     GOTOOLCHAIN="${GOTOOLCHAIN-}" \
     GOENV="${GOENV-}" \
     CGO_CPPFLAGS="${CGO_CPPFLAGS-}" \
+    CGO_CFLAGS="${CGO_CFLAGS-}" \
+    CGO_CXXFLAGS="${CGO_CXXFLAGS-}" \
+    CGO_ENABLED="${CGO_ENABLED-}" \
     CGO_LDFLAGS="${CGO_LDFLAGS-}" \
     GOFLAGS="${GOFLAGS-}" \
     GO111MODULE="${GO111MODULE-}" \

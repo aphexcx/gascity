@@ -109,6 +109,9 @@ run_in_test_env() {
     GOWORK="${GOWORK-}" \
     GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
     CGO_CPPFLAGS="${cgo_cppflags}" \
+    CGO_CFLAGS="${CGO_CFLAGS-}" \
+    CGO_CXXFLAGS="${CGO_CXXFLAGS-}" \
+    CGO_ENABLED="${CGO_ENABLED-}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
     GC_TEST_SHARD_INDEX="${shard_index}" \
     GC_TEST_SHARD_TOTAL="${shard_total}"
