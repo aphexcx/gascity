@@ -599,7 +599,10 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if cfg == nil {
 		return nil, nil
 	}
-	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
+	resolved, configuredTransport, err := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
+	if err != nil {
+		return nil, err
+	}
 	if resolved == nil {
 		return nil, nil
 	}
@@ -894,18 +897,21 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 }
 
 func resolveWorkerRuntimeProviderWithConfig(cfg *config.City, info session.Info, sessionKind string) (*config.ResolvedProvider, string) {
-	return resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+	resolved, transport, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+	return resolved, transport
 }
 
-func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string) {
+func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string, error) {
 	if cfg == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
 	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
 		if foundAgent {
 			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
-				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved)
+				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved), nil
+			} else if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+				return nil, "", err
 			}
 		}
 	}
@@ -916,10 +922,13 @@ func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info se
 		}
 		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
 		if err == nil {
-			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport()), nil
+		}
+		if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+			return nil, "", err
 		}
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

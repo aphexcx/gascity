@@ -377,7 +377,10 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, error) {
 	cmd := session.BuildResumeCommand(info)
 	metadata := s.sessionMetadata(info.ID)
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, err := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	if err != nil {
+		return "", runtime.Config{}, err
+	}
 	if resolved == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}, nil
 	}
@@ -503,7 +506,10 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if metadata == nil {
 		metadata = s.sessionMetadata(info.ID)
 	}
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, err := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	if err != nil {
+		return nil, err
+	}
 	if resolved == nil {
 		return nil, nil
 	}
@@ -661,7 +667,7 @@ func resolvedSessionTransport(info session.Info, resolved *config.ResolvedProvid
 	return ""
 }
 
-func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool) {
+func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool, error) {
 	cfg := s.state.Config()
 	var (
 		resolved            *config.ResolvedProvider
@@ -683,7 +689,11 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 							workDir = info.WorkDir
 						}
 						configuredTransport = config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
+					} else if err := session.ACPProviderResolutionError(metadata, workDirErr); err != nil {
+						return nil, "", "", false, err
 					}
+				} else if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+					return nil, "", "", false, err
 				}
 			}
 		}
@@ -695,7 +705,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 		}
 		candidate, err := s.resolveBareProvider(providerName)
 		if err != nil {
-			return nil, "", "", false
+			return nil, "", "", false, session.ACPProviderResolutionError(metadata, err)
 		}
 		resolved = candidate
 		workDir = info.WorkDir
@@ -708,7 +718,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, legacySessionKind(metadata)) {
 		transport = "acp"
 	}
-	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)
+	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata), nil
 }
 
 // resolveBareProvider resolves a provider by name without an agent template.

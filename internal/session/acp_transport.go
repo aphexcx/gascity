@@ -31,6 +31,15 @@ func ResolveMCPTransport(configuredTransport, identity, snapshot string) (string
 	return "", true
 }
 
+// ACPProviderResolutionError prevents persisted-provider fallback from hiding
+// a failed resolution before an ACP session's metadata and route are migrated.
+func ACPProviderResolutionError(metadata map[string]string, err error) error {
+	if err != nil && len(storedACPKeys(metadata)) > 0 {
+		return fmt.Errorf("resolving intended provider for ACP session: %w", err)
+	}
+	return nil
+}
+
 // ResumeInfoForTransport discards a legacy ACP launch shape when the resolved
 // transport is no longer ACP. Callers rebuild command and resume hints from the
 // current provider before handing them to the session start boundary.

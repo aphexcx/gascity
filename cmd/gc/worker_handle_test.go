@@ -835,54 +835,65 @@ func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 }
 
 func TestWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
-	cityDir := t.TempDir()
-	missingCommand := filepath.Join(cityDir, "unavailable-terminal")
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "worker", Provider: "replacement", Session: "tmux"}},
-		Providers: map[string]config.ProviderSpec{
-			"replacement": {Command: missingCommand},
-			"previous":    {Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
-		},
-	}
-	store := beads.NewMemStore()
-	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
-		"template": "worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
-		"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": cityDir,
-		"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag",
-		session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal, acp := runtime.NewFake(), runtime.NewFake()
-	sp := sessionauto.New(terminal, acp)
-	sp.RouteACP("legacy-session")
-	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
-	if err == nil {
-		err = handle.Start(context.Background())
-	}
-	if err == nil || !strings.Contains(err.Error(), missingCommand) || !strings.Contains(err.Error(), "replacement") {
-		t.Errorf("restart error = %v, want unavailable replacement provider and executable", err)
-	}
-	stored, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for key, value := range b.Metadata {
-		if stored.Metadata[key] != value {
-			t.Errorf("refused migration changed %s from %q to %q", key, value, stored.Metadata[key])
-		}
-	}
-	if terminal.LastStartConfig("legacy-session") != nil || acp.LastStartConfig("legacy-session") != nil {
-		t.Fatal("refused migration started a runtime")
-	}
-	// A direct start probes the retained route independently of bead metadata.
-	if err := sp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	if !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
-		t.Fatal("refused migration removed the ACP route")
+	for _, phase := range []string{"resolve", "start"} {
+		t.Run(phase, func(t *testing.T) {
+			cityDir := t.TempDir()
+			missingCommand := filepath.Join(cityDir, "unavailable-terminal")
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: "worker", Provider: "replacement", Session: "tmux"}},
+				Providers: map[string]config.ProviderSpec{
+					"replacement": {Command: missingCommand},
+					"previous":    {Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
+				},
+			}
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
+				"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": cityDir,
+				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag",
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, acp := runtime.NewFake(), runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			sp.RouteACP("legacy-session")
+			if phase == "start" {
+				cfg.Providers["replacement"] = config.ProviderSpec{Command: "/bin/echo"}
+			}
+			handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+			if phase == "start" && err != nil {
+				t.Fatalf("resolve available replacement: %v", err)
+			}
+			cfg.Providers["replacement"] = config.ProviderSpec{Command: missingCommand}
+			if err == nil {
+				err = handle.Start(context.Background())
+			}
+			if err == nil || !strings.Contains(err.Error(), missingCommand) || !strings.Contains(err.Error(), "replacement") {
+				t.Errorf("restart error = %v, want unavailable replacement provider and executable", err)
+			}
+			stored, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range b.Metadata {
+				if stored.Metadata[key] != value {
+					t.Errorf("refused migration changed %s from %q to %q", key, value, stored.Metadata[key])
+				}
+			}
+			if terminal.LastStartConfig("legacy-session") != nil || acp.LastStartConfig("legacy-session") != nil {
+				t.Fatal("refused migration started a runtime")
+			}
+			// A direct start probes the retained route independently of bead metadata.
+			if err := sp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			if !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
+				t.Fatal("refused migration removed the ACP route")
+			}
+		})
 	}
 }
 
@@ -1061,7 +1072,7 @@ func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession
 		Provider: "stored-provider",
 	}
 
-	resolved, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
+	resolved, _, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
 		"session_origin": "manual",
 	})
 	if resolved == nil {
@@ -1075,7 +1086,7 @@ func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession
 		Template: "myrig/worker",
 		Provider: "agent-provider",
 	}
-	resolved, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, legacyAgentInfo, "", map[string]string{
+	resolved, _, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, legacyAgentInfo, "", map[string]string{
 		"session_origin": "manual",
 	})
 	if resolved == nil {
@@ -1085,7 +1096,7 @@ func TestResolveWorkerRuntimeProviderWithConfigMetadataIdentifiesProviderSession
 		t.Fatalf("legacy agent resolved.Name = %q, want agent-provider", got)
 	}
 
-	resolved, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
+	resolved, _, _ = resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, "", map[string]string{
 		"session_origin": "manual",
 		"agent_name":     "myrig/worker",
 	})
@@ -2679,7 +2690,7 @@ func TestResolvedWorkerRuntimeStagesProviderOverlayForRigBasePiProvider(t *testi
 func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t *testing.T) {
 	cityDir, overlayDir, cfg := piVllmRigCity(t)
 
-	resolved, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, session.Info{Template: "myrig/polecat"}, "", nil)
+	resolved, _, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, session.Info{Template: "myrig/polecat"}, "", nil)
 	if resolved == nil {
 		t.Fatal("resolveWorkerRuntimeProviderWithConfigAndMetadata() = nil")
 	}
