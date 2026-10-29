@@ -225,7 +225,14 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 			applyResolvedRuntimeToSessionSpec(&spec, resolved)
 		}
 	}
-	return f.Session(spec)
+	handle, err := f.Session(spec)
+	if err != nil {
+		return nil, err
+	}
+	handle.resolveStartup = f.resolveSessionRuntime != nil &&
+		(strings.TrimSpace(pr.Metadata[sessionpkg.MCPIdentityMetadataKey]) != "" ||
+			strings.TrimSpace(pr.Metadata[sessionpkg.MCPServersSnapshotMetadataKey]) != "")
+	return handle, nil
 }
 
 // HandleForTarget resolves a session target to a session-backed worker when

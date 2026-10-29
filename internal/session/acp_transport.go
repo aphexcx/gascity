@@ -75,12 +75,18 @@ func resolvedStartProvider(b beads.Bead, cfg runtime.Config) string {
 }
 
 // clearIncompatibleACPMetadata runs under the session operation lock before a
-// start. Provider resolution is required even when persisted transport remains
-// ACP. The persisted clear makes a config-change migration idempotent and records
-// it through the normal bead history, including when startup fails. refreshLaunch
-// replaces cached inputs; explicitly prepared startup inputs retain their setup.
+// start. Handles created with legacy MCP evidence defer their launch resolution
+// with an empty command on every start, including after migration clears the keys.
+// Provider resolution is required even when persisted transport remains ACP.
+// refreshLaunch replaces cached inputs; prepared inputs retain their setup and
+// rendered durable command. Migration is recorded through normal bead history.
 func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, command *string, cfg *runtime.Config, refreshLaunch bool) error {
-	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) || m.sp.IsRunning(name) {
+	if m.liveACPTransport(name) || m.sp.IsRunning(name) {
+		return nil
+	}
+	migrate := len(storedACPKeys(b.Metadata)) > 0
+	resolveLaunch := refreshLaunch && strings.TrimSpace(*command) == "" && m.resumeConfigResolver != nil
+	if !migrate && !resolveLaunch {
 		return nil
 	}
 	patch := map[string]string{
@@ -99,9 +105,31 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 		patch["resume_style"] = resume.ResumeStyle
 		patch["session_id_flag"] = resume.SessionIDFlag
 	}
+	if resolveLaunch {
+		info := infoFromPersistedBead(*b)
+		info.Command = patch["command"]
+		info.ResumeCommand = patch["resume_command"]
+		info.ResumeFlag = patch["resume_flag"]
+		info.ResumeStyle = patch["resume_style"]
+		*command = BuildResumeCommand(info)
+		if (info.State == StateStartPending || info.State == StateCreating) &&
+			strings.TrimSpace(info.CreationCompleteAt) == "" && strings.TrimSpace(info.StartedConfigHash) == "" &&
+			patch["session_id_flag"] != "" && strings.TrimSpace(info.SessionKey) != "" {
+			*command = info.Command + " " + patch["session_id_flag"] + " " + info.SessionKey
+		}
+		*cfg = resolvedHints
+	}
+	if !migrate {
+		return nil
+	}
 	if m.transportResolver == nil || transportFromMetadata(*b) == "acp" ||
 		m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata)) == "acp" {
 		return nil
+	}
+	if !refreshLaunch {
+		// The prepared caller has already persisted its rendered base command.
+		// Its launch command can additionally contain resume/first-start flags.
+		delete(patch, "command")
 	}
 	ClearStoredMCPMetadata(patch)
 	if err := m.store.SetMetadataBatch(id, patch); err != nil {
@@ -110,7 +138,7 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 	for key, value := range patch {
 		b.Metadata[key] = value
 	}
-	if m.resumeConfigResolver != nil && refreshLaunch {
+	if m.resumeConfigResolver != nil && refreshLaunch && !resolveLaunch {
 		*command = BuildResumeCommand(infoFromPersistedBead(*b))
 		*cfg = resolvedHints
 	}

@@ -815,8 +815,9 @@ func WithTransportResolver(resolver func(template, provider string) string) Mana
 	}
 }
 
-// WithResumeConfigResolver supplies current launch hints and resume settings when a
-// legacy transport migration replaces persisted ACP settings before startup.
+// WithResumeConfigResolver supplies current launch hints and resume settings for
+// legacy transport migration and handles that defer startup resolution by passing
+// an empty command. Resolution runs under the session operation lock.
 func WithResumeConfigResolver(resolver func(Info, map[string]string) (string, ProviderResume, runtime.Config, error)) ManagerOption {
 	return func(m *Manager) { m.resumeConfigResolver = resolver }
 }

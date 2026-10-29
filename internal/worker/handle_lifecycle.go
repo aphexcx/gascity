@@ -492,6 +492,9 @@ func (h *SessionHandle) currentSessionID() string {
 }
 
 func (h *SessionHandle) startCommand(id string) (string, error) {
+	if h.resolveStartup {
+		return "", nil
+	}
 	info, pr, err := sessionRecordViaManager(h.manager, id)
 	if err != nil {
 		return "", err
@@ -580,6 +583,9 @@ func (h *SessionHandle) historyProvider(info sessionpkg.Info) string {
 }
 
 func (h *SessionHandle) runtimeHints() runtime.Config {
+	if h.resolveStartup {
+		return runtime.Config{}
+	}
 	cfg := cloneRuntimeConfig(h.session.Hints)
 	cfg.Env = mergeStringMaps(cfg.Env, h.session.Env)
 	return cfg

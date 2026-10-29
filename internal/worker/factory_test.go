@@ -348,47 +348,66 @@ func TestFactoryReusedHandleMigratesACPStartupInputs(t *testing.T) {
 				PreStart: []string{"prepare-worktree"}, SessionSetup: []string{"configure-session"},
 				SessionSetupScript: "session-setup.sh", OperatorEnv: map[string]string{"AGENT_ENV": "prepared"},
 			}
-			switch name {
-			case "prepared_runtime_only":
-				err = handle.StartResolved(ctx, prepared.Command, prepared)
-			case "runtime_only":
-				err = handle.StartResolved(ctx, "", runtime.Config{})
-			default:
-				err = handle.Start(ctx)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			start := terminal.LastStartConfig("legacy-session")
-			if start == nil {
-				t.Fatal("terminal backend was not started")
-			}
-			if start.Command != "terminal --continue saved-key" || len(start.MCPServers) != 0 {
-				t.Errorf("terminal launch = %q with %d MCP servers, want replacement resume command without ACP hints", start.Command, len(start.MCPServers))
-			}
-			if start.ProviderName != "replacement" || start.WorkDir != workDir || start.ReadyPromptPrefix != "terminal>" || start.Env["TERMINAL"] != "1" || start.Env["OLD_ACP"] != "" {
-				t.Errorf("terminal received stale launch hints: %#v", start)
-			}
-			if name == "prepared_runtime_only" {
-				if start.Nudge != prepared.Nudge || start.PromptSuffix != prepared.PromptSuffix || start.PromptFlag != prepared.PromptFlag ||
-					!reflect.DeepEqual(start.PreStart, prepared.PreStart) || !reflect.DeepEqual(start.SessionSetup, prepared.SessionSetup) ||
-					start.SessionSetupScript != prepared.SessionSetupScript || !reflect.DeepEqual(start.OperatorEnv, prepared.OperatorEnv) || start.Env["AGENT_ENV"] != "prepared" {
-					t.Errorf("migration discarded explicitly prepared startup inputs: %#v", start)
+			for restart := 1; restart <= 2; restart++ {
+				t.Logf("restart %d", restart)
+				switch name {
+				case "prepared_runtime_only":
+					// The controller persists its rendered base command before start.
+					if err := store.SetMetadata(b.ID, "command", "terminal"); err != nil {
+						t.Fatal(err)
+					}
+					err = handle.StartResolved(ctx, prepared.Command, prepared)
+				case "runtime_only":
+					err = handle.StartResolved(ctx, "", runtime.Config{})
+				default:
+					err = handle.Start(ctx)
 				}
-			}
-			if acp.IsRunning("legacy-session") {
-				t.Error("restart still uses the ACP backend")
-			}
-			stored, err := store.Get(b.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for key, want := range map[string]string{
-				"command": "terminal", "resume_command": "", "resume_flag": "--continue", "resume_style": "flag", "session_id_flag": "--session-id",
-				sessionpkg.MCPIdentityMetadataKey: "", sessionpkg.MCPServersSnapshotMetadataKey: "",
-			} {
-				if got := stored.Metadata[key]; got != want {
-					t.Errorf("persisted %s = %q, want %q", key, got, want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				start := terminal.LastStartConfig("legacy-session")
+				if start == nil {
+					t.Fatal("terminal backend was not started")
+				}
+				if start.Command != "terminal --continue saved-key" || len(start.MCPServers) != 0 {
+					t.Errorf("terminal launch = %q with %d MCP servers, want replacement resume command without ACP hints", start.Command, len(start.MCPServers))
+				}
+				if start.ProviderName != "replacement" || start.WorkDir != workDir || start.ReadyPromptPrefix != "terminal>" || start.Env["TERMINAL"] != "1" || start.Env["OLD_ACP"] != "" {
+					t.Errorf("terminal received stale launch hints: %#v", start)
+				}
+				if name == "prepared_runtime_only" {
+					if start.Nudge != prepared.Nudge || start.PromptSuffix != prepared.PromptSuffix || start.PromptFlag != prepared.PromptFlag ||
+						!reflect.DeepEqual(start.PreStart, prepared.PreStart) || !reflect.DeepEqual(start.SessionSetup, prepared.SessionSetup) ||
+						start.SessionSetupScript != prepared.SessionSetupScript || !reflect.DeepEqual(start.OperatorEnv, prepared.OperatorEnv) || start.Env["AGENT_ENV"] != "prepared" {
+						t.Errorf("migration discarded explicitly prepared startup inputs: %#v", start)
+					}
+				}
+				if acp.IsRunning("legacy-session") {
+					t.Error("restart still uses the ACP backend")
+				}
+				stored, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for key, want := range map[string]string{
+					"command": "terminal", "resume_command": "", "resume_flag": "--continue", "resume_style": "flag", "session_id_flag": "--session-id",
+					sessionpkg.MCPIdentityMetadataKey: "", sessionpkg.MCPServersSnapshotMetadataKey: "",
+				} {
+					if got := stored.Metadata[key]; got != want {
+						t.Errorf("persisted %s = %q, want %q", key, got, want)
+					}
+				}
+				if name != "start" {
+					// Runtime-only callers commit lifecycle state after launch.
+					if err := store.SetMetadata(b.ID, "state", "active"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := handle.Stop(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if terminal.IsRunning("legacy-session") {
+					t.Fatal("runtime was not stopped between restarts")
 				}
 			}
 		})

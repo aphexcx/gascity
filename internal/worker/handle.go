@@ -331,14 +331,17 @@ type SessionHandleConfig struct {
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
-	mu             sync.Mutex
-	manager        *sessionpkg.Manager
-	adapter        SessionLogAdapter
-	recorder       events.Recorder
-	usageSink      usage.Sink
-	searchPaths    []string
-	session        SessionSpec
-	sessionID      string
+	mu          sync.Mutex
+	manager     *sessionpkg.Manager
+	adapter     SessionLogAdapter
+	recorder    events.Recorder
+	usageSink   usage.Sink
+	searchPaths []string
+	session     SessionSpec
+	sessionID   string
+	// resolveStartup delegates launch inputs to the manager's resolver under
+	// the operation lock instead of reusing this handle's construction snapshot.
+	resolveStartup bool
 	history        *HistorySnapshot
 	historyRaw     historyGeneration
 	pricing        *pricing.Registry

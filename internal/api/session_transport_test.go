@@ -100,6 +100,58 @@ func TestAPIWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 	}
 }
 
+func TestAPIWorkerReusedHandleRestartsAfterACPProviderSwitch(t *testing.T) {
+	ctx := context.Background()
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Provider = "stub"
+	fs.cfg.Agents[0].Session = "acp"
+	supportsACP := true
+	fs.cfg.Providers["stub"] = config.ProviderSpec{Command: "/bin/echo", SupportsACP: &supportsACP, ACPArgs: []string{"acp"}, ReadyPromptPrefix: "terminal>"}
+	b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "myrig/worker", "provider": "stub", "session_name": "legacy-session", "state": "active",
+		"command": "/bin/echo acp", "work_dir": fs.cityPath,
+		session.MCPIdentityMetadataKey: "worker", session.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acp := runtime.NewFake()
+	sp := sessionauto.New(fs.sp, acp)
+	fs.sessionProvider = sp
+	sp.RouteACP("legacy-session")
+	if err := sp.Start(ctx, "legacy-session", runtime.Config{Command: "/bin/echo acp"}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := New(fs).workerFactory(fs.cityBeadStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := factory.SessionByID(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.cfg.Agents[0].Session = "tmux"
+	for restart := 1; restart <= 2; restart++ {
+		if err := handle.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := handle.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		start := fs.sp.LastStartConfig("legacy-session")
+		if start == nil || start.Command != "/bin/echo" || len(start.MCPServers) != 0 || start.ReadyPromptPrefix != "terminal>" {
+			t.Fatalf("restart %d received stale launch inputs: %#v", restart, start)
+		}
+		stored, err := fs.cityBeadStore.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Metadata["command"] != start.Command || stored.Metadata["transport"] == "acp" || stored.Metadata[session.MCPIdentityMetadataKey] != "" || stored.Metadata[session.MCPServersSnapshotMetadataKey] != "" || acp.IsRunning("legacy-session") {
+			t.Fatalf("restart %d did not preserve migrated settings: %#v", restart, stored.Metadata)
+		}
+	}
+}
+
 func TestAPIWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
 	for _, phase := range []string{"resolve", "start", "explicit_acp"} {
 		t.Run(phase, func(t *testing.T) {
