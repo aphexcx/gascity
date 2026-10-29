@@ -14,6 +14,9 @@ this tool:
   6. updates the pinned-import examples in docs/guides/gastown-config-recipes.md.
 
 --check verifies all of the above without modifying the checkout.
+--check-pinned verifies the releases named by the repository's public pack
+constants instead of following the latest registry releases. It retains the
+registry membership, withdrawal, content hash, lock, and documentation checks.
 
 Note on the go.mod version form: `go get module@commit` resolves to whatever
 version Go derives for that commit -- a tag pointing at exactly that commit,
@@ -53,7 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
     parser.add_argument("--repo", default=DEFAULT_GASCITY_PACKS_REPO)
     parser.add_argument("--registry", help="path to registry.toml; defaults to <repo>/registry.toml")
-    parser.add_argument("--check", action="store_true", help="verify without modifying the checkout")
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument("--check", action="store_true", help="verify latest releases without modifying the checkout")
+    checks.add_argument("--check-pinned", action="store_true", help="verify repository-pinned releases without modifying the checkout")
     return parser.parse_args()
 
 
@@ -62,10 +67,13 @@ def main() -> int:
     repo_root = Path(args.repo_root).resolve()
     public_packs = (repo_root / PUBLIC_PACKS_GO).resolve()
     require_within(repo_root, public_packs)
+    pins = read_public_pack_constants(public_packs) if args.check_pinned else {}
 
     with maybe_clone_repo(args.repo) as packs_repo:
         registry_path = Path(args.registry).resolve() if args.registry else packs_repo / "registry.toml"
-        release = latest_registry_release(registry_path)
+        release = registry_release(
+            registry_path, pin=pins.get("PublicGastownPackVersion", "") if args.check_pinned else None
+        )
         pack_path = source_pack_path(release["source"])
         if not pack_path:
             raise SystemExit(f"{PACK_NAME}: registry source does not include a pack path: {release['source']}")
@@ -77,10 +85,13 @@ def main() -> int:
 
         # The gascity pack is embedded from the SAME module pin, so its
         # canonical pin must stay in lockstep: the module tree at the
-        # gastown pin must match the latest gascity registry release.
-        gascity_release = latest_registry_release(registry_path, "gascity")
+        # gastown pin must match the selected gascity registry release.
+        gascity_release = registry_release(
+            registry_path, "gascity",
+            pin=pins.get("PublicGascityPackVersion", "") if args.check_pinned else None,
+        )
 
-    if args.check:
+    if args.check or args.check_pinned:
         errors = check_local_state(repo_root, public_packs, release)
         errors += check_gascity_lockstep(repo_root, public_packs, gascity_release)
         if errors:
@@ -196,7 +207,9 @@ class maybe_clone_repo:
             self.tempdir.cleanup()
 
 
-def latest_registry_release(registry_path: Path, pack_name: str = PACK_NAME) -> dict[str, str]:
+def registry_release(
+    registry_path: Path, pack_name: str = PACK_NAME, *, pin: str | None = None
+) -> dict[str, str]:
     with registry_path.open("rb") as handle:
         catalog = tomllib.load(handle)
     matches = [pack for pack in catalog.get("pack", []) if pack.get("name") == pack_name]
@@ -210,6 +223,14 @@ def latest_registry_release(registry_path: Path, pack_name: str = PACK_NAME) -> 
     ]
     if not releases:
         raise SystemExit(f"{pack_name}: registry has no non-withdrawn releases")
+    if pin is not None:
+        if not re.fullmatch(r"sha:[0-9a-f]{40}", pin):
+            raise SystemExit(f"{pack_name}: invalid repository pin: {pin!r}")
+        releases = [release for release in releases if release.get("commit") == pin[4:]]
+        if len(releases) != 1:
+            raise SystemExit(
+                f"{pack_name}: expected one non-withdrawn registry release for {pin}, got {len(releases)}"
+            )
     release = max(releases, key=lambda item: semver_key(item.get("version", "")))
     return {
         "source": pack["source"],
@@ -528,6 +549,7 @@ def read_public_pack_constants(path: Path) -> dict[str, str]:
     names = [
         "PublicGastownPackSource",
         "PublicGastownPackVersion",
+        "PublicGascityPackVersion",
     ]
     found: dict[str, str] = {}
     for name in names:
