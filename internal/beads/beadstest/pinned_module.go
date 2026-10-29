@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // PinnedBeadsModulePath is the module gc links its native store against.
@@ -44,7 +47,22 @@ func PinnedBeadsModuleDir(t *testing.T) string {
 	if dir := bazelRunfilesBeadsModule(); dir != "" {
 		return dir
 	}
-	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+	pin := readPinnedBeadsModule(t)
+	if pin.Version == "" {
+		dir := pin.Path
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(RepositoryRoot(t), dir)
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("read local beads replacement %s: %v", dir, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("local beads replacement %s is not a directory", dir)
+		}
+		return dir
+	}
+	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), pin.Path, pin.Version)
 }
 
 // bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
@@ -90,9 +108,9 @@ type moduleDirReporter interface {
 
 // pinnedBeadsModuleDirOrFatal reports an unresolved module cache as a test
 // failure. See PinnedBeadsModuleDir for why it cannot be a skip.
-func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) string {
+func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, path, version string) string {
 	t.Helper()
-	dir, err := pinnedBeadsModuleDir(cache, version)
+	dir, err := pinnedBeadsModuleDir(cache, path, version)
 	if err != nil {
 		t.Fatalf("%v\n"+
 			"The test binary links %s, so the go command resolved it; this resolution did not. "+
@@ -106,8 +124,16 @@ func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) str
 
 // pinnedBeadsModuleDir is the resolution itself, separated from the test so that
 // the failure path has a test of its own.
-func pinnedBeadsModuleDir(cache, version string) (string, error) {
-	dir := filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
+func pinnedBeadsModuleDir(cache, path, version string) (string, error) {
+	escapedPath, err := module.EscapePath(path)
+	if err != nil {
+		return "", fmt.Errorf("escape pinned beads module path: %w", err)
+	}
+	escapedVersion, err := module.EscapeVersion(version)
+	if err != nil {
+		return "", fmt.Errorf("escape pinned beads module version: %w", err)
+	}
+	dir := filepath.Join(cache, filepath.FromSlash(escapedPath)+"@"+escapedVersion)
 	info, err := os.Stat(dir)
 	switch {
 	case err != nil:
@@ -119,24 +145,42 @@ func pinnedBeadsModuleDir(cache, version string) (string, error) {
 	}
 }
 
-// PinnedBeadsVersion reads the beads version this module requires from go.mod.
+// PinnedBeadsVersion reads the effective beads version, including a replacement.
 func PinnedBeadsVersion(t *testing.T) string {
+	t.Helper()
+	return readPinnedBeadsModule(t).Version
+}
+
+func readPinnedBeadsModule(t *testing.T) module.Version {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(RepositoryRoot(t), "go.mod"))
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[0] == PinnedBeadsModulePath {
-			return fields[1]
-		}
-		if len(fields) >= 3 && fields[0] == "require" && fields[1] == PinnedBeadsModulePath {
-			return fields[2]
-		}
+	pin, err := pinnedBeadsModule(data)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("go.mod does not require %s", PinnedBeadsModulePath)
-	return ""
+	return pin
+}
+
+func pinnedBeadsModule(data []byte) (module.Version, error) {
+	f, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return module.Version{}, fmt.Errorf("parse pinned beads module: %w", err)
+	}
+	for _, req := range f.Require {
+		if req.Mod.Path != PinnedBeadsModulePath {
+			continue
+		}
+		for _, replacement := range f.Replace {
+			if replacement.Old.Path == req.Mod.Path && (replacement.Old.Version == "" || replacement.Old.Version == req.Mod.Version) {
+				return replacement.New, nil
+			}
+		}
+		return req.Mod, nil
+	}
+	return module.Version{}, fmt.Errorf("go.mod does not require %s", PinnedBeadsModulePath)
 }
 
 // RepositoryRoot walks up from the working directory to the module root.

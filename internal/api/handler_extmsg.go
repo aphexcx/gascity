@@ -445,7 +445,7 @@ func (s *Server) extmsgNotifyInboundWithReceipt(ctx context.Context, msg extmsg.
 //   - unknown: no fan-out for the message in this process — the first
 //     delivery, or a gc restart took the record, or it aged out of
 //     retention. gc cannot vouch for a prior delivery, so the message keeps
-//     the at-least-once behaviour a message without a provider id has.
+//     the at-least-once behavior a message without a provider id has.
 //     Claimed.
 func (s *Server) extmsgClaimInboundFanout(result *extmsg.InboundResult, msg extmsg.ExternalInboundMessage) (receiptID string, held extmsg.InboundDelivery, isHeld bool) {
 	store := s.inboundReceiptStore()

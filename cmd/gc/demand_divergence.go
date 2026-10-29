@@ -186,8 +186,8 @@ func classifyDemandTriggerBlockedness(triggerID, dir string, opts hookClaimOptio
 // driven directly in tests without constructing a whole claim. The blockedness
 // settlement answers "not blocked", the shape a row with no unmet plain `blocks`
 // edge produces; demandDivergenceOpsForBlockedBead drives the other answers.
-func demandDivergenceOpsForBead(bead beads.Bead, err error) hookClaimOps {
-	return demandDivergenceOpsForBlockedBead(bead, err, false, nil)
+func demandDivergenceOpsForBead(bead beads.Bead) hookClaimOps {
+	return demandDivergenceOpsForBlockedBead(bead, nil, false, nil)
 }
 
 // demandDivergenceOpsForBlockedBead is demandDivergenceOpsForBead with the

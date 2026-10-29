@@ -71,6 +71,12 @@ func twoClones(t *testing.T, doltPath, dataDir, hubParent string, sc twoCloneSce
 	runDoltForCompactTest(t, doltPath, dataDir, "clone", "file://"+hub, jadegate)
 	citadelDir := filepath.Join(dataDir, citadel)
 	jadegateDir := filepath.Join(dataDir, jadegate)
+	// Cloning does not copy the seed repository's local author identity.
+	// The CLI pull path creates merge commits and must not depend on host config.
+	for _, dir := range []string{citadelDir, jadegateDir} {
+		runDoltForCompactTest(t, doltPath, dir, "config", "--local", "--add", "user.name", "Gas City")
+		runDoltForCompactTest(t, doltPath, dir, "config", "--local", "--add", "user.email", "test@example.com")
+	}
 	runDoltForCompactTest(t, doltPath, citadelDir, "sql", "-q", sc.citadel)
 	runDoltForCompactTest(t, doltPath, citadelDir, "commit", "--author", "bd <bd@citadel>", "-Am", "bd: wake 1 expired defer(s)")
 	runDoltForCompactTest(t, doltPath, citadelDir, "push", "origin", "main")
