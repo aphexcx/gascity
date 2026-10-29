@@ -79,7 +79,7 @@ func resolvedStartProvider(b beads.Bead, cfg runtime.Config) string {
 // ACP. The persisted clear makes a config-change migration idempotent and records
 // it through the normal bead history, including when startup fails.
 func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, cfg runtime.Config) error {
-	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) {
+	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) || m.sp.IsRunning(name) {
 		return nil
 	}
 	patch := map[string]string{

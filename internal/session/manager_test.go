@@ -4145,6 +4145,53 @@ func TestStartPreservesLiveACPBehindSuspendedProjection(t *testing.T) {
 	}
 }
 
+func TestSendToLiveStandaloneACPWithUnavailableReplacement(t *testing.T) {
+	store := beads.NewMemStore()
+	// Like the standalone ACP backend, this provider has no transport detector.
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": "live-session", "template": "worker", "provider": "old", "state": string(StateActive),
+		"command": "old acp", "transport": "acp", MCPIdentityMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "live-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("replacement executable unavailable")
+	mgr := NewManagerWithOptions(store, sp,
+		WithTransportResolver(func(_, _ string) string { return "acp" }),
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, error) {
+			return "", ProviderResume{}, wantErr
+		}))
+	if _, err := mgr.Send(context.Background(), b.ID, "hello", "old acp", runtime.Config{}); err != nil {
+		t.Fatalf("send to live standalone ACP: %v", err)
+	}
+	delivered := false
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == "live-session" && call.Message == "hello" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Fatal("message did not reach the live ACP runtime")
+	}
+	if err := sp.Stop("live-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Send(context.Background(), b.ID, "restart", "old acp", runtime.Config{}); !errors.Is(err, wantErr) {
+		t.Fatalf("send after runtime stop = %v, want replacement resolution error", err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Metadata[MCPIdentityMetadataKey] != "worker" || sp.IsRunning("live-session") {
+		t.Fatal("refused restart changed MCP identity or started a runtime")
+	}
+}
+
 func TestStartPreservesACPMetadataWhenResumeResolutionFails(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
