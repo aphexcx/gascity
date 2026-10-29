@@ -58,11 +58,22 @@ unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstw
 
 # macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
 # keg-only under Homebrew, so its headers/libs are not on the default CGO
-# search path. Point CGO at them when icu4c is present. This is a no-op on
-# Linux and other platforms (where system ICU, e.g. libicu-dev, is found
-# normally) and a no-op on macOS when icu4c is not installed.
+# search path. Prefer an explicit prefix; otherwise require installed headers,
+# since Homebrew can advertise a newer formula that is not installed. Linux
+# and other platforms keep their existing system ICU discovery.
 ifeq ($(shell uname),Darwin)
-ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+ifeq ($(origin ICU_PREFIX),undefined)
+ICU_PREFIX_HELPER := $(firstword $(wildcard scripts/lib/icu-prefix.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/icu-prefix.sh))
+ICU_DETECTED_PREFIX := $(shell sh "$(ICU_PREFIX_HELPER)")
+ifeq ($(strip $(ICU_DETECTED_PREFIX)),)
+$(error ICU headers not found: brew install icu4c or set ICU_PREFIX=/path/to/installed/icu)
+endif
+ICU_PREFIX_SOURCE := installed header (Homebrew versions newest first, then pkg-config icu-uc)
+else
+ICU_PREFIX_SOURCE := explicit $(origin ICU_PREFIX)
+endif
+ICU_PREFIX ?= $(ICU_DETECTED_PREFIX)
+export ICU_PREFIX ICU_PREFIX_SOURCE
 ifneq ($(ICU_PREFIX),)
 CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
@@ -138,9 +149,9 @@ ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif
 
-## print-cgo-env: print Bash assignments for exported CGO flags without building
+## print-cgo-env: print Bash assignments for ICU selection and CGO flags without building
 print-cgo-env:
-	@bash -eu -c 'for cgo_name in CGO_CPPFLAGS CGO_LDFLAGS; do \
+	@bash -eu -c 'for cgo_name in ICU_PREFIX ICU_PREFIX_SOURCE CGO_CPPFLAGS CGO_LDFLAGS; do \
 		if declare -p "$$cgo_name" >/dev/null 2>&1; then \
 			printf "%s=%q\n" "$$cgo_name" "$${!cgo_name}"; \
 		fi; \

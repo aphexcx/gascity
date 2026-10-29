@@ -64,6 +64,96 @@ printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of
 	}
 }
 
+func TestMakefileDarwinICUPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installed []string
+		pkgConfig string
+		explicit  string
+		want      string
+	}{
+		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
+		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
+		{name: "unversioned brew", installed: []string{"icu4c"}, want: "icu4c"},
+		{name: "pkg config fallback", installed: []string{"pkg-icu"}, pkgConfig: "pkg-icu", want: "pkg-icu"},
+		{name: "stale pkg config prefix", pkgConfig: "absent"},
+		{name: "nothing installed"},
+		{name: "environment wins", installed: []string{"icu4c@78"}, explicit: "environment", want: "custom"},
+		{name: "command line wins", installed: []string{"icu4c@78"}, explicit: "command line", want: "custom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			binDir := filepath.Join(tmp, "bin")
+			if err := os.Mkdir(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.installed {
+				header := filepath.Join(tmp, name, "include", "unicode", "regex.h")
+				if err := os.MkdirAll(filepath.Dir(header), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(header, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeExecutable(t, filepath.Join(binDir, "uname"), "#!/bin/sh\necho Darwin\n")
+			writeExecutable(t, filepath.Join(binDir, "brew"), `#!/bin/sh
+root=$(dirname "$(dirname "$0")")
+case "$*" in
+  'list --formula') printf '%s\n' icu4c@79 icu4c@9 icu4c@78 ;;
+  '--prefix icu4c')
+    if [ -f "$root/icu4c/include/unicode/regex.h" ]; then
+      echo "$root/icu4c"
+    else
+      echo "$root/icu4c@79"
+    fi ;;
+  '--prefix icu4c@'*) echo "$root/$2" ;;
+  *) exit 1 ;;
+esac
+`)
+			writeExecutable(t, filepath.Join(binDir, "pkg-config"), "#!/bin/sh\n[ \"$*\" = '--variable=prefix icu-uc' ] || exit 1\nprintf '%s\\n' \"$TEST_ICU_PKG_PREFIX\"\n")
+			args := []string{"-s", "--no-print-directory", "print-cgo-env"}
+			if tc.explicit == "command line" {
+				args = append(args, "ICU_PREFIX="+filepath.Join(tmp, tc.want))
+			}
+			cmd := makeCommand(args...)
+			cmd.Dir = repoRoot(t)
+			env := replaceScriptEnv(filteredMakefileCGOTestEnv(), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			env = replaceScriptEnv(env, "TEST_ICU_PKG_PREFIX", filepath.Join(tmp, tc.pkgConfig))
+			// An inherited prefix must not bypass the automatic resolver cases.
+			for i := len(env) - 1; i >= 0; i-- {
+				if strings.HasPrefix(env[i], "ICU_PREFIX=") {
+					env = append(env[:i], env[i+1:]...)
+				}
+			}
+			if tc.explicit != "" {
+				env = append(env, "ICU_PREFIX="+filepath.Join(tmp, "custom-env"))
+				if tc.explicit == "environment" {
+					env = replaceScriptEnv(env, "ICU_PREFIX", filepath.Join(tmp, tc.want))
+				}
+			}
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("make succeeded without ICU:\n%s", out)
+				}
+				assertContains(t, string(out), "ICU_PREFIX=")
+				assertContains(t, string(out), "brew install")
+				return
+			}
+			if err != nil {
+				t.Fatalf("make print-cgo-env: %v\n%s", err, out)
+			}
+			prefix := filepath.Join(tmp, tc.want)
+			assertContains(t, string(out), "CGO_CPPFLAGS=-I"+prefix+"/include")
+			assertContains(t, string(out), "CGO_LDFLAGS=-L"+prefix+"/lib")
+			assertContains(t, string(out), "ICU_PREFIX="+prefix)
+			assertContains(t, string(out), "ICU_PREFIX_SOURCE=")
+		})
+	}
+}
+
 func TestMakefileLinuxCGOPathsCanBeDisabled(t *testing.T) {
 	repoRoot := repoRoot(t)
 	tmp := t.TempDir()

@@ -89,6 +89,10 @@ print_failure_details() {
 
   echo "observable go test: failure details from $log" >&2
 
+  # Compiler diagnostics use build-output, not output. Keep them outside the
+  # tail so failures of dependent packages cannot bury the original error.
+  jq -r 'select(.Action == "build-output" and .Output != null) | .Output' "$log" >&2
+
   # Portable across bash 3.2 (macOS default) and bash 4+. mapfile/readarray
   # are bash 4+ only — using them on macOS runners exits 127 (command not
   # found) and fails the entire Mac/make test job.
