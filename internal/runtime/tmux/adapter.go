@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -747,10 +748,86 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return matched, nil
 }
 
-// GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// GetLastActivity returns the newest pane or provider-native transcript activity.
+// Claude transcript reads are scoped to the exact provider session key; missing
+// identity or unreadable native activity is unknown, never proof of idleness.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	return p.tm.GetSessionActivity(name)
+	pane, provider, err := p.tm.sessionActivityAndProvider(name)
+	if err != nil {
+		return time.Time{}, err
+	}
+	provider = sessionlog.ProviderFamily(provider)
+	if provider != "claude" && !strings.HasPrefix(provider, "claude-") {
+		return pane, nil
+	}
+	env, err := p.tm.GetAllEnvironment(name)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: reading activity environment for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	native, err := claudeTranscriptActivity(env)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: reading Claude activity for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	if native.After(pane) {
+		return native, nil
+	}
+	return pane, nil
+}
+
+func claudeTranscriptActivity(env map[string]string) (time.Time, error) {
+	key, workDir := strings.TrimSpace(env["GC_SESSION_KEY"]), strings.TrimSpace(env["GC_DIR"])
+	if key == "" || workDir == "" {
+		return time.Time{}, fmt.Errorf("provider session key or working directory is unknown")
+	}
+	root := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
+	if root == "" {
+		home := strings.TrimSpace(env["HOME"])
+		if home == "" {
+			return time.Time{}, fmt.Errorf("claude config directory is unknown")
+		}
+		root = filepath.Join(home, ".claude")
+	}
+	path, err := sessionlog.FindSessionFileByIDWithError([]string{filepath.Join(root, "projects")}, workDir, key)
+	if errors.Is(err, os.ErrNotExist) {
+		// Claude creates this file on its first conversation write. Until then,
+		// a keyed session is governed by pane activity alone. Only confirmed
+		// absence takes this path; unreadable or invalid identity stays unknown.
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return time.Time{}, fmt.Errorf("transcript is not a regular file")
+	}
+	latest := info.ModTime()
+	// Subagent transcripts belong to this conversation even while its parent
+	// waits without writing to the pane or its own transcript.
+	subdir := filepath.Join(strings.TrimSuffix(path, ".jsonl"), "subagents")
+	entries, err := os.ReadDir(subdir)
+	if errors.Is(err, os.ErrNotExist) {
+		return latest, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading subagent activity: %w", err)
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return time.Time{}, fmt.Errorf("reading subagent transcript activity: %w", err)
+		}
+		if info.Mode().IsRegular() && info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest, nil
 }
 
 // GetAllEnvironment returns all environment variables for a session,

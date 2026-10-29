@@ -4951,6 +4951,9 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 	if !base.IsRunning(info.SessionName) {
 		t.Fatal("session should be running after fresh retry")
 	}
+	if cfg := base.LastStartConfig(info.SessionName); cfg == nil || cfg.Env["GC_SESSION_KEY"] != "" {
+		t.Fatalf("fresh retry must clear the rejected provider identity, got %+v", cfg)
+	}
 
 	b, _ = store.Get(info.ID)
 	if b.Metadata["session_key"] != "" {

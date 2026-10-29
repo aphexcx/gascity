@@ -67,6 +67,8 @@ func RuntimeEnvWithAlias(sessionID, sessionName, alias string, generation, conti
 func RuntimeEnvWithSessionContext(info Info, generation, continuationEpoch int, instanceToken string) map[string]string {
 	publicAlias := runtimePublicAlias(info)
 	env := RuntimeEnvWithAlias(info.ID, info.SessionName, publicAlias, generation, continuationEpoch, instanceToken)
+	// Empty explicitly clears a key inherited from a previous incarnation.
+	env["GC_SESSION_KEY"] = strings.TrimSpace(info.SessionKey)
 	if template := strings.TrimSpace(info.Template); template != "" {
 		env["GC_TEMPLATE"] = template
 	}
@@ -85,6 +87,45 @@ func runtimePublicAlias(info Info) string {
 		return alias
 	}
 	return strings.TrimSpace(info.ConfiguredNamedIdentity)
+}
+
+// SyncRuntimeSessionKey publishes a captured provider identity to the matching
+// live runtime, so native activity follows the current conversation.
+func SyncRuntimeSessionKey(sp runtime.Provider, info Info) error {
+	if sp == nil || info.SessionName == "" || info.SessionKey == "" {
+		return nil
+	}
+	key, err := sp.GetMeta(info.SessionName, "GC_SESSION_KEY")
+	if err != nil {
+		return fmt.Errorf("reading runtime provider session key: %w", err)
+	}
+	if key == info.SessionKey {
+		return nil
+	}
+	id, err := sp.GetMeta(info.SessionName, "GC_SESSION_ID")
+	if err != nil {
+		return fmt.Errorf("reading runtime session identity: %w", err)
+	}
+	// Unowned runtimes have no identity to fence; leave their activity unknown.
+	if id == "" {
+		return nil
+	}
+	if id != info.ID {
+		return fmt.Errorf("runtime session identity changed for %q", info.SessionName)
+	}
+	if info.InstanceToken != "" {
+		token, err := sp.GetMeta(info.SessionName, "GC_INSTANCE_TOKEN")
+		if err != nil {
+			return fmt.Errorf("reading runtime instance identity: %w", err)
+		}
+		if token != info.InstanceToken {
+			return fmt.Errorf("runtime instance identity changed for %q", info.SessionName)
+		}
+	}
+	if err := sp.SetMeta(info.SessionName, "GC_SESSION_KEY", info.SessionKey); err != nil {
+		return fmt.Errorf("publishing runtime provider session key: %w", err)
+	}
+	return nil
 }
 
 // SyncRuntimeAlias updates live runtime metadata from the session's current

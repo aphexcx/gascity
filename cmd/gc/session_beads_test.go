@@ -349,6 +349,80 @@ func allSessionBeads(t *testing.T, store beads.Store) []beads.Bead {
 	return all
 }
 
+func TestSyncSessionBeads_PublishesPreservedProviderIdentity(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replacement=%t", replacement), func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"session_name": "worker", "template": "worker", "state": "active",
+				"session_key": "preserved-conversation", "instance_token": "original-instance",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			token := "original-instance"
+			if replacement {
+				token = "replacement-instance"
+			}
+			for key, value := range map[string]string{"GC_SESSION_ID": b.ID, "GC_INSTANCE_TOKEN": token} {
+				if err := sp.SetMeta("worker", key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ds := map[string]TemplateParams{"worker": {TemplateName: "worker"}}
+			clk := &clock.Fake{Time: time.Unix(1700000000, 0)}
+			var stderr bytes.Buffer
+			syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+			got, err := sp.GetMeta("worker", "GC_SESSION_KEY")
+			want := "preserved-conversation"
+			if replacement {
+				want = ""
+				if !strings.Contains(stderr.String(), "runtime instance identity changed") {
+					t.Fatalf("missing ownership diagnostic: %s", &stderr)
+				}
+			}
+			if err != nil || got != want {
+				t.Fatalf("runtime key = %q, %v; want %q; stderr=%s", got, err, want, &stderr)
+			}
+			writes := sp.CountCalls("SetMeta", "worker")
+			syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+			if replacement && strings.Count(stderr.String(), "runtime instance identity changed") != 1 {
+				t.Fatalf("ownership warning repeated: %s", &stderr)
+			}
+			if sp.CountCalls("SetMeta", "worker") != writes {
+				t.Fatal("unchanged provider identity was republished")
+			}
+			if sp.CountCalls("Start", "worker") != 1 || sp.CountCalls("Stop", "worker") != 0 {
+				t.Fatal("publishing identity restarted the preserved runtime")
+			}
+			if replacement {
+				if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "original-instance"); err != nil {
+					t.Fatal(err)
+				}
+				syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+				if got, err := sp.GetMeta("worker", "GC_SESSION_KEY"); err != nil || got != "preserved-conversation" {
+					t.Fatalf("identity did not recover after warning: %q, %v", got, err)
+				}
+				if err := sp.SetMeta("worker", "GC_SESSION_KEY", ""); err != nil {
+					t.Fatal(err)
+				}
+				if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "another-instance"); err != nil {
+					t.Fatal(err)
+				}
+				syncSessionBeads(cityPath, store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+				if strings.Count(stderr.String(), "runtime instance identity changed") != 2 {
+					t.Fatalf("new ownership failure after recovery was hidden: %s", &stderr)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeads_CreatesNewBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

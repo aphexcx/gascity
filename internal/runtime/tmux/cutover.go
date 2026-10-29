@@ -8,7 +8,7 @@ import (
 )
 
 // seamBackedProvider serves the legacy [runtime.Provider] through the
-// de-conflated seams (via [runtime.NewProviderFromSeams]) for the 18
+// de-conflated seams (via [runtime.NewProviderFromSeams]) for the
 // driving/lifecycle methods, while EMBEDDING the raw *Provider so that tmux's
 // large optional-interface surface AND its real RunLive (session_live re-apply,
 // which the seam adapter cannot model) are carried unchanged. The early cut-over
@@ -20,12 +20,12 @@ import (
 // InterruptBoundaryWait, DialogProvider, ProcessTableScanner, ServerLifecycle,
 // DeadRuntimeSessionChecker, LivenessObserver, SleepCapability, … — and a missed
 // interface would silently degrade a capability. Embedding raw guarantees every
-// non-seam-routed method (known or not) stays on the real provider; only the 18
-// Provider methods below are explicitly routed through the seams. RunLive is
-// intentionally NOT overridden, so the embedded provider's real RunLive runs.
+// non-seam-routed method (known or not) stays on the real provider. Activity
+// reads preserve the raw error-bearing boundary. RunLive is intentionally NOT
+// overridden, so the embedded provider's real RunLive runs.
 type seamBackedProvider struct {
 	*Provider                  // raw: carries RunLive + every optional interface
-	seams     runtime.Provider // the seam adapter, for the 18 routed methods
+	seams     runtime.Provider // the seam adapter, for the routed methods
 }
 
 var (
@@ -42,8 +42,7 @@ func NewSeamBackedWithConfig(cfg Config) runtime.Provider {
 	return &seamBackedProvider{Provider: raw, seams: runtime.NewProviderFromSeams(rt, tp)}
 }
 
-// --- the 18 Provider methods routed through the seams (RunLive intentionally
-// NOT overridden, so the embedded raw provider's real RunLive is used) ---
+// --- Provider methods (RunLive uses the embedded raw implementation) ---
 
 func (s *seamBackedProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.seams.Start(ctx, name, cfg)
@@ -82,7 +81,9 @@ func (s *seamBackedProvider) ListRunning(prefix string) ([]string, error) {
 }
 
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
-	return s.seams.GetLastActivity(name)
+	// Keep the error-bearing activity boundary: the combined seam observation
+	// cannot distinguish unknown activity from a failed attachment lookup.
+	return s.Provider.GetLastActivity(name)
 }
 
 func (s *seamBackedProvider) ClearScrollback(name string) error {

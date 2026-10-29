@@ -872,20 +872,29 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		warn("hook stdin provider session id is only accepted for codex/cursor/claude session %q", gcSessionID)
 		return
 	}
-	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
-		return
+	captured := strings.TrimSpace(info.SessionKey) == ""
+	if captured {
+		if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
+			warn("writing session_key for session %q: %v", gcSessionID, err)
+			return
+		}
+		info.SessionKey = providerSessionID
 	}
-	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
-		warn("writing session_key for session %q: %v", gcSessionID, err)
-		return
+	if info.SessionName != "" {
+		sp, err := newSessionProviderForCity(cfg, cityPath)
+		if err != nil {
+			warn("constructing runtime for session %q: %v", gcSessionID, err)
+			return
+		}
+		if err := sessionpkg.SyncRuntimeSessionKey(sp, info); err != nil {
+			warn("syncing runtime session_key for session %q: %v", gcSessionID, err)
+		}
 	}
-	// Runs once per session (the empty-key check above guards re-entry).
-	//
 	// Opt-in only. A provider hook forwards its child's stderr into the agent's
 	// terminal, so anything written here lands in the user's input box mid-turn.
 	// Every failure above goes through warn; this is the one success path, and a
 	// routine capture is not something the operator needs to be told about.
-	if stderr != nil && gcDebugEnabled() {
+	if captured && stderr != nil && gcDebugEnabled() {
 		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
 	}
 }

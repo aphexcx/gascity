@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -652,14 +653,41 @@ func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string
 }
 
 func findSessionFileByIDForCandidates(searchPaths, slugs []string, fileName string) string {
+	path, _ := findSessionFileByIDForCandidatesWithError(searchPaths, slugs, fileName)
+	return path
+}
+
+// FindSessionFileByIDWithError resolves the same exact conversation as
+// FindSessionFileByID, distinguishing confirmed absence (os.ErrNotExist) from
+// unreadable files or invalid identity for runtime activity observations.
+func FindSessionFileByIDWithError(searchPaths []string, workDir, sessionID string) (string, error) {
+	fileName := safeSessionLogFileName(sessionID)
+	if strings.TrimSpace(workDir) == "" || fileName == "" {
+		return "", fmt.Errorf("provider session key or working directory is invalid")
+	}
+	return findSessionFileByIDForCandidatesWithError(searchPaths, claudeProjectSlugCandidates(workDir), fileName)
+}
+
+func findSessionFileByIDForCandidatesWithError(searchPaths, slugs []string, fileName string) (string, error) {
+	var lookupErr error
 	for _, base := range searchPaths {
 		var bestPath string
 		var bestTime int64
 		for _, slug := range slugs {
 			path := filepath.Join(base, slug, fileName)
 			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
+			}
+			if err != nil {
+				lookupErr = errors.Join(lookupErr, err)
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				lookupErr = errors.Join(lookupErr, fmt.Errorf("transcript %q is not a regular file", path))
+				if info.IsDir() {
+					continue
+				}
 			}
 			mt := info.ModTime().UnixNano()
 			if mt > bestTime {
@@ -668,10 +696,15 @@ func findSessionFileByIDForCandidates(searchPaths, slugs []string, fileName stri
 			}
 		}
 		if bestPath != "" {
-			return bestPath
+			// Best-effort callers retain their exact-match selection; activity
+			// callers also receive uncertainty from any unreadable candidates.
+			return bestPath, lookupErr
 		}
 	}
-	return ""
+	if lookupErr != nil {
+		return "", lookupErr
+	}
+	return "", os.ErrNotExist
 }
 
 func findClaudeLatestSessionFile(searchPaths []string, workDir string) string {

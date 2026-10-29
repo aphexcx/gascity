@@ -32,6 +32,10 @@ const sessionBeadLabel = "gc:session"
 // sessionBeadType is the bead type for session beads.
 const sessionBeadType = "session"
 
+// Diagnostic-only memo, replaced each sync so resolved or closed sessions do
+// not accumulate. Runtime ownership is still checked on every reconciliation.
+var providerIdentitySyncWarnings sync.Map // city path -> map[session ID]error text
+
 const (
 	poolAliasConflictMetadataKey      = "pool_alias_conflict"
 	poolAliasConflictCountMetadataKey = "pool_alias_conflict_count"
@@ -1734,6 +1738,35 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				openBeads[i].Status = "closed"
 			}
 		}
+	}
+
+	// A supervisor restart preserves running sessions. Publish their persisted
+	// conversation identity without requiring a relaunch or another prime hook.
+	previousWarnings, _ := providerIdentitySyncWarnings.Load(cityPath)
+	previous, _ := previousWarnings.(map[string]string)
+	warnings := make(map[string]string)
+	for sn, b := range bySessionName {
+		if strings.TrimSpace(b.Metadata["session_key"]) == "" || sp == nil || !sp.IsRunning(sn) {
+			continue
+		}
+		info, err := sessFront.Get(b.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: reading provider identity for %s: %v\n", sn, err) //nolint:errcheck
+			continue
+		}
+		if !info.Closed {
+			if err := session.SyncRuntimeSessionKey(sp, info); err != nil {
+				warnings[b.ID] = err.Error()
+				if previous[b.ID] != err.Error() {
+					fmt.Fprintf(stderr, "session beads: syncing provider identity for %s: %v\n", sn, err) //nolint:errcheck
+				}
+			}
+		}
+	}
+	if len(warnings) == 0 {
+		providerIdentitySyncWarnings.Delete(cityPath)
+	} else {
+		providerIdentitySyncWarnings.Store(cityPath, warnings)
 	}
 
 	// Track open bead IDs for the returned index.

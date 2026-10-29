@@ -2762,7 +2762,7 @@ op_start() {
         # setsid ships with util-linux; macOS uses Python's POSIX adapter.
         nohup sh -c '
             exec 9>&-
-            unset GC_SESSION_ID GC_SESSION_NAME GC_ALIAS GC_AGENT GC_TEMPLATE \
+            unset GC_SESSION_ID GC_SESSION_KEY GC_SESSION_NAME GC_ALIAS GC_AGENT GC_TEMPLATE \
                 GC_SESSION_ORIGIN GC_RUNTIME_EPOCH GC_CONTINUATION_EPOCH \
                 GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN BEADS_ACTOR \
                 CLAUDE_CODE_SESSION_ID CLAUDE_SESSION_ID CLAUDECODE TMUX TMUX_PANE

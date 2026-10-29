@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -14,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -29,6 +33,7 @@ type executionBackstopFixture struct {
 	cfg      *config.City
 	store    beads.Store
 	sp       *runtime.Fake
+	provider runtime.Provider
 	session  beads.Bead
 	work     beads.Bead
 	rec      *events.Fake
@@ -46,6 +51,7 @@ func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
 		rec:      events.NewFake(),
 		sp:       runtime.NewFake(),
 	}
+	f.provider = executionDeliveryRuntime{Fake: f.sp}
 	f.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -134,7 +140,7 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	for i := range work {
 		stores[i] = f.store
 	}
-	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	nudgeStalledPoolExecution(f.provider, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -156,7 +162,7 @@ func (f *executionBackstopFixture) tickWithAssignedWorkSnapshot(t *testing.T, wo
 	for i := range work {
 		stores[i] = f.store
 	}
-	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	nudgeStalledPoolExecution(f.provider, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -359,21 +365,8 @@ func TestExecutionStepStalledStaysOffTheExportAllowlist(t *testing.T) {
 	}
 }
 
-// TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured is the
-// production row this backstop was missing. `agent.Nudge` is optional, and in a
-// real city every workflow pool template leaves it unset — maintainer-city had
-// it on 18 of 260 agents and on none of its four pool roles. The shared engine
-// skipped empty content with a bare `continue`, so the state machine parked on
-// its observe marker forever: it never reserved an attempt, never reached the
-// attempt cap, and so never ran the drain that is the ONLY thing that releases
-// the claim. A seat holding an in-progress bead still satisfies poolDesired, so
-// no replacement spawns and the whole pool starves behind it. Observed: 20 of 21
-// live markers frozen at count=0, the oldest claim held 3.5 days.
-//
-// With nothing to deliver there is nothing to wait for — the bounded attempts
-// exist to give the agent a chance to ANSWER a nudge. The grace window still
-// applies, and then it escalates.
-func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
+// A quiet claim cannot be drained when no nudge could be delivered.
+func TestExecutionBackstopHoldsWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 	f.idleFor(t, 10*time.Minute)
@@ -393,21 +386,21 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	if got := f.nudgeCount(); got != 0 {
 		t.Fatalf("delivered nudges with no configured nudge = %d, want 0", got)
 	}
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v, want none; stdout=%s", f.drained, f.stdout.String())
 	}
 	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
 		t.Fatal("escalation was not latched; a later tick would drain the session all over again")
 	}
 
-	// Latched: however many ticks follow, exactly one drain and one event.
+	// Latched: further ticks hold the claim and emit no duplicate event.
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
-	if len(f.drained) != 1 {
-		t.Fatalf("drain requests after further ticks = %v, want exactly one", f.drained)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after further ticks = %v, want none", f.drained)
 	}
 	stalled := 0
 	for _, e := range f.rec.Events {
@@ -417,6 +410,9 @@ func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T
 	}
 	if stalled != 1 {
 		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	}
+	if strings.Count(f.stdout.String(), "no nudge configured") != 1 || strings.Contains(f.stdout.String(), "nudges deliverable") {
+		t.Fatalf("missing once-only no-nudge diagnostic: %s", f.stdout.String())
 	}
 }
 
@@ -668,5 +664,115 @@ func TestExecutionClaimOwnerFenceRevalidate(t *testing.T) {
 	p := poolExecutionBackstop{cfg: f.cfg, now: f.now}
 	if got := p.revalidate(backstopTarget{ID: f.work.ID, Assignee: f.sessName, Store: f.store}); got != backstopResolutionClear {
 		t.Errorf("revalidation=%v, want clear for changed foreign owner", got)
+	}
+}
+
+// Failed delivery reservations are not evidence that the agent heard a nudge.
+func TestExecutionBackstopHoldsWhenNudgeDeliveryIsUnsupported(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Provider = "claude-opus"
+	f.sp.NudgeErrors = map[string]error{f.sessName: errors.New("live delivery is unsupported for claude-opus")}
+	f.idleFor(t, 10*time.Minute)
+	for i := 0; i < idleClaimNudgeMaxAttempts+4; i++ {
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v with zero delivered nudges; stdout=%s", f.drained, f.stdout.String())
+	}
+	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
+		t.Fatal("undeliverable nudge was not latched")
+	}
+	if got := len(f.rec.Events); got != 1 {
+		t.Fatalf("events = %d, want one stalled event", got)
+	}
+	if strings.Count(f.stdout.String(), "quiet for 600 s, 0 of 3 nudges deliverable (provider claude-opus); holding claim") != 1 || strings.Contains(f.stdout.String(), "unexecuted") {
+		t.Fatalf("log must describe delivery evidence: %s", f.stdout.String())
+	}
+}
+
+// The fixture vouches only for successful sends to its running fake session.
+type executionDeliveryRuntime struct{ *runtime.Fake }
+
+func (p executionDeliveryRuntime) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	err := p.Nudge(name, content)
+	return runtime.NudgeDelivery{Delivered: err == nil && p.IsRunning(name), Submit: runtime.NudgeSubmitUnverified}, err
+}
+
+func TestExecutionBackstopRequiresPositiveDeliveryEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		receipt    runtime.NudgeDelivery
+		err        error
+		legacy     bool
+		wantDrains int
+	}{
+		{name: "zero receipt"},
+		{name: "legacy nil is not proof", legacy: true},
+		{name: "inferred delivery is not proof", receipt: runtime.NudgeDelivery{Delivered: true}},
+		{name: "landed despite error", receipt: runtime.NudgeDelivery{Bytes: 1, Submit: runtime.NudgeSubmitUnconfirmed}, err: errors.New("submit failed"), wantDrains: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			var base runtime.Provider = executionReceiptRuntime{Fake: f.sp, receipt: tc.receipt, err: tc.err}
+			if tc.legacy {
+				base = f.sp
+			}
+			// Both routers synthesize inferred receipts for legacy backends.
+			f.provider = newBoundedStatusProvider(auto.New(hybrid.New(base, base, func(string) bool { return false }), base))
+			for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+				f.idleFor(t, 10*time.Minute)
+				f.tick(t)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+			}
+			if len(f.drained) != tc.wantDrains {
+				t.Fatalf("drains = %v, want %d; %s", f.drained, tc.wantDrains, f.stdout.String())
+			}
+			if len(f.rec.Events) != 1 {
+				t.Fatalf("events = %d, want 1", len(f.rec.Events))
+			}
+			var payload events.ExecutionStepStalledPayload
+			if err := json.Unmarshal(f.rec.Events[0].Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if tc.wantDrains > 0 {
+				want = idleClaimNudgeMaxAttempts
+			}
+			if payload.Attempts != want {
+				t.Fatalf("reported deliveries = %d, want %d", payload.Attempts, want)
+			}
+		})
+	}
+}
+
+type executionReceiptRuntime struct {
+	*runtime.Fake
+	receipt runtime.NudgeDelivery
+	err     error
+}
+
+func (p executionReceiptRuntime) NudgeDelivered(string, []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	return p.receipt, p.err
+}
+
+func TestExecutionBackstopOneDeliveredNudgeAllowsDrain(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts+2; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		if i > 0 {
+			f.sp.NudgeErrors = map[string]error{f.sessName: errors.New("unavailable")}
+		}
+		f.tick(t)
+	}
+	if len(f.drained) != 1 {
+		t.Fatalf("drains = %v, want one", f.drained)
+	}
+	if !strings.Contains(f.stdout.String(), "1 of 3 nudges delivered") {
+		t.Fatalf("delivery count lost: %s", f.stdout.String())
 	}
 }

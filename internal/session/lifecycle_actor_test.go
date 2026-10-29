@@ -136,3 +136,45 @@ func TestSyncRuntimeAliasRollsBackOnPartialFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEnvPublishesExactProviderSessionKey(t *testing.T) {
+	for _, key := range []string{"provider-key", ""} {
+		env := RuntimeEnvWithSessionContext(Info{ID: "bead-id", SessionKey: key}, 1, 1, "token")
+		if got := env["GC_SESSION_KEY"]; got != key {
+			t.Fatalf("GC_SESSION_KEY = %q, want %q", got, key)
+		}
+	}
+}
+
+func TestSyncRuntimeSessionKeyRejectsReplacementRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, runtimeID, token string
+		wantErr                bool
+	}{
+		{"same instance", "session-id", "instance", false},
+		{"unowned runtime", "", "", false},
+		{"reused name", "replacement-id", "instance", true},
+		{"restarted instance", "session-id", "replacement", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			for key, value := range map[string]string{"GC_SESSION_ID": tc.runtimeID, "GC_INSTANCE_TOKEN": tc.token} {
+				if err := sp.SetMeta("worker", key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := SyncRuntimeSessionKey(sp, Info{ID: "session-id", SessionName: "worker", SessionKey: "captured", InstanceToken: "instance"})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("sync error = %v, want error=%v", err, tc.wantErr)
+			}
+			got, err := sp.GetMeta("worker", "GC_SESSION_KEY")
+			want := "captured"
+			if tc.wantErr || tc.runtimeID == "" {
+				want = ""
+			}
+			if err != nil || got != want {
+				t.Fatalf("runtime key = %q, %v; want %q", got, err, want)
+			}
+		})
+	}
+}
