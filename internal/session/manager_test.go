@@ -4044,6 +4044,306 @@ func TestGetDoesNotInferConfiguredTransportForStoppedLegacySessionWithPolicyFall
 	}
 }
 
+func TestStoredMCPMetadataRequiresConfiguredACPTransport(t *testing.T) {
+	for _, key := range []string{MCPIdentityMetadataKey, MCPServersSnapshotMetadataKey} {
+		for _, transport := range []string{"", "tmux", "acp"} {
+			t.Run(key+"/"+transport, func(t *testing.T) {
+				mgr := NewManagerWithOptions(beads.NewMemStore(), runtime.NewFake(), WithTransportResolver(func(_, _ string) string { return transport }))
+				b := beads.Bead{Metadata: map[string]string{"provider": "custom", "template": "worker", key: "stored"}}
+				want := ""
+				if transport == "acp" {
+					want = "acp"
+				}
+				got, verified := mgr.transportForBead(b, "worker")
+				if got != want {
+					t.Fatalf("transportForBead = %q, want %q", got, want)
+				}
+				infoTransport, infoVerified := mgr.transportForInfo(infoFromPersistedBead(b))
+				if infoTransport != want || infoVerified != verified {
+					t.Fatalf("transportForInfo = (%q, %v), want (%q, %v)", infoTransport, infoVerified, want, verified)
+				}
+			})
+		}
+	}
+}
+
+func TestStartClearsStaleACPKeysOnNonACPProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP, acpSP := runtime.NewFake(), runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": "worker-stale-acp", "template": "worker", "provider": "previous-provider", "state": string(StateAsleep),
+		MCPIdentityMetadataKey: "worker", MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoSP.RouteACP("worker-stale-acp")
+	mgr := NewManagerWithOptions(store, autoSP, WithTransportResolver(func(_, _ string) string { return "tmux" }))
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+	if err := mgr.Start(context.Background(), b.ID, "new-provider", runtime.Config{ProviderName: "new-provider"}); err != nil {
+		t.Fatal(err)
+	}
+	if !defaultSP.IsRunning("worker-stale-acp") || acpSP.IsRunning("worker-stale-acp") {
+		t.Fatal("stale ACP route selected instead of the configured provider")
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{MCPIdentityMetadataKey, MCPServersSnapshotMetadataKey} {
+		if stored.Metadata[key] != "" {
+			t.Errorf("stale %s remains: %q", key, stored.Metadata[key])
+		}
+	}
+	if err := mgr.Start(context.Background(), b.ID, "new-provider", runtime.Config{ProviderName: "new-provider"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(logs.String(), "ignoring ACP keys on a non-ACP provider"); got != 1 {
+		t.Fatalf("ignore log count = %d, want 1: %s", got, logs.String())
+	}
+}
+
+func TestStartPreservesLiveACPBehindSuspendedProjection(t *testing.T) {
+	for _, configured := range []string{"acp", "tmux"} {
+		t.Run(configured, func(t *testing.T) {
+			store := beads.NewMemStore()
+			terminal := &orphanScanProvider{Fake: runtime.NewFake()}
+			acp := runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+				"session_name": "legacy-session", "template": "worker", "provider": "stub", "state": string(StateSuspended),
+				MCPIdentityMetadataKey: "worker",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := acp.Start(context.Background(), "legacy-session", runtime.Config{Env: map[string]string{"GC_SESSION_ID": b.ID}}); err != nil {
+				t.Fatal(err)
+			}
+			terminal.results = []runtime.LiveRuntime{{PID: 12345, SessionID: b.ID, IsTracked: false}}
+			mgr := NewManagerWithOptions(store, sp, WithTransportResolver(func(_, _ string) string { return configured }))
+			if err := mgr.Start(context.Background(), b.ID, "stub acp", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range terminal.events {
+				if strings.HasPrefix(event, "terminate:") {
+					t.Fatalf("healthy ACP runtime was classified as an orphan: %v", terminal.events)
+				}
+			}
+			stored, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Metadata["state"] != string(StateActive) || !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
+				t.Fatalf("live ACP runtime was not adopted: state=%q", stored.Metadata["state"])
+			}
+		})
+	}
+}
+
+func TestSendToLiveStandaloneACPWithUnavailableReplacement(t *testing.T) {
+	store := beads.NewMemStore()
+	// Like the standalone ACP backend, this provider has no transport detector.
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": "live-session", "template": "worker", "provider": "old", "state": string(StateActive),
+		"command": "old acp", "transport": "acp", MCPIdentityMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "live-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("replacement executable unavailable")
+	mgr := NewManagerWithOptions(store, sp,
+		WithTransportResolver(func(_, _ string) string { return "acp" }),
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, runtime.Config, error) {
+			return "", ProviderResume{}, runtime.Config{}, wantErr
+		}))
+	if _, err := mgr.Send(context.Background(), b.ID, "hello", "old acp", runtime.Config{}); err != nil {
+		t.Fatalf("send to live standalone ACP: %v", err)
+	}
+	delivered := false
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Name == "live-session" && call.Message == "hello" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Fatal("message did not reach the live ACP runtime")
+	}
+	if err := sp.Stop("live-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Send(context.Background(), b.ID, "restart", "old acp", runtime.Config{}); !errors.Is(err, wantErr) {
+		t.Fatalf("send after runtime stop = %v, want replacement resolution error", err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Metadata[MCPIdentityMetadataKey] != "worker" || sp.IsRunning("live-session") {
+		t.Fatal("refused restart changed MCP identity or started a runtime")
+	}
+}
+
+func TestStartPreservesACPMetadataWhenResumeResolutionFails(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": "legacy-session", "template": "worker", "provider": "old", "state": string(StateAsleep),
+		"command": "old acp", "resume_flag": "--old-resume", "session_key": "saved-key",
+		MCPIdentityMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("current resume config unavailable")
+	mgr := NewManagerWithOptions(store, sp,
+		WithTransportResolver(func(_, _ string) string { return "tmux" }),
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, runtime.Config, error) {
+			return "", ProviderResume{}, runtime.Config{}, wantErr
+		}))
+	if err := mgr.Start(context.Background(), b.ID, "new", runtime.Config{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Start error = %v, want resolution failure", err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"command", "resume_flag", "session_key", MCPIdentityMetadataKey} {
+		if stored.Metadata[key] != b.Metadata[key] {
+			t.Fatalf("failed migration changed %s from %q to %q", key, b.Metadata[key], stored.Metadata[key])
+		}
+	}
+	if sp.IsRunning("legacy-session") {
+		t.Fatal("runtime started after resume config failure")
+	}
+}
+
+func TestStartUsesProviderSessionIdentityForMCPMigration(t *testing.T) {
+	for _, wantACP := range []bool{false, true} {
+		for _, selector := range []string{"session_origin", "real_world_app_session_kind"} {
+			for _, key := range []string{MCPIdentityMetadataKey, MCPServersSnapshotMetadataKey} {
+				t.Run(fmt.Sprintf("acp=%v/%s/%s", wantACP, selector, key), func(t *testing.T) {
+					store := beads.NewMemStore()
+					defaultSP, acpSP := runtime.NewFake(), runtime.NewFake()
+					autoSP := sessionauto.New(defaultSP, acpSP)
+					value := "manual"
+					if selector == "real_world_app_session_kind" {
+						value = "provider"
+					}
+					metadataValue := "stored"
+					hints := runtime.Config{ProviderName: "stored-provider"}
+					if key == MCPServersSnapshotMetadataKey {
+						servers := []runtime.MCPServerConfig{{Name: "tools", Transport: runtime.MCPTransportStdio, Command: "echo"}}
+						var err error
+						metadataValue, err = EncodeMCPServersSnapshot(servers)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if wantACP {
+							hints.MCPServers = servers
+						}
+					}
+					b, err := store.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{
+						"session_name": "provider-session", "template": "collision", "provider": "stored-provider", "state": string(StateAsleep), selector: value, key: metadataValue,
+					}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					mgr := NewManagerWithOptions(store, autoSP, WithTransportResolver(func(template, provider string) string {
+						if provider != "stored-provider" {
+							t.Errorf("resolved provider = %q", provider)
+						}
+						if (template == "") == wantACP {
+							return "acp"
+						}
+						return "tmux"
+					}))
+					if err := mgr.Start(context.Background(), b.ID, "echo", hints); err != nil {
+						t.Fatal(err)
+					}
+					stored, err := store.Get(b.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if acpSP.IsRunning("provider-session") != wantACP || defaultSP.IsRunning("provider-session") == wantACP || (stored.Metadata[key] != "") != wantACP {
+						t.Fatalf("wrong provider migration: ACP=%v default=%v metadata=%q want ACP=%v", acpSP.IsRunning("provider-session"), defaultSP.IsRunning("provider-session"), stored.Metadata[key], wantACP)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestProviderSwitchPreservesLiveACPThenMigratesOnRestart(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP, acpSP := runtime.NewFake(), runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+	const name = "worker-live-acp"
+	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"session_name": name, "template": "worker", "provider": "previous-provider", "state": string(StateActive),
+		MCPIdentityMetadataKey: "worker", MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acpSP.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	autoSP.RouteACP(name)
+	mgr := NewManagerWithOptions(store, autoSP, WithTransportResolver(func(_, _ string) string { return "tmux" }))
+	transport, verified := mgr.transportForBead(b, name)
+	infoTransport, infoVerified := mgr.transportForInfo(infoFromPersistedBead(b))
+	if transport != "acp" || verified || infoTransport != transport || infoVerified != verified {
+		t.Fatalf("live transport must be preserved without pinning it across the switch: bead=(%q,%v) info=(%q,%v)", transport, verified, infoTransport, infoVerified)
+	}
+	if err := mgr.Start(context.Background(), b.ID, "new-provider", runtime.Config{ProviderName: "new-provider"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil || stored.Metadata[MCPIdentityMetadataKey] == "" || stored.Metadata["transport"] != "" || defaultSP.IsRunning(name) {
+		t.Fatalf("live runtime must retain identity until restart: bead=%+v err=%v", stored, err)
+	}
+	if err := autoSP.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background(), b.ID, "new-provider", runtime.Config{ProviderName: "new-provider"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = store.Get(b.ID)
+	if err != nil || stored.Metadata[MCPIdentityMetadataKey] != "" || stored.Metadata[MCPServersSnapshotMetadataKey] != "" || !defaultSP.IsRunning(name) || acpSP.IsRunning(name) {
+		t.Fatalf("restart must migrate to the configured provider: bead=%+v err=%v", stored, err)
+	}
+}
+
+func TestACPStartErrorNamesTransportKeyAndResolvedProvider(t *testing.T) {
+	for _, key := range []string{MCPIdentityMetadataKey, MCPServersSnapshotMetadataKey} {
+		t.Run(key, func(t *testing.T) {
+			store := beads.NewMemStore()
+			failure := errors.New("acp handshake: initialize timeout")
+			sp := &startOverrideProvider{Fake: runtime.NewFake(), startErr: failure}
+			b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+				"session_name": "worker", "template": "worker", "provider": "old-provider", "state": string(StateAsleep), key: "stored",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := NewManagerWithOptions(store, sp, WithTransportResolver(func(_, _ string) string { return "acp" }))
+			err = mgr.Start(context.Background(), b.ID, "new-provider --acp", runtime.Config{ProviderName: "new-provider"})
+			if !errors.Is(err, failure) || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "new-provider") {
+				t.Fatalf("Start error = %v, want wrapped failure naming %s and new-provider", err, key)
+			}
+		})
+	}
+}
+
 func TestGetInfersACPTransportFromStoredMCPMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	defaultSP := runtime.NewFake()
@@ -4070,7 +4370,7 @@ func TestGetInfersACPTransportFromStoredMCPMetadata(t *testing.T) {
 		t.Fatalf("Create legacy bead: %v", err)
 	}
 
-	mgr := NewManagerWithOptions(store, autoSP, WithTransportResolver(nil))
+	mgr := NewManagerWithOptions(store, autoSP, WithTransportResolver(func(_, _ string) string { return "acp" }))
 	info, err := mgr.Get(legacy.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)

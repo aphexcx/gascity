@@ -20,6 +20,64 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+func TestCodexStartupRecoversInterruptedArgumentPrompt(t *testing.T) {
+	const interrupted = "OpenAI Codex\n■ Conversation interrupted - tell the model what to do differently\n› \n  gpt-model · /lane"
+	for _, tc := range []struct {
+		name, provider, pane, nudge string
+		busy                        bool
+		want                        string
+	}{
+		{name: "interrupted claim", provider: "codex", pane: interrupted, want: "Claim the assigned bead.\nKeep the user's instructions."},
+		{name: "busy turn", provider: "codex", pane: interrupted, busy: true},
+		{name: "staged draft", provider: "codex", pane: "■ Conversation interrupted\n› [Pasted Content 4096 chars]"},
+		{name: "ordinary composer", provider: "codex", pane: "OpenAI Codex\n› "},
+		{name: "quoted text", provider: "codex", pane: "The user mentioned Conversation interrupted\n› "},
+		{name: "old interruption before a completed turn", provider: "codex", pane: interrupted + "resume work\n• Completed the request.\n› "},
+		{name: "menu remains", provider: "codex", pane: interrupted + "\nHooks need review\nTrust all and continue"},
+		{name: "no composer", provider: "codex", pane: "■ Conversation interrupted"},
+		{name: "other provider", provider: "claude", pane: interrupted},
+		{name: "configured nudge", provider: "codex", pane: interrupted, nudge: "claim now", want: "claim now"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeStartOps{hasSessionResult: true, capturePaneText: tc.pane, paneBusyResult: tc.busy}
+			cfg := runtime.Config{ProviderName: tc.provider, PromptSuffix: shellquote.Quote("Claim the assigned bead.\nKeep the user's instructions."), Nudge: tc.nudge, AcceptStartupDialogs: boolPtr(true)}
+			if err := launchOrchestration(context.Background(), ops, "worker", cfg, time.Second); err != nil {
+				t.Fatal(err)
+			}
+			var sent []string
+			for _, call := range ops.calls {
+				if call.method == "sendKeys" {
+					sent = append(sent, call.command)
+				}
+			}
+			if tc.want == "" && len(sent) != 0 || tc.want != "" && (len(sent) != 1 || sent[0] != tc.want) {
+				t.Fatalf("sent = %q, want one %q or none when empty", sent, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexStartupRecoveryReportsObservationAndDeliveryErrors(t *testing.T) {
+	for _, stage := range []string{"capture", "activity", "delivery"} {
+		t.Run(stage, func(t *testing.T) {
+			want := errors.New("provider probe failed")
+			ops := &fakeStartOps{hasSessionResult: true, capturePaneText: "■ Conversation interrupted\n› "}
+			switch stage {
+			case "capture":
+				ops.capturePaneErr = want
+			case "activity":
+				ops.paneBusyErr = want
+			case "delivery":
+				ops.sendKeysErr = want
+			}
+			cfg := runtime.Config{ProviderName: "codex", PromptSuffix: shellquote.Quote("Claim work"), AcceptStartupDialogs: boolPtr(true)}
+			if err := launchOrchestration(context.Background(), ops, "worker", cfg, time.Second); !errors.Is(err, want) {
+				t.Fatalf("launchOrchestration error = %v, want %v", err, want)
+			}
+		})
+	}
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 func fallbackPromptDir(tmpRoot string) string {

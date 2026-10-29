@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -4419,6 +4420,68 @@ func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testi
 	}
 }
 
+func TestCommitAsyncStartResultPreservesPreparedCommandDuringACPMigration(t *testing.T) {
+	ctx := context.Background()
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	terminal, acp := runtime.NewFake(), runtime.NewFake()
+	sp := sessionauto.New(terminal, acp)
+	clk := &clock.Fake{Time: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "stub", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{"stub": {
+			Command: "/bin/echo {{.Agent}}", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}, PromptMode: "none",
+		}},
+	}
+	var stderr bytes.Buffer
+	tp, err := resolveTemplate(newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, &stderr), &cfg.Agents[0], "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.Command != "/bin/echo worker" {
+		t.Fatalf("rendered command = %q", tp.Command)
+	}
+	tp.SessionName = "legacy-session"
+	b, err := store.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "stub", "session_name": "legacy-session", "state": "asleep",
+		"command": tp.Command, "work_dir": cityPath, "generation": "1", "instance_token": "migration-token",
+		sessionpkg.MCPIdentityMetadataKey: "worker", sessionpkg.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.RouteACP("legacy-session")
+	prepared, err := prepareStartCandidateForCity(startCandidate{info: sessiontest.SeedBead(t, b), tp: tp}, cityPath, "test-city", cfg, sp, store, clk, &stderr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := runPreparedStartCandidate(ctx, *prepared, cityPath, sp, store, cfg, 0, func(context.Context, string) bool { return true }, nil, nil)
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	start := terminal.LastStartConfig("legacy-session")
+	if start == nil || start.Command != tp.Command || len(start.MCPServers) != 0 {
+		t.Fatalf("prepared launch = %#v", start)
+	}
+	for _, key := range []string{"GC_SESSION_ID", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH"} {
+		if err := sp.SetMeta("legacy-session", key, start.Env[key]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	committed := commitAsyncStartResultWithContext(ctx, result, sp, store, clk, events.Discard, 0, io.Discard, &stderr, nil)
+	if !committed || !terminal.IsRunning("legacy-session") {
+		t.Errorf("prepared runtime lost during async commit: committed=%v running=%v; %s", committed, terminal.IsRunning("legacy-session"), stderr.String())
+	}
+	stored, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Metadata["command"] != tp.Command || stored.Metadata[sessionpkg.MCPIdentityMetadataKey] != "" || stored.Metadata[sessionpkg.MCPServersSnapshotMetadataKey] != "" {
+		t.Errorf("migration did not preserve rendered durable command: %#v", stored.Metadata)
+	}
+}
+
 func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 6, 0, 0, time.UTC)}
@@ -8286,6 +8349,33 @@ func TestCommitStartResult_PersistsMCPIdentityForACPStart(t *testing.T) {
 	}
 	if got.Metadata[sessionpkg.MCPServersSnapshotMetadataKey] == "" {
 		t.Fatal("mcp_servers_snapshot = empty, want persisted snapshot")
+	}
+}
+
+func TestCommitStartResultClearsMCPIdentityAfterProviderSwitch(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"template": "worker", "agent_name": "worker", "session_name": "worker-1", "state": "creating",
+		sessionpkg.MCPIdentityMetadataKey: "worker", sessionpkg.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, b), tp: TemplateParams{TemplateName: "worker", InstanceName: "worker-1"}}},
+		outcome:  "success", started: time.Unix(100, 0), finished: time.Unix(101, 0),
+	}
+	if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: time.Unix(102, 0)}, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commit failed")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{sessionpkg.MCPIdentityMetadataKey, sessionpkg.MCPServersSnapshotMetadataKey} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q after non-ACP start", key, got.Metadata[key])
+		}
 	}
 }
 

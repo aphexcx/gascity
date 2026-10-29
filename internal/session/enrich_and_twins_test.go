@@ -54,6 +54,9 @@ func TestEnrichInfoMatchesBeadOverlay(t *testing.T) {
 		if template == "pending-tmpl" {
 			return "tmux"
 		}
+		if template == "acp-tmpl" {
+			return "acp"
+		}
 		return ""
 	}))
 
@@ -66,7 +69,7 @@ func TestEnrichInfoMatchesBeadOverlay(t *testing.T) {
 		"asleep":         mk("s-as", "open", map[string]string{"session_name": "s-running", "state": "asleep", "provider": "claude"}),
 		"closed-raw":     mk("s-cl", "closed", map[string]string{"session_name": "s-running", "state": "active", "provider": "claude"}),
 		"acp-provider":   mk("s-acp", "open", map[string]string{"session_name": "s-acp", "state": "asleep", "provider": "acp"}),
-		"mcp-identity":   mk("s-mcp", "open", map[string]string{"session_name": "s-mcp", "state": "asleep", MCPIdentityMetadataKey: "mcp-x"}),
+		"mcp-identity":   mk("s-mcp", "open", map[string]string{"session_name": "s-mcp", "state": "asleep", "template": "acp-tmpl", MCPIdentityMetadataKey: "mcp-x"}),
 		"pending-create": mk("s-pc", "open", map[string]string{"session_name": "s-pc", "state": "creating", "pending_create_claim": "true", "template": "pending-tmpl"}),
 	}
 

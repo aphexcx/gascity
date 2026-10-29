@@ -24,6 +24,56 @@ type errorBearingLivenessObserverStub struct {
 	err error
 }
 
+type processScannerStub struct {
+	*runtime.Fake
+	found      []runtime.LiveRuntime
+	err        error
+	scanned    string
+	terminated runtime.LiveRuntime
+}
+
+func (p *processScannerStub) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	p.scanned = id
+	return p.found, p.err
+}
+
+func (p *processScannerStub) TerminateRuntime(live runtime.LiveRuntime) error {
+	p.terminated = live
+	return p.err
+}
+
+func TestProviderPreservesProcessTableScanner(t *testing.T) {
+	live := runtime.LiveRuntime{PID: 12345, SessionID: "saved-session", City: "/city"}
+	wantErr := errors.New("partial process snapshot")
+	base := &processScannerStub{Fake: runtime.NewFake(), found: []runtime.LiveRuntime{live}, err: wantErr}
+	provider := New(base, runtime.NewFake())
+	scanner, ok := any(provider).(runtime.ProcessTableScanner)
+	if !ok {
+		t.Fatal("auto provider hides the default backend's process scanner")
+	}
+	found, err := scanner.FindRuntimesBySessionID(live.SessionID)
+	if !errors.Is(err, wantErr) || len(found) != 1 || found[0] != live || base.scanned != live.SessionID {
+		t.Fatalf("scan lost partial results or error: found=%+v err=%v scanned=%q", found, err, base.scanned)
+	}
+	if err := scanner.TerminateRuntime(live); !errors.Is(err, wantErr) || base.terminated != live {
+		t.Fatalf("termination lost target or error: target=%+v err=%v", base.terminated, err)
+	}
+}
+
+func TestProviderProcessTableScannerWithoutHostSupport(t *testing.T) {
+	provider := New(struct{ runtime.Provider }{runtime.NewFake()}, runtime.NewFake())
+	scanner, ok := any(provider).(runtime.ProcessTableScanner)
+	if !ok {
+		t.Fatal("auto provider does not expose its scanner adapter")
+	}
+	if found, err := scanner.FindRuntimesBySessionID("session"); err != nil || len(found) != 0 {
+		t.Fatalf("unsupported host scan = %+v, %v", found, err)
+	}
+	if err := scanner.TerminateRuntime(runtime.LiveRuntime{PID: 12345}); err == nil {
+		t.Fatal("termination must report unsupported host scanning")
+	}
+}
+
 func (s *errorBearingLivenessObserverStub) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
 	return s.obs, s.err
 }

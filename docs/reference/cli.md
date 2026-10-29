@@ -292,8 +292,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+For create and update, relative --body-file and --design-file paths are
+resolved from the caller's working directory before selecting the rig.
+The stdin marker "-" is preserved. --acceptance takes literal text, not a
+file path, as in bd.
+
+A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
@@ -4666,6 +4670,12 @@ default_sling_targets (or default_sling_target) from config and one is chosen
 at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
+For local dispatch, code beads require --allow-implicit to use a rig's
+implicit claude, codex, or codex-astra provider slot. Use a configured
+role lane for work that needs its worktree and prompt configuration.
+Only city-prefix beads labeled mayor-tool are exempt. --force does not
+bypass this check.
+
 With --formula, the formula is instantiated and its root bead is routed to
 the target. v2 formulas — those declaring [requires]
 formula_compiler = "&gt;=2.0.0" — start a workflow; v1 formulas
@@ -4678,8 +4688,8 @@ root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
 format and contract details.
 
 Examples:
-  gc sling my-rig/claude BL-42              # route existing bead
-  gc sling my-rig/claude "write a README"   # create bead from text, then route
+  gc sling my-rig/worker BL-42              # route existing bead
+  gc sling my-rig/worker "write a README"   # create bead from text, then route
   gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin
 
@@ -4689,6 +4699,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-implicit` | bool |  | allow local code work on a rig's implicit provider slot |
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |

@@ -542,9 +542,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints, true); err != nil {
+		return err
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+	if (State(b.Metadata["state"]) != StateSuspended || resumeCommand == "") && m.sp.IsRunning(sessName) {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
@@ -598,11 +601,15 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
 	// exact "old process survives alongside its replacement" scenario. No
 	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
+	// A suspended projection can still have a live named runtime. Let Start
+	// report duplication or a provider error without reaping that runtime.
+	if !m.sp.IsRunning(sessName) {
+		if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
@@ -618,7 +625,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return sessionStartError("resuming session", b, cfg, transport, err)
 			}
 			started = retried
 		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
@@ -628,7 +635,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return sessionStartError("resuming session", b, cfg, transport, err)
 		}
 	} else {
 		started = true
@@ -674,6 +681,13 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	// StartResolved uses Config.Command to distinguish a caller-prepared launch
+	// from cached handle hints. Preserve its full prompt/setup/environment while
+	// still validating the replacement provider and migrating stored settings.
+	refreshLaunch := strings.TrimSpace(hints.Command) == ""
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints, refreshLaunch); err != nil {
+		return err
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
@@ -744,7 +758,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 				if unroute != nil {
 					unroute()
 				}
-				return fmt.Errorf("resuming session: %w", err)
+				return sessionStartError("resuming session", b, cfg, transport, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -753,7 +767,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 			if unroute != nil {
 				unroute()
 			}
-			return fmt.Errorf("resuming session: %w", err)
+			return sessionStartError("resuming session", b, cfg, transport, err)
 		}
 	} else {
 		started = true

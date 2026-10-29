@@ -42,9 +42,9 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		searchPaths      []string
 	)
 	if cfg != nil {
-		rigContext := currentRigContext(cfg)
 		resolveTransport = func(template, provider string) string {
-			agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
+			// Persisted templates are canonical identities, independent of cwd.
+			agentCfg, ok := resolveAgentIdentity(cfg, template, "")
 			if ok {
 				resolved, err := config.ResolveProvider(
 					&agentCfg,
@@ -599,7 +599,10 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if cfg == nil {
 		return nil, nil
 	}
-	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
+	resolved, configuredTransport, err := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
+	if err != nil {
+		return nil, err
+	}
 	if resolved == nil {
 		return nil, nil
 	}
@@ -611,6 +614,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		return nil, fmt.Errorf("legacy session transport is ambiguous: recreate the stopped session or resume it while ACP metadata can still be persisted")
 	}
 
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	command := resolvedWorkerRuntimeCommandForTransport(cityPath, resolved, transport, info.Command, info.Provider, metadata)
 
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -781,11 +785,10 @@ func storedCommandHasSettingsArg(command string) bool {
 }
 
 func storedWorkerSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {
+	if transport, hasMCP := session.ResolveMCPTransport(configuredTransport, metadata[session.MCPIdentityMetadataKey], metadata[session.MCPServersSnapshotMetadataKey]); hasMCP {
+		return transport == "acp"
+	}
 	if metadata != nil {
-		if strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
-			strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "" {
-			return true
-		}
 		if strings.TrimSpace(configuredTransport) == "acp" && legacyWorkerResumeMetadataProvesACPTransport(metadata) {
 			return true
 		}
@@ -894,18 +897,21 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 }
 
 func resolveWorkerRuntimeProviderWithConfig(cfg *config.City, info session.Info, sessionKind string) (*config.ResolvedProvider, string) {
-	return resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+	resolved, transport, _ := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+	return resolved, transport
 }
 
-func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string) {
+func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string, error) {
 	if cfg == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
 	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
 		if foundAgent {
 			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
-				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved)
+				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved), nil
+			} else if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+				return nil, "", err
 			}
 		}
 	}
@@ -916,10 +922,13 @@ func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info se
 		}
 		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
 		if err == nil {
-			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport()), nil
+		}
+		if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+			return nil, "", err
 		}
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

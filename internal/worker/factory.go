@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -70,6 +71,21 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.ResolveSessionRuntime != nil {
+		opts = append(opts, sessionpkg.WithResumeConfigResolver(func(info sessionpkg.Info, metadata map[string]string) (string, sessionpkg.ProviderResume, runtime.Config, error) {
+			resolved, err := cfg.ResolveSessionRuntime(info, strings.TrimSpace(metadata["real_world_app_session_kind"]), cloneStringMap(metadata))
+			if err != nil {
+				return "", sessionpkg.ProviderResume{}, runtime.Config{}, err
+			}
+			if resolved == nil {
+				return "", sessionpkg.ProviderResume{}, runtime.Config{}, fmt.Errorf("%w: provider %q has no resolved runtime for transport migration", ErrHandleConfig, info.Provider)
+			}
+			normalized := normalizeResolvedRuntimeInput(*resolved)
+			hints := normalized.Hints
+			hints.Env = mergeStringMaps(hints.Env, normalized.SessionEnv)
+			return normalized.Command, normalized.Resume, hints, nil
+		}))
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
@@ -199,11 +215,24 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 	if f.resolveSessionRuntime != nil {
 		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
 		if err != nil {
-			return nil, err
+			if !errors.Is(err, sessionpkg.ErrACPProviderResolution) {
+				return nil, err
+			}
+			// Control operations still need the persisted runtime. Migration
+			// re-resolves through WithResumeConfigResolver before any mutation.
+			log.Printf("session %s: deferring provider resolution until startup: %v", info.ID, err)
+		} else {
+			applyResolvedRuntimeToSessionSpec(&spec, resolved)
 		}
-		applyResolvedRuntimeToSessionSpec(&spec, resolved)
 	}
-	return f.Session(spec)
+	handle, err := f.Session(spec)
+	if err != nil {
+		return nil, err
+	}
+	handle.resolveStartup = f.resolveSessionRuntime != nil &&
+		(strings.TrimSpace(pr.Metadata[sessionpkg.MCPIdentityMetadataKey]) != "" ||
+			strings.TrimSpace(pr.Metadata[sessionpkg.MCPServersSnapshotMetadataKey]) != "")
+	return handle, nil
 }
 
 // HandleForTarget resolves a session target to a session-backed worker when

@@ -87,6 +87,11 @@ func bdCommandFlagTokens(bdArgs []string, command string, visit func(i int, name
 			valueFlags[flag] = true
 		}
 	}
+	if command == "update" {
+		// bd's hidden literal-text alias is omitted from its help-derived
+		// manifest. Its value may itself look like a document-file flag.
+		valueFlags["--acceptance-criteria"] = true
+	}
 	boolFlags := bdflags.BoolFlags(command)
 	if boolFlags == nil {
 		boolFlags = bdflags.GlobalBoolFlags()

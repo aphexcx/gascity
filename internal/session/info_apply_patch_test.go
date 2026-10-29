@@ -25,6 +25,7 @@ var allProjectedMetadataKeys = []string{
 	"resume_style", "resume_command", "continuation_epoch", "sleep_reason",
 	NamedSessionIdentityMetadata, NamedSessionMetadataKey, NamedSessionModeMetadata,
 	"common_name", "pool_slot", "pool_managed", "session_origin",
+	"real_world_app_session_kind",
 	"dependency_only", "manual_session",
 	"pool_alias_conflict", "pool_alias_conflict_count", "pool_alias_conflict_at",
 	MCPIdentityMetadataKey,

@@ -2599,9 +2599,7 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
-	if result.prepared.candidate.tp.IsACP ||
-		info.MCPIdentity != "" ||
-		info.MCPServersSnapshot != "" {
+	if result.prepared.candidate.tp.IsACP {
 		storedMCPIdentity := firstNonEmptyGCString(
 			info.MCPIdentity,
 			info.ConfiguredNamedIdentity,
@@ -2610,6 +2608,8 @@ func commitStartResultTraced(
 		if storedMCPIdentity != "" || info.MCPIdentity != "" {
 			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
 		}
+	} else if info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
+		sessionpkg.ClearStoredMCPMetadata(metadata)
 	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)

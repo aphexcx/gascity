@@ -356,6 +356,9 @@ type SessionHandle struct {
 	sidecarRetryID        string
 	sidecarRetryAttempts  int
 	sidecarRetryScheduled bool
+	// resolveStartup delegates launch inputs to the manager's resolver under
+	// the operation lock instead of reusing this handle's construction snapshot.
+	resolveStartup bool
 }
 
 var (

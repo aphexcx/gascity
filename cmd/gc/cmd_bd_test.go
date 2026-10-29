@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -3331,6 +3333,80 @@ func TestGcBdDisclosesAnsweringStore(t *testing.T) {
 			t.Fatalf("stderr = %q, want no scope disclosure for a write verb; stderr=%q", stderr.String(), stderr.String())
 		}
 	})
+}
+
+func TestGcBdInputFilesResolveFromCallerBeforeRigSwitch(t *testing.T) {
+	cityDir := newGcBdBinaryProbeCity(t)
+	pinDir := t.TempDir()
+	writeGcBdProbeCityTOML(t, cityDir, pinDir, "frontend")
+	writeGcBdProbeRig(t, cityDir, "frontend", completeStorageBindingJSON)
+	script := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --body-file|--design-file) shift; cat "$1"; exit $? ;;
+    --body-file=*|--design-file=*) cat "${1#*=}"; exit $? ;;
+  esac
+  shift
+done
+exit 2
+`
+	if err := os.WriteFile(filepath.Join(pinDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "input.md"), []byte("caller document"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, verb := range []string{"create", "update"} {
+		for _, flag := range []string{"--body-file", "--design-file"} {
+			for _, inline := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/inline=%v", verb, flag, inline), func(t *testing.T) {
+					args := []string{"--rig", "frontend", verb, "frontend-task"}
+					if inline {
+						args = append(args, flag+"=input.md")
+					} else {
+						args = append(args, flag, "input.md")
+					}
+					var stdout, stderr bytes.Buffer
+					if code := doBd(args, &stdout, &stderr); code != 0 || stdout.String() != "caller document" {
+						t.Fatalf("doBd = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+					}
+				})
+			}
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doBd([]string{"--rig", "frontend", "create", "title", "--body-file", "missing.md"}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), filepath.Join(cityDir, "missing.md")) {
+		t.Fatalf("missing file must name caller absolute path: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestAbsoluteBdInputFilesPreservesNonFileArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "title", "--body-file", "-", "--design-file=-"},
+		{"update", "rig-id", "--acceptance", "relative.md", "--acceptance-criteria=other.md"},
+		{"update", "rig-id", "--acceptance-criteria", "--body-file=literal.md"},
+		{"create", "title", "--description", "--body-file=literal.md", "--design", "--design-file=literal.md"},
+		{"update", "rig-id", "--", "--body-file", "literal.md"},
+		{"create", "title", "--body-file=", "--design-file"},
+		{"show", "rig-id", "--body-file", "unsupported.md"},
+		{"--actor", "create", "show", "rig-id", "--body-file", "literal.md"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			got, err := absoluteBdInputFiles(args)
+			if err != nil || !slices.Equal(got, args) {
+				t.Fatalf("absoluteBdInputFiles = %q, %v; want %q", got, err, args)
+			}
+		})
+	}
+	absolute, err := filepath.Abs("input.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--actor", "worker", "update", "rig-id", "--body-file", "input.md", "--design-file=" + absolute}
+	got, err := absoluteBdInputFiles(args)
+	if err != nil || got[5] != absolute || got[6] != args[6] || args[5] != "input.md" {
+		t.Fatalf("absoluteBdInputFiles = %q, %v; original = %q", got, err, args)
+	}
 }
 
 // TestGcBdPassthroughResolvesBdBinaryForRigScope pins the binary the

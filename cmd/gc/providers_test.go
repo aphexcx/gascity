@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -482,6 +483,127 @@ func TestConfiguredACPRouteNames_IncludeLegacyObservedACPProviderSessionsWithout
 	got := configuredACPRouteNames(snapshot, "test-city", cfg)
 	if len(got) != 1 || got[0] != "provider-session" {
 		t.Fatalf("configuredACPRouteNames() = %v, want [provider-session]", got)
+	}
+}
+
+func TestStoredACPTemplateIgnoresCurrentRig(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cityTransport := range []string{"acp", "tmux"} {
+		t.Run(cityTransport, func(t *testing.T) {
+			rigTransport := "acp"
+			if cityTransport == "acp" {
+				rigTransport = "tmux"
+			}
+			cfg := &config.City{
+				Rigs: []config.Rig{{Name: "frontend", Path: cwd}},
+				Agents: []config.Agent{
+					{Name: "worker", Provider: "stub", Session: cityTransport},
+					{Name: "worker", Dir: "frontend", Provider: "stub", Session: rigTransport},
+				},
+				Providers: map[string]config.ProviderSpec{"stub": {Command: "echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}}},
+			}
+			if got := currentRigContext(cfg); got != "frontend" {
+				t.Fatalf("rig context = %q, want frontend", got)
+			}
+			for _, key := range []string{session.MCPIdentityMetadataKey, session.MCPServersSnapshotMetadataKey} {
+				b := beads.Bead{Type: session.BeadType, Metadata: map[string]string{"template": "worker", "provider": "stub", "command": "echo", key: "stored"}}
+				info := session.Info{Template: "worker", Provider: "stub", Command: "echo", MCPIdentity: b.Metadata[session.MCPIdentityMetadataKey], MCPServersSnapshot: b.Metadata[session.MCPServersSnapshotMetadataKey]}
+				wantACP := cityTransport == "acp"
+				if got := beadUsesACPTransport(b, cfg); got != wantACP {
+					t.Errorf("raw bead %s ACP = %v, want %v", key, got, wantACP)
+				}
+				if got := infoUsesACPTransport(info, cfg); got != wantACP {
+					t.Errorf("session info %s ACP = %v, want %v", key, got, wantACP)
+				}
+				store := beads.NewMemStore()
+				created, err := store.Create(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				catalog, err := workerSessionCatalogWithConfig(t.TempDir(), store, runtime.NewFake(), cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := catalog.Get(created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (got.Transport == "acp") != wantACP {
+					t.Errorf("worker catalog %s transport = %q, want ACP=%v", key, got.Transport, wantACP)
+				}
+			}
+		})
+	}
+}
+
+func TestStoredACPProviderSessionIgnoresAgentNameCollision(t *testing.T) {
+	for _, wantACP := range []bool{false, true} {
+		for _, selector := range []string{"session_origin", "real_world_app_session_kind"} {
+			for _, key := range []string{session.MCPIdentityMetadataKey, session.MCPServersSnapshotMetadataKey} {
+				t.Run(fmt.Sprintf("acp=%v/%s/%s", wantACP, selector, key), func(t *testing.T) {
+					provider, agentProvider, agentTransport := "plain", "protocol", "acp"
+					if wantACP {
+						provider, agentProvider, agentTransport = "protocol", "plain", "tmux"
+					}
+					cfg := &config.City{
+						Agents: []config.Agent{{Name: "collision", Provider: agentProvider, Session: agentTransport}},
+						Providers: map[string]config.ProviderSpec{
+							"plain":    {Command: "echo"},
+							"protocol": {Command: "echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
+						},
+					}
+					value := "manual"
+					if selector == "real_world_app_session_kind" {
+						value = "provider"
+					}
+					store := beads.NewMemStore()
+					b, err := store.Create(beads.Bead{Type: session.BeadType, Metadata: map[string]string{
+						"template": "collision", "provider": provider, "command": "echo", selector: value, key: "stored",
+					}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					catalog, err := workerSessionCatalogWithConfig(t.TempDir(), store, runtime.NewFake(), cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					info, err := catalog.Get(b.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if (info.Transport == "acp") != wantACP {
+						t.Errorf("catalog transport = %q, want ACP=%v", info.Transport, wantACP)
+					}
+					info.Transport = "" // Exercise stored-key classification independently of the live overlay.
+					if got := beadUsesACPTransport(b, cfg); got != wantACP {
+						t.Errorf("raw ACP = %v, want %v", got, wantACP)
+					}
+					if got := infoUsesACPTransport(info, cfg); got != wantACP {
+						t.Errorf("Info ACP = %v, want %v", got, wantACP)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestObservedACPRouteIgnoresKeysAfterProviderSwitch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Provider: "new-provider", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{
+			"new-provider": {Command: "echo"},
+			"old-provider": {Command: "echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
+		},
+	}
+	for _, key := range []string{session.MCPIdentityMetadataKey, session.MCPServersSnapshotMetadataKey} {
+		b := beads.Bead{Metadata: map[string]string{"template": "worker", "provider": "old-provider", "command": "echo acp", key: "stored"}}
+		info := session.Info{Template: "worker", Provider: "old-provider", Command: "echo acp", MCPIdentity: b.Metadata[session.MCPIdentityMetadataKey], MCPServersSnapshot: b.Metadata[session.MCPServersSnapshotMetadataKey]}
+		if beadUsesACPTransport(b, cfg) || infoUsesACPTransport(info, cfg) {
+			t.Fatalf("%s selected ACP after a non-ACP provider switch", key)
+		}
 	}
 }
 
@@ -1185,6 +1307,111 @@ func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	}
+}
+
+func TestSessionProviderDiscoversLiveLegacyACPAfterLastProviderRemoved(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	terminal, acp := runtime.NewFake(), runtime.NewFake()
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return acp, nil
+		}
+		return terminal, nil
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"}, Session: config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "plain", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{"plain": {Command: "/bin/echo"}},
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "removed-provider", "command": "old-acp", "state": "active",
+		"session_name": "legacy-session", session.MCPIdentityMetadataKey: "legacy-agent",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cityDir := t.TempDir()
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityDir, newSessionBeadSnapshot([]beads.Bead{b}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := workerSessionCatalogWithConfig(cityDir, store, sp, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := catalog.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Transport != "acp" {
+		t.Fatalf("live transport = %q, want acp", info.Transport)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if acp.IsRunning("legacy-session") {
+		t.Fatal("suspend left the ACP process running")
+	}
+}
+
+func TestLegacyACPDiscoveryPreservesTerminalOrphanCleanup(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	terminal := newProcessTableSweepProvider()
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return runtime.NewFake(), nil
+		}
+		return terminal, nil
+	}
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"}, Session: config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "worker", Provider: "plain", Session: "tmux"}},
+		Providers: map[string]config.ProviderSpec{"plain": {Command: "/bin/echo"}},
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "provider": "plain", "command": "old-acp", "state": "asleep",
+		"session_name": "legacy-session", session.MCPIdentityMetadataKey: "legacy-agent",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal.runtimes = []runtime.LiveRuntime{{PID: 999999999, SessionID: b.ID, City: cityDir}}
+	sp, err := newSessionProviderFromContext(sessionProviderContextForCity(cfg, cityDir, ""), newSessionBeadSnapshot([]beads.Bead{b}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityDir, store, sp, cfg, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(terminal.terminated) != 1 || terminal.terminated[0].SessionID != b.ID {
+		t.Fatalf("terminal orphan cleanup lost through legacy composition: %+v", terminal.terminated)
+	}
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	terminal.terminateErr[999999999] = errors.New("orphan survived")
+	if err := handle.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "orphan survived") {
+		t.Fatalf("start must fail when the composed scanner cannot stop an orphan: %v", err)
+	}
+	if terminal.IsRunning("legacy-session") {
+		t.Fatal("replacement started alongside an unconfirmed orphan")
 	}
 }
 

@@ -1712,7 +1712,26 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 	runSessionSetup(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
-	// Step 6: Send nudge text if configured.
+	// Codex can consume the argument prompt when its hooks review interrupts
+	// startup. Recover only at an idle interrupted composer after the dialog
+	// passes, and use the normal startup delivery/diagnostic path once.
+	if cfg.ProviderName == "codex" && cfg.PromptSuffix != "" && cfg.Nudge == "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		pane, err := ops.capturePane(name, 40)
+		if err != nil {
+			return fmt.Errorf("checking interrupted Codex startup: %w", err)
+		}
+		if interruptedCodexStartupPrompt(pane) {
+			busy, err := ops.paneBusy(name)
+			if err != nil {
+				return fmt.Errorf("checking Codex startup activity: %w", err)
+			}
+			if !busy {
+				cfg.Nudge = unquotePrompt(cfg.PromptSuffix)
+			}
+		}
+	}
+
+	// Step 6: Send nudge text if configured or recovered from an interruption.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2125,13 +2144,50 @@ func recreateSessionAfterCleanup(ops startOps, name, workDir, command string, en
 // a silent "inline the prompt into the tmux command line" path that produced
 // "cannot execute: File name too long" pane deaths for large prompts.
 func writePromptFile(workDir, agentName, shellQuotedPrompt string) (string, error) {
+	raw := unquotePrompt(shellQuotedPrompt)
+	return writeRawPromptFile(workDir, agentName, raw)
+}
+
+// interruptedCodexStartupPrompt recognizes the TUI's interrupted-turn marker
+// and a ready composer. A still-visible hooks menu must not receive prompt text.
+func interruptedCodexStartupPrompt(pane string) bool {
+	lower := strings.ToLower(pane)
+	if strings.Contains(lower, "hooks need review") {
+		return false
+	}
+	lines := strings.Split(pane, "\n")
+	if marker, ok := stagedDraftMarkerForFamily("codex"); ok && paneShowsStagedDraft(lines, marker) {
+		return false
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "›" && !strings.HasPrefix(line, "› ") {
+			continue
+		}
+		// Only the last rendered turn may trigger recovery. An older marker
+		// above another user prompt or completed response is transcript history.
+		for j := i - 1; j >= 0; j-- {
+			previous := strings.TrimSpace(lines[j])
+			if previous != "" {
+				return strings.HasPrefix(previous, "■ Conversation interrupted")
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func unquotePrompt(shellQuotedPrompt string) string {
 	// Strip surrounding single quotes from shell-quoted string.
 	raw := shellQuotedPrompt
 	if len(raw) >= 2 && raw[0] == '\'' && raw[len(raw)-1] == '\'' {
 		raw = raw[1 : len(raw)-1]
 		raw = strings.ReplaceAll(raw, `'\''`, `'`)
 	}
+	return raw
+}
 
+func writeRawPromptFile(workDir, agentName, raw string) (string, error) {
 	// Try workDir-scoped path first so the prompt file sits next to the
 	// session's scratch state. An unusable workDir is not fatal; we still
 	// want a valid argv-via-file path to avoid the inline fallback.

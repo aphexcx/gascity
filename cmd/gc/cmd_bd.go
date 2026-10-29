@@ -105,8 +105,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+For create and update, relative --body-file and --design-file paths are
+resolved from the caller's working directory before selecting the rig.
+The stdin marker "-" is preserved. --acceptance takes literal text, not a
+file path, as in bd.
+
+A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
@@ -485,6 +489,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	bdArgs, err = absoluteBdDirectoryFlag(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: resolving directory: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Anchor caller-relative document paths before selecting the child cwd.
+	bdArgs, err = absoluteBdInputFiles(bdArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: resolving input file: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1348,6 +1359,43 @@ func absoluteBdDirectoryFlag(args []string) ([]string, error) {
 		out[slot] = absolute
 	}
 	return out, nil
+}
+
+// absoluteBdInputFiles anchors document inputs before the child changes cwd.
+// Acceptance is literal text in bd, so it must never be rewritten as a path.
+func absoluteBdInputFiles(args []string) ([]string, error) {
+	verb, _ := bdflags.SplitGlobalFlags(args)
+	if verb != "create" && verb != "update" {
+		return args, nil
+	}
+	out := slices.Clone(args)
+	var pathErr error
+	bdCommandFlagTokens(args, verb, func(slot int, name, value string, inline bool) {
+		if pathErr != nil || (name != "--body-file" && name != "--design-file") {
+			return
+		}
+		if !inline {
+			slot++
+			if slot >= len(args) {
+				return // bd reports the missing flag value.
+			}
+			value = args[slot]
+		}
+		if value == "" || value == "-" || filepath.IsAbs(value) {
+			return
+		}
+		absolute, err := filepath.Abs(value)
+		if err != nil {
+			pathErr = fmt.Errorf("%s %q: %w", name, value, err)
+			return
+		}
+		if inline {
+			out[slot] = name + "=" + absolute
+		} else {
+			out[slot] = absolute
+		}
+	})
+	return out, pathErr
 }
 
 // resolveBdScopeTarget determines the canonical scope root for a bd command.

@@ -1,13 +1,228 @@
 package api
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+type migratedResumeProvider struct {
+	*runtime.Fake
+	rejected int
+}
+
+func (p *migratedResumeProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if strings.Contains(cfg.Command, "expired-key") {
+		p.rejected++
+		return runtime.ErrSessionDiedDuringStartup
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func TestAPIWorkerRestartAfterACPProviderSwitch(t *testing.T) {
+	for _, tc := range []struct{ name, command, resume, overrides, key, currentResume string }{
+		{name: "MCP evidence", command: "/bin/echo"},
+		{name: "stored ACP command", command: "/bin/echo acp --resume old-session"},
+		{name: "stored resume command", command: "/bin/echo", resume: "/bin/echo acp"},
+		{name: "invalid overrides fallback", command: "/bin/echo acp --resume old-session", overrides: "invalid-json"},
+		{name: "expired generated resume", command: "/bin/echo acp", key: "expired-key"},
+		{name: "expired explicit resume", command: "/bin/echo acp", key: "expired-key", currentResume: "/bin/echo --continue {{.SessionKey}}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.cfg.Agents[0].Provider = "stub"
+			fs.cfg.Agents[0].Session = "tmux"
+			supportsACP := true
+			fs.cfg.Providers["stub"] = config.ProviderSpec{Command: "/bin/echo", SupportsACP: &supportsACP, ACPArgs: []string{"acp"}, ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: tc.currentResume}
+			b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "myrig/worker", "provider": "stub", "session_name": "legacy-session", "state": "asleep",
+				"command": tc.command, "resume_command": tc.resume, "template_overrides": tc.overrides, "work_dir": fs.cityPath,
+				"session_key": tc.key, "resume_flag": "--resume", "resume_style": "flag",
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			acp := runtime.NewFake()
+			terminal := &migratedResumeProvider{Fake: fs.sp}
+			sp := sessionauto.New(terminal, acp)
+			sp.RouteACP("legacy-session")
+			fs.sessionProvider = sp
+			factory, err := New(fs).workerFactory(fs.cityBeadStore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if tc.key != "" {
+					if err := fs.cityBeadStore.SetMetadata(b.ID, "session_key", tc.key); err != nil {
+						t.Fatal(err)
+					}
+				}
+				handle, err := factory.SessionByID(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := handle.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				start := fs.sp.LastStartConfig("legacy-session")
+				if start == nil {
+					t.Fatal("terminal was not started")
+				}
+				if start.Command != "/bin/echo" || len(start.MCPServers) != 0 {
+					t.Fatalf("terminal command = %q, MCP servers = %d, want interactive command without ACP hints", start.Command, len(start.MCPServers))
+				}
+				if acp.IsRunning("legacy-session") {
+					t.Fatal("restarted on ACP")
+				}
+				updated, err := fs.cityBeadStore.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.Metadata[session.MCPIdentityMetadataKey] != "" || updated.Metadata[session.MCPServersSnapshotMetadataKey] != "" {
+					t.Fatal("restart retained stale MCP metadata")
+				}
+				if tc.key != "" && (updated.Metadata["session_key"] != "" || terminal.rejected != attempt+1) {
+					t.Fatalf("expired key recovery: key=%q rejected=%d, want empty key and %d resumed attempts", updated.Metadata["session_key"], terminal.rejected, attempt+1)
+				}
+				if err := handle.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestAPIWorkerReusedHandleRestartsAfterACPProviderSwitch(t *testing.T) {
+	ctx := context.Background()
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Provider = "stub"
+	fs.cfg.Agents[0].Session = "acp"
+	supportsACP := true
+	fs.cfg.Providers["stub"] = config.ProviderSpec{Command: "/bin/echo", SupportsACP: &supportsACP, ACPArgs: []string{"acp"}, ReadyPromptPrefix: "terminal>"}
+	b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "myrig/worker", "provider": "stub", "session_name": "legacy-session", "state": "active",
+		"command": "/bin/echo acp", "work_dir": fs.cityPath,
+		session.MCPIdentityMetadataKey: "worker", session.MCPServersSnapshotMetadataKey: "[]",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acp := runtime.NewFake()
+	sp := sessionauto.New(fs.sp, acp)
+	fs.sessionProvider = sp
+	sp.RouteACP("legacy-session")
+	if err := sp.Start(ctx, "legacy-session", runtime.Config{Command: "/bin/echo acp"}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := New(fs).workerFactory(fs.cityBeadStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := factory.SessionByID(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.cfg.Agents[0].Session = "tmux"
+	for restart := 1; restart <= 2; restart++ {
+		if err := handle.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := handle.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		start := fs.sp.LastStartConfig("legacy-session")
+		if start == nil || start.Command != "/bin/echo" || len(start.MCPServers) != 0 || start.ReadyPromptPrefix != "terminal>" {
+			t.Fatalf("restart %d received stale launch inputs: %#v", restart, start)
+		}
+		stored, err := fs.cityBeadStore.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Metadata["command"] != start.Command || stored.Metadata["transport"] == "acp" || stored.Metadata[session.MCPIdentityMetadataKey] != "" || stored.Metadata[session.MCPServersSnapshotMetadataKey] != "" || acp.IsRunning("legacy-session") {
+			t.Fatalf("restart %d did not preserve migrated settings: %#v", restart, stored.Metadata)
+		}
+	}
+}
+
+func TestAPIWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
+	for _, phase := range []string{"resolve", "start", "explicit_acp"} {
+		t.Run(phase, func(t *testing.T) {
+			transport := ""
+			if phase == "explicit_acp" {
+				transport = "acp"
+			}
+			snapshot, err := session.EncodeMCPServersSnapshot([]runtime.MCPServerConfig{{Name: "tools", Command: "/bin/echo"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs := newSessionFakeState(t)
+			missingCommand := filepath.Join(fs.cityPath, "unavailable-terminal")
+			fs.cfg.Agents[0].Provider = "replacement"
+			fs.cfg.Agents[0].Session = "tmux"
+			supportsACP := true
+			fs.cfg.Providers["replacement"] = config.ProviderSpec{Command: missingCommand}
+			fs.cfg.Providers["previous"] = config.ProviderSpec{Command: "/bin/echo", SupportsACP: &supportsACP, ACPArgs: []string{"acp"}}
+			b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "myrig/worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
+				"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": fs.cityPath,
+				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag", "transport": transport,
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: snapshot,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			acp := runtime.NewFake()
+			sp := sessionauto.New(fs.sp, acp)
+			sp.RouteACP("legacy-session")
+			fs.sessionProvider = sp
+			factory, err := New(fs).workerFactory(fs.cityBeadStore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "start" {
+				fs.cfg.Providers["replacement"] = config.ProviderSpec{Command: "/bin/echo"}
+			}
+			handle, err := factory.SessionByID(b.ID)
+			if phase == "start" && err != nil {
+				t.Fatalf("resolve available replacement: %v", err)
+			}
+			fs.cfg.Providers["replacement"] = config.ProviderSpec{Command: missingCommand}
+			if err == nil {
+				err = handle.Start(context.Background())
+			}
+			if err == nil || !strings.Contains(err.Error(), missingCommand) || !strings.Contains(err.Error(), "replacement") {
+				t.Errorf("restart error = %v, want unavailable replacement provider and executable", err)
+			}
+			stored, err := fs.cityBeadStore.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range b.Metadata {
+				if stored.Metadata[key] != value {
+					t.Errorf("refused migration changed %s from %q to %q", key, value, stored.Metadata[key])
+				}
+			}
+			if fs.sp.LastStartConfig("legacy-session") != nil || acp.LastStartConfig("legacy-session") != nil {
+				t.Fatal("refused migration started a runtime")
+			}
+			// A direct start probes the retained route independently of bead metadata.
+			if err := sp.Start(context.Background(), "legacy-session", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			if !acp.IsRunning("legacy-session") || fs.sp.IsRunning("legacy-session") {
+				t.Fatal("refused migration removed the ACP route")
+			}
+		})
+	}
+}
 
 type createTransportCapableProvider struct {
 	*runtime.Fake

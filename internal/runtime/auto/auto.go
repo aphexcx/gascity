@@ -37,6 +37,7 @@ var (
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
 	_ runtime.NudgeVouchingProvider         = (*Provider)(nil)
+	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -220,6 +221,24 @@ func (p *Provider) Attach(name string) error {
 		return fmt.Errorf("agent %q uses ACP transport (no terminal to attach to)", name)
 	}
 	return p.defaultSP.Attach(name)
+}
+
+// FindRuntimesBySessionID preserves the default backend's host process scan.
+// Backends without host process discovery yield no roots.
+func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	if scanner, ok := p.defaultSP.(runtime.ProcessTableScanner); ok {
+		return scanner.FindRuntimesBySessionID(id)
+	}
+	return nil, nil
+}
+
+// TerminateRuntime delegates a discovered root to the host backend that scanned
+// it, independently of mutable per-session ACP routes.
+func (p *Provider) TerminateRuntime(live runtime.LiveRuntime) error {
+	if scanner, ok := p.defaultSP.(runtime.ProcessTableScanner); ok {
+		return scanner.TerminateRuntime(live)
+	}
+	return fmt.Errorf("default runtime does not support process-table termination")
 }
 
 // ProcessAlive delegates to the routed backend.

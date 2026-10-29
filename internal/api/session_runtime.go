@@ -377,13 +377,17 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, error) {
 	cmd := session.BuildResumeCommand(info)
 	metadata := s.sessionMetadata(info.ID)
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, err := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	if err != nil {
+		return "", runtime.Config{}, err
+	}
 	if resolved == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}, nil
 	}
 	if ambiguous {
 		return "", runtime.Config{}, fmt.Errorf("%w: recreate the stopped session or resume it while ACP metadata can still be persisted", errAmbiguousLegacyACPTransport)
 	}
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	mcpServers, err := s.resumeSessionMCPServers(info, metadata, resolved, firstNonEmptyString(workDir, info.WorkDir), transport)
 	if err != nil {
 		return "", runtime.Config{}, err
@@ -502,13 +506,17 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if metadata == nil {
 		metadata = s.sessionMetadata(info.ID)
 	}
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, err := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	if err != nil {
+		return nil, err
+	}
 	if resolved == nil {
 		return nil, nil
 	}
 	if ambiguous {
 		return nil, fmt.Errorf("%w: recreate the stopped session or resume it while ACP metadata can still be persisted", errAmbiguousLegacyACPTransport)
 	}
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	mcpServers, err := s.resumeSessionMCPServers(info, metadata, resolved, firstNonEmptyString(workDir, info.WorkDir), transport)
 	if err != nil {
 		return nil, err
@@ -544,11 +552,10 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 }
 
 func storedSessionProvesACPTransport(resolved *config.ResolvedProvider, configuredTransport, storedCommand string, metadata map[string]string) bool {
+	if transport, hasMCP := session.ResolveMCPTransport(configuredTransport, metadata[session.MCPIdentityMetadataKey], metadata[session.MCPServersSnapshotMetadataKey]); hasMCP {
+		return transport == "acp"
+	}
 	if metadata != nil {
-		if strings.TrimSpace(metadata[session.MCPIdentityMetadataKey]) != "" ||
-			strings.TrimSpace(metadata[session.MCPServersSnapshotMetadataKey]) != "" {
-			return true
-		}
 		if strings.TrimSpace(configuredTransport) == "acp" && legacyResumeMetadataProvesACPTransport(metadata) {
 			return true
 		}
@@ -660,7 +667,7 @@ func resolvedSessionTransport(info session.Info, resolved *config.ResolvedProvid
 	return ""
 }
 
-func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool) {
+func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool, error) {
 	cfg := s.state.Config()
 	var (
 		resolved            *config.ResolvedProvider
@@ -682,7 +689,11 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 							workDir = info.WorkDir
 						}
 						configuredTransport = config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
+					} else if err := session.ACPProviderResolutionError(metadata, workDirErr); err != nil {
+						return nil, "", "", false, err
 					}
+				} else if err := session.ACPProviderResolutionError(metadata, err); err != nil {
+					return nil, "", "", false, err
 				}
 			}
 		}
@@ -694,7 +705,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 		}
 		candidate, err := s.resolveBareProvider(providerName)
 		if err != nil {
-			return nil, "", "", false
+			return nil, "", "", false, session.ACPProviderResolutionError(metadata, err)
 		}
 		resolved = candidate
 		workDir = info.WorkDir
@@ -707,7 +718,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, legacySessionKind(metadata)) {
 		transport = "acp"
 	}
-	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)
+	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata), nil
 }
 
 // resolveBareProvider resolves a provider by name without an agent template.
