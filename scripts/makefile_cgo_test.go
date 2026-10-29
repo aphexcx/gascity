@@ -133,8 +133,8 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 				probe := testCommand("sh", filepath.Join(repoRoot(t), "scripts/lib/icu-prefix.sh"))
 				out, err := probe.CombinedOutput()
 				if err != nil {
-					exitErr := &exec.ExitError{}
-					if errors.As(err, &exitErr) {
+					var exitErr *exec.ExitError
+					if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 {
 						t.Skip("real Darwin ICU build requires installed ICU")
 					}
 					t.Fatalf("discover installed ICU for real build: %v\n%s", err, out)
@@ -277,6 +277,29 @@ func TestMakefileDarwinICURealBuildSkipsUnavailable(t *testing.T) {
 	}
 	if count := strings.Count(string(out), "--- SKIP: TestMakefileDarwinICUPrefix/"); count != 5 {
 		t.Fatalf("expected all five real-build cases to skip, got %d:\n%s", count, out)
+	}
+}
+
+func TestMakefileDarwinICURealBuildRejectsDiscoveryErrors(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("real Darwin ICU discovery requires macOS")
+	}
+	for _, tc := range []struct{ name, script string }{
+		{"unexpected exit", "exit 2\n"},
+		{"error output", "echo discovery-error >&2\nexit 1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeExecutable(t, filepath.Join(binDir, "sh"), "#!/bin/sh\n"+tc.script)
+			cmd := testCommand(os.Args[0], "-test.run=^TestMakefileDarwinICUPrefix$/persisted_CPP_real_vet$", "-test.v")
+			cmd.Env = replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("unexpected discovery error was hidden:\n%s", out)
+			}
+			assertContains(t, string(out), "discover installed ICU for real build:")
+			assertNotContains(t, string(out), "--- SKIP:")
+		})
 	}
 }
 
