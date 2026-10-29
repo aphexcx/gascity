@@ -92,6 +92,10 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "goroot", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(tmpDir, "goroot", "bin", "go"), fakeGo)
 	if err := os.WriteFile(filepath.Join(binDir, "uname"), []byte("#!/bin/sh\n[ \"$#\" -eq 0 ] || exit 99\nprintf 'Linux\\n'\n"), 0o755); err != nil {
 		t.Fatalf("write fake uname: %v", err)
 	}
@@ -139,6 +143,7 @@ func (f goTestShardFixture) commandForShardWithBash(bashPath, shardIndex, shardT
 		"TMPDIR=" + f.tmpDir,
 		"GO_TEST_TIMEOUT=1m",
 		"GC_TEST_NO_SLICE=1",
+		"GOTOOLCHAIN=go1.26.6",
 		"SYS_USR_CGO_FALLBACK=0",
 	}, extraEnv...)
 	return cmd
@@ -374,13 +379,14 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 	}
 	wantEnv := map[string]string{
 		"GC_TEST_BD": "/test/pinned-bd",
-		"PATH":       fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PATH":       filepath.Join(fixture.tmpDir, "goroot", "bin") + string(os.PathListSeparator) + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME":       fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
 		"GIT_CONFIG_NOSYSTEM": "1",
 		"LANG":                "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
 		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),
 		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(fixture.tmpDir, "gotmp"),
 		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
+		"GOTOOLCHAIN":  "go1.26.6",
 		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
 		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
 		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",

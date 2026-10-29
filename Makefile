@@ -1,12 +1,36 @@
 GOLANGCI_LINT_VERSION := 2.12.0
 BUILDX_VERSION := 0.21.2
 
-# Detect OS and arch for binary download.
-GOOS   := $(shell go env GOOS)
-GOARCH := $(shell go env GOARCH)
+# Resolve once, before any Go probes. The fallback supports make -f from a
+# different module; ordinary recipes and copied Makefile test fixtures use cwd.
+GO_TOOLCHAIN_HELPER := $(firstword $(wildcard scripts/lib/go-toolchain.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/go-toolchain.sh))
+GO_TOOLCHAIN_SELECTION := $(shell export GOTOOLCHAIN="$(GOTOOLCHAIN)"; . "$(GO_TOOLCHAIN_HELPER)" && gc_go_toolchain "$(CURDIR)" && printf '%s %s' "$$GOTOOLCHAIN" "$$GOROOT")
+ifeq ($(strip $(GO_TOOLCHAIN_SELECTION)),)
+$(error Unable to resolve the Go toolchain)
+endif
+override GOTOOLCHAIN := $(firstword $(GO_TOOLCHAIN_SELECTION))
+override GOROOT := $(wordlist 2,$(words $(GO_TOOLCHAIN_SELECTION)),$(GO_TOOLCHAIN_SELECTION))
+export GOTOOLCHAIN GOROOT
+# Keep the host shim's scratch/cache defaults before replacing PATH, as the
+# shared resolver does. Environment and command-line settings take precedence.
+ifeq ($(origin GOTMPDIR),undefined)
+export GOTMPDIR := $(shell unset GOROOT; GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOTMPDIR)
+endif
+ifeq ($(origin GOCACHE),undefined)
+export GOCACHE := $(shell unset GOROOT; GOTOOLCHAIN="$(GOTOOLCHAIN)" go env GOCACHE)
+endif
+export PATH := $(GOROOT)/bin:$(PATH)
+# $(shell) probes need explicit assignments on older GNU Make versions, which
+# do not pass newly exported Make variables into their expansion environment.
+GO_TOOLCHAIN_ENV = env GOTOOLCHAIN="$(GOTOOLCHAIN)" GOROOT="$(GOROOT)" PATH="$(PATH)" GOTMPDIR="$(GOTMPDIR)" GOCACHE="$(GOCACHE)"
 
-BIN_DIR := $(shell go env GOPATH)/bin
-GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+# Detect OS and arch for binary download.
+GOOS   := $(shell $(GO_TOOLCHAIN_ENV) go env GOOS)
+GOARCH := $(shell $(GO_TOOLCHAIN_ENV) go env GOARCH)
+
+BIN_DIR := $(shell $(GO_TOOLCHAIN_ENV) go env GOPATH)/bin
+GO_TOOLCHAIN_VERSION := $(shell $(GO_TOOLCHAIN_ENV) go env GOVERSION)
+GOLANGCI_LINT := $(BIN_DIR)/gascity-tools/golangci-lint-v$(GOLANGCI_LINT_VERSION)-$(GO_TOOLCHAIN_VERSION)/golangci-lint
 
 BINARY     := gc
 BUILD_DIR  := bin
@@ -409,6 +433,10 @@ fmt-check-changed: $(GOLANGCI_LINT)
 fmt: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt ./...
 
+.PHONY: fmt-staged-go
+fmt-staged-go: $(GOLANGCI_LINT)
+	@GOLANGCI_LINT="$(GOLANGCI_LINT)" scripts/precommit-format-staged-go
+
 ## vet: run go vet
 vet:
 	pkgs="$(PKGS)" || exit $$?; \
@@ -427,11 +455,10 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
-GOPATH_VAL    := $(shell go env GOPATH)
-GOCACHE_VAL   := $(shell go env GOCACHE)
-GOMODCACHE_VAL := $(shell go env GOMODCACHE)
-GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
-GOROOT_VAL    := $(shell go env GOROOT)
+GOPATH_VAL    := $(shell $(GO_TOOLCHAIN_ENV) go env GOPATH)
+GOCACHE_VAL   := $(shell $(GO_TOOLCHAIN_ENV) go env GOCACHE)
+GOMODCACHE_VAL := $(shell $(GO_TOOLCHAIN_ENV) go env GOMODCACHE)
+GOTMPDIR_VAL  := $(shell $(GO_TOOLCHAIN_ENV) go env GOTMPDIR)
 TEST_ENV = env -i \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
@@ -451,7 +478,8 @@ TEST_ENV = env -i \
 	GOCACHE="$(GOCACHE_VAL)" \
 	GOMODCACHE="$(GOMODCACHE_VAL)" \
 	GOTMPDIR="$(GOTMPDIR_VAL)" \
-	GOROOT="$${GOROOT:-$(GOROOT_VAL)}" \
+	GOROOT="$(GOROOT)" \
+	GOTOOLCHAIN="$(GOTOOLCHAIN)" \
 	GOENV="$${GOENV-}" \
 	GOFLAGS="$${GOFLAGS-}" \
 	GO111MODULE="$${GO111MODULE-}" \
@@ -945,23 +973,14 @@ cover: test-cover
 ## install-tools: install pinned golangci-lint + oapi-codegen
 install-tools: $(GOLANGCI_LINT) install-oapi-codegen
 
-$(GOLANGCI_LINT):
-	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	@attempt=1; max_attempts=5; delay=2; \
-	while [ $$attempt -le $$max_attempts ]; do \
-		echo "golangci-lint install attempt $$attempt/$$max_attempts"; \
-		if GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
-			exit 0; \
-		fi; \
-		if [ $$attempt -lt $$max_attempts ]; then \
-			echo "golangci-lint install failed; retrying in $${delay}s..." >&2; \
-			sleep $$delay; \
-		fi; \
-		attempt=$$((attempt + 1)); \
-		delay=$$((delay * 2)); \
-	done; \
-	echo "ERROR: failed to install golangci-lint v$(GOLANGCI_LINT_VERSION) after $$max_attempts attempts" >&2; \
-	exit 1
+# Explicit command-line GOLANGCI_LINT overrides remain caller-owned. The default
+# cache is checked every time, so an existing stale binary cannot skip the gate.
+ifeq ($(origin GOLANGCI_LINT),file)
+.PHONY: ensure-golangci-lint
+$(GOLANGCI_LINT): ensure-golangci-lint
+ensure-golangci-lint:
+	@scripts/ensure-golangci-lint "$(GOLANGCI_LINT)" "$(GOLANGCI_LINT_VERSION)"
+endif
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.

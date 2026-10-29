@@ -154,6 +154,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 
 	logDir := t.TempDir()
 	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
+	probeCmd += `; test "$GOTOOLCHAIN" = go1.26.6 && test "${PATH%%:*}" = /selected-toolchain/bin`
 
 	lines := []string{
 		"#!/usr/bin/env bash",
@@ -174,6 +175,8 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		"export TEST_LOCAL_GOMODCACHE=" + shellQuote(goEnvValue(t, "GOMODCACHE")),
 		"export TEST_LOCAL_GOTMPDIR=" + shellQuote(goEnvValue(t, "GOTMPDIR")),
 		"export TEST_LOCAL_GOROOT=" + shellQuote(goEnvValue(t, "GOROOT")),
+		"export GOTOOLCHAIN=go1.26.6",
+		"export PATH=/selected-toolchain/bin:" + shellQuote(os.Getenv("PATH")),
 		"set +e",
 		"run_fan_out",
 		"status=$?",

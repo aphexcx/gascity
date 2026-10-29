@@ -484,6 +484,9 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
 	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	// Toolchain selection has its own contract tests; this fixture owns the
+	// later spec-generation side effect and the missing-npm failure.
+	writeTestFile(t, filepath.Join(tmpRepo, "scripts", "lib", "go-toolchain.sh"), "gc_go_toolchain() { :; }\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 

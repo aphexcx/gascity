@@ -9,7 +9,7 @@ while IFS= read -r file; do
   fi
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/gc-precommit-fmt.XXXXXX")
-  if ! golangci-lint fmt --stdin <"$file" >"$tmp"; then
+  if ! "${GOLANGCI_LINT:-golangci-lint}" fmt --stdin <"$file" >"$tmp"; then
     rm -f "$tmp"
     status=1
     continue

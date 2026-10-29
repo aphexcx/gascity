@@ -181,6 +181,12 @@ case "$1" in
 esac
 `)
 
+	if err := os.MkdirAll(filepath.Join(tmp, "goroot", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(binDir, "go"), filepath.Join(tmp, "goroot", "bin", "go")); err != nil {
+		t.Fatal(err)
+	}
 	return shardCGOFixture{
 		tmp:          tmp,
 		binDir:       binDir,
