@@ -108,6 +108,40 @@ pretending a real multi-agent workflow is just "some prompts somewhere"
 plus shell history. The method that coordinates the agents becomes a formula the
 orchestrator executes for you, not a routine you perform by hand every time.
 
+### Worker workspace contract
+
+A worker with a configured `work_dir` and `pre_start` on the tmux or herdr
+runtime receives concrete workspace paths in its startup prompt and `gc prime`
+output. Its working directory must differ from the city and rig roots.
+
+| Variable | Meaning |
+| --- | --- |
+| `GC_CITY_PATH` | Absolute city directory, including city-owned helpers. |
+| `GC_RIG_ROOT` | Configured rig checkout; empty for a city-scoped worker. |
+| `GC_PRESTART_LOG` | The lane's `.gc/pre-start.log`, containing redacted pre-start diagnostics. |
+| `GC_RIG` | Rig name; empty for a city-scoped worker. |
+| `BEADS_DIR` | Rig store directory when rig-scoped; the prompt names the city store otherwise. |
+
+After pre-start succeeds, `.gc/worker-env.sh` in the lane contains these
+values and `GC_DIR`. If a tool shell filters the launch environment, source
+the absolute file path printed in the prompt to restore them. The file
+contains workspace paths and rig identity only. A lane can use the configured
+store without a local `.beads` directory.
+
+A task or session `work_dir` override makes `GC_DIR`, `GC_PRESTART_LOG`, the
+artifact location, the workspace appendix, and skill hints use the overridden
+directory instead of the configured directory.
+
+Pre-start diagnostics retain an output tail of at most 8 KiB per command.
+Gas City buffers the output until preparation finishes, so creating the log
+cannot interfere with a command that needs an empty worktree destination.
+Failed preparation appends to an existing log; on a fresh lane, its output
+stays in the startup error and the destination remains untouched for retry.
+The buffer and file each stop growing at 1 MiB and record a capacity marker;
+restarts do not erase earlier records. Skill hints name an existing
+`SKILL.md` in the provider's materialized skill directory, or omit the path
+when it is absent.
+
 ## Move the parts you already repeat
 
 | Good candidates | Less urgent |

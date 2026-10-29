@@ -1108,6 +1108,19 @@ func buildPreparedStartWithWorkDirResolver(
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
+	if tp.WorkDir != agentCfg.WorkDir && (tp.laneContextConfigured || tp.assignedSkills != nil) {
+		// Re-derive the generated paths and prompt from the final directory before
+		// choosing startup delivery. Keep durable fingerprints and option overrides.
+		tp.WorkDir = agentCfg.WorkDir
+		tp = resolveTemplateWorkDirContext(tp)
+		finalCfg, finalDelivery, err := templateParamsToConfigWithDelivery(tp)
+		if err != nil {
+			return nil, candidate.info, err
+		}
+		agentCfg.Env = finalCfg.Env
+		agentCfg.PromptSuffix, agentCfg.PromptFlag, agentCfg.Nudge = finalCfg.PromptSuffix, finalCfg.PromptFlag, finalCfg.Nudge
+		delivery = finalDelivery
+	}
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
 	// disabled, manual cleanup, worktree rebuild), a resume would hard-fail

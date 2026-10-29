@@ -76,6 +76,12 @@ type TemplateParams struct {
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
+	// Workspace appendices are re-derived when preparation overrides WorkDir.
+	// Retain generated suffixes so user-authored prompt text is never rewritten.
+	laneContextConfigured bool
+	laneContextSuffix     string
+	assignedSkills        *assignedSkillsPromptContext
+	assignedSkillsSuffix  string
 	// SessionName is the computed tmux session name.
 	SessionName string
 	// Alias is the human-readable session identifier used for commands and mail.
@@ -430,7 +436,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		prompt = beacon
 	}
 
-	// Step 9b: Append the assigned-skills appendix when the agent
+	// Step 9b: Capture the assigned-skills appendix inputs when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
 	// delivers the skills to the session workdir. The appendix claims
 	// "these skills are materialized in your provider's skill
@@ -448,18 +454,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
+	var assignedSkills *assignedSkillsPromptContext
 	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
 		provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
-		if _, ok := materialize.VendorSink(provider); ok {
+		if sink, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
-			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
+			stage1Eligible := canStage1Materialize(p.sessionProvider, cfgAgent)
 			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
-			if stage1Delivers || stage2Delivers {
+			if stage1Eligible || stage2Delivers {
 				var agentCat materialize.AgentCatalog
 				if cfgAgent.SkillsDir != "" {
 					// Best-effort: a transient I/O failure loading the
@@ -471,8 +477,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 						agentCat = c
 					}
 				}
-				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat); frag != "" {
-					prompt = prompt + "\n\n" + frag
+				assignedSkills = &assignedSkillsPromptContext{
+					agent: cfgAgent, shared: p.sharedSkillCatalogForAgent(cfgAgent), assigned: agentCat,
+					sink: sink, scopeRoot: scopeRoot, stage2: stage2Delivers,
 				}
 			}
 		}
@@ -769,11 +776,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		MCPServers:       mcpServers,
 	}
 	params.SessionOverride = cfgAgent.Session
+	params.laneContextConfigured = laneContextConfigured(cfgAgent, p.sessionProvider)
+	params.assignedSkills = assignedSkills
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}
-	return params, nil
+	return resolveTemplateWorkDirContext(params), nil
 }
 
 // isOperationalScript reports whether rel (a slash-separated path relative to

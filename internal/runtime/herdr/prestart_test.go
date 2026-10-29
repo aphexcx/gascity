@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,74 @@ func TestRunPreStartNoCommandsIsNoOp(t *testing.T) {
 	p := newTestProvider(t, time.Second)
 	if err := p.runPreStart(context.Background(), runtime.Config{}); err != nil {
 		t.Fatalf("runPreStart with no commands = %v, want nil", err)
+	}
+}
+
+func TestRunPreStartMaterializesLaneDiagnostics(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("worktree_destination_missing_%t", missing), func(t *testing.T) {
+			lane, repo := t.TempDir(), t.TempDir()
+			if missing {
+				lane = filepath.Join(lane, "new-lane")
+			}
+			logPath := filepath.Join(lane, ".gc", "pre-start.log")
+			p := newTestProvider(t, 10*time.Second)
+			cfg := runtime.Config{Env: map[string]string{
+				"GC_DIR": lane, "GC_RIG_ROOT": repo, "GC_PRESTART_LOG": logPath,
+			}, PreStart: []string{"printf prerequisite", "echo failed-prepare >&2; exit 3"}}
+			if err := p.runPreStart(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "failed-prepare") {
+				t.Fatalf("preparation failure lost its output: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(lane, ".gc")); !os.IsNotExist(err) {
+				t.Fatalf("failed preparation polluted the worktree destination: %v", err)
+			}
+			cfg.PreStart = []string{
+				`git init -q "$GC_RIG_ROOT" && git -C "$GC_RIG_ROOT" -c user.name=Test -c user.email=test@example.invalid commit --allow-empty -qm initial && printf prerequisite`,
+				`git -C "$GC_RIG_ROOT" worktree add --detach "$GC_DIR" && printf prepared-worktree`,
+			}
+			if err := p.runPreStart(context.Background(), cfg); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(logPath)
+			if err != nil || !strings.Contains(string(got), "prerequisite") || !strings.Contains(string(got), "prepared-worktree") {
+				t.Fatalf("completed worktree preparation lost diagnostic output: %q, %v", got, err)
+			}
+		})
+	}
+	lane := t.TempDir()
+	logPath := filepath.Join(lane, ".gc", "pre-start.log")
+	p := newTestProvider(t, time.Second)
+	cfg := runtime.Config{
+		Env:      map[string]string{"GC_DIR": lane, "GC_PRESTART_LOG": logPath, "GC_RIG": "repo", "BEADS_DIR": "/repo/.beads"},
+		PreStart: []string{"printf prepared"},
+	}
+	if err := p.runPreStart(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(got), "prepared") {
+		t.Fatalf("pre-start diagnostic = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(lane, ".gc", "worker-env.sh")); err != nil {
+		t.Fatalf("lane environment was not materialized: %v", err)
+	}
+	cfg.Env["GC_RIG"], cfg.Env["BEADS_DIR"] = "next-repo", "/next-repo/.beads"
+	if err := p.runPreStart(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	contextFile, err := os.ReadFile(filepath.Join(lane, ".gc", "worker-env.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"export GC_RIG='next-repo'", "export BEADS_DIR='/next-repo/.beads'"} {
+		if !strings.Contains(string(contextFile), want) {
+			t.Errorf("reused lane context lacks %q: %s", want, contextFile)
+		}
+	}
+	for _, stale := range []string{"export GC_RIG='repo'", "export BEADS_DIR='/repo/.beads'"} {
+		if strings.Contains(string(contextFile), stale) {
+			t.Errorf("reused lane context retains %q: %s", stale, contextFile)
+		}
 	}
 }
 

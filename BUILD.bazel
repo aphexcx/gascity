@@ -329,6 +329,7 @@ filegroup(
         "//internal/runtime/herdr/herdrtest:bazel_repo_srcs",
         "//internal/runtime/hybrid:bazel_repo_srcs",
         "//internal/runtime/k8s:bazel_repo_srcs",
+        "//internal/runtime/lanectx:bazel_repo_srcs",
         "//internal/runtime/proctable:bazel_repo_srcs",
         "//internal/runtime/registry:bazel_repo_srcs",
         "//internal/runtime/rppcheck:bazel_repo_srcs",
