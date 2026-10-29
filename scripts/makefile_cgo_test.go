@@ -72,7 +72,10 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		explicit   string
 		want       string
 		withoutICU []string
+		makeArgs   []string
 		goEnv      string
+		defaultCGO bool
+		cgoInclude string
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -80,12 +83,19 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "pkg config fallback", installed: []string{"pkg-icu"}, pkgConfig: "pkg-icu", want: "pkg-icu"},
 		{name: "stale pkg config prefix", pkgConfig: "absent"},
 		{name: "nothing installed"},
+		{name: "pure Go package without ICU", withoutICU: []string{"test-pkg", "PKG=./internal/shellquote", "EXTRA_TEST_ENV=CGO_ENABLED=1"}},
+		{name: "test environment disables CGO", withoutICU: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStoreCreateUsesSerializableTimestamp$", "EXTRA_TEST_ENV=CGO_ENABLED=0"}},
+		{name: "ICU dependency with CGO enabled", makeArgs: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStoreCreateUsesSerializableTimestamp$", "EXTRA_TEST_ENV=CGO_ENABLED=1"}},
 		{name: "environment wins", installed: []string{"icu4c@78"}, explicit: "environment", want: "custom"},
 		{name: "command line wins", installed: []string{"icu4c@78"}, explicit: "command line", want: "custom"},
 		{name: "help without ICU", withoutICU: []string{"help"}},
 		{name: "CGO disabled without ICU", withoutICU: []string{"print-cgo-env", "CGO_ENABLED=0"}},
-		{name: "cross compilation without ICU", withoutICU: []string{"print-cgo-env", "GOOS=js", "GOARCH=wasm"}},
-		{name: "persisted CGO setting without ICU", withoutICU: []string{"print-cgo-env"}, goEnv: "CGO_ENABLED=0\n"},
+		{name: "cross compilation without ICU", withoutICU: []string{"print-cgo-env", "GOOS=js", "GOARCH=wasm"}, defaultCGO: true},
+		{name: "persisted CGO setting without ICU", withoutICU: []string{"print-cgo-env"}, goEnv: "CGO_ENABLED=0\n", defaultCGO: true},
+		{name: "saved CGO off cannot bypass missing ICU", goEnv: "CGO_ENABLED=0\n"},
+		{name: "manual CGO include", installed: []string{"manual"}, cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
+		{name: "manual separated CGO include", installed: []string{"manual"}, cgoInclude: "-I ", withoutICU: []string{"print-cgo-env"}},
+		{name: "stale manual CGO include", cgoInclude: "-I"},
 		{name: "native DoltLite without ICU", withoutICU: []string{"-n", "test-native-doltlite-beads"}},
 		{name: "pack registry without ICU", withoutICU: []string{"-n", "test-pack-registry-live"}},
 		{name: "docs without ICU", withoutICU: []string{"-n", "docs-dev"}},
@@ -122,6 +132,9 @@ esac
 `)
 			writeExecutable(t, filepath.Join(binDir, "pkg-config"), "#!/bin/sh\n[ \"$*\" = '--variable=prefix icu-uc' ] || exit 1\nprintf '%s\\n' \"$TEST_ICU_PKG_PREFIX\"\n")
 			args := []string{"-s", "--no-print-directory", "print-cgo-env"}
+			if tc.makeArgs != nil {
+				args = append([]string{"-s", "--no-print-directory"}, tc.makeArgs...)
+			}
 			if tc.withoutICU != nil {
 				args = append([]string{"-s", "--no-print-directory"}, tc.withoutICU...)
 			}
@@ -130,8 +143,15 @@ esac
 			}
 			cmd := makeCommand(args...)
 			cmd.Dir = repoRoot(t)
-			env := replaceScriptEnv(filteredMakefileCGOTestEnv(), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			env := replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = replaceScriptEnv(env, "TEST_ICU_PKG_PREFIX", filepath.Join(tmp, tc.pkgConfig))
+			if tc.cgoInclude != "" {
+				env = replaceScriptEnv(env, "CGO_CFLAGS", "-O2 "+tc.cgoInclude+filepath.Join(tmp, "manual", "include"))
+				env = replaceScriptEnv(env, "CGO_LDFLAGS", "-L"+filepath.Join(tmp, "manual", "lib"))
+			}
+			if tc.defaultCGO {
+				env = replaceScriptEnv(env, "CGO_ENABLED", "")
+			}
 			if tc.goEnv != "" {
 				goEnvFile := filepath.Join(tmp, "goenv")
 				if err := os.WriteFile(goEnvFile, []byte(tc.goEnv), 0o600); err != nil {
@@ -177,6 +197,28 @@ esac
 			assertContains(t, string(out), "ICU_PREFIX="+prefix)
 			assertContains(t, string(out), "ICU_PREFIX_SOURCE=")
 		})
+	}
+}
+
+func TestMakefileCGOFixtureIgnoresSavedSettings(t *testing.T) {
+	goEnvFile := filepath.Join(t.TempDir(), "goenv")
+	if err := os.WriteFile(goEnvFile, []byte("CGO_ENABLED=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOENV", goEnvFile)
+	cmd := testCommand("go", "env", "CGO_ENABLED", "GOENV")
+	cmd.Env = filteredMakefileCGOTestEnv(t)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "1\n\n" {
+		t.Fatalf("fixture inherited saved CGO settings: %s", out)
+	}
+	for _, entry := range cmd.Env {
+		if entry == "HOME="+os.Getenv("HOME") {
+			t.Fatal("fixture inherited the developer's HOME")
+		}
 	}
 }
 
@@ -434,7 +476,7 @@ print-cgo-flags:
 	cmdArgs := append([]string{"--no-print-directory", "-f", testMakefile, "print-cgo-flags"}, args...)
 	cmd := makeCommand(cmdArgs...)
 	cmd.Dir = repoRoot
-	cmd.Env = append(filteredMakefileCGOTestEnv(),
+	cmd.Env = append(filteredMakefileCGOTestEnv(t),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"HOME="+filepath.Join(tmp, "home"),
 	)
@@ -453,22 +495,27 @@ func testCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
-func filteredMakefileCGOTestEnv() []string {
+func filteredMakefileCGOTestEnv(t *testing.T) []string {
+	t.Helper()
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") {
+		if strings.HasPrefix(entry, "CGO_") || strings.HasPrefix(entry, "GOENV=") || strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "OBSERVABLE_") {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
-	// The Makefile's CGO probes invoke `go env`; with an isolated HOME that
-	// would download a toolchain into t.TempDir(), whose read-only module
-	// cache files then defeat TempDir cleanup. Pin the local toolchain and
-	// keep any module-cache writes out of the temp home.
+	// Isolate persistent Go settings and state the intended CGO mode. Keep
+	// toolchain and cache paths on the host so actual package regressions
+	// reuse dependencies instead of downloading them into the temp home.
+	for _, key := range []string{"GOPATH", "GOMODCACHE", "GOCACHE"} {
+		filtered = replaceScriptEnv(filtered, key, goEnvValue(t, key))
+	}
 	return append(filtered,
 		"GOTOOLCHAIN=local",
-		"GOMODCACHE="+filepath.Join(os.TempDir(), "gc-makefile-cgo-gomodcache"),
+		"HOME="+t.TempDir(),
+		"GOENV=off",
+		"CGO_ENABLED=1",
 	)
 }
 

@@ -139,12 +139,18 @@ endif
 endif
 endif
 
+# Only missing automatic discovery needs a preflight. Call this in the same
+# environment as the build, with the packages (and test/build flags) it uses.
+ICU_CHECK_HELPER := $(firstword $(wildcard scripts/lib/check-icu.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/check-icu.sh))
+CHECK_ICU = $(if $(ICU_DISCOVERY_ERROR),sh "$(ICU_CHECK_HELPER)",true)
+
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-pkg test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: print-cgo-env
 
 ## build: compile gc binary with version metadata
 build:
+	@$(CHECK_ICU) ./cmd/gc
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
@@ -162,17 +168,12 @@ print-cgo-env:
 		fi; \
 	done'
 
-# Validate at build execution time: docs, help, and non-CGO targets must remain
-# usable without ICU. Ask Go for CGO mode so cross-compilation defaults apply.
+# Explicit discovery reports missing ICU. Build/test recipes below scope the
+# check to their selected dependencies; lint and shard runners own their loads.
 .PHONY: check-icu
-build print-cgo-env lint-full lint-new lint-changed lint-affected vet test test-pkg test-fast-parallel: | check-icu
+print-cgo-env: | check-icu
 check-icu:
-ifneq ($(ICU_DISCOVERY_ERROR),)
-	@cgo_enabled="$$(go env CGO_ENABLED)" || exit $$?; \
-	if [ "$$cgo_enabled" != 0 ]; then \
-		printf '%s\n' '$(ICU_DISCOVERY_ERROR)' >&2; exit 1; \
-	fi
-endif
+	@$(CHECK_ICU)
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
 ## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
@@ -538,6 +539,7 @@ TEST_ENV = env -i \
 	ZCODE_NODE_BIN="$${ZCODE_NODE_BIN-}" \
 	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
+	CGO_CFLAGS="$${CGO_CFLAGS-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
 
@@ -560,6 +562,7 @@ test-ci-policy:
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile check-bd-parent-grammar
 	pkgs="$(PKGS)" || exit $$?; \
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 $(CHECK_ICU) -test $$pkgs || exit $$?; \
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $$pkgs
 
 # Compare against the pinned bd module by default; a clone can validate an upgrade.
@@ -579,6 +582,7 @@ RUN ?= .
 ## test-pkg: fast tests for required PKG, optional RUN regexp and COUNT (default: 1)
 test-pkg:
 	@if [ -z '$(strip $(PKG))' ]; then echo 'PKG is required: make test-pkg PKG=./internal/doctor' >&2; exit 1; fi
+	@$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 $(CHECK_ICU) -test $(PKG)
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test-pkg -- -p=4 -count=$(COUNT) -timeout 15m -run '$(subst ','"'"',$(value RUN))' $(PKG)
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
