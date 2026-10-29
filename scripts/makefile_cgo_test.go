@@ -76,6 +76,7 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		goEnv      string
 		defaultCGO bool
 		cgoInclude string
+		cgoVar     string
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -86,6 +87,8 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "pure Go package without ICU", withoutICU: []string{"test-pkg", "PKG=./internal/shellquote", "EXTRA_TEST_ENV=CGO_ENABLED=1"}},
 		{name: "test environment disables CGO", withoutICU: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStoreCreateUsesSerializableTimestamp$", "EXTRA_TEST_ENV=CGO_ENABLED=0"}},
 		{name: "ICU dependency with CGO enabled", makeArgs: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStoreCreateUsesSerializableTimestamp$", "EXTRA_TEST_ENV=CGO_ENABLED=1"}},
+		{name: "vet ICU dependency", makeArgs: []string{"vet", "PKGS=github.com/dolthub/go-icu-regex/internal/icu"}},
+		{name: "vet pure Go package", withoutICU: []string{"vet", "PKGS=./internal/shellquote"}},
 		{name: "environment wins", installed: []string{"icu4c@78"}, explicit: "environment", want: "custom"},
 		{name: "command line wins", installed: []string{"icu4c@78"}, explicit: "command line", want: "custom"},
 		{name: "help without ICU", withoutICU: []string{"help"}},
@@ -93,8 +96,10 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "cross compilation without ICU", withoutICU: []string{"print-cgo-env", "GOOS=js", "GOARCH=wasm"}, defaultCGO: true},
 		{name: "persisted CGO setting without ICU", withoutICU: []string{"print-cgo-env"}, goEnv: "CGO_ENABLED=0\n", defaultCGO: true},
 		{name: "saved CGO off cannot bypass missing ICU", goEnv: "CGO_ENABLED=0\n"},
-		{name: "manual CGO include", installed: []string{"manual"}, cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
-		{name: "manual separated CGO include", installed: []string{"manual"}, cgoInclude: "-I ", withoutICU: []string{"print-cgo-env"}},
+		{name: "manual CPP include", installed: []string{"manual"}, cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
+		{name: "manual separated CPP include", installed: []string{"manual"}, cgoInclude: "-I ", withoutICU: []string{"print-cgo-env"}},
+		{name: "manual CXX include", installed: []string{"manual"}, cgoInclude: "-I", cgoVar: "CGO_CXXFLAGS", withoutICU: []string{"print-cgo-env"}},
+		{name: "C-only include cannot supply CXX headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVar: "CGO_CFLAGS"},
 		{name: "stale manual CGO include", cgoInclude: "-I"},
 		{name: "native DoltLite without ICU", withoutICU: []string{"-n", "test-native-doltlite-beads"}},
 		{name: "pack registry without ICU", withoutICU: []string{"-n", "test-pack-registry-live"}},
@@ -146,7 +151,11 @@ esac
 			env := replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = replaceScriptEnv(env, "TEST_ICU_PKG_PREFIX", filepath.Join(tmp, tc.pkgConfig))
 			if tc.cgoInclude != "" {
-				env = replaceScriptEnv(env, "CGO_CFLAGS", "-O2 "+tc.cgoInclude+filepath.Join(tmp, "manual", "include"))
+				flagVar := tc.cgoVar
+				if flagVar == "" {
+					flagVar = "CGO_CPPFLAGS"
+				}
+				env = replaceScriptEnv(env, flagVar, "-O2 "+tc.cgoInclude+filepath.Join(tmp, "manual", "include"))
 				env = replaceScriptEnv(env, "CGO_LDFLAGS", "-L"+filepath.Join(tmp, "manual", "lib"))
 			}
 			if tc.defaultCGO {
@@ -197,6 +206,113 @@ esac
 			assertContains(t, string(out), "ICU_PREFIX="+prefix)
 			assertContains(t, string(out), "ICU_PREFIX_SOURCE=")
 		})
+	}
+}
+
+// TestMakefileICUGateTargets proves that each caller checks its selected load
+// before invoking the compiler or linter, without blocking unrelated packages.
+func TestMakefileICUGateTargets(t *testing.T) {
+	for _, target := range []string{"build", "print-cgo-env", "test", "test-pkg", "vet", "lint-full", "lint-new", "lint-changed", "lint-affected", "test-fast-parallel"} {
+		for _, selection := range []string{"icu", "safe", "empty", "dry-run"} {
+			if (target == "build" || target == "print-cgo-env" || target == "test" || target == "test-pkg") && selection != "dry-run" {
+				continue
+			}
+			if target == "vet" && selection == "empty" {
+				continue
+			}
+			if target == "test-fast-parallel" && (selection == "safe" || selection == "empty") {
+				continue // The fast suite always selects the whole module.
+			}
+			t.Run(target+"/"+selection, func(t *testing.T) {
+				files := map[string]string{
+					"icu/icu.go":   "package icu\nimport \"C\"\n",
+					"icu/icu.cpp":  "#include <unicode/regex.h>\n",
+					"safe/safe.go": "package safe\n",
+				}
+				// Affected selection intentionally includes every native consumer
+				// for any changed path, so a pure-Go closure needs a pure-Go module.
+				if target == "lint-affected" && selection == "safe" {
+					delete(files, "icu/icu.go")
+					delete(files, "icu/icu.cpp")
+				}
+				fixture := newPRStaticScopeFixture(t, files)
+				binDir := t.TempDir()
+				writeExecutable(t, filepath.Join(binDir, "uname"), "#!/bin/sh\necho Darwin\n")
+				writeExecutable(t, filepath.Join(binDir, "brew"), "#!/bin/sh\nexit 1\n")
+				writeExecutable(t, filepath.Join(binDir, "pkg-config"), "#!/bin/sh\nexit 1\n")
+				// Only the package-load boundary is real; unrelated parallel jobs
+				// must not launch the repository's heavy suite from this fixture.
+				for _, path := range []string{
+					"scripts/test-local-parallel", "scripts/test-gitconfig-path",
+					"scripts/push-gate-lock-lib.sh", "scripts/lib/go-toolchain.sh",
+					"scripts/lib/test-slice.sh", "scripts/lib/inner-parallelism.sh",
+					"scripts/lib/harness-reap.sh", "scripts/lib/check-icu.sh",
+				} {
+					content, err := os.ReadFile(filepath.Join(repoRoot(t), path))
+					if err != nil {
+						t.Fatal(err)
+					}
+					writeTestFile(t, filepath.Join(fixture.repoRoot, path), string(content))
+					if err := os.Chmod(filepath.Join(fixture.repoRoot, path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, path := range []string{"scripts/test-go-test-shard", "scripts/test-push-gate-lock.sh", "scripts/test-local-concurrency.sh"} {
+					writeExecutable(t, filepath.Join(fixture.repoRoot, path), "#!/bin/sh\nexit 0\n")
+				}
+				pkg := "./" + selection
+				if selection == "dry-run" {
+					pkg = "./icu"
+				}
+				if selection == "empty" {
+					pkg = ""
+				} else {
+					file := strings.TrimPrefix(pkg, "./")
+					writeTestFile(t, filepath.Join(fixture.repoRoot, file, file+".go"), "package "+file+"\n"+map[string]string{"icu": "import \"C\"\n"}[file]+"// changed\n")
+				}
+				args := []string{
+					"-s", "--no-print-directory", "-f", fixture.productionMakefile, target,
+					"GOLANGCI_LINT=" + fixture.fakeLint, "LINT_PKGS=" + pkg, "PKGS=" + pkg, "PKG=" + pkg,
+					"LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=HEAD", "LINT_FLAGS=",
+					"LOCAL_TEST_JOBS=1", "CORE_SHARD_TOTAL=1", "CMD_GC_PROCESS_TOTAL=1",
+				}
+				if selection == "dry-run" {
+					args = append(args, "-n")
+				}
+				cmd := makeCommand(args...)
+				cmd.Dir = fixture.repoRoot
+				cmd.Env = replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				for _, entry := range []string{
+					"GC_PUSH_GATE_NO_CAP=1", "GC_TEST_NO_SLICE=1",
+					"STATIC_SCOPE_LINT_LOG=" + fixture.lintLog,
+					"LOCAL_TEST_LOG_DIR=" + filepath.Join(t.TempDir(), "logs"),
+				} {
+					key, value, _ := strings.Cut(entry, "=")
+					cmd.Env = replaceScriptEnv(cmd.Env, key, value)
+				}
+				out, err := cmd.CombinedOutput()
+				if selection == "icu" {
+					if err == nil {
+						t.Fatalf("%s reached its tool without ICU:\n%s", target, out)
+					}
+					assertContains(t, string(out), "ICU headers not found")
+					assertContains(t, string(out), "ICU_PREFIX=")
+					assertNotContains(t, string(out), "file not found")
+					assertNotContains(t, string(out), "[unit-core-1-of-1] start")
+					fixture.requireNoCalls(t)
+				} else {
+					if err != nil {
+						t.Fatalf("%s/%s: %v\n%s", target, selection, err, out)
+					}
+					if selection == "dry-run" {
+						assertContains(t, string(out), "check-icu.sh")
+					}
+					if selection == "empty" && target != "vet" {
+						fixture.requireNoCalls(t)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -500,7 +616,7 @@ func filteredMakefileCGOTestEnv(t *testing.T) []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") || strings.HasPrefix(entry, "GOENV=") || strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "OBSERVABLE_") {
+		if strings.HasPrefix(entry, "ICU_PREFIX=") || strings.HasPrefix(entry, "CGO_") || strings.HasPrefix(entry, "GOENV=") || strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "OBSERVABLE_") {
 			continue
 		}
 		filtered = append(filtered, entry)

@@ -143,6 +143,8 @@ endif
 # environment as the build, with the packages (and test/build flags) it uses.
 ICU_CHECK_HELPER := $(firstword $(wildcard scripts/lib/check-icu.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/check-icu.sh))
 CHECK_ICU = $(if $(ICU_DISCOVERY_ERROR),sh "$(ICU_CHECK_HELPER)",true)
+# Selection-owning runners receive the same helper, without shell evaluation.
+ICU_CHECK_ENV = GC_ICU_CHECK_HELPER="$(if $(ICU_DISCOVERY_ERROR),$(abspath $(ICU_CHECK_HELPER)))"
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-pkg test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
@@ -168,8 +170,10 @@ print-cgo-env:
 		fi; \
 	done'
 
-# Explicit discovery reports missing ICU. Build/test recipes below scope the
-# check to their selected dependencies; lint and shard runners own their loads.
+# Explicit discovery reports missing ICU. Build, vet and serial test recipes
+# check their selected dependencies. Lint checks its selected test/build load;
+# ci-static-select owns affected selection, and test-local-parallel checks the
+# fast suite's package union before starting any shard.
 .PHONY: check-icu
 print-cgo-env: | check-icu
 check-icu:
@@ -397,11 +401,15 @@ lint: lint-full
 ## lint-full: run golangci-lint across all packages
 lint-full: $(GOLANGCI_LINT)
 	pkgs="$(LINT_PKGS)" || exit $$?; \
+	[ -n "$$pkgs" ] || exit 0; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
 lint-new: $(GOLANGCI_LINT)
 	pkgs="$(LINT_PKGS)" || exit $$?; \
+	[ -n "$$pkgs" ] || exit 0; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files $$pkgs
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
@@ -444,11 +452,12 @@ lint-changed: $(GOLANGCI_LINT)
 		exit 0; \
 	fi; \
 	echo "lint-changed: $$(printf '%s\n' "$$pkgs" | tr '\n' ' ')"; \
+	$(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
 lint-affected: $(GOLANGCI_LINT)
-	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
+	@GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(ICU_CHECK_ENV) "$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
 fmt-check: $(GOLANGCI_LINT)
@@ -469,6 +478,7 @@ fmt-staged-go: $(GOLANGCI_LINT)
 ## vet: run go vet
 vet:
 	pkgs="$(PKGS)" || exit $$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) -test $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet $$pkgs
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
@@ -540,6 +550,8 @@ TEST_ENV = env -i \
 	ZCODE_STORAGE_DIR="$${ZCODE_STORAGE_DIR-}" \
 	CGO_CPPFLAGS="$${CGO_CPPFLAGS-}" \
 	CGO_CFLAGS="$${CGO_CFLAGS-}" \
+	CGO_CXXFLAGS="$${CGO_CXXFLAGS-}" \
+	CGO_ENABLED="$${CGO_ENABLED-}" \
 	CGO_LDFLAGS="$${CGO_LDFLAGS-}" \
 	$(EXTRA_TEST_ENV)
 
@@ -620,7 +632,7 @@ GO_TEST_TIMEOUT ?=
 
 ## test-fast-parallel: run the default fast suite with core packages and cmd/gc sharded locally
 test-fast-parallel:
-	$(TEST_ENV) TMPDIR="$${TMPDIR-}" GC_TEST_INNER_P="$${GC_TEST_INNER_P-}" LOCAL_TEST_LOG_DIR="$${LOCAL_TEST_LOG_DIR-}" GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" CORE_SHARD_TOTAL=$(CORE_SHARD_TOTAL) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
+	$(TEST_ENV) $(ICU_CHECK_ENV) TMPDIR="$${TMPDIR-}" GC_TEST_INNER_P="$${GC_TEST_INNER_P-}" LOCAL_TEST_LOG_DIR="$${LOCAL_TEST_LOG_DIR-}" GC_PUSH_GATE_NO_CAP="$${GC_PUSH_GATE_NO_CAP-}" PUSH_GATE_MAX_CONCURRENT="$${PUSH_GATE_MAX_CONCURRENT-}" PUSH_GATE_MAX_WAIT_SECONDS="$${PUSH_GATE_MAX_WAIT_SECONDS-}" PUSH_GATE_POLL_SECONDS="$${PUSH_GATE_POLL_SECONDS-}" CORE_SHARD_TOTAL=$(CORE_SHARD_TOTAL) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) GO_TEST_TIMEOUT=$(GO_TEST_TIMEOUT) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.

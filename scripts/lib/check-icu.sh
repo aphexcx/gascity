@@ -11,7 +11,7 @@ cgo_enabled=$(go env CGO_ENABLED)
 # tokenizes quoted flag values without evaluating shell code in those values.
 # The sentinel also makes BSD xargs run the probe when the flags are empty.
 # shellcheck disable=SC2016 # Variables belong to the child shell.
-if printf '%s\n' -- "${CGO_CFLAGS-}" "${CGO_CPPFLAGS-}" | xargs sh -c '
+if printf '%s\n' -- "${CGO_CPPFLAGS-}" "${CGO_CXXFLAGS-}" | xargs sh -c '
   next_include=false
   for flag do
     if "$next_include"; then
@@ -32,11 +32,35 @@ if printf '%s\n' -- "${CGO_CFLAGS-}" "${CGO_CPPFLAGS-}" | xargs sh -c '
 fi
 
 missing_icu() {
-  printf '%s\n' 'ICU headers not found: brew install icu4c or set ICU_PREFIX=/path/to/installed/icu' >&2
+  printf '%s\n' 'ICU headers not found: brew install icu4c, set ICU_PREFIX=/path/to/installed/icu, or set CGO_CPPFLAGS=-I/path/to/icu/include' >&2
   exit 1
 }
 
 [ "$#" -gt 0 ] || missing_icu
+
+# Lint loads tests by default and accepts repeated build-tag flags. Translate
+# only its load options; issue filtering and formatter flags do not affect ICU.
+if [ "$1" = --lint ]; then
+  shift
+  lint_tests=true
+  tags=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) shift; break ;;
+      --build-tags)
+        shift
+        [ "$#" -gt 0 ] || { echo 'check-icu: --build-tags needs a value' >&2; exit 2; }
+        tags="${tags:+$tags,}$1" ;;
+      --build-tags=*) tags="${tags:+$tags,}${1#*=}" ;;
+      --tests=false) lint_tests=false ;;
+      --tests|--tests=true) lint_tests=true ;;
+    esac
+    shift
+  done
+  [ "$#" -gt 0 ] || exit 0
+  [ -z "$tags" ] || set -- "-tags=$tags" "$@"
+  [ "$lint_tests" = false ] || set -- -test "$@"
+fi
 
 # shellcheck disable=SC2016 # $dir is a Go template variable.
 sources=$(go list -deps -f '{{if .CgoFiles}}{{$dir := .Dir}}{{range .CgoFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{range .CFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{range .CXXFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{range .HFiles}}{{$dir}}/{{.}}{{"\n"}}{{end}}{{end}}' "$@")
