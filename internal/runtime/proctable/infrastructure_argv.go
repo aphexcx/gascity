@@ -1,5 +1,7 @@
 package proctable
 
+import "path/filepath"
+
 // ManagedDoltScopeWatchdogVerb is the argv[1] re-exec marker of gc's managed
 // Dolt scope watchdog (cmd/gc/dolt_scope_watchdog.go).
 const ManagedDoltScopeWatchdogVerb = "__gc-managed-dolt-scope-watchdog"
@@ -11,13 +13,13 @@ const BDProxyChildVerb = "db-proxy-child"
 
 // IsCityInfrastructureArgv reports whether argv is a long-lived city
 // infrastructure process that can inherit an agent session's environment but
-// is never that session's runtime: gc's managed Dolt scope watchdog or bd's
-// db-proxy-child. Both are spawned Setpgid/Setsid, reparent to init once their
-// spawner exits, and supervise a Dolt server the whole city depends on, so
-// terminating one as a session orphan takes the city's store down with it.
+// is never that session's runtime: a Dolt sql-server, gc's managed Dolt scope
+// watchdog, or bd's db-proxy-child. Terminating one as a session orphan takes
+// the city's store down with it, including servers launched by older scripts
+// that inherited the caller's session identity.
 //
-// argv[0] is deliberately ignored: both are re-execs of whatever the operator's
-// binary is called on disk.
+// The watchdog/proxy markers are re-execs of an operator-named binary. A
+// sql-server must be the dolt executable itself, not text in an agent's prompt.
 func IsCityInfrastructureArgv(argv []string) bool {
 	if len(argv) < 2 {
 		return false
@@ -25,6 +27,8 @@ func IsCityInfrastructureArgv(argv []string) bool {
 	switch argv[1] {
 	case ManagedDoltScopeWatchdogVerb, BDProxyChildVerb:
 		return true
+	case "sql-server":
+		return filepath.Base(argv[0]) == "dolt"
 	}
 	return false
 }

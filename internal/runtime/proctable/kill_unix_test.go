@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"slices"
@@ -11,6 +12,78 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRuntimeSignalsPreserveInfrastructureInAgentGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		peerArgv    []string
+		peerGroup   int
+		inspectErr  error
+		snapshotErr error
+		wantTarget  int
+		groupErr    error
+		peerZombie  bool
+	}{
+		{"legacy dolt shares agent group", []string{"/opt/bin/dolt", "sql-server"}, 100, nil, nil, 0, nil, false},
+		{"watchdog shares agent group", []string{"gc", ManagedDoltScopeWatchdogVerb}, 100, nil, nil, 0, nil, false},
+		{"isolated dolt", []string{"dolt", "sql-server"}, 200, nil, nil, -100, nil, false},
+		{"ordinary agent child", []string{"sh", "-c", "work"}, 100, nil, nil, -100, nil, false},
+		{"unreadable group member", nil, 100, syscall.EINVAL, nil, 0, nil, false},
+		{"zombie member is skipped", nil, 100, syscall.EINVAL, nil, -100, nil, true},
+		{"unavailable process table", nil, 100, nil, errors.New("snapshot failed"), 0, nil, false},
+		{"ordinary group syscall failure permits PID fallback", []string{"agent"}, 100, nil, nil, 100, syscall.EPERM, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var targets []int
+			var signals []syscall.Signal
+			snapshot := func() ([]ProcessRecord, error) {
+				return []ProcessRecord{{PID: 100, PGID: 100}, {PID: 101, PGID: tc.peerGroup, Zombie: tc.peerZombie}, {PID: 102, PPID: 100, PGID: 100}}, tc.snapshotErr
+			}
+			argv := func(pid int) ([]string, error) {
+				if pid == 101 && tc.peerZombie {
+					t.Error("attempted to read a zombie's argv")
+				}
+				if pid == 100 || pid == 102 {
+					return []string{"agent"}, nil
+				}
+				return tc.peerArgv, tc.inspectErr
+			}
+			kill := func(pid int, sig syscall.Signal) error {
+				targets = append(targets, pid)
+				signals = append(signals, sig)
+				if pid < 0 {
+					return tc.groupErr
+				}
+				return nil
+			}
+			guarded := func(pid int, sig syscall.Signal) error {
+				return signalRuntimeWith(pid, sig, snapshot, argv, kill)
+			}
+			// The ordinary child is hidden inside its parent's scan envelope.
+			// A mixed group must fail before signaling, not kill just the root
+			// and claim cleanup succeeded while that child is still running.
+			err := killByPID(100, guarded, func(int) bool { return true }, func(int) bool { return false }, 0, 0)
+			if tc.wantTarget == 0 {
+				if !errors.Is(err, errUnsafeRuntimeGroup) || len(targets) != 0 {
+					t.Fatalf("unsafe group cleanup: err=%v targets=%v, want refusal without signals", err, targets)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTargets := []int{tc.wantTarget, tc.wantTarget}
+			wantSignals := []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}
+			if tc.groupErr != nil {
+				wantTargets = []int{-100, tc.wantTarget, -100, tc.wantTarget}
+				wantSignals = []syscall.Signal{syscall.SIGTERM, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGKILL}
+			}
+			if !slices.Equal(targets, wantTargets) || !slices.Equal(signals, wantSignals) {
+				t.Fatalf("targets=%v signals=%v; want targets=%v signals=%v", targets, signals, wantTargets, wantSignals)
+			}
+		})
+	}
+}
 
 func TestKillByPIDRefusesLowPIDs(t *testing.T) {
 	for _, pid := range []int{-1, 0, 1} {
@@ -22,15 +95,51 @@ func TestKillByPIDRefusesLowPIDs(t *testing.T) {
 
 func TestKillByPIDAlreadyGoneIsSuccess(t *testing.T) {
 	// Spawn a short-lived process and wait for it to exit, then try to kill it.
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("spawning test process: %v", err)
+	cmd, exited := startKillTestProcess(t, "true", nil, nil)
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("short-lived test process did not exit")
+	}
+	if !cmd.ProcessState.Success() {
+		t.Fatalf("short-lived test process failed: %v", cmd.ProcessState)
 	}
 	pid := cmd.ProcessState.Pid()
 	// Process is already gone. KillByPID should return nil (ESRCH → success).
 	if err := KillByPID(pid); err != nil {
 		t.Fatalf("KillByPID(%d) for already-dead process: %v", pid, err)
 	}
+}
+
+// startKillTestProcess owns the isolated group and bounded cleanup shared by
+// the already-gone test and the Darwin process-table integration proof.
+func startKillTestProcess(t *testing.T, name string, args []string, configure func(*exec.Cmd)) (*exec.Cmd, <-chan struct{}) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if configure != nil {
+		configure(cmd)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting test process: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		// Only this test's Setpgid group is ever signaled during cleanup.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("cleaning up test group %d: %v", cmd.Process.Pid, err)
+		}
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("test group leader did not exit during cleanup")
+		}
+	})
+	return cmd, exited
 }
 
 func TestSignalPIDGroupThenFallback(t *testing.T) {

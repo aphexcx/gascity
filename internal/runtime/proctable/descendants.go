@@ -7,6 +7,7 @@ type ProcessRecord struct {
 	PID       int
 	PPID      int
 	PGID      int
+	Zombie    bool   // known to have exited and be awaiting reaping; false also covers unknown state
 	StartTime string // opaque host-local process-start identity
 	Name      string // basename of the process's command
 	SessionID string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)

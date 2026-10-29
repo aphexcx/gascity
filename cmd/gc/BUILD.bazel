@@ -1062,6 +1062,7 @@ go_test(
         "dolt_runtime_test_helpers_test.go",
         "dolt_scope_watchdog_sweep_test.go",
         "dolt_scope_watchdog_test.go",
+        "dolt_shell_session_isolation_test.go",
         "dolt_sql_health_test.go",
         "dolt_standalone_conflict_test.go",
         "dolt_start_address_in_use_retry_window_test.go",

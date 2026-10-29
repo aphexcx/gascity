@@ -131,6 +131,8 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	writeFakeProcCmdline(t, root, 4101, "dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml")
 	writeFakeProcEntry(t, root, 4200, 1, "bd", sessionEnv)
 	writeFakeProcCmdline(t, root, 4200, "/opt/beads/bd-1.3.0", proxyendpoint.ChildVerb, "--root", cityPath+"/.beads/proxy")
+	writeFakeProcEntry(t, root, 4400, 1, "dolt", sessionEnv)
+	writeFakeProcCmdline(t, root, 4400, "/opt/bin/dolt", "sql-server", "--config", "/city/.gc/runtime/packs/dolt/dolt-config.yaml")
 	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
 	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
 	t.Cleanup(proctable.SetScanRootForTesting(root))
@@ -141,7 +143,7 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
 		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300; stderr=%q", got, sp.terminated, stderr.String())
 	}
-	for _, pid := range []string{"pid=4100", "pid=4200"} {
+	for _, pid := range []string{"pid=4100", "pid=4200", "pid=4400"} {
 		if !strings.Contains(stderr.String(), "leaving process-table root "+pid) {
 			t.Errorf("stderr %q does not report leaving %s alone", stderr.String(), pid)
 		}

@@ -56,7 +56,12 @@ func runRestart(t *testing.T, cityPath, root string, port int) ([]byte, error) {
 
 func runRestartWithEnv(t *testing.T, cityPath, root string, extraEnv []string, args ...string) ([]byte, error) {
 	t.Helper()
-	script := filepath.Join(root, restartScript)
+	return runDoltLifecycleWithEnv(t, cityPath, root, restartScript, extraEnv, args...)
+}
+
+func runDoltLifecycleWithEnv(t *testing.T, cityPath, root, scriptName string, extraEnv []string, args ...string) ([]byte, error) {
+	t.Helper()
+	script := filepath.Join(root, scriptName)
 	cmd := exec.Command("sh", append([]string{script}, args...)...)
 	cmd.Env = append(filteredEnv(
 		"PATH", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",

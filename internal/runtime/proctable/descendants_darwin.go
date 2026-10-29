@@ -9,6 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const darwinZombieState = 5 // SZOMB from sys/proc.h: awaiting collection by parent.
+
 // snapshotProcesses reads every destructive field from one kern.proc.all
 // result. The later ps read only enriches liveness metadata; it never splices a
 // new PID identity onto parent/group edges captured for teardown.
@@ -48,6 +50,7 @@ func darwinProcessRecord(process unix.KinfoProc) (ProcessRecord, bool) {
 		PID:       pid,
 		PPID:      ppid,
 		PGID:      pgid,
+		Zombie:    process.Proc.P_stat == darwinZombieState,
 		StartTime: startTime,
 		Name:      unix.ByteSliceToString(process.Proc.P_comm[:]),
 	}, true
