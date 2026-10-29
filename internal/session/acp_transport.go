@@ -78,19 +78,21 @@ func resolvedStartProvider(b beads.Bead, cfg runtime.Config) string {
 // start. Provider resolution is required even when persisted transport remains
 // ACP. The persisted clear makes a config-change migration idempotent and records
 // it through the normal bead history, including when startup fails.
-func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, cfg runtime.Config) error {
+func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, command *string, cfg *runtime.Config) error {
 	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) || m.sp.IsRunning(name) {
 		return nil
 	}
 	patch := map[string]string{
 		"command": "", "resume_command": "", "resume_flag": "", "resume_style": "",
 	}
+	var resolvedHints runtime.Config
 	if m.resumeConfigResolver != nil {
-		command, resume, err := m.resumeConfigResolver(m.infoFromBead(*b), b.Metadata)
+		resolvedCommand, resume, hints, err := m.resumeConfigResolver(m.infoFromBead(*b), b.Metadata)
 		if err != nil {
 			return fmt.Errorf("resolving session resume settings: %w", err)
 		}
-		patch["command"] = command
+		resolvedHints = hints
+		patch["command"] = resolvedCommand
 		patch["resume_command"] = resume.ResumeCommand
 		patch["resume_flag"] = resume.ResumeFlag
 		patch["resume_style"] = resume.ResumeStyle
@@ -102,15 +104,19 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 	}
 	ClearStoredMCPMetadata(patch)
 	if err := m.store.SetMetadataBatch(id, patch); err != nil {
-		return fmt.Errorf("clearing incompatible ACP keys for provider %q: %w", resolvedStartProvider(*b, cfg), err)
+		return fmt.Errorf("clearing incompatible ACP keys for provider %q: %w", resolvedStartProvider(*b, *cfg), err)
 	}
 	for key, value := range patch {
 		b.Metadata[key] = value
 	}
+	if m.resumeConfigResolver != nil {
+		*command = BuildResumeCommand(infoFromPersistedBead(*b))
+		*cfg = resolvedHints
+	}
 	if router, ok := m.sp.(acpRouteRegistrar); ok {
 		router.Unroute(name)
 	}
-	log.Printf("session %s: ignoring ACP keys on a non-ACP provider %q", id, resolvedStartProvider(*b, cfg))
+	log.Printf("session %s: ignoring ACP keys on a non-ACP provider %q", id, resolvedStartProvider(*b, *cfg))
 	return nil
 }
 

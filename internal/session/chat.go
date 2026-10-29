@@ -542,7 +542,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
-	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, hints); err != nil {
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints); err != nil {
 		return err
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
@@ -681,7 +681,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, hints); err != nil {
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints); err != nil {
 		return err
 	}
 	transport, _ := m.transportForBead(b, sessName)

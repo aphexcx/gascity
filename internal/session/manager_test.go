@@ -4162,8 +4162,8 @@ func TestSendToLiveStandaloneACPWithUnavailableReplacement(t *testing.T) {
 	wantErr := errors.New("replacement executable unavailable")
 	mgr := NewManagerWithOptions(store, sp,
 		WithTransportResolver(func(_, _ string) string { return "acp" }),
-		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, error) {
-			return "", ProviderResume{}, wantErr
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, runtime.Config, error) {
+			return "", ProviderResume{}, runtime.Config{}, wantErr
 		}))
 	if _, err := mgr.Send(context.Background(), b.ID, "hello", "old acp", runtime.Config{}); err != nil {
 		t.Fatalf("send to live standalone ACP: %v", err)
@@ -4206,8 +4206,8 @@ func TestStartPreservesACPMetadataWhenResumeResolutionFails(t *testing.T) {
 	wantErr := errors.New("current resume config unavailable")
 	mgr := NewManagerWithOptions(store, sp,
 		WithTransportResolver(func(_, _ string) string { return "tmux" }),
-		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, error) {
-			return "", ProviderResume{}, wantErr
+		WithResumeConfigResolver(func(Info, map[string]string) (string, ProviderResume, runtime.Config, error) {
+			return "", ProviderResume{}, runtime.Config{}, wantErr
 		}))
 	if err := mgr.Start(context.Background(), b.ID, "new", runtime.Config{}); !errors.Is(err, wantErr) {
 		t.Fatalf("Start error = %v, want resolution failure", err)

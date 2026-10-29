@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -279,6 +280,105 @@ func TestFactoryPreservesLegacyACPMetadataWithoutResolvedRuntime(t *testing.T) {
 	}
 	if sp.IsRunning("legacy-session") {
 		t.Fatal("runtime started with unresolved launch settings")
+	}
+}
+
+func TestFactoryReusedHandleMigratesACPStartupInputs(t *testing.T) {
+	for _, runtimeOnly := range []bool{false, true} {
+		name := "start"
+		if runtimeOnly {
+			name = "runtime_only"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := beads.NewMemStore()
+			terminal, acp := runtime.NewFake(), runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			servers := []runtime.MCPServerConfig{{Name: "tools", Transport: runtime.MCPTransportStdio, Command: "old-tools"}}
+			snapshot, err := sessionpkg.EncodeMCPServersSnapshot(servers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := store.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
+				"session_name": "legacy-session", "template": "worker", "provider": "previous", "state": "active",
+				"command": "old acp", "resume_command": "old acp --resume {{.SessionKey}}", "resume_flag": "--old-resume",
+				"session_key": "saved-key", "resume_style": "flag",
+				sessionpkg.MCPIdentityMetadataKey: "worker", sessionpkg.MCPServersSnapshotMetadataKey: snapshot,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp.RouteACP("legacy-session")
+			if err := sp.Start(ctx, "legacy-session", runtime.Config{Command: "old acp", MCPServers: servers}); err != nil {
+				t.Fatal(err)
+			}
+			transport := "acp"
+			workDir := t.TempDir()
+			factory, err := NewFactory(FactoryConfig{
+				Store: store, Provider: sp,
+				ResolveTransport: func(_, _ string) string { return transport },
+				ResolveSessionRuntime: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
+					if sp.DetectTransport("legacy-session") == "acp" || transport == "acp" {
+						return &ResolvedRuntime{
+							Command: "old acp", Provider: "previous",
+							Resume: sessionpkg.ProviderResume{ResumeCommand: "old acp --resume {{.SessionKey}}"},
+							Hints:  runtime.Config{MCPServers: servers, ProviderName: "previous", Env: map[string]string{"OLD_ACP": "1"}},
+						}, nil
+					}
+					return &ResolvedRuntime{
+						Command: "terminal", Provider: "replacement", WorkDir: workDir,
+						Resume:     sessionpkg.ProviderResume{ResumeFlag: "--continue", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+						Hints:      runtime.Config{ProviderName: "replacement", ReadyPromptPrefix: "terminal>"},
+						SessionEnv: map[string]string{"TERMINAL": "1"},
+					}, nil
+				},
+				StaleKeyDetectionWaiter: func(context.Context, string) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := factory.SessionByID(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport = "tmux"
+			if err := handle.Stop(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if runtimeOnly {
+				err = handle.StartResolved(ctx, "", runtime.Config{})
+			} else {
+				err = handle.Start(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := terminal.LastStartConfig("legacy-session")
+			if start == nil {
+				t.Fatal("terminal backend was not started")
+			}
+			if start.Command != "terminal --continue saved-key" || len(start.MCPServers) != 0 {
+				t.Errorf("terminal launch = %q with %d MCP servers, want replacement resume command without ACP hints", start.Command, len(start.MCPServers))
+			}
+			if start.ProviderName != "replacement" || start.WorkDir != workDir || start.ReadyPromptPrefix != "terminal>" || start.Env["TERMINAL"] != "1" || start.Env["OLD_ACP"] != "" {
+				t.Errorf("terminal received stale launch hints: %#v", start)
+			}
+			if acp.IsRunning("legacy-session") {
+				t.Error("restart still uses the ACP backend")
+			}
+			stored, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{
+				"command": "terminal", "resume_command": "", "resume_flag": "--continue", "resume_style": "flag", "session_id_flag": "--session-id",
+				sessionpkg.MCPIdentityMetadataKey: "", sessionpkg.MCPServersSnapshotMetadataKey: "",
+			} {
+				if got := stored.Metadata[key]; got != want {
+					t.Errorf("persisted %s = %q, want %q", key, got, want)
+				}
+			}
+		})
 	}
 }
 

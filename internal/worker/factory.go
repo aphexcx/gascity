@@ -73,15 +73,18 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
 	}
 	if cfg.ResolveSessionRuntime != nil {
-		opts = append(opts, sessionpkg.WithResumeConfigResolver(func(info sessionpkg.Info, metadata map[string]string) (string, sessionpkg.ProviderResume, error) {
+		opts = append(opts, sessionpkg.WithResumeConfigResolver(func(info sessionpkg.Info, metadata map[string]string) (string, sessionpkg.ProviderResume, runtime.Config, error) {
 			resolved, err := cfg.ResolveSessionRuntime(info, strings.TrimSpace(metadata["real_world_app_session_kind"]), cloneStringMap(metadata))
 			if err != nil {
-				return "", sessionpkg.ProviderResume{}, err
+				return "", sessionpkg.ProviderResume{}, runtime.Config{}, err
 			}
 			if resolved == nil {
-				return "", sessionpkg.ProviderResume{}, fmt.Errorf("%w: provider %q has no resolved runtime for transport migration", ErrHandleConfig, info.Provider)
+				return "", sessionpkg.ProviderResume{}, runtime.Config{}, fmt.Errorf("%w: provider %q has no resolved runtime for transport migration", ErrHandleConfig, info.Provider)
 			}
-			return resolved.Command, resolved.Resume, nil
+			normalized := normalizeResolvedRuntimeInput(*resolved)
+			hints := normalized.Hints
+			hints.Env = mergeStringMaps(hints.Env, normalized.SessionEnv)
+			return normalized.Command, normalized.Resume, hints, nil
 		}))
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
