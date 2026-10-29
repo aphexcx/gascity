@@ -102,14 +102,16 @@ func TestStatusSessionSnapshotRetainsHistoricalWorkDirsForAttribution(t *testing
 	if err := sessions.Close(created.ID); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := (&Server{state: st}).sessionSnapshot(context.Background(), true)
-	if len(snapshot.partialErrors) != 0 || len(snapshot.infos) != 1 {
-		t.Fatalf("snapshot has %d infos, errors %v", len(snapshot.infos), snapshot.partialErrors)
+	st.cfg.Agents = []config.Agent{{Name: "observer", WorkDir: "/city/lane-worker-2", MaxActiveSessions: intPtr(1)}}
+	srv := &Server{state: st}
+	snapshot := srv.agentAttributionSnapshot(context.Background(), st.cfg)
+	if !snapshot.Complete || len(snapshot.Infos) != 1 {
+		t.Fatalf("snapshot has %d infos, complete=%v", len(snapshot.Infos), snapshot.Complete)
 	}
-	if got := snapshot.infos[0].WorkDir; got != "/city/lane-worker-2" {
+	if got := snapshot.Infos[0].WorkDir; got != "/city/lane-worker-2" {
 		t.Fatalf("historical work_dir = %q", got)
 	}
-	if len(snapshot.bySessionName) != 0 {
+	if !snapshot.Infos[0].Closed || len(srv.statusSessionSnapshot(context.Background()).bySessionName) != 0 {
 		t.Fatal("historical transcript owner must not appear as a live session")
 	}
 }

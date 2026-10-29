@@ -6757,7 +6757,7 @@ func newAssignedTaskWorkDirResolver(cityPath string, assignedWorkBeads []beads.B
 		index[assignee] = assignedTaskWorkDir{path: workDir, createdAt: bead.CreatedAt}
 	}
 	return func(candidate startCandidate, cfg *config.City) string {
-		for _, assignee := range taskWorkDirAssignees(candidate, cfg) {
+		for _, assignee := range taskWorkDirLookupAssignees(candidate, cfg) {
 			if workDir := index[strings.TrimSpace(assignee)].path; workDir != "" {
 				return workDir
 			}

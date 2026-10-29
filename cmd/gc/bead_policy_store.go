@@ -253,6 +253,17 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// ReadMetadataPathPage preserves bounded ownership reads and the policy's
+// both-tier visibility through the production store wrapper.
+func (s *beadPolicyStore) ReadMetadataPathPage(ctx context.Context, query beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
+	reader, ok := s.Store.(beads.MetadataPathPageReader)
+	if !ok {
+		return beads.MetadataPathPage{}, beads.ErrMetadataPathPagingUnsupported
+	}
+	query.IncludeEphemeral = true
+	return reader.ReadMetadataPathPage(ctx, query)
+}
+
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
 }

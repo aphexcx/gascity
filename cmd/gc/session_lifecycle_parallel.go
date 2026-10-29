@@ -1544,7 +1544,7 @@ func resolvePreparedTaskWorkDir(
 			return workDir
 		}
 	}
-	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+	return resolveTaskWorkDir(cityPath, store, taskWorkDirLookupAssignees(candidate, cfg)...)
 }
 
 // generatedPreStartPrefixes are the exact command prefixes
@@ -1611,6 +1611,34 @@ func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
 		strings.TrimSpace(candidate.info.Alias),
 		candidate.logicalTemplate(cfg),
 	}
+}
+
+// taskWorkDirLookupAssignees excludes a shared pool template from directory
+// authority. Work claimed by another slot may still be assigned to that name;
+// its recorded workspace must not override this slot's resolved directory.
+func taskWorkDirLookupAssignees(candidate startCandidate, cfg *config.City) []string {
+	assignees := taskWorkDirAssignees(candidate, cfg)
+	if !isPoolManagedSessionInfo(candidate.info) || isNamedSessionInfo(candidate.info) || candidate.info.ManualSession || candidate.tp.ManualSession {
+		return assignees
+	}
+	template := candidate.logicalTemplate(cfg)
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return assignees
+	}
+	// A configured namepool member can reserve the template's own name as
+	// its stable claim alias. That member owns assignments under the alias;
+	// other members must still exclude it as a shared-template fallback.
+	if strings.TrimSpace(candidate.info.Alias) == template && cfgAgent.PoolSlotForIdentity(template) > 0 {
+		return assignees
+	}
+	owned := make([]string, 0, len(assignees))
+	for _, assignee := range assignees {
+		if strings.TrimSpace(assignee) != template {
+			owned = append(owned, assignee)
+		}
+	}
+	return owned
 }
 
 func executePreparedStartWave(

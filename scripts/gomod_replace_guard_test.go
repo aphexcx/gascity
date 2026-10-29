@@ -62,6 +62,36 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		}
 	})
 
+	const forkPin = "v0.59.1-0.20261013092804-43ba1e2ebfb3"
+	forkCases := []struct {
+		name, directive string
+		wantPass        bool
+	}{
+		{"fork_pin", "replace github.com/steveyegge/beads => github.com/aphexcx/beads " + forkPin, true},
+		{"fork_block_tabs_comment", "replace (\n\tgithub.com/steveyegge/beads\t=>\tgithub.com/aphexcx/beads\t" + forkPin + " // schema lineage\n)", true},
+		{"fork_release_tag", "replace github.com/steveyegge/beads => github.com/aphexcx/beads v1.5.0", false},
+		{"fork_branch", "replace github.com/steveyegge/beads => github.com/aphexcx/beads main", false},
+		{"fork_missing_version", "replace github.com/steveyegge/beads => github.com/aphexcx/beads", false},
+		{"fork_short_timestamp", "replace github.com/steveyegge/beads => github.com/aphexcx/beads v0.59.1-0.20261013-43ba1e2ebfb3", false},
+		{"fork_short_hash", "replace github.com/steveyegge/beads => github.com/aphexcx/beads v0.59.1-0.20261013092804-43ba1e2", false},
+		{"fork_non_hex_hash", "replace github.com/steveyegge/beads => github.com/aphexcx/beads v0.59.1-0.20261013092804-43ba1e2ebfbz", false},
+		{"fork_other_source", "replace github.com/example/beads => github.com/aphexcx/beads " + forkPin, false},
+		{"fork_other_target", "replace github.com/steveyegge/beads => github.com/example/beads " + forkPin, false},
+		{"fork_target_prefix", "replace github.com/steveyegge/beads => github.com/aphexcx/beads-extra " + forkPin, false},
+		{"fork_source_version", "replace github.com/steveyegge/beads v1.3.1 => github.com/aphexcx/beads " + forkPin, false},
+	}
+	for _, tc := range forkCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := runScript(t, "module example.com/test\n\ngo 1.22\n\n"+tc.directive+"\n")
+			if (code == 0) != tc.wantPass {
+				t.Fatalf("exit = %d, want pass = %t\n%s", code, tc.wantPass, out)
+			}
+			if tc.wantPass && !strings.Contains(out, "schema lineage") {
+				t.Fatalf("allowed fork pin must explain the schema lineage carve-out:\n%s", out)
+			}
+		})
+	}
+
 	pseudoVersionCases := []struct {
 		name  string
 		block string

@@ -213,6 +213,7 @@ jobs:
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-claude-native.sh'
+              - 'scripts/build-pinned-bd.sh'
               - 'internal/beads/**'
               - 'internal/events/**'
               - 'internal/config/**'
@@ -514,34 +515,19 @@ jobs:
       GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
-      # exactly as contract-acceptance-current does, so the bd on PATH and the
-      # beads library in go.mod reach the same upstream commit.
+      # Build from go.mod, including the fork replacement, so the bd on PATH
+      # and the linked library share one schema lineage.
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
           install-claude-cli: "false"
-      - name: Resolve bd current pin
+      - name: Build bd from the linked beads module
         id: bd
         run: |
           set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
-        run: |
-          set -euo pipefail
-          src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
-          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
-          mkdir -p "${HOME}/.local/bin"
-          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          bash scripts/build-pinned-bd.sh "${HOME}/.local/bin"
+          echo "pin=$(GOWORK=off GOFLAGS= go list -m -f '{{if .Replace}}{{.Replace.Path}}@{{.Replace.Version}}{{else}}{{.Path}}@{{.Version}}{{end}}' github.com/steveyegge/beads)" >> "$GITHUB_OUTPUT"
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       # Fail here rather than inside a test: a bd that is missing or too old is
@@ -590,7 +576,7 @@ jobs:
           {
             echo "## Beads topology acceptance"
             echo
-            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            echo "bd pin: ${{ steps.bd.outputs.pin }}"
             echo
             echo "### Skipped"
             echo

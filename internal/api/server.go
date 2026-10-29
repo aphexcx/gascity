@@ -115,6 +115,9 @@ type Server struct {
 	// unchanged mirror.
 	activityMemo *worker.DerivedActivityMemo
 
+	// attribution coalesces and memoizes bounded historical ownership reads.
+	attribution attributionMemo
+
 	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
 	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
 	agentVisibilityWaitTimeout time.Duration

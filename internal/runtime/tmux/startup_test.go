@@ -2071,6 +2071,7 @@ func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
 		Command:  "claude",
 		WorkDir:  "/proj",
 		PreStart: []string{"setup-worktree"},
+		Env:      map[string]string{"GC_TRIGGER_BEAD_ID": "work-2"},
 	}
 
 	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
@@ -2083,6 +2084,9 @@ func TestDoStartSession_PreStartRunsBeforeCreate(t *testing.T) {
 	pre := ops.calls[0]
 	if pre.command != "setup-worktree" {
 		t.Errorf("pre_start command = %q, want %q", pre.command, "setup-worktree")
+	}
+	if got := pre.env["GC_TRIGGER_BEAD_ID"]; got != "work-2" {
+		t.Errorf("pre_start trigger = %q, want work-2", got)
 	}
 	if pre.timeout != DefaultConfig().SetupTimeout {
 		t.Errorf("pre_start timeout = %v, want %v", pre.timeout, DefaultConfig().SetupTimeout)
