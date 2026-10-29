@@ -502,6 +502,11 @@ export const zExtMsgAdapterRegisterInputBody = z.object({
     account_id: z.string().min(1),
     callback_url: z.string().optional(),
     capabilities: zAdapterCapabilities.optional(),
+    envelope_format: z.enum([
+        '',
+        'long',
+        'short'
+    ]).optional(),
     name: z.string().optional(),
     provider: z.string().min(1),
     reply_instructions: z.string().optional()

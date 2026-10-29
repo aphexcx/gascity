@@ -2982,6 +2982,15 @@
             "$ref": "#/components/schemas/AdapterCapabilities",
             "description": "Adapter capabilities."
           },
+          "envelope_format": {
+            "description": "Reminder envelope labels: long (default when omitted or empty) or short.",
+            "enum": [
+              "",
+              "long",
+              "short"
+            ],
+            "type": "string"
+          },
           "name": {
             "description": "Adapter display name.",
             "type": "string"
