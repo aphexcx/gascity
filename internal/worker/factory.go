@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -211,9 +212,15 @@ func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.Persiste
 	if f.resolveSessionRuntime != nil {
 		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
 		if err != nil {
-			return nil, err
+			if !errors.Is(err, sessionpkg.ErrACPProviderResolution) {
+				return nil, err
+			}
+			// Control operations still need the persisted runtime. Migration
+			// re-resolves through WithResumeConfigResolver before any mutation.
+			log.Printf("session %s: deferring provider resolution until startup: %v", info.ID, err)
+		} else {
+			applyResolvedRuntimeToSessionSpec(&spec, resolved)
 		}
-		applyResolvedRuntimeToSessionSpec(&spec, resolved)
 	}
 	return f.Session(spec)
 }

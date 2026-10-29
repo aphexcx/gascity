@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -31,11 +32,15 @@ func ResolveMCPTransport(configuredTransport, identity, snapshot string) (string
 	return "", true
 }
 
+// ErrACPProviderResolution identifies an unavailable intended provider whose
+// resolution must be retried before migrating an ACP session at startup.
+var ErrACPProviderResolution = errors.New("resolving intended provider for ACP session")
+
 // ACPProviderResolutionError prevents persisted-provider fallback from hiding
 // a failed resolution before an ACP session's metadata and route are migrated.
 func ACPProviderResolutionError(metadata map[string]string, err error) error {
 	if err != nil && len(storedACPKeys(metadata)) > 0 {
-		return fmt.Errorf("resolving intended provider for ACP session: %w", err)
+		return fmt.Errorf("%w: %w", ErrACPProviderResolution, err)
 	}
 	return nil
 }

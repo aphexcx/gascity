@@ -897,6 +897,62 @@ func TestWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
 	}
 }
 
+func TestWorkerControlsLiveACPWithUnavailableReplacement(t *testing.T) {
+	for _, operation := range []string{"stop", "close"} {
+		t.Run(operation, func(t *testing.T) {
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "worker", Provider: "replacement", Session: "tmux"}},
+				Providers: map[string]config.ProviderSpec{
+					"replacement": {Command: filepath.Join(t.TempDir(), "unavailable-terminal")},
+					"previous":    {Command: "/bin/echo", SupportsACP: boolPtr(true), ACPArgs: []string{"acp"}},
+				},
+			}
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "worker", "provider": "previous", "session_name": "live-session", "state": "active",
+				"command": "/bin/echo acp", session.MCPIdentityMetadataKey: "legacy-agent",
+				session.MCPServersSnapshotMetadataKey: "[]",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, acp := runtime.NewFake(), runtime.NewFake()
+			sp := sessionauto.New(terminal, acp)
+			sp.RouteACP("live-session")
+			if err := sp.Start(context.Background(), "live-session", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, b.ID)
+			if err != nil {
+				t.Fatalf("construct control handle: %v", err)
+			}
+			if operation == "stop" {
+				err = handle.Stop(context.Background())
+			} else {
+				err = handle.Close(context.Background())
+			}
+			if err != nil {
+				t.Fatalf("%s live ACP session: %v", operation, err)
+			}
+			if acp.IsRunning("live-session") || terminal.LastStartConfig("live-session") != nil {
+				t.Fatal("control operation left ACP running or started the terminal backend")
+			}
+			stored, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{session.MCPIdentityMetadataKey, session.MCPServersSnapshotMetadataKey} {
+				if stored.Metadata[key] != b.Metadata[key] {
+					t.Errorf("control operation changed %s", key)
+				}
+			}
+			if operation == "close" && stored.Status != "closed" {
+				t.Errorf("close left bead status %q", stored.Status)
+			}
+		})
+	}
+}
+
 func TestResolvedWorkerRuntimeTransportUsesStoredACPCommandBeforeConfiguredTmux(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "kimi",
