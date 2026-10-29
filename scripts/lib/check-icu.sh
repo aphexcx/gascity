@@ -7,11 +7,16 @@ set -eu
 cgo_enabled=$(go env CGO_ENABLED)
 [ "$cgo_enabled" != 0 ] || exit 0
 
+# Ask Go for the effective flags: exported values override persisted GOENV
+# settings, exactly as they do for the build that follows this check.
+effective_flags=$(go env CGO_CPPFLAGS CGO_CFLAGS CGO_CXXFLAGS CGO_LDFLAGS)
+
 # A caller can supply ICU without a discoverable installation prefix. xargs
 # tokenizes quoted flag values without evaluating shell code in those values.
 # The sentinel also makes BSD xargs run the probe when the flags are empty.
-# shellcheck disable=SC2016 # Variables belong to the child shell.
-if printf '%s\n' -- "${CGO_CPPFLAGS-}" "${CGO_CXXFLAGS-}" | xargs sh -c '
+header_dirs() {
+  # shellcheck disable=SC2016 # Variables belong to the child shell.
+  printf '%s\n' -- "$1" | xargs sh -c '
   next_include=false
   for flag do
     if "$next_include"; then
@@ -24,10 +29,29 @@ if printf '%s\n' -- "${CGO_CPPFLAGS-}" "${CGO_CXXFLAGS-}" | xargs sh -c '
         *) continue ;;
       esac
     fi
-    [ ! -f "$include/unicode/regex.h" ] || exit 0
+    if [ -f "$include/unicode/regex.h" ]; then
+      printf "%s\n" "$include"
+    fi
+  done
+' check-cgo-include
+}
+
+cpp_dirs=$(header_dirs "$(printf '%s\n' "$effective_flags" | sed -n '1p')")
+[ -z "$cpp_dirs" ] || exit 0
+
+# The C preamble and C++ source must use the same ICU headers. CPPFLAGS
+# reaches both compiles; otherwise require a directory in both flag sets.
+c_dirs=$(header_dirs "$(printf '%s\n' "$effective_flags" | sed -n '2p')")
+cxx_dirs=$(header_dirs "$(printf '%s\n' "$effective_flags" | sed -n '3p')")
+if printf '%s\n' "$c_dirs" | (
+  while IFS= read -r include; do
+    [ -n "$include" ] || continue
+    if printf '%s\n' "$cxx_dirs" | grep -F -x -e "$include" >/dev/null; then
+      exit 0
+    fi
   done
   exit 1
-' check-cgo-include; then
+); then
   exit 0
 fi
 

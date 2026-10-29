@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -76,7 +77,8 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		goEnv      string
 		defaultCGO bool
 		cgoInclude string
-		cgoVar     string
+		cgoVars    []string
+		realICU    bool
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -98,20 +100,54 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "saved CGO off cannot bypass missing ICU", goEnv: "CGO_ENABLED=0\n"},
 		{name: "manual CPP include", installed: []string{"manual"}, cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
 		{name: "manual separated CPP include", installed: []string{"manual"}, cgoInclude: "-I ", withoutICU: []string{"print-cgo-env"}},
-		{name: "manual CXX include", installed: []string{"manual"}, cgoInclude: "-I", cgoVar: "CGO_CXXFLAGS", withoutICU: []string{"print-cgo-env"}},
-		{name: "C-only include cannot supply CXX headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVar: "CGO_CFLAGS"},
+		{name: "CXX-only include cannot supply C headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CXXFLAGS"}},
+		{name: "C-only include cannot supply CXX headers", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS"}},
+		{name: "paired C and CXX includes", installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS", "CGO_CXXFLAGS"}, withoutICU: []string{"print-cgo-env"}},
+		{name: "persisted CPP include", installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/manual/include\nCGO_LDFLAGS=-L{root}/manual/lib\n", withoutICU: []string{"print-cgo-env"}},
+		{name: "persisted stale CPP include", goEnv: "CGO_CPPFLAGS=-I{root}/absent/include\n"},
+		{name: "exported CPP wins over persisted stale include", installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/absent/include\n", cgoInclude: "-I", withoutICU: []string{"print-cgo-env"}},
+		{name: "exported stale CPP overrides persisted valid include", installed: []string{"saved"}, goEnv: "CGO_CPPFLAGS=-I{root}/saved/include\n", cgoInclude: "-I"},
+		{name: "persisted paired C and CXX includes", installed: []string{"manual"}, goEnv: "CGO_CFLAGS=-I{root}/manual/include\nCGO_CXXFLAGS=-I{root}/manual/include\n", withoutICU: []string{"print-cgo-env"}},
+		{name: "persisted CXX-only include", installed: []string{"manual"}, goEnv: "CGO_CXXFLAGS=-I{root}/manual/include\n"},
+		{name: "C and CXX require a common header directory", installed: []string{"manual", "saved"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS"}, goEnv: "CGO_CXXFLAGS=-I{root}/saved/include\n"},
+		{name: "persisted CPP real vet", realICU: true, installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/manual/include\nCGO_LDFLAGS=-L{root}/manual/lib\n", withoutICU: []string{"vet", "PKGS=github.com/dolthub/go-icu-regex/internal/icu"}},
+		{name: "persisted CPP real beads build", realICU: true, installed: []string{"manual"}, goEnv: "CGO_CPPFLAGS=-I{root}/manual/include\nCGO_LDFLAGS=-L{root}/manual/lib\n", withoutICU: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStore"}},
+		{name: "paired C and CXX real beads build", realICU: true, installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CFLAGS", "CGO_CXXFLAGS"}, withoutICU: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStore"}},
+		{name: "CPP real beads build", realICU: true, installed: []string{"manual"}, cgoInclude: "-I", withoutICU: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStore"}},
+		{name: "CXX-only real beads build rejected", realICU: true, installed: []string{"manual"}, cgoInclude: "-I", cgoVars: []string{"CGO_CXXFLAGS"}, makeArgs: []string{"test-pkg", "PKG=./internal/beads", "RUN=^TestMemStore"}},
 		{name: "stale manual CGO include", cgoInclude: "-I"},
 		{name: "native DoltLite without ICU", withoutICU: []string{"-n", "test-native-doltlite-beads"}},
 		{name: "pack registry without ICU", withoutICU: []string{"-n", "test-pack-registry-live"}},
 		{name: "docs without ICU", withoutICU: []string{"-n", "docs-dev"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var realPrefix string
+			if tc.realICU {
+				if runtime.GOOS != "darwin" {
+					t.Skip("real Darwin ICU build requires macOS")
+				}
+				probe := testCommand("sh", filepath.Join(repoRoot(t), "scripts/lib/icu-prefix.sh"))
+				out, err := probe.CombinedOutput()
+				if err != nil {
+					t.Fatalf("discover installed ICU for real build: %v\n%s", err, out)
+				}
+				realPrefix = strings.TrimSpace(string(out))
+				if realPrefix == "" {
+					t.Skip("real Darwin ICU build requires installed ICU")
+				}
+			}
 			tmp := t.TempDir()
 			binDir := filepath.Join(tmp, "bin")
 			if err := os.Mkdir(binDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			for _, name := range tc.installed {
+				if tc.realICU {
+					if err := os.Symlink(realPrefix, filepath.Join(tmp, name)); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
 				header := filepath.Join(tmp, name, "include", "unicode", "regex.h")
 				if err := os.MkdirAll(filepath.Dir(header), 0o755); err != nil {
 					t.Fatal(err)
@@ -151,11 +187,13 @@ esac
 			env := replaceScriptEnv(filteredMakefileCGOTestEnv(t), "PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			env = replaceScriptEnv(env, "TEST_ICU_PKG_PREFIX", filepath.Join(tmp, tc.pkgConfig))
 			if tc.cgoInclude != "" {
-				flagVar := tc.cgoVar
-				if flagVar == "" {
-					flagVar = "CGO_CPPFLAGS"
+				flagVars := tc.cgoVars
+				if len(flagVars) == 0 {
+					flagVars = []string{"CGO_CPPFLAGS"}
 				}
-				env = replaceScriptEnv(env, flagVar, "-O2 "+tc.cgoInclude+filepath.Join(tmp, "manual", "include"))
+				for _, flagVar := range flagVars {
+					env = replaceScriptEnv(env, flagVar, "-O2 "+tc.cgoInclude+filepath.Join(tmp, "manual", "include"))
+				}
 				env = replaceScriptEnv(env, "CGO_LDFLAGS", "-L"+filepath.Join(tmp, "manual", "lib"))
 			}
 			if tc.defaultCGO {
@@ -163,7 +201,7 @@ esac
 			}
 			if tc.goEnv != "" {
 				goEnvFile := filepath.Join(tmp, "goenv")
-				if err := os.WriteFile(goEnvFile, []byte(tc.goEnv), 0o600); err != nil {
+				if err := os.WriteFile(goEnvFile, []byte(strings.ReplaceAll(tc.goEnv, "{root}", tmp)), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				env = replaceScriptEnv(env, "GOENV", goEnvFile)
@@ -195,6 +233,7 @@ esac
 				}
 				assertContains(t, string(out), "ICU_PREFIX=")
 				assertContains(t, string(out), "brew install")
+				assertContains(t, string(out), "CGO_CPPFLAGS=")
 				return
 			}
 			if err != nil {
