@@ -794,6 +794,188 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
+func TestTaskWorkDirLookupAssigneesPreservesOwnedIdentities(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		capacity     int
+		pool, manual bool
+		alias        string
+		want         []string
+	}{
+		{"expanded pool", 2, true, false, "demo/worker-2", []string{"session-id", "runtime-name", "demo/worker-2"}},
+		{"legacy shared alias", 2, true, false, "demo/worker", []string{"session-id", "runtime-name"}},
+		{"unlimited pool", -1, true, false, "demo/worker-2", []string{"session-id", "runtime-name", "demo/worker-2"}},
+		{"disabled pool", 0, true, false, "demo/worker-2", []string{"session-id", "runtime-name", "demo/worker-2"}},
+		{"singleton pool", 1, true, false, "demo/worker", []string{"session-id", "runtime-name", "demo/worker", "demo/worker"}},
+		{"manual session", 2, true, true, "manual", []string{"session-id", "runtime-name", "manual", "demo/worker"}},
+		{"non-pool session", 2, false, false, "named", []string{"session-id", "runtime-name", "named", "demo/worker"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "demo", MaxActiveSessions: intPtr(tc.capacity)}}}
+			candidate := startCandidate{
+				info: sessionpkg.Info{ID: "session-id", SessionNameMetadata: "runtime-name", Alias: tc.alias, PoolManaged: tc.pool, ManualSession: tc.manual},
+				tp:   TemplateParams{TemplateName: "demo/worker", SessionName: "runtime-name"},
+			}
+			if got := taskWorkDirLookupAssignees(candidate, cfg); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("work directory identities = %v, want %v", got, tc.want)
+			}
+			// Dispatch option lookup keeps its existing template fallback.
+			if got := taskWorkDirAssignees(candidate, cfg); !reflect.DeepEqual(got, []string{"session-id", "runtime-name", tc.alias, "demo/worker"}) {
+				t.Fatalf("dispatch option identities changed: %v", got)
+			}
+		})
+	}
+	t.Run("named session with legacy pool marker", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "demo", MaxActiveSessions: intPtr(2)}}}
+		candidate := startCandidate{
+			info: sessionpkg.Info{ID: "named-id", SessionNameMetadata: "named-runtime", Alias: "demo/worker", PoolManaged: true, ConfiguredNamedSession: true},
+			tp:   TemplateParams{TemplateName: "demo/worker"},
+		}
+		want := []string{"named-id", "named-runtime", "demo/worker", "demo/worker"}
+		if got := taskWorkDirLookupAssignees(candidate, cfg); !reflect.DeepEqual(got, want) {
+			t.Fatalf("named session work directory identities = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestPreparedTaskWorkDirPreservesNamepoolTemplateAlias(t *testing.T) {
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title: "owned task", Assignee: "demo/worker",
+		Metadata: map[string]string{beadmeta.LegacyWorkDirMetadataKey: workDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatal(err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "worker", Dir: "demo", MaxActiveSessions: intPtr(1),
+		NamepoolNames: []string{"worker", "other"},
+	}}}
+	candidate := startCandidate{
+		info: sessionpkg.Info{ID: "session-id", SessionNameMetadata: "runtime-name", Alias: "demo/worker", PoolManaged: true, PoolSlot: "1"},
+		tp:   TemplateParams{TemplateName: "demo/worker", InstanceName: "demo/worker"},
+	}
+	for _, lookup := range []string{"live", "snapshot"} {
+		t.Run(lookup, func(t *testing.T) {
+			var resolver taskWorkDirResolver
+			if lookup == "snapshot" {
+				resolver = newAssignedTaskWorkDirResolver("", []beads.Bead{work})
+			}
+			if got := resolvePreparedTaskWorkDir(candidate, "", cfg, store, resolver); got != workDir {
+				t.Fatalf("namepool-owned work directory = %q, want %q", got, workDir)
+			}
+			sibling := candidate
+			sibling.info.Alias = "demo/other"
+			sibling.info.PoolSlot = "2"
+			sibling.tp.InstanceName = "demo/other"
+			if got := resolvePreparedTaskWorkDir(sibling, "", cfg, store, resolver); got != "" {
+				t.Fatalf("sibling work directory = %q, want no override from the namepool owner", got)
+			}
+		})
+	}
+}
+
+func TestPrepareStartCandidatePoolLaneIgnoresSiblingTaskWorkDir(t *testing.T) {
+	for _, lookup := range []string{"live", "snapshot"} {
+		t.Run(lookup, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "repo")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "city"},
+				Rigs:      []config.Rig{{Name: "demo", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name: "worker", Dir: "demo", StartCommand: "true",
+					WorkDir:           ".worktrees/{{.Rig}}/lane-{{.AgentBase}}",
+					PreStart:          []string{"prepare {{.WorkDir}}"},
+					MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+				}},
+			}
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			now := time.Date(2026, 10, 26, 2, 10, 0, 0, time.UTC)
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("city", cityPath, cfg, sp, now, store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "demo/worker",
+				Requests: []SessionRequest{
+					{Template: "demo/worker", Tier: "new", WorkBeadID: "work-1"},
+					{Template: "demo/worker", Tier: "new", WorkBeadID: "work-2"},
+				},
+			}, desired, &stderr)
+			if len(desired) != 2 {
+				t.Fatalf("desired sessions = %d, want 2; stderr=%s", len(desired), stderr.String())
+			}
+			var candidate startCandidate
+			for _, info := range bp.sessionBeads.OpenInfos() {
+				if info.PoolSlot == "2" {
+					candidate = startCandidate{info: info, tp: desired[info.SessionNameMetadata]}
+				}
+			}
+			if candidate.info.ID == "" {
+				t.Fatal("second pool slot missing")
+			}
+			wantDir := filepath.Join(cityPath, ".worktrees", "demo", "lane-worker.pool-2")
+			if candidate.tp.WorkDir != wantDir || candidate.info.WorkDirCanonical != wantDir || candidate.info.WorkDir != wantDir {
+				t.Fatalf("creation paths: template=%q canonical=%q legacy=%q; want %q", candidate.tp.WorkDir, candidate.info.WorkDirCanonical, candidate.info.WorkDir, wantDir)
+			}
+			// The first worker was started at cap one and claimed through the
+			// shared template identity before the pool grew to two slots.
+			siblingDir := filepath.Join(cityPath, ".worktrees", "demo", "lane-worker")
+			if err := os.MkdirAll(siblingDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sibling, err := store.Create(beads.Bead{
+				ID: "work-1", Title: "first worker task", Assignee: "demo/worker",
+				Metadata: map[string]string{beadmeta.LegacyWorkDirMetadataKey: siblingDir},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := "in_progress"
+			if err := store.Update(sibling.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+			sibling, err = store.Get(sibling.ID)
+			if err != nil || sibling.Status != status {
+				t.Fatalf("sibling task = %#v, err=%v; want in_progress", sibling, err)
+			}
+			var resolver taskWorkDirResolver
+			if lookup == "snapshot" {
+				resolver = newAssignedTaskWorkDirResolver(cityPath, []beads.Bead{sibling})
+			}
+			prepared, err := prepareStartCandidateForCity(candidate, cityPath, "city", cfg, sp, store, &clock.Fake{Time: now}, &stderr, resolver)
+			if err != nil {
+				t.Fatalf("prepare second pool slot: %v", err)
+			}
+			if prepared.cfg.WorkDir != wantDir {
+				t.Fatalf("prepared work_dir = %q, want %q", prepared.cfg.WorkDir, wantDir)
+			}
+			result := runPreparedStartCandidate(context.Background(), *prepared, cityPath, sp, store, cfg, 0, func(context.Context, string) bool { return true }, nil, nil)
+			if result.err != nil {
+				t.Fatalf("start second pool slot: %v", result.err)
+			}
+			started := sp.LastStartConfig(candidate.name())
+			if started == nil || started.WorkDir != wantDir || started.Env["GC_TRIGGER_BEAD_ID"] != "work-2" || !reflect.DeepEqual(started.PreStart, []string{"prepare " + wantDir}) {
+				t.Fatalf("runtime start config = %#v; want slot directory, pre_start and second trigger", started)
+			}
+		})
+	}
+}
+
 func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")

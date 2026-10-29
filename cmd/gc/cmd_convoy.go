@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -2393,31 +2392,6 @@ func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) 
 		fmt.Fprintf(stderr, "gc bd hook autoclose: %s: not autoclosing — cannot prove which store the close came from while a store is unavailable (close attributed to %s)\n", beadID, storeRoot) //nolint:errcheck // best-effort stderr
 	}
 	return store, dir, outcome
-}
-
-// autocloseFaultOnce bounds warnAutocloseResolutionFault to one line per
-// process.
-var autocloseFaultOnce sync.Once
-
-// warnAutocloseResolutionFault announces a by-id resolution that failed rather
-// than missed, once per process.
-//
-// The autoclose hooks are best-effort by design: bd's on_close must not fail
-// because a molecule root could not be found, so every error here is swallowed
-// and the caller falls back to the cwd-rooted store. That is right for absence
-// and wrong for a fault. A binding that cannot be read, or an id the scan
-// refuses as ambiguous, makes the fallback close a root in a ledger that may
-// not hold it — the silent wrong-store write this lane exists to end — and it
-// cannot be made fatal without wedging closes on a city whose binding is sick.
-// So it is made LOUD instead.
-//
-// Once per process, because bd closes beads in bursts: a persistent fault would
-// otherwise print the same line on every close of a drain and bury the hook log
-// it is trying to be seen in.
-func warnAutocloseResolutionFault(beadID string, err error) {
-	autocloseFaultOnce.Do(func() {
-		fmt.Fprintf(cliStorageStderr, "gc autoclose: resolving the store that owns %s failed (%v); falling back to the cwd-rooted store, which may not hold it. Further occurrences this process are not repeated.\n", beadID, err) //nolint:errcheck // best-effort stderr
-	})
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {

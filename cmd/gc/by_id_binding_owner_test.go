@@ -5,7 +5,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -203,7 +202,6 @@ func TestConvoyResolutionSurfacesABindingFaultRatherThanAbsence(t *testing.T) {
 // unless it is said out loud — but only once, because bd closes beads in bursts
 // and a repeated line buries the log it wants to be seen in.
 func TestAutocloseOwningStoreAnnouncesAFaultOnce(t *testing.T) {
-	resetAutocloseFaultOnce(t)
 	cityPath, _ := foreignProviderCity(t)
 	sink := captureCLIStorageStderr(t)
 	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
@@ -230,7 +228,6 @@ func TestAutocloseOwningStoreAnnouncesAFaultOnce(t *testing.T) {
 // above. Absence is the ordinary case — most closed beads are not molecule
 // members — and announcing it would make the warning meaningless.
 func TestAutocloseOwningStoreStaysQuietOnAbsence(t *testing.T) {
-	resetAutocloseFaultOnce(t)
 	cityPath, _ := foreignProviderCity(t)
 	sink := captureCLIStorageStderr(t)
 
@@ -494,15 +491,6 @@ type countingGetStore struct {
 func (s *countingGetStore) Get(id string) (beads.Bead, error) {
 	s.gets++
 	return s.Store.Get(id)
-}
-
-// resetAutocloseFaultOnce lets a test observe the once-per-process warning more
-// than once per test binary, and leaves the gate closed again afterwards so an
-// unrelated test cannot inherit a spent one.
-func resetAutocloseFaultOnce(t *testing.T) {
-	t.Helper()
-	autocloseFaultOnce = sync.Once{}
-	t.Cleanup(func() { autocloseFaultOnce = sync.Once{} })
 }
 
 // TestByIDPlanUsesTheRegisteredControllerRoutes pins which routes the by-id

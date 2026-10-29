@@ -1,10 +1,14 @@
 package events
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,6 +39,9 @@ func TestWalkCachedContextReusesArchivesAndReadsActive(t *testing.T) {
 	want, err := ReadFiltered(path, Filter{Type: BeadCreated})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for i := range want {
+		want[i].Actor = ""
 	}
 	if got := walk(); !reflect.DeepEqual(got, want) || opens != 3 {
 		t.Fatalf("cold opens=%d got=%v want=%v", opens, got, want)
@@ -71,6 +78,9 @@ func TestWalkCachedContextSkipsExcludedArchivesBeforeOpening(t *testing.T) {
 	want, err := ReadFiltered(path, Filter{Type: BeadCreated, AfterSeq: opts.AfterSeq})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for i := range want {
+		want[i].Actor = ""
 	}
 	if opens != 2 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("opens=%d got=%v want=%v", opens, got, want)
@@ -130,31 +140,126 @@ func TestWalkCachedContextDoesNotPublishPartialArchives(t *testing.T) {
 	}
 }
 
-func TestWalkCachedContextRejectsCorruptAndOversizedCache(t *testing.T) {
-	path := filepath.Join(seedArchives(t), "events.jsonl")
-	opts := ArchiveCacheOptions{Dir: t.TempDir(), Types: []string{BeadCreated}, MaxBytes: 1 << 20}
-	visit := func(Event) error { return nil }
-	if err := WalkCachedContext(context.Background(), path, opts, visit); err != nil {
+func TestWalkCachedContextRebuildsCorruptCache(t *testing.T) {
+	for _, damage := range []string{"incomplete", "truncated", "checksum"} {
+		t.Run(damage, func(t *testing.T) {
+			path := filepath.Join(seedArchives(t), "events.jsonl")
+			opts := ArchiveCacheOptions{Dir: t.TempDir(), Types: []string{BeadCreated}, MaxBytes: 1 << 20}
+			var want []Event
+			if err := WalkCachedContext(context.Background(), path, opts, func(e Event) error { want = append(want, e); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			files, err := os.ReadDir(opts.Dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cachePath := filepath.Join(opts.Dir, files[0].Name())
+			data, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch damage {
+			case "incomplete":
+				data = []byte("{}")
+			case "truncated":
+				data = data[:len(data)/2]
+			case "checksum":
+				data = bytes.Replace(data, []byte("r0-0"), []byte("bad!"), 1)
+			}
+			if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var diagnostic bytes.Buffer
+			oldOutput := log.Writer()
+			log.SetOutput(&diagnostic)
+			t.Cleanup(func() { log.SetOutput(oldOutput) })
+			var progress ArchiveCacheProgress
+			opts.Progress = func(p ArchiveCacheProgress) { progress = p }
+			var got []Event
+			opens := 0
+			err = walkCachedContext(context.Background(), path, opts, func(e Event) error { got = append(got, e); return nil }, func(ctx context.Context, source string, compressed bool, visit func(Event) error) error {
+				if compressed {
+					opens++
+					if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+						t.Fatalf("corrupt entry not removed before rebuild: %v", err)
+					}
+				}
+				return walkEventFile(ctx, source, compressed, visit)
+			})
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("error=%v got=%v want=%v", err, got, want)
+			}
+			if opens != 1 || progress.Hits != 2 || progress.Misses != 1 || progress.Phase != "rebuilt corrupt entry" {
+				t.Fatalf("opens=%d progress=%+v", opens, progress)
+			}
+			if strings.Count(diagnostic.String(), cachePath) != 1 {
+				t.Fatalf("diagnostic=%q", diagnostic.String())
+			}
+			if err := WalkCachedContext(context.Background(), path, opts, func(Event) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if progress.Hits != 3 || progress.Misses != 0 || progress.Phase != "warm cache" {
+				t.Fatalf("rebuilt entry not reusable: %+v", progress)
+			}
+		})
+	}
+}
+
+func TestWalkCachedContextFullCacheDeliversHistory(t *testing.T) {
+	for _, populated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "summary exceeds budget", true: "existing cache exceeds budget"}[populated], func(t *testing.T) {
+			path := filepath.Join(seedArchives(t), "events.jsonl")
+			opts := ArchiveCacheOptions{Dir: t.TempDir(), Types: []string{BeadCreated}, MaxBytes: 1 << 20}
+			var want []Event
+			if err := WalkContext(context.Background(), path, func(e Event) error {
+				if e.Type == BeadCreated {
+					e.Actor = ""
+					want = append(want, e)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if populated {
+				if err := WalkCachedContext(context.Background(), path, opts, func(Event) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts.MaxBytes = 1
+			var progress ArchiveCacheProgress
+			opts.Progress = func(p ArchiveCacheProgress) { progress = p }
+			var got []Event
+			if err := WalkCachedContext(context.Background(), path, opts, func(e Event) error { got = append(got, e); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) || progress.Hits != 0 || progress.Misses != 3 || progress.Phase != "cache full" {
+				t.Fatalf("got=%v want=%v progress=%+v", got, want, progress)
+			}
+			files, err := os.ReadDir(opts.Dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantFiles := 0
+			if populated {
+				wantFiles = 3
+			}
+			if len(files) != wantFiles {
+				t.Fatalf("published over budget: %v", files)
+			}
+		})
+	}
+}
+
+func TestWalkCachedContextNoArchivesPhase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	writeJSONLEvents(t, path, 1)
+	var progress ArchiveCacheProgress
+	opts := ArchiveCacheOptions{Dir: t.TempDir(), Types: []string{BeadCreated}, MaxBytes: 1, Progress: func(p ArchiveCacheProgress) { progress = p }}
+	if err := WalkCachedContext(context.Background(), path, opts, func(Event) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	files, err := os.ReadDir(opts.Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(opts.Dir, files[0].Name()), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := WalkCachedContext(context.Background(), path, opts, visit); err == nil {
-		t.Fatal("corrupt cache must not produce success")
-	}
-	opts.Dir = t.TempDir()
-	opts.MaxBytes = 1
-	if err := WalkCachedContext(context.Background(), path, opts, visit); err == nil || !strings.Contains(err.Error(), "cache") {
-		t.Fatalf("cache capacity error=%v", err)
-	}
-	files, err = os.ReadDir(opts.Dir)
-	if err != nil || len(files) != 0 {
-		t.Fatalf("over-budget cache files=%v error=%v", files, err)
+	if progress.Phase != "no archives" {
+		t.Fatalf("progress=%+v", progress)
 	}
 }
 
@@ -218,6 +323,10 @@ func TestWalkCachedContextInvalidatesSourceAndTypeSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for i := range want {
+		want[i].Actor = ""
+		want[i].Payload = nil
+	}
 	if opens != 3 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("type change opens=%d got=%v want=%v", opens, got, want)
 	}
@@ -280,6 +389,9 @@ func TestWalkCachedContextDoesNotCacheTheCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for i := range want {
+		want[i].Actor = ""
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cached cursor lost same-archive history: %v want %v", got, want)
 	}
@@ -305,8 +417,10 @@ func TestWalkCachedContextPrunesRetiredEntriesAndBoundsTotalBytes(t *testing.T) 
 		largest = max(largest, st.Size())
 	}
 	opts.MaxBytes = largest + 1
-	if err := WalkCachedContext(context.Background(), path, opts, visit); err == nil {
-		t.Fatal("aggregate cache budget ignored")
+	var progress ArchiveCacheProgress
+	opts.Progress = func(p ArchiveCacheProgress) { progress = p }
+	if err := WalkCachedContext(context.Background(), path, opts, visit); err != nil || progress.Phase != "cache full" || progress.Misses != 3 || progress.Hits != 0 {
+		t.Fatalf("aggregate budget fallback: progress=%+v error=%v", progress, err)
 	}
 	opts.MaxBytes = 1 << 20
 	retired := files[0].Name()
@@ -342,6 +456,78 @@ func TestArchiveCacheLockHonorsCancellation(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 	})
+}
+
+func TestWalkCachedContextRebuildsVersionOneAsSummary(t *testing.T) {
+	path := filepath.Join(seedArchives(t), "events.jsonl")
+	opts := ArchiveCacheOptions{Dir: t.TempDir(), Types: []string{BeadCreated}, MaxBytes: 1 << 20}
+	if err := WalkCachedContext(context.Background(), path, opts, func(Event) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	files, err := os.ReadDir(opts.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(opts.Dir, files[0].Name())
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reconstruct a valid pre-change entry with all Event fields and its digest.
+	var old struct {
+		Key    archiveCacheKey
+		Events []Event
+		Digest string
+	}
+	if err := json.Unmarshal(data, &old); err != nil {
+		t.Fatal(err)
+	}
+	old.Key.Version = 1
+	old.Events[0].Payload = json.RawMessage(`{"unused":"large payload"}`)
+	old.Events[0].Actor = "unused actor"
+	old.Events[0].RunID = "unused run"
+	recordBytes, err := json.Marshal(old.Events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(recordBytes)
+	old.Digest = hex.EncodeToString(digest[:])
+	data, err = json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var progress ArchiveCacheProgress
+	opts.Progress = func(p ArchiveCacheProgress) { progress = p }
+	if err := WalkCachedContext(context.Background(), path, opts, func(e Event) error {
+		if e.Payload != nil || e.Actor != "" || e.RunID != "" {
+			t.Errorf("not summarized: %+v", e)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Misses != 1 || progress.Hits != 2 {
+		t.Fatalf("version not rebuilt: %+v", progress)
+	}
+	data, err = os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"payload"`, `"actor"`, `"run_id"`} {
+		if bytes.Contains(data, []byte(field)) {
+			t.Errorf("entry retains %s", field)
+		}
+	}
+	var rebuilt archiveCacheEntry
+	if err := json.Unmarshal(data, &rebuilt); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.Key.Version <= 1 {
+		t.Fatalf("version=%d", rebuilt.Key.Version)
+	}
 }
 
 func TestWalkCachedContextReturnsCacheIOAndVisitorErrors(t *testing.T) {

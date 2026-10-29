@@ -224,7 +224,7 @@ func TestSiblingRaceLoserClassifiesBenign(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(winner), &stderr)
 
 	if len(rec.Events) != 1 {
 		t.Fatalf("events = %d, want exactly 1", len(rec.Events))
@@ -259,7 +259,7 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere), &stderr)
 
 	if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimDivergence {
 		t.Fatalf("events = %+v, want one divergence-classified event", rec.Events)
@@ -286,7 +286,7 @@ func TestNonDemandSpawnedSeatRecordsNoDivergence(t *testing.T) {
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
 	}
 
-	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere, nil), &stderr)
+	recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", opts, demandDivergenceOpsForBead(stillThere), &stderr)
 
 	if len(rec.Events) != 0 {
 		t.Fatalf("events = %+v, want none for a seat not spawned from demand", rec.Events)
@@ -320,7 +320,7 @@ func TestDivergenceClassificationTreatsCrossCityFencedRowAsBenign(t *testing.T) 
 	}
 
 	status, class := classifyDemandTrigger(demandSpawnTriggerID, "/rig", opts,
-		demandDivergenceOpsForBead(row("owner:citadel"), nil))
+		demandDivergenceOpsForBead(row("owner:citadel")))
 	if class != events.DemandClaimBenign || status != "open" {
 		t.Fatalf("fenced foreign row classified (%q, %q), want (open, %s)", status, class, events.DemandClaimBenign)
 	}
@@ -330,7 +330,7 @@ func TestDivergenceClassificationTreatsCrossCityFencedRowAsBenign(t *testing.T) 
 		"unlabeled":  nil,
 	} {
 		if _, class := classifyDemandTrigger(demandSpawnTriggerID, "/rig", opts,
-			demandDivergenceOpsForBead(row(labels...), nil)); class != events.DemandClaimDivergence {
+			demandDivergenceOpsForBead(row(labels...))); class != events.DemandClaimDivergence {
 			t.Fatalf("%s row (still claimable here) classified %q, want %s", name, class, events.DemandClaimDivergence)
 		}
 	}

@@ -522,6 +522,15 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 	return closed, nil
 }
 
+// ReadMetadataPathPage preserves bounded ownership reads through class routing.
+func (s *emittingClassStore) ReadMetadataPathPage(ctx context.Context, query beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
+	reader, ok := s.Store.(beads.MetadataPathPageReader)
+	if !ok {
+		return beads.MetadataPathPage{}, beads.ErrMetadataPathPagingUnsupported
+	}
+	return reader.ReadMetadataPathPage(ctx, query)
+}
+
 // AtomicConditionalCloserHandle keeps AtomicConditionalCloserFor honest over
 // this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
 // wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a

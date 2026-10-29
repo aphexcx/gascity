@@ -648,6 +648,21 @@ make test-integration-shards-parallel
 make test-local-full-parallel
 ```
 
+The `cmd/gc` process tests build `bd` from the Beads dependency selected by
+`go.mod`, including its replacement path and version. To reuse a binary built
+from that same source, set `GC_TEST_BD` to its absolute executable path:
+
+```bash
+bash scripts/build-pinned-bd.sh "$HOME/.local/gascity-test-bin"
+GC_TEST_BD="$HOME/.local/gascity-test-bin/bd" make test-cmd-gc-process-parallel
+```
+
+The override skips the helper's build. You are responsible for matching the
+binary to the pin; the source-build provenance test is skipped in this mode.
+Invalid paths fail explicitly. Leave `GC_TEST_BD` unset to exercise the build
+path. The Makefile and nested shard runners preserve this override; topology
+acceptance uses its separate `GC_ACCEPTANCE_BD_BIN` setting.
+
 By default, the local runners bound concurrency by both detected CPUs and
 available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
 If memory cannot be detected, they use three jobs. An explicit override always

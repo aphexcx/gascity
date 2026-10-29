@@ -188,6 +188,37 @@ func TestBeadsStorePayloadOnAHealthyProxiedScope(t *testing.T) {
 	}
 }
 
+func TestProxiedEndpointReportsPinnedAndBehindCursors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		actual proxyendpoint.Cursors
+		drift  bool
+	}{
+		{"current fork", proxyendpoint.Cursors{Main: 73, Ignored: 29}, false},
+		{"old upstream", proxyendpoint.Cursors{Main: 66, Ignored: 26}, true},
+		{"main behind", proxyendpoint.Cursors{Main: 72, Ignored: 29}, true},
+		{"ignored behind", proxyendpoint.Cursors{Main: 73, Ignored: 28}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
+			stubProxyProcess(t, fixture, "-1ns")
+			probes := 0
+			stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: tc.actual}, &probes)
+			ep := inspectProxiedEndpoint(scope, "beads")
+			if ep.Cursors == nil || *ep.Cursors != tc.actual {
+				t.Fatalf("observed cursors = %v, want %v", ep.Cursors, tc.actual)
+			}
+			if want := (proxyendpoint.Cursors{Main: 73, Ignored: 29}); ep.ExpectedCursors != want {
+				t.Fatalf("reported pin = %v, want %v", ep.ExpectedCursors, want)
+			}
+			if drift := *ep.Cursors != ep.ExpectedCursors; drift != tc.drift {
+				t.Fatalf("reported cursor drift = %v, want %v", drift, tc.drift)
+			}
+		})
+	}
+}
+
 // TestBeadsStorePayloadNeverProbesAnUnprovenEndpoint is the safety property of
 // the whole payload: the port named by a record gc cannot vouch for belongs to
 // whatever happens to be listening there, and gc must not speak to it.

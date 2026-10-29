@@ -266,6 +266,7 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 				"GC_HOME=/host/gc",
 				"GC_DOLT_PORT=13306",
 				"BEADS_DOLT_SERVER_PORT=13307",
+				"GC_TEST_BD=/test/pinned-bd",
 			}
 			if tt.provider != "" {
 				cmd.Env = append(cmd.Env, tt.envName+"="+tt.provider)
@@ -276,6 +277,9 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 				t.Fatalf("make %s did not preserve fake go exit %d: %v\n%s", tt.target, tt.exitCode, err, output)
 			}
 			captured := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
+			if got := captured["GC_TEST_BD"]; got != "/test/pinned-bd" {
+				t.Fatalf("make %s lost GC_TEST_BD: %q", tt.target, got)
+			}
 			if got := captured[tt.envName]; got != tt.provider {
 				t.Fatalf("make %s passed %s=%q to go, want %q", tt.target, tt.envName, got, tt.provider)
 			}
@@ -357,6 +361,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		"GITHUB_SHA=ignored-control",
 		"RUNNER_OS=ignored-control",
 		"SHOULD_NOT_LEAK=ignored-control",
+		"GC_TEST_BD=/test/pinned-bd",
 	)
 	status, output := runShardCommand(t, cmd)
 	if status != 23 {
@@ -368,8 +373,9 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		t.Fatalf("direct product argv:\n%s\nwant:\n%s", got, wantArgs)
 	}
 	wantEnv := map[string]string{
-		"PATH": fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME": fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
+		"GC_TEST_BD": "/test/pinned-bd",
+		"PATH":       fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME":       fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
 		"GIT_CONFIG_NOSYSTEM": "1",
 		"LANG":                "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
 		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),

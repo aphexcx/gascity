@@ -568,11 +568,6 @@ type statusSessionInfo struct {
 // "sessions: loading session snapshot timed out after 1s" for data sitting in a
 // local store.
 func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
-	return s.sessionSnapshot(ctx, false)
-}
-
-// sessionSnapshot optionally includes historical owners for transcript attribution.
-func (s *Server) sessionSnapshot(ctx context.Context, includeClosed bool) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
@@ -622,7 +617,7 @@ func (s *Server) sessionSnapshot(ctx context.Context, includeClosed bool) status
 		} else if scoped != nil {
 			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfosWithHistory(session.NewStore(readSessions), includeClosed)
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 

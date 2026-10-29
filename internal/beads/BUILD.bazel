@@ -113,6 +113,8 @@ go_test(
         "memstore_test.go",
         "metadata_cas_operation_test.go",
         "metadata_empty_clear_conformance_test.go",
+        "metadata_path_page_test.go",
+        "metadata_path_providers_test.go",
         "namespace_census_test.go",
         "native_dolt_store_close_retry_test.go",
         "native_dolt_store_conditional_retry_test.go",
