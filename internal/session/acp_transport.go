@@ -75,13 +75,11 @@ func resolvedStartProvider(b beads.Bead, cfg runtime.Config) string {
 }
 
 // clearIncompatibleACPMetadata runs under the session operation lock before a
-// start. The persisted clear makes a config-change migration idempotent and
-// records it through the normal bead history, including when startup fails.
+// start. Provider resolution is required even when persisted transport remains
+// ACP. The persisted clear makes a config-change migration idempotent and records
+// it through the normal bead history, including when startup fails.
 func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name string, cfg runtime.Config) error {
-	if m.transportResolver == nil || len(storedACPKeys(b.Metadata)) == 0 ||
-		transportFromMetadata(*b) == "acp" ||
-		m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata)) == "acp" ||
-		m.liveACPTransport(name) {
+	if len(storedACPKeys(b.Metadata)) == 0 || m.liveACPTransport(name) {
 		return nil
 	}
 	patch := map[string]string{
@@ -90,13 +88,17 @@ func (m *Manager) clearIncompatibleACPMetadata(id string, b *beads.Bead, name st
 	if m.resumeConfigResolver != nil {
 		command, resume, err := m.resumeConfigResolver(m.infoFromBead(*b), b.Metadata)
 		if err != nil {
-			return fmt.Errorf("resolving non-ACP resume settings: %w", err)
+			return fmt.Errorf("resolving session resume settings: %w", err)
 		}
 		patch["command"] = command
 		patch["resume_command"] = resume.ResumeCommand
 		patch["resume_flag"] = resume.ResumeFlag
 		patch["resume_style"] = resume.ResumeStyle
 		patch["session_id_flag"] = resume.SessionIDFlag
+	}
+	if m.transportResolver == nil || transportFromMetadata(*b) == "acp" ||
+		m.resolveConfiguredTransport(ProviderResolutionIdentity(b.Metadata["template"], b.Metadata["provider"], b.Metadata)) == "acp" {
+		return nil
 	}
 	ClearStoredMCPMetadata(patch)
 	if err := m.store.SetMetadataBatch(id, patch); err != nil {

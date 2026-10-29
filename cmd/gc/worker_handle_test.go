@@ -835,8 +835,16 @@ func TestWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 }
 
 func TestWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
-	for _, phase := range []string{"resolve", "start"} {
+	for _, phase := range []string{"resolve", "start", "explicit_acp"} {
 		t.Run(phase, func(t *testing.T) {
+			transport := ""
+			if phase == "explicit_acp" {
+				transport = "acp"
+			}
+			snapshot, err := session.EncodeMCPServersSnapshot([]runtime.MCPServerConfig{{Name: "tools", Command: "/bin/echo"}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			cityDir := t.TempDir()
 			missingCommand := filepath.Join(cityDir, "unavailable-terminal")
 			cfg := &config.City{
@@ -851,8 +859,8 @@ func TestWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
 			b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
 				"template": "worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
 				"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": cityDir,
-				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag",
-				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag", "transport": transport,
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: snapshot,
 			}})
 			if err != nil {
 				t.Fatal(err)

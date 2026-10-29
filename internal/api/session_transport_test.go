@@ -101,8 +101,16 @@ func TestAPIWorkerRestartAfterACPProviderSwitch(t *testing.T) {
 }
 
 func TestAPIWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
-	for _, phase := range []string{"resolve", "start"} {
+	for _, phase := range []string{"resolve", "start", "explicit_acp"} {
 		t.Run(phase, func(t *testing.T) {
+			transport := ""
+			if phase == "explicit_acp" {
+				transport = "acp"
+			}
+			snapshot, err := session.EncodeMCPServersSnapshot([]runtime.MCPServerConfig{{Name: "tools", Command: "/bin/echo"}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			fs := newSessionFakeState(t)
 			missingCommand := filepath.Join(fs.cityPath, "unavailable-terminal")
 			fs.cfg.Agents[0].Provider = "replacement"
@@ -113,8 +121,8 @@ func TestAPIWorkerRestartRefusesUnavailableACPReplacement(t *testing.T) {
 			b, err := fs.cityBeadStore.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
 				"template": "myrig/worker", "provider": "previous", "session_name": "legacy-session", "state": "asleep",
 				"command": "/bin/echo acp", "resume_command": "/bin/echo acp", "work_dir": fs.cityPath,
-				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag",
-				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: "[]",
+				"session_key": "saved-key", "resume_flag": "--resume", "resume_style": "flag", "transport": transport,
+				session.MCPIdentityMetadataKey: "legacy-agent", session.MCPServersSnapshotMetadataKey: snapshot,
 			}})
 			if err != nil {
 				t.Fatal(err)
