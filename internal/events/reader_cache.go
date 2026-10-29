@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,7 +18,7 @@ import (
 
 // ArchiveCacheOptions selects the event types kept in a bounded, disposable
 // archive cache. Dir must be dedicated to this caller. MaxBytes caps its total
-// published entries; exceeding it returns an error rather than partial history.
+// published entries; a full cache bypasses caching without losing history.
 // AfterSeq filters delivery, never the cached summary. The active log is uncached.
 type ArchiveCacheOptions struct {
 	Dir      string
@@ -47,14 +48,38 @@ type archiveCacheKey struct {
 
 type archiveCacheEntry struct {
 	Key    archiveCacheKey
-	Events []Event
+	Events []archiveCacheRecord
 	Digest string
 }
 
+// The cache is a summary for history consumers, not a copy of event payloads.
+type archiveCacheRecord struct {
+	Seq     uint64    `json:"seq"`
+	Type    string    `json:"type"`
+	Ts      time.Time `json:"ts"`
+	Subject string    `json:"subject,omitempty"`
+	Message string    `json:"message,omitempty"`
+}
+
+func summarizeArchiveEvent(e Event) archiveCacheRecord {
+	return archiveCacheRecord{Seq: e.Seq, Type: e.Type, Ts: e.Ts, Subject: e.Subject, Message: e.Message}
+}
+
+func (r archiveCacheRecord) event() Event {
+	return Event{Seq: r.Seq, Type: r.Type, Ts: r.Ts, Subject: r.Subject, Message: r.Message}
+}
+
+var (
+	errArchiveCacheFull    = errors.New("archive cache byte budget exhausted")
+	errArchiveCacheCorrupt = errors.New("corrupt archive cache")
+)
+
 // WalkCachedContext visits selected event types in retained sequence order.
+// Delivered events contain only Seq, Type, Ts, Subject and Message, on both
+// cache hits and misses and from the active log. Use WalkContext for full events.
 // Complete immutable-archive summaries are reused only when their source key
-// matches. Missing/stale entries are rebuilt; corrupt entries and I/O errors
-// fail explicitly. Completed entries survive cancellation of a later archive.
+// matches. Missing, stale or corrupt entries are rebuilt; I/O errors fail
+// explicitly. Completed entries survive cancellation of a later archive.
 func WalkCachedContext(ctx context.Context, path string, opts ArchiveCacheOptions, visit func(Event) error) error {
 	return walkCachedContext(ctx, path, opts, visit, walkEventFile)
 }
@@ -74,6 +99,7 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 		return fmt.Errorf("listing event archives: %w", err)
 	}
 	p := ArchiveCacheProgress{AfterSeq: opts.AfterSeq, Archives: len(archives)}
+	var cacheFull, rebuiltCorrupt bool
 	progress := func(phase string) {
 		p.Phase = phase
 		if opts.Progress != nil {
@@ -85,7 +111,7 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 			return err
 		}
 		if matchesFilter(e, Filter{AfterSeq: opts.AfterSeq}) && slices.Contains(types, e.Type) {
-			return visit(e)
+			return visit(summarizeArchiveEvent(e).event())
 		}
 		return nil
 	}
@@ -106,9 +132,7 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 		if err != nil {
 			return err
 		}
-		if used > opts.MaxBytes {
-			return fmt.Errorf("archive cache exceeds %d byte budget", opts.MaxBytes)
-		}
+		cacheFull = used > opts.MaxBytes
 		for i, info := range archives {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -123,22 +147,42 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 			if err != nil {
 				return fmt.Errorf("stat archive %q: %w", info.Basename, err)
 			}
-			key := archiveCacheKey{Version: 1, Basename: info.Basename, Size: st.Size(), LastSeq: info.LastSeq, ModTime: st.ModTime().UnixNano(), Types: types}
+			key := archiveCacheKey{Version: 2, Basename: info.Basename, Size: st.Size(), LastSeq: info.LastSeq, ModTime: st.ModTime().UnixNano(), Types: types}
 			cachePath := filepath.Join(opts.Dir, info.Basename+".json")
-			records, oldSize, hit, err := readArchiveCache(cachePath, key, opts.MaxBytes)
-			if err != nil {
-				return err
+			var records []Event
+			var oldSize int64
+			var hit bool
+			if !cacheFull {
+				records, oldSize, hit, err = readArchiveCache(cachePath, key, opts.MaxBytes)
+				if errors.Is(err, errArchiveCacheCorrupt) {
+					if removeErr := os.Remove(cachePath); removeErr != nil {
+						return fmt.Errorf("removing corrupt archive cache %q: %w", cachePath, removeErr)
+					}
+					log.Printf("events: %v; removed entry and rebuilding", err)
+					used -= oldSize
+					oldSize = 0
+					rebuiltCorrupt = true
+				} else if err != nil {
+					return err
+				}
 			}
 			if hit {
 				p.Hits++
-				progress("warm cache")
+				progress("cache hit")
 			} else {
 				p.Misses++
-				progress(fmt.Sprintf("cold fill %d of %d", i+1, len(archives)))
+				switch {
+				case cacheFull:
+					progress("cache full")
+				case rebuiltCorrupt:
+					progress("rebuilt corrupt entry")
+				default:
+					progress(fmt.Sprintf("cold fill %d of %d", i+1, len(archives)))
+				}
 				records = []Event{}
 				err := read(ctx, source, true, func(e Event) error {
 					if slices.Contains(types, e.Type) {
-						records = append(records, e)
+						records = append(records, summarizeArchiveEvent(e).event())
 					}
 					return ctx.Err()
 				})
@@ -152,11 +196,18 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 				if !os.SameFile(st, end) || st.Size() != end.Size() || !st.ModTime().Equal(end.ModTime()) {
 					return fmt.Errorf("archive %q changed during cache fill", info.Basename)
 				}
-				size, err := writeArchiveCache(ctx, cachePath, key, records, opts.MaxBytes-used+oldSize)
-				if err != nil {
-					return err
+				if !cacheFull {
+					size, err := writeArchiveCache(ctx, cachePath, key, records, opts.MaxBytes-used+oldSize)
+					switch {
+					case errors.Is(err, errArchiveCacheFull):
+						cacheFull = true
+						progress("cache full")
+					case err != nil:
+						return err
+					default:
+						used += size - oldSize
+					}
 				}
-				used += size - oldSize
 			}
 			for _, e := range records {
 				if err := deliver(e); err != nil {
@@ -169,10 +220,19 @@ func walkCachedContext(ctx context.Context, path string, opts ArchiveCacheOption
 	if err := read(ctx, path, false, deliver); err != nil {
 		return err
 	}
-	if p.Misses == 0 {
+	switch {
+	case p.Archives == 0:
+		progress("no archives")
+	case cacheFull:
+		progress("cache full")
+	case rebuiltCorrupt:
+		progress("rebuilt corrupt entry")
+	case p.Hits > 0 && p.Misses == 0:
 		progress("warm cache")
-	} else {
+	case p.Misses > 0:
 		progress("cold fill complete")
+	default:
+		progress("no matching archives")
 	}
 	return ctx.Err()
 }
@@ -244,7 +304,7 @@ func readArchiveCache(path string, key archiveCacheKey, maxBytes int64) ([]Event
 		return nil, 0, false, fmt.Errorf("stat archive cache: %w", err)
 	}
 	if st.Size() > maxBytes {
-		return nil, st.Size(), false, fmt.Errorf("archive cache %q exceeds byte budget", path)
+		return nil, st.Size(), false, errArchiveCacheFull
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -252,26 +312,30 @@ func readArchiveCache(path string, key archiveCacheKey, maxBytes int64) ([]Event
 	}
 	var entry archiveCacheEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
-		return nil, st.Size(), false, fmt.Errorf("decoding archive cache %q: %w", path, err)
+		return nil, st.Size(), false, fmt.Errorf("%w: decoding %q: %w", errArchiveCacheCorrupt, path, err)
 	}
 	if entry.Key.Version == 0 || entry.Events == nil || entry.Digest == "" {
-		return nil, st.Size(), false, fmt.Errorf("incomplete archive cache %q", path)
+		return nil, st.Size(), false, fmt.Errorf("%w: incomplete entry %q", errArchiveCacheCorrupt, path)
 	}
 	if entry.Key.Version != key.Version || entry.Key.Basename != key.Basename || entry.Key.Size != key.Size || entry.Key.LastSeq != key.LastSeq || entry.Key.ModTime != key.ModTime || !slices.Equal(entry.Key.Types, key.Types) {
 		return nil, st.Size(), false, nil
 	}
-	digest, err := archiveCacheDigest(entry.Events)
+	records := make([]Event, len(entry.Events))
+	for i, record := range entry.Events {
+		records[i] = record.event()
+	}
+	digest, err := archiveCacheDigest(records)
 	if err != nil {
 		return nil, st.Size(), false, err
 	}
 	if entry.Digest != digest {
-		return nil, st.Size(), false, fmt.Errorf("archive cache %q checksum mismatch", path)
+		return nil, st.Size(), false, fmt.Errorf("%w: checksum mismatch %q", errArchiveCacheCorrupt, path)
 	}
-	return entry.Events, st.Size(), true, nil
+	return records, st.Size(), true, nil
 }
 
 func archiveCacheDigest(records []Event) (string, error) {
-	data, err := json.Marshal(records)
+	data, err := json.Marshal(archiveCacheRecords(records))
 	if err != nil {
 		return "", fmt.Errorf("encoding archive cache records: %w", err)
 	}
@@ -279,17 +343,25 @@ func archiveCacheDigest(records []Event) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func archiveCacheRecords(records []Event) []archiveCacheRecord {
+	summary := make([]archiveCacheRecord, len(records))
+	for i, e := range records {
+		summary[i] = summarizeArchiveEvent(e)
+	}
+	return summary
+}
+
 func writeArchiveCache(ctx context.Context, path string, key archiveCacheKey, records []Event, available int64) (int64, error) {
 	digest, err := archiveCacheDigest(records)
 	if err != nil {
 		return 0, err
 	}
-	data, err := json.Marshal(archiveCacheEntry{Key: key, Events: records, Digest: digest})
+	data, err := json.Marshal(archiveCacheEntry{Key: key, Events: archiveCacheRecords(records), Digest: digest})
 	if err != nil {
 		return 0, fmt.Errorf("encoding archive cache: %w", err)
 	}
 	if int64(len(data)) > available {
-		return 0, fmt.Errorf("archive cache byte budget exhausted while caching %q", key.Basename)
+		return 0, fmt.Errorf("%w while caching %q", errArchiveCacheFull, key.Basename)
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -302,6 +374,10 @@ func writeArchiveCache(ctx context.Context, path string, key archiveCacheKey, re
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return 0, fmt.Errorf("writing archive cache: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return 0, fmt.Errorf("syncing archive cache: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return 0, fmt.Errorf("closing archive cache: %w", err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -71,9 +72,9 @@ func TestOrderOutcomeCachedHistoryPreservesFailuresAndGrace(t *testing.T) {
 	writeOrderFiringTestOrder(t, city, "scheduled", "cooldown", "5m")
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	records := []events.Event{
-		{Seq: 1, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-3 * time.Hour)},
-		{Seq: 2, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-2 * time.Hour)},
-		{Seq: 3, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-time.Hour)},
+		{Seq: 1, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-3 * time.Hour), Payload: json.RawMessage(`{"large":"unused"}`)},
+		{Seq: 2, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-2 * time.Hour), Actor: "unused", RunID: "unused"},
+		{Seq: 3, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(-time.Hour), Message: "meaningful failure"},
 		{Seq: 4, Type: events.ControllerStarted, Ts: start},
 		{Seq: 5, Type: events.OrderFailed, Subject: "scheduled", Ts: start.Add(time.Minute)},
 	}
@@ -85,11 +86,42 @@ func TestOrderOutcomeCachedHistoryPreservesFailuresAndGrace(t *testing.T) {
 	}
 	writeOrderFiringArchive(t, city, "20260801T000100Z", 1, 5, body.String())
 	c := NewOrderOutcomeHealthyCheck(cfg, city)
+	c.walkEvents = events.WalkContext
+	want := c.Run(nil)
+	c.walkEvents = nil
 	for _, phase := range []string{"cold fill complete", "warm cache"} {
 		got := c.Run(nil)
+		if got.Status != want.Status || got.FixHint != want.FixHint || !reflect.DeepEqual(got.Details, want.Details) {
+			t.Fatalf("summary changed verdict: got=%+v want=%+v", got, want)
+		}
 		if got.Status != StatusWarning || len(got.Details) != 1 || !strings.Contains(got.Details[0], "3 consecutive failures") || !strings.Contains(got.Message, phase) || !strings.Contains(got.Message, "after seq 0, archives 1 of 1") {
 			t.Fatalf("%s result=%+v", phase, got)
 		}
+	}
+	cacheDir := filepath.Join(city, ".gc", "doctor-cache", "order-outcome")
+	files, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("cache entries=%d", len(files))
+	}
+	cachePath := filepath.Join(cacheDir, files[0].Name())
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"payload"`)) || bytes.Contains(data, []byte(`"actor"`)) || bytes.Contains(data, []byte(`"run_id"`)) {
+		t.Fatal("cache retained unused fields")
+	}
+	// A sparse oversized entry exercises the production 256 MiB budget without
+	// allocating that much memory or filling the test filesystem.
+	if err := os.Truncate(cachePath, (256<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+	got := c.Run(nil)
+	if got.Status != want.Status || !reflect.DeepEqual(got.Details, want.Details) || !strings.Contains(got.Message, "cache hits 0, misses 1, cache full") {
+		t.Fatalf("full cache changed verdict: got=%+v want=%+v", got, want)
 	}
 	// Same timestamp, greater Seq: a success still terminates the streak.
 	writeOrderFiringTestEvents(t, city, events.Event{Seq: 6, Type: events.OrderCompleted, Subject: "scheduled", Ts: start.Add(time.Minute)})
