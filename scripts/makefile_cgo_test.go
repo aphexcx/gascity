@@ -66,11 +66,12 @@ printf '%s\n' '#include <...> search starts here:' ' /nix/store/include' 'End of
 
 func TestMakefileDarwinICUPrefix(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		installed []string
-		pkgConfig string
-		explicit  string
-		want      string
+		name       string
+		installed  []string
+		pkgConfig  string
+		explicit   string
+		want       string
+		withoutICU []string
 	}{
 		{name: "skip advertised missing version", installed: []string{"icu4c@78"}, want: "icu4c@78"},
 		{name: "newest installed version", installed: []string{"icu4c@9", "icu4c@78"}, want: "icu4c@78"},
@@ -80,6 +81,11 @@ func TestMakefileDarwinICUPrefix(t *testing.T) {
 		{name: "nothing installed"},
 		{name: "environment wins", installed: []string{"icu4c@78"}, explicit: "environment", want: "custom"},
 		{name: "command line wins", installed: []string{"icu4c@78"}, explicit: "command line", want: "custom"},
+		{name: "help without ICU", withoutICU: []string{"help"}},
+		{name: "CGO disabled without ICU", withoutICU: []string{"print-cgo-env", "CGO_ENABLED=0"}},
+		{name: "native DoltLite without ICU", withoutICU: []string{"-n", "test-native-doltlite-beads"}},
+		{name: "pack registry without ICU", withoutICU: []string{"-n", "test-pack-registry-live"}},
+		{name: "docs without ICU", withoutICU: []string{"-n", "docs-dev"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
@@ -113,6 +119,9 @@ esac
 `)
 			writeExecutable(t, filepath.Join(binDir, "pkg-config"), "#!/bin/sh\n[ \"$*\" = '--variable=prefix icu-uc' ] || exit 1\nprintf '%s\\n' \"$TEST_ICU_PKG_PREFIX\"\n")
 			args := []string{"-s", "--no-print-directory", "print-cgo-env"}
+			if tc.withoutICU != nil {
+				args = append([]string{"-s", "--no-print-directory"}, tc.withoutICU...)
+			}
 			if tc.explicit == "command line" {
 				args = append(args, "ICU_PREFIX="+filepath.Join(tmp, tc.want))
 			}
@@ -134,6 +143,13 @@ esac
 			}
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()
+			if tc.withoutICU != nil {
+				if err != nil {
+					t.Fatalf("target should not need ICU: %v\n%s", err, out)
+				}
+				assertNotContains(t, string(out), "ICU headers not found")
+				return
+			}
 			if tc.want == "" {
 				if err == nil {
 					t.Fatalf("make succeeded without ICU:\n%s", out)

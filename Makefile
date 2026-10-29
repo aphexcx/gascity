@@ -66,14 +66,15 @@ ifeq ($(origin ICU_PREFIX),undefined)
 ICU_PREFIX_HELPER := $(firstword $(wildcard scripts/lib/icu-prefix.sh $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/icu-prefix.sh))
 ICU_DETECTED_PREFIX := $(shell sh "$(ICU_PREFIX_HELPER)")
 ifeq ($(strip $(ICU_DETECTED_PREFIX)),)
-$(error ICU headers not found: brew install icu4c or set ICU_PREFIX=/path/to/installed/icu)
-endif
+ICU_DISCOVERY_ERROR := ICU headers not found: brew install icu4c or set ICU_PREFIX=/path/to/installed/icu
+ICU_PREFIX_SOURCE := unavailable
+else
 ICU_PREFIX_SOURCE := installed header (Homebrew versions newest first, then pkg-config icu-uc)
+endif
 else
 ICU_PREFIX_SOURCE := explicit $(origin ICU_PREFIX)
 endif
 ICU_PREFIX ?= $(ICU_DETECTED_PREFIX)
-export ICU_PREFIX ICU_PREFIX_SOURCE
 ifneq ($(ICU_PREFIX),)
 CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
@@ -150,12 +151,27 @@ ifeq ($(shell uname),Darwin)
 endif
 
 ## print-cgo-env: print Bash assignments for ICU selection and CGO flags without building
+ifeq ($(shell uname),Darwin)
+print-cgo-env: export ICU_PREFIX := $(ICU_PREFIX)
+print-cgo-env: export ICU_PREFIX_SOURCE := $(ICU_PREFIX_SOURCE)
+endif
 print-cgo-env:
 	@bash -eu -c 'for cgo_name in ICU_PREFIX ICU_PREFIX_SOURCE CGO_CPPFLAGS CGO_LDFLAGS; do \
 		if declare -p "$$cgo_name" >/dev/null 2>&1; then \
 			printf "%s=%q\n" "$$cgo_name" "$${!cgo_name}"; \
 		fi; \
 	done'
+
+# Validate at build execution time: docs, help, and explicitly non-CGO test
+# targets must remain usable on hosts without ICU.
+.PHONY: check-icu
+build print-cgo-env lint-full lint-new lint-changed lint-affected vet test test-pkg test-fast-parallel: | check-icu
+check-icu:
+ifneq ($(CGO_ENABLED),0)
+ifneq ($(ICU_DISCOVERY_ERROR),)
+	@printf '%s\n' '$(ICU_DISCOVERY_ERROR)' >&2; exit 1
+endif
+endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
 ## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
