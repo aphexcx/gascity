@@ -583,9 +583,6 @@ func (h *SessionHandle) historyProvider(info sessionpkg.Info) string {
 }
 
 func (h *SessionHandle) runtimeHints() runtime.Config {
-	if h.resolveStartup {
-		return runtime.Config{}
-	}
 	cfg := cloneRuntimeConfig(h.session.Hints)
 	cfg.Env = mergeStringMaps(cfg.Env, h.session.Env)
 	return cfg

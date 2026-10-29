@@ -338,6 +338,17 @@ func TestFactoryReusedHandleMigratesACPStartupInputs(t *testing.T) {
 				t.Fatal(err)
 			}
 			transport = "tmux"
+			if name == "start" {
+				if err := store.SetMetadata(b.ID, "state", "suspended"); err != nil {
+					t.Fatal(err)
+				}
+				if err := handle.Start(ctx); err != nil {
+					t.Fatalf("adopt live ACP runtime behind suspended projection: %v", err)
+				}
+				if !acp.IsRunning("legacy-session") || terminal.IsRunning("legacy-session") {
+					t.Fatal("live ACP runtime was replaced before stop")
+				}
+			}
 			if err := handle.Stop(ctx); err != nil {
 				t.Fatal(err)
 			}
