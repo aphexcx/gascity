@@ -769,7 +769,12 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
-			cr, err = c.ListSessions(stateFilter, templateFilter, false)
+			cr, err = c.ListSessions(stateFilter, templateFilter, true)
+			// Request the pane observation for parked-menu status; list output
+			// does not expose the pane contents collected for that observation.
+			for i := range cr.Body {
+				cr.Body[i].LastOutput = ""
+			}
 			return err
 		},
 		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
@@ -1020,8 +1025,19 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
 	sortSessionsCreatedDesc(sessions)
 
+	menus := make(map[string]string)
+	for _, info := range sessions {
+		if info.State == session.StateActive && !info.Closed {
+			menu, err := runtime.ObserveStartupMenu(sp, info.SessionName)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session list: observing startup menu for %s: %v\n", info.ID, err) //nolint:errcheck
+			} else {
+				menus[info.ID] = menu
+			}
+		}
+	}
 	if jsonOutput {
-		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
+		return writeSessionListJSONWithMenus(sessions, stateFilter, templateFilter, menus, stdout, stderr)
 	}
 
 	// Build the per-session reason-projection index from the one snapshot (no
@@ -1072,6 +1088,9 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 			state = "closed"
 		}
 		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		if menus[s.ID] != "" {
+			state, reason = session.DisplayWithStartupMenu(s, reason, menus[s.ID])
+		}
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
@@ -1092,6 +1111,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 
 type sessionListJSONRow struct {
 	ID        string        `json:"id"`
+	Reason    string        `json:"reason,omitempty"`
 	Name      string        `json:"name,omitempty"`
 	Template  string        `json:"template"`
 	Provider  string        `json:"provider,omitempty"`
@@ -1142,13 +1162,18 @@ type sessionListSummary struct {
 	Closed    int `json:"closed"`
 }
 
-func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
+func writeSessionListJSONWithMenus(sessions []session.Info, stateFilter, templateFilter string, menus map[string]string, stdout, stderr io.Writer) int {
 	rows := sessionListJSONRows(sessions)
+	summary := summarizeSessionList(rows)
+	for i, info := range sessions {
+		state, reason := session.DisplayWithStartupMenu(info, "", menus[info.ID])
+		rows[i].State, rows[i].Reason = session.State(state), reason
+	}
 	result := sessionListJSON{
 		SchemaVersion: "1",
 		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
 		Sessions:      rows,
-		Summary:       summarizeSessionList(rows),
+		Summary:       summary,
 	}
 	if err := writeCLIJSONLine(stdout, result); err != nil {
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr

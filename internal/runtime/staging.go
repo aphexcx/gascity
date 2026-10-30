@@ -38,6 +38,34 @@ func HashHookSettingsContent(path, relPath string) string {
 	return HashPathContent(path)
 }
 
+// OverlaySourceHashes snapshots configured provider overlay sources so a later
+// probe can distinguish delayed staging from a source added after startup.
+// Unreadable or absent sources have an empty hash and cannot authorize repair.
+func OverlaySourceHashes(cfg Config) map[string]string {
+	dirs := append(append([]string(nil), cfg.PackOverlayDirs...), cfg.OverlayDir)
+	var hashes map[string]string
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		for _, provider := range EffectiveOverlayProviderNames(cfg) {
+			if hashes == nil {
+				hashes = make(map[string]string)
+			}
+			source := filepath.Join(dir, "per-provider", provider)
+			// Staging reads through a symlinked provider root. WalkDir does
+			// not, so resolve it before hashing the tree that is actually used.
+			resolved, err := filepath.EvalSymlinks(source)
+			if err != nil {
+				hashes[source] = ""
+				continue
+			}
+			hashes[source] = HashPathContent(resolved)
+		}
+	}
+	return hashes
+}
+
 // StageWorkDir applies a legacy overlay directory and CopyFiles staging before
 // a provider starts the session process.
 func StageWorkDir(workDir, overlayDir string, copyFiles []CopyEntry) error {

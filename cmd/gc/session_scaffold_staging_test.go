@@ -186,6 +186,12 @@ func TestRetargetPreStartWorkDirPreservesShellQuoting(t *testing.T) {
 				return appendProjectMCPPreStart(nil, agentName, identity, workDir)
 			},
 		},
+		{
+			label: "codex-hook-trust",
+			preStart: func(workDir string) []string {
+				return appendCodexHookTrustPreStart(nil, "codex -p city", "/city", workDir)
+			},
+		},
 	}
 
 	cases := []struct {

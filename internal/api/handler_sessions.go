@@ -626,12 +626,27 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 		if lines <= 0 {
 			lines = defaultSessionPeekLines
 		}
-		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
-			resp.LastOutput = output
+		if output, err := peekHandle.Peek(context.Background(), max(lines, 120)); err == nil {
+			resp.State, resp.Reason = session.DisplayWithStartupMenu(info, resp.Reason, runtime.StartupMenuReason(output))
+			resp.LastOutput = sessionPreviewTail(output, lines)
+		} else {
+			log.Printf("session %s: observing pane: %v", info.ID, err)
 		}
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+}
+
+func sessionPreviewTail(output string, lines int) string {
+	parts := strings.SplitAfter(output, "\n")
+	count := len(parts)
+	if parts[count-1] == "" {
+		count--
+	}
+	if count <= lines {
+		return output
+	}
+	return strings.Join(parts[count-lines:], "")
 }
 
 // sessionRuntimeHandles resolves the state and peek handles for an active

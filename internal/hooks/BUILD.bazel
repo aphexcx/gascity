@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hooks",
     srcs = [
+        "codex_trust.go",
         "hooks.go",
         "preserve.go",
     ],
@@ -17,13 +18,18 @@ go_library(
         "//internal/citylayout",
         "//internal/fsys",
         "//internal/overlay",
+        "//internal/runtime",
         "//internal/shellquote",
+        "@cc_mvdan_sh_v3//expand",
+        "@cc_mvdan_sh_v3//syntax",
+        "@com_github_burntsushi_toml//:toml",
     ],
 )
 
 go_test(
     name = "hooks_test",
     srcs = [
+        "codex_trust_test.go",
         "hooks_family_test.go",
         "hooks_test.go",
         "preserve_test.go",
@@ -37,6 +43,7 @@ go_test(
         "//internal/overlay",
         "//internal/shellquote",
         "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
     ],
 )
 

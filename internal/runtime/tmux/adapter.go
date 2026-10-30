@@ -1325,7 +1325,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 		runCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
+	c := runtime.ShellCommand(runCtx, cmd)
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}

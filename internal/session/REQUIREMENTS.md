@@ -84,6 +84,7 @@ unless the row names how they map to the canonical projection.
 | SESSION-LIFE-006 | Missing config | A session whose backing config target is missing is desired-blocked with blocker missing-config instead of silently waking. | `internal/session/lifecycle_projection_test.go` |
 | SESSION-LIFE-007 | Terminal wake conflict | Closed or closing bead IDs cannot be woken. Archived historical beads cannot be woken by bead ID unless continuity-eligible. Active metadata on a closed bead does not override terminal status. | `internal/session/lifecycle_projection_test.go`; `internal/api/session_model_phase0_lifecycle_spec_test.go`; `internal/session/waits_test.go` |
 | SESSION-LIFE-008 | User-facing projection guard | CLI/API/doctor user-facing consumers must use projection helpers rather than raw state interpretation. | `internal/session/lifecycle_projection_test.go` static guard |
+| SESSION-LIFE-009 | Startup menu observation | An active session whose current pane contains a Codex hook-review or directory-trust menu displays as parked with the menu heading as its reason. This is an observation over active, not a new persisted lifecycle state; inactive sessions and resume identity remain unchanged. | gf-a5f; `internal/session/startup_menu_test.go`; `internal/runtime/startup_menu_test.go` |
 
 ### State Transitions
 

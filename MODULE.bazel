@@ -20,6 +20,8 @@ use_repo(go_sdk, "go_sdk")
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 
+use_repo(go_deps, "cc_mvdan_sh_v3")
+
 # External repos that ship WORKSPACE-era BUILD files referencing apparent
 # repo names (@rules_go, @protobuf, @npm, @rules_pkg) which are not visible
 # from go_deps extension repositories under Bzlmod. Patches swap them for

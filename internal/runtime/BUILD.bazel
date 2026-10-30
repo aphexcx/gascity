@@ -27,6 +27,7 @@ go_library(
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
+        "startup_menu.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
@@ -66,6 +67,7 @@ go_test(
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
+        "startup_menu_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

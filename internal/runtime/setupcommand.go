@@ -20,6 +20,13 @@ const (
 	setupCommandWaitDelay = 2 * time.Second
 )
 
+// ShellCommand constructs a configured launcher using the runtime's POSIX shell
+// semantics. The caller supplies cwd, environment overrides, and process policy;
+// an unset Env inherits the caller's environment, including pre-start exports.
+func ShellCommand(ctx context.Context, command string) *exec.Cmd {
+	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
 // RunSetupCommand executes one session lifecycle shell command (pre_start,
 // session_setup, session_setup_script, session_live) host-side — "in gc's
 // process via sh -c", per the Config field contracts — with a per-command
@@ -48,7 +55,7 @@ const (
 func RunSetupCommand(ctx context.Context, command string, env map[string]string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := exec.CommandContext(ctx, "sh", "-c", command)
+	c := ShellCommand(ctx, command)
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}

@@ -43,6 +43,7 @@ require (
 	k8s.io/apimachinery v0.35.2
 	k8s.io/client-go v0.35.2
 	modernc.org/sqlite v1.50.1
+	mvdan.cc/sh/v3 v3.12.0
 	pgregory.net/rapid v1.2.0
 )
 
