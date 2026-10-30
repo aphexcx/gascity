@@ -32,6 +32,8 @@ func TestReconcilerRebaselinesGeneratedHookAdditionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	tp.Hints.CopyFiles = stageHookFiles(nil, tp.WorkDir, tp.WorkDir, []string{"codex"})
+	// A simultaneous live edit must still run after the core-only repair.
+	tp.Hints.SessionLive = []string{"echo updated live configuration"}
 	env.desiredState["worker"] = tp
 	env.reconcile([]beads.Bead{sess})
 	if ds := env.dt.get(sess.ID); ds != nil {
@@ -47,9 +49,23 @@ func TestReconcilerRebaselinesGeneratedHookAdditionOnce(t *testing.T) {
 	if updated.Metadata["started_config_hash"] != runtime.CoreFingerprint(templateParamsToConfig(tp)) {
 		t.Fatal("baseline was not persisted")
 	}
+	for _, key := range []string{"live_hash", "started_live_hash"} {
+		if updated.Metadata[key] != baseline[key] {
+			t.Fatalf("generated-hook repair overwrote unapplied %s", key)
+		}
+	}
 	env.reconcile([]beads.Bead{updated})
 	if count := strings.Count(env.stderr.String(), "rebaselined generated hooks for worker"); count != 1 {
 		t.Fatalf("repeated rebaseline: %s", env.stderr.String())
+	}
+	liveRuns := 0
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "RunLive" {
+			liveRuns++
+		}
+	}
+	if liveRuns != 1 {
+		t.Fatalf("live update executions=%d, want 1", liveRuns)
 	}
 }
 

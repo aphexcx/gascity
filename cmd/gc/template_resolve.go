@@ -718,7 +718,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if providerFamily == "codex" && sessionTransport != config.SessionTransportACP {
-		expandedPreStart = appendCodexHookTrustPreStart(expandedPreStart, resolved.CommandString(), p.cityPath, workDir)
+		expandedPreStart = appendCodexHookTrustPreStart(expandedPreStart, command, p.cityPath, workDir)
 	}
 	var mcpServers []runtime.MCPServerConfig
 	if sessionTransport == config.SessionTransportACP {

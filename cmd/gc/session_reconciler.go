@@ -3366,7 +3366,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, generatedHooks)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining %s for %s: %v\n", label, name, rebaseErr) //nolint:errcheck
 							} else {
@@ -3606,7 +3606,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							outcome := rebaselineLegacyHashOutcome(storedLive)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, false)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy live hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -3684,7 +3684,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, generatedHooks)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining %s for %s: %v\n", label, name, rebaseErr) //nolint:errcheck
 							} else {
@@ -6855,17 +6855,23 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 // does not match runtime.FingerprintVersion. The reconciler invokes this
 // instead of draining the session — the hash mismatch is purely a
 // versioning artifact, not real config drift.
+// For generated-hook repair, preserveLive keeps unapplied SessionLive changes
+// on the ordinary live-drift path instead of marking them applied.
 //
 // Returns (patch, nil) on success, (nil, err) on persist error, (nil, nil)
 // when nothing was written (nil session or nil front-door). The caller folds
 // the returned patch onto the typed snapshot via ApplyPatch (nil is a no-op).
-func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config, preserveLive bool) (map[string]string, error) {
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
 	patch, err := sessionHashRebaselineMetadata(agentCfg)
 	if err != nil {
 		return nil, err
+	}
+	if preserveLive {
+		delete(patch, "live_hash")
+		delete(patch, "started_live_hash")
 	}
 	if err := sessFront.ApplyPatch(id, patch); err != nil {
 		return nil, fmt.Errorf("rebaselining hashes: %w", err)

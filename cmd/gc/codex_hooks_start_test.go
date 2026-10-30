@@ -19,7 +19,7 @@ func TestCodexOverlayHookExistsBeforeFingerprint(t *testing.T) {
 	cfg := &config.City{
 		Workspace:       config.Workspace{Name: "test-city"},
 		Agents:          []config.Agent{{Name: "worker", Provider: "codex-local", WorkDir: workDir}},
-		Providers:       map[string]config.ProviderSpec{"codex-local": {Base: &base, Command: "/bin/echo", ResumeCommand: "/bin/echo resume {{.SessionKey}}"}},
+		Providers:       map[string]config.ProviderSpec{"codex-local": {Base: &base, Command: "/bin/echo --config-dir={{.ConfigDir}} --agent={{.Agent}}", ResumeCommand: "/bin/echo resume {{.SessionKey}}"}},
 		PackOverlayDirs: []string{overlayDir},
 	}
 	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
@@ -34,7 +34,7 @@ func TestCodexOverlayHookExistsBeforeFingerprint(t *testing.T) {
 	foundTrust := false
 	for _, command := range tp.Hints.PreStart {
 		if strings.Contains(command, "internal trust-codex-hooks ") {
-			foundTrust = strings.Contains(command, "/bin/echo") && strings.Contains(command, workDir)
+			foundTrust = strings.Contains(command, "--config-dir="+cityDir) && strings.Contains(command, "--agent=worker") && strings.Contains(command, workDir) && !strings.Contains(command, "{{")
 		}
 	}
 	if !foundTrust {
