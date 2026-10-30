@@ -150,7 +150,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		command = "sh"
 	}
 
-	cmd := exec.Command("sh", "-c", command)
+	cmd := runtime.ShellCommand(context.Background(), command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir

@@ -2,14 +2,16 @@ package hooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestAppendCodexTrustPreservesConfig(t *testing.T) {
@@ -116,14 +118,59 @@ func TestManagedCodexTrustRequiresExactBundledDefinition(t *testing.T) {
 }
 
 func TestCodexInspectionKeepsLauncherAndDropsRuntimeFlags(t *testing.T) {
-	got, err := codexInspectionArgs(`CODEX_HOME='/account home' '/wrapper path/codex' -p city --dangerously-bypass-approvals-and-sandbox --model gpt-6-astra -c 'features.hooks=true'`)
-	want := []string{"CODEX_HOME=/account home", "/wrapper path/codex", "-c", "features.hooks=true", "app-server"}
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("args=%q err=%v", got, err)
+	got, err := codexInspectionCommand(`CODEX_HOME='/account home' '/wrapper path/codex' -p city --dangerously-bypass-approvals-and-sandbox --model gpt-6-astra -c 'features.hooks=true'`)
+	want := "CODEX_HOME='/account home' '/wrapper path/codex' -c 'features.hooks=true' app-server"
+	if err != nil || strings.TrimSpace(got) != want {
+		t.Fatalf("command=%q err=%v", got, err)
 	}
-	for _, invalid := range []string{"", "codex --profile", "cd /lane && codex", "'unclosed"} {
-		if _, err := codexInspectionArgs(invalid); err == nil {
+	for _, invalid := range []string{"", "codex --profile", "codex &", "'unclosed"} {
+		if _, err := codexInspectionCommand(invalid); err == nil {
 			t.Fatalf("accepted unsupported launcher %q", invalid)
 		}
+	}
+}
+
+func TestCodexInspectionPreservesShellLaunchers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bin := filepath.Join(home, ".local", "bin", "codex")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A protocol fixture proves the shell actually expands the executable and
+	// account home, rather than only comparing a rendered command string.
+	script := `#!/bin/sh
+[ "$#" = 1 ] && [ "$1" = app-server ] || exit 21
+read -r request || exit 22
+printf '{"id":1,"result":{"codexHome":"%s"}}\n' "$CODEX_HOME"
+read -r request || exit 23
+read -r request || exit 24
+printf '{"id":2,"result":{"data":[]}}\n'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, launcher string }{
+		{"executable expansion", `CODEX_HOME="$HOME/.codex-team" "$HOME/.local/bin/codex" -p city`},
+		{"home expansion", `CODEX_HOME="$HOME/.codex-team" ` + shellquote.Quote(bin) + ` --model=gpt-6-astra`},
+		{"shell operator", `export CODEX_HOME="$HOME/.codex-team"; test -d "$HOME" && "$HOME/.local/bin/codex" --full-auto`},
+		{"quoted options", `CODEX_HOME="$HOME/.codex-team" "$HOME/.local/bin/codex" --profile="city" '--model' "$MODEL" "--full-auto"`},
+		{"expanded option values", `CODEX_HOME="$HOME/.codex-team" "$HOME/.local/bin/codex" --model="$MODEL" "--profile=$PROFILE"`},
+		{"escaped options", `CODEX_HOME="$HOME/.codex-team" "$HOME/.local/bin/codex" --pro\file\=city --mo\del="$MODEL"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := inspectCodexHooks(t.Context(), tc.launcher, home)
+			if err != nil || got != filepath.Join(home, ".codex-team") {
+				t.Fatalf("inspection home=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestCodexInspectionFailureNamesLauncher(t *testing.T) {
+	launcher := "exit 27"
+	_, _, err := inspectCodexHooks(context.Background(), launcher, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), launcher) {
+		t.Fatalf("inspection must name the failed launcher: %v", err)
 	}
 }

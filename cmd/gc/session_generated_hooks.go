@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -28,7 +29,7 @@ func generatedHookFilesAdded(storedHash, storedJSON string, current runtime.Conf
 			before.CopyFiles = append(before.CopyFiles, entry)
 			continue
 		}
-		if !generatedHookMatchesOverlay(entry, current) {
+		if !generatedHookMatchesOverlay(entry, current, stored.OverlaySources) {
 			return false
 		}
 		added = true
@@ -36,7 +37,26 @@ func generatedHookFilesAdded(storedHash, storedJSON string, current runtime.Conf
 	return added && runtime.CoreFingerprint(before) == storedHash
 }
 
-func generatedHookMatchesOverlay(entry runtime.CopyEntry, cfg runtime.Config) bool {
+// preserveGeneratedHookSourceBaseline keeps the actual startup evidence across
+// successive repairs. Another source may have changed before its first probe.
+func preserveGeneratedHookSourceBaseline(patch map[string]string, storedJSON string) error {
+	var stored, updated runtime.BreakdownV1
+	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil {
+		return fmt.Errorf("reading startup overlay sources: %w", err)
+	}
+	if err := json.Unmarshal([]byte(patch["core_hash_breakdown"]), &updated); err != nil {
+		return fmt.Errorf("reading repaired hash breakdown: %w", err)
+	}
+	updated.OverlaySources = stored.OverlaySources
+	data, err := json.Marshal(updated)
+	if err != nil {
+		return fmt.Errorf("preserving startup overlay sources: %w", err)
+	}
+	patch["core_hash_breakdown"] = string(data)
+	return nil
+}
+
+func generatedHookMatchesOverlay(entry runtime.CopyEntry, cfg runtime.Config, baseline map[string]string) bool {
 	if !entry.Probed || entry.ContentHash == "" || cfg.WorkDir == "" {
 		return false
 	}
@@ -52,17 +72,23 @@ func generatedHookMatchesOverlay(entry runtime.CopyEntry, cfg runtime.Config) bo
 		return false
 	}
 	dirs := append(append([]string(nil), cfg.PackOverlayDirs...), cfg.OverlayDir)
-	var source string
+	var source, sourceDir string
 	for _, dir := range dirs {
 		if dir == "" {
 			continue
 		}
 		for _, provider := range runtime.EffectiveOverlayProviderNames(cfg) {
-			candidate := filepath.Join(dir, "per-provider", provider, rel)
+			providerDir := filepath.Join(dir, "per-provider", provider)
+			candidate := filepath.Join(providerDir, rel)
 			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 				source = candidate
+				sourceDir = providerDir
 			}
 		}
 	}
-	return source != "" && runtime.HashHookSettingsContent(source, rel) == entry.ContentHash
+	// A match against today's overlay alone cannot establish what the running
+	// process loaded. Old snapshots without source evidence fail closed as drift.
+	return source != "" && baseline[sourceDir] != "" &&
+		baseline[sourceDir] == runtime.OverlaySourceHashes(cfg)[sourceDir] &&
+		runtime.HashHookSettingsContent(source, rel) == entry.ContentHash
 }

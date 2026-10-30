@@ -19,6 +19,9 @@ type BreakdownV1 struct {
 	Version   string               `json:"version"`
 	Fields    map[string]string    `json:"fields"`
 	CopyFiles []BreakdownCopyEntry `json:"copy_files,omitempty"`
+	// OverlaySources records startup evidence for late-probed generated files.
+	// It is diagnostic metadata, not an input to the versioned core hash.
+	OverlaySources map[string]string `json:"overlay_sources,omitempty"`
 }
 
 // BreakdownCopyEntry is the per-entry record for the CopyFiles slice in
@@ -512,9 +515,10 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		}
 	}
 	return BreakdownV1{
-		Version:   FingerprintVersion,
-		Fields:    fields,
-		CopyFiles: copyEntries,
+		Version:        FingerprintVersion,
+		Fields:         fields,
+		CopyFiles:      copyEntries,
+		OverlaySources: OverlaySourceHashes(cfg),
 	}
 }
 

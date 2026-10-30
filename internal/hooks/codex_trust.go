@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +18,9 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/google/shlex"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 type codexTrustRecord struct {
@@ -231,15 +232,20 @@ func managedCodexTrustRecords(listed codexHooksList, cityDir, workDir string) ([
 	return records, nil
 }
 
-func inspectCodexHooks(ctx context.Context, launcher, workDir string) (string, codexHooksList, error) {
-	var listed codexHooksList
-	args, err := codexInspectionArgs(launcher)
+func inspectCodexHooks(ctx context.Context, launcher, workDir string) (home string, listed codexHooksList, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("inspecting Codex launcher %q: %w", launcher, resultErr)
+		}
+	}()
+	command, err := codexInspectionCommand(launcher)
 	if err != nil {
 		return "", listed, err
 	}
-	// env preserves leading NAME=value assignments and executes the same
-	// account-selecting launcher. Inspection does not evaluate shell operators.
-	cmd := exec.CommandContext(ctx, "env", args...)
+	// Reuse the runtime shell launch path (subprocess.Start and tmux pre_start),
+	// inheriting the pre-start environment and evaluating the configured shell
+	// expressions in the session workdir, including account selection.
+	cmd := runtime.ShellCommand(ctx, command)
 	cmd.Dir = workDir
 	cmd.WaitDelay = time.Second
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -293,33 +299,62 @@ func inspectCodexHooks(ctx context.Context, launcher, workDir string) (string, c
 // Codex 0.153.3 rejects --profile and other TUI options on app-server.
 // Hook keys/hashes are definition-based; inspect through the same launcher
 // and CODEX_HOME, retaining config overrides but omitting runtime-only flags.
-func codexInspectionArgs(launcher string) ([]string, error) {
-	words, err := shlex.Split(launcher)
+func codexInspectionCommand(launcher string) (string, error) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(launcher), "launcher")
 	if err != nil {
-		return nil, fmt.Errorf("codex hook inspection requires a quoted executable command: %w", err)
+		return "", fmt.Errorf("parsing launcher: %w", err)
 	}
-	if len(words) == 0 {
-		return nil, fmt.Errorf("codex hook inspection requires an executable launcher")
+	if len(file.Stmts) == 0 {
+		return "", fmt.Errorf("codex hook inspection requires an executable launcher")
 	}
-	var args []string
-	for i := 0; i < len(words); i++ {
-		word := words[i]
+	// The runtime appends provider arguments to the terminal command. Keep
+	// shell setup, assignments, quoting, expansions, redirects and operators
+	// intact; only adapt that terminal invocation to the app-server protocol.
+	stmt := file.Stmts[len(file.Stmts)-1]
+	for {
+		if stmt.Background || stmt.Negated {
+			return "", fmt.Errorf("codex inspection requires a foreground terminal command")
+		}
+		binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		if !ok {
+			break
+		}
+		stmt = binary.Y
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return "", fmt.Errorf("codex inspection requires a terminal executable command")
+	}
+	args := call.Args[:1:1]
+	for i := 1; i < len(call.Args); i++ {
+		parts, complete := codexStaticWordPrefix(call.Args[i].Parts)
+		fields, err := expand.Fields(nil, &syntax.Word{Parts: parts})
+		if err != nil {
+			return "", fmt.Errorf("reading launcher option: %w", err)
+		}
+		word := ""
+		if len(fields) == 1 {
+			word = fields[0]
+		}
+		// An expansion after a known --option= prefix is its value. An
+		// expansion within the option name cannot be classified statically.
+		if !complete && !strings.Contains(word, "=") {
+			word = ""
+		}
 		switch word {
-		case "&&", "||", ";", "|", "&", ">", "<":
-			return nil, fmt.Errorf("codex hook inspection requires an executable launcher; put shell operators in a wrapper script")
 		case "-p", "--profile", "-m", "--model", "-a", "--ask-for-approval", "-s", "--sandbox", "--add-dir", "-i", "--image":
-			if i+1 == len(words) {
-				return nil, fmt.Errorf("codex launcher option %s has no value", word)
+			if i+1 == len(call.Args) {
+				return "", fmt.Errorf("codex launcher option %s has no value", word)
 			}
 			i++
 			continue
 		case "--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--no-alt-screen", "--search":
 			continue
 		case "-c", "--config", "--enable", "--disable":
-			if i+1 == len(words) {
-				return nil, fmt.Errorf("codex launcher option %s has no value", word)
+			if i+1 == len(call.Args) {
+				return "", fmt.Errorf("codex launcher option %s has no value", word)
 			}
-			args = append(args, word, words[i+1])
+			args = append(args, call.Args[i], call.Args[i+1])
 			i++
 			continue
 		}
@@ -327,12 +362,39 @@ func codexInspectionArgs(launcher string) ([]string, error) {
 		if hasValue && (name == "--profile" || name == "--model" || name == "--ask-for-approval" || name == "--sandbox" || name == "--add-dir" || name == "--image") {
 			continue
 		}
-		args = append(args, word)
+		args = append(args, call.Args[i])
 	}
-	if len(args) == 0 {
-		return nil, fmt.Errorf("codex hook inspection requires an executable launcher")
+	args = append(args, &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "app-server"}}})
+	call.Args = args
+	var command strings.Builder
+	if err := syntax.NewPrinter().Print(&command, file); err != nil {
+		return "", fmt.Errorf("rendering inspection launcher: %w", err)
 	}
-	return append(args, "app-server"), nil
+	return command.String(), nil
+}
+
+// codexStaticWordPrefix retains only literal syntax for option recognition.
+// Expansion nodes are never evaluated here; the original word remains intact
+// for retained arguments and is evaluated only by the runtime shell.
+func codexStaticWordPrefix(parts []syntax.WordPart) ([]syntax.WordPart, bool) {
+	var prefix []syntax.WordPart
+	for _, part := range parts {
+		switch p := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+			prefix = append(prefix, part)
+		case *syntax.DblQuoted:
+			inner, complete := codexStaticWordPrefix(p.Parts)
+			quoted := *p
+			quoted.Parts = inner
+			prefix = append(prefix, &quoted)
+			if !complete {
+				return prefix, false
+			}
+		default:
+			return prefix, false
+		}
+	}
+	return prefix, true
 }
 
 func codexHookRPC(enc *json.Encoder, dec *json.Decoder, id int, method string, params, result any) error {
