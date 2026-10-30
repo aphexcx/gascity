@@ -63,4 +63,26 @@ describe('SessionPeekContent — terminal control stripping', () => {
     expect(container.querySelector('[class*="ansi-"]')).not.toBeNull();
     expect(container.textContent).toContain('red-text');
   });
+
+  it('retains the API pane fallback suggestion label in the rendered text', () => {
+    const result = {
+      ...viewWithTurn(
+        'status\n────────────────\n❯ [suggestion] Try the next step\n────────────────\n',
+      ),
+      format: 'text',
+      turns: [
+        {
+          role: 'output',
+          text: 'status\n────────────────\n❯ [suggestion] Try the next step\n────────────────\n',
+        },
+      ],
+    } as SessionTranscriptView;
+    const { container } = render(
+      <SessionPeekContent loading={false} error={null} result={result} />,
+    );
+    expect(container.querySelector('pre')?.textContent).toContain(
+      '❯ [suggestion] Try the next step',
+    );
+    expect(container.querySelector('pre')?.textContent).toContain('status');
+  });
 });

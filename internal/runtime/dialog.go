@@ -332,6 +332,11 @@ func AcceptStartupDialogsWithTimeout(
 ) error {
 	cfg := newStartupDialogConfig(opts)
 	budget := newStartupDialogBudget(timeout)
+	capture := peek
+	peek = func(lines int) (string, error) {
+		text, err := capture(lines)
+		return stripTerminalSGR(text), err
+	}
 	if err := acceptThemeSelectionDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("theme selection dialog: %w", err)
 	}
@@ -1745,6 +1750,7 @@ func ContainsFeedbackSurveyModal(content string) bool {
 // ContainsProviderRateLimitScreen reports whether pane content has
 // high-confidence provider rate-limit screen evidence.
 func ContainsProviderRateLimitScreen(content string) bool {
+	content = stripTerminalSGR(content)
 	if strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
 		strings.Contains(content, "/rate-limit-options") {
@@ -1767,6 +1773,7 @@ func ContainsProviderRateLimitScreen(content string) bool {
 // Other providers' historical screen fragments are only used for exit
 // classification by ContainsProviderRateLimitScreen.
 func ContainsActiveProviderRateLimitScreen(content string) bool {
+	content = stripTerminalSGR(content)
 	lines := strings.Split(content, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -1811,7 +1818,7 @@ func containsClaudeSpendLimitModal(content string) bool {
 // ProviderTerminalErrorReason classifies high-confidence provider errors that
 // require operator/config intervention rather than immediate retry.
 func ProviderTerminalErrorReason(content string) string {
-	lower := strings.ToLower(content)
+	lower := strings.ToLower(stripTerminalSGR(content))
 	switch {
 	case strings.Contains(lower, "model_not_found"):
 		return "model_not_found"

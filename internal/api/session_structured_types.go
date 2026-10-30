@@ -435,6 +435,7 @@ func structuredFallbackHistory(sessionID, providerSessionID, activity string) *S
 }
 
 func structuredFallbackMessages(sessionID, provider, text string) []SessionStructuredMessage {
+	text = renderPaneOutput(text)
 	if strings.TrimSpace(text) == "" {
 		return []SessionStructuredMessage{}
 	}

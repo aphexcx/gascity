@@ -581,7 +581,7 @@ func (s *Server) agentOutputByName(name string, tail int, provided bool, before 
 
 	turns := []outputTurn{}
 	if output != "" {
-		turns = append(turns, outputTurn{Role: "output", Text: output})
+		turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 	}
 
 	return &struct {

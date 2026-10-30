@@ -2296,7 +2296,7 @@ func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	fakeProvider := runtime.NewFake()
-	fakeProvider.SetPeekOutput("runtime-session", "hello\nworld\n")
+	fakeProvider.SetPeekOutput("runtime-session", suggestionPeekFixture)
 	oldBuild := buildSessionProviderByName
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return fakeProvider, nil
@@ -2337,7 +2337,7 @@ func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
 	}
-	if got.SchemaVersion != "1" || got.SessionID != b.ID || got.Output != "hello\nworld\n" || got.LineCount != 2 {
+	if got.SchemaVersion != "1" || got.SessionID != b.ID || got.Suggestion != "Try the next step" || got.LineCount != 4 || strings.Contains(got.Output, "Try the next step") || strings.Contains(got.Output, "\x1b") {
 		t.Fatalf("peek JSON = %+v", got)
 	}
 }

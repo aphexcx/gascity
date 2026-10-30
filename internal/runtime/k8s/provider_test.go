@@ -515,7 +515,7 @@ func TestPeek(t *testing.T) {
 
 	// Configure fake to return captured output.
 	fake.setExecResult("gc-test-agent",
-		[]string{"tmux", "capture-pane", "-t", "main", "-p", "-S", "-50"},
+		[]string{"tmux", "capture-pane", "-t", "main", "-p", "-e", "-S", "-50"},
 		"line1\nline2\nline3\n", nil)
 
 	output, err := p.Peek("gc-test-agent", 50)

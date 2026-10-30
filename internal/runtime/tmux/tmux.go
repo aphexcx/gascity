@@ -3843,6 +3843,17 @@ func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	return content, err
 }
 
+// CapturePaneWithAttributes captures pane text with SGR attributes for display
+// consumers that distinguish faint suggestions from typed input. A nonpositive
+// line count captures all scrollback; plain-text scanners use CapturePane.
+func (t *Tmux) CapturePaneWithAttributes(session string, lines int) (string, error) {
+	start := "-"
+	if lines > 0 {
+		start = fmt.Sprintf("-%d", lines)
+	}
+	return t.run("capture-pane", "-p", "-e", "-t", session, "-S", start)
+}
+
 // CapturePaneJoined captures the visible content of a pane with wrapped lines
 // rejoined (-J).
 //

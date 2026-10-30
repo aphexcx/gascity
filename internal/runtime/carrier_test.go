@@ -110,7 +110,7 @@ func TestTmuxCarrier_PeekCapturesPaneAndReturnsOutput(t *testing.T) {
 	if got != "captured pane text" {
 		t.Errorf("Peek output = %q, want %q", got, "captured pane text")
 	}
-	wantExec(t, f, "tmux capture-pane -t main -p -S -40")
+	wantExec(t, f, "tmux capture-pane -t main -p -e -S -40")
 }
 
 func TestTmuxCarrier_PeekAllScrollback(t *testing.T) {
@@ -119,7 +119,7 @@ func TestTmuxCarrier_PeekAllScrollback(t *testing.T) {
 	if _, err := c.Peek(context.Background(), "s", 0); err != nil {
 		t.Fatalf("Peek: %v", err)
 	}
-	wantExec(t, f, "tmux capture-pane -t main -p -S -")
+	wantExec(t, f, "tmux capture-pane -t main -p -e -S -")
 }
 
 func TestTmuxCarrier_NudgeMessageIsASingleArg(t *testing.T) {
