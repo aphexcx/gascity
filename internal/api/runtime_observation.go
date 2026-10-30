@@ -73,3 +73,9 @@ func (h providerSessionResponseHandle) Peek(_ context.Context, lines int) (strin
 	}
 	return h.provider.Peek(h.sessionName, lines)
 }
+
+// renderPaneOutput is used only for terminal fallback text, never provider
+// transcript records. Keep LastOutput attributed for the CLI's structured peek.
+func renderPaneOutput(output string) string {
+	return runtime.RenderPeek(output).Text
+}

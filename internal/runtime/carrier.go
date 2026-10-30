@@ -103,7 +103,7 @@ func (c *tmuxCarrier) Peek(ctx context.Context, name string, lines int) (string,
 	if lines > 0 {
 		start = "-" + strconv.Itoa(lines)
 	}
-	out, err := c.tmux(ctx, name, "capture-pane", "-t", c.target, "-p", "-S", start)
+	out, err := c.tmux(ctx, name, "capture-pane", "-t", c.target, "-p", "-e", "-S", start)
 	if err != nil {
 		return "", err
 	}

@@ -188,7 +188,7 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 	if peekErr == nil {
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
 			ID:       info.ID,

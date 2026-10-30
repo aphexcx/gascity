@@ -310,7 +310,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		}
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		return &IndexOutput[sessionTranscriptGetResponse]{
 			Index: s.latestIndex(),

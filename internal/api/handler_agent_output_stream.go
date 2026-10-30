@@ -242,7 +242,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		data, err := json.Marshal(agentOutputResponse{
 			Agent:  name,
@@ -424,7 +424,7 @@ func (s *Server) streamPeekOutputHuma(ctx context.Context, send sse.Sender, name
 
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
 			Agent:  name,

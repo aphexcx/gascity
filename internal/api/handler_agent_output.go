@@ -198,7 +198,7 @@ func (s *Server) peekFallbackOutput(ctx context.Context, w http.ResponseWriter, 
 
 	turns := []outputTurn{}
 	if output != "" {
-		turns = append(turns, outputTurn{Role: "output", Text: output})
+		turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 	}
 
 	writeJSON(w, http.StatusOK, agentOutputResponse{

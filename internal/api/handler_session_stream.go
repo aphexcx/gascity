@@ -816,7 +816,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			if output != "" {
 				syntheticMsg, _ := json.Marshal(syntheticAssistantFrame{
 					Role:    "assistant",
-					Content: []syntheticContentBlock{{Type: "text", Text: output}},
+					Content: []syntheticContentBlock{{Type: "text", Text: renderPaneOutput(output)}},
 				})
 				data, err := json.Marshal(SessionStreamRawMessageEvent{
 					ID:       info.ID,
@@ -982,7 +982,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		data, err := json.Marshal(SessionStreamMessageEvent{
 			ID:       info.ID,
@@ -1535,7 +1535,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 		if output != "" {
 			syntheticMsg, err := json.Marshal(syntheticAssistantFrame{
 				Role:    "assistant",
-				Content: []syntheticContentBlock{{Type: "text", Text: output}},
+				Content: []syntheticContentBlock{{Type: "text", Text: renderPaneOutput(output)}},
 			})
 			if err == nil {
 				seq++
@@ -1712,7 +1712,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 
 		turns := []outputTurn{}
 		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
+			turns = append(turns, outputTurn{Role: "output", Text: renderPaneOutput(output)})
 		}
 		_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
 			ID:       info.ID,

@@ -2190,6 +2190,7 @@ type sessionPeekJSONResult struct {
 	Lines         int    `json:"lines"`
 	LineCount     int    `json:"line_count"`
 	Output        string `json:"output"`
+	Suggestion    string `json:"suggestion,omitempty"`
 }
 
 // sessionPeekAPIClient returns (client, "") when the API path is available,
@@ -2232,26 +2233,10 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 // cache age crosses the threshold. Matches the fallback path's text output
 // semantics: trailing newline if the preview doesn't already end in one.
 func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	output := cr.Body.LastOutput
-	if jsonOutput {
-		if err := writeCLIJSONLine(stdout, sessionPeekJSONResult{
-			SchemaVersion: "1",
-			SessionID:     cr.Body.ID,
-			Target:        target,
-			Lines:         lines,
-			LineCount:     outputLineCount(output),
-			Output:        output,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+	if code := renderSessionPeek(cr.Body.LastOutput, cr.Body.ID, target, lines, jsonOutput, stdout, stderr); code != 0 {
+		return code
 	}
-	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
-	if !strings.HasSuffix(output, "\n") {
-		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	}
-	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
+	if !jsonOutput && cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
 		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "cached pane output")) //nolint:errcheck
 	}
 	return 0
@@ -2306,26 +2291,7 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 		return 1
 	}
 
-	if jsonOutput {
-		if err := writeCLIJSONLine(stdout, sessionPeekJSONResult{
-			SchemaVersion: "1",
-			SessionID:     sessionID,
-			Target:        target,
-			Lines:         lines,
-			LineCount:     outputLineCount(output),
-			Output:        output,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
-	}
-
-	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
-	if !strings.HasSuffix(output, "\n") {
-		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	}
-	return 0
+	return renderSessionPeek(output, sessionID, target, lines, jsonOutput, stdout, stderr)
 }
 
 func outputLineCount(output string) int {

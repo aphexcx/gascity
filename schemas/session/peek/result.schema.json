@@ -33,6 +33,9 @@
     },
     "output": {
       "type": "string"
+    },
+    "suggestion": {
+      "type": "string"
     }
   },
   "additionalProperties": true
