@@ -3232,11 +3232,14 @@ func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, std
 // city config. Sets the non-stale X-GC-Cache-Age-S header so happy-path
 // rows exercise the envelope-field wiring without tripping the stale
 // banner threshold.
-func okSessionsHandler(_ *testing.T) http.Handler {
+func okSessionsHandler(t *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/sessions") {
 			http.NotFound(w, r)
 			return
+		}
+		if r.URL.Query().Get("peek") != "true" {
+			t.Error("session list did not request the parked-menu observation")
 		}
 		w.Header().Set("X-GC-Cache-Age-S", "2")
 		w.Header().Set("Content-Type", "application/json")
@@ -3255,6 +3258,7 @@ func okSessionsHandler(_ *testing.T) http.Handler {
 					"last_active":  "2026-04-23T12:00:00Z",
 					"attached":     true,
 					"running":      true,
+					"last_output":  "private pane contents",
 				},
 			},
 			"total": 1,
@@ -3384,6 +3388,9 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 	if _, ok := out["_cache_age_s"]; !ok {
 		t.Errorf("_cache_age_s missing from API --json:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "private pane contents") {
+		t.Fatal("list exposed pane contents collected for menu status")
 	}
 	sessions, ok := out["sessions"]
 	if !ok {

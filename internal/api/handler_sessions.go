@@ -185,14 +185,6 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 		isRunning = sp.IsRunning
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
-	if info.State == session.StateActive {
-		menu, err := runtime.ObserveStartupMenu(sp, info.SessionName)
-		if err != nil {
-			log.Printf("session %s: observing startup menu: %v", info.ID, err)
-		} else {
-			r.State, r.Reason = session.DisplayWithStartupMenu(info, r.Reason, menu)
-		}
-	}
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(pr.Metadata, hasDeferredQueue)
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
@@ -634,12 +626,27 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 		if lines <= 0 {
 			lines = defaultSessionPeekLines
 		}
-		if output, err := peekHandle.Peek(context.Background(), lines); err == nil {
-			resp.LastOutput = output
+		if output, err := peekHandle.Peek(context.Background(), max(lines, 120)); err == nil {
+			resp.State, resp.Reason = session.DisplayWithStartupMenu(info, resp.Reason, runtime.StartupMenuReason(output))
+			resp.LastOutput = sessionPreviewTail(output, lines)
+		} else {
+			log.Printf("session %s: observing pane: %v", info.ID, err)
 		}
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+}
+
+func sessionPreviewTail(output string, lines int) string {
+	parts := strings.SplitAfter(output, "\n")
+	count := len(parts)
+	if parts[count-1] == "" {
+		count--
+	}
+	if count <= lines {
+		return output
+	}
+	return strings.Join(parts[count-lines:], "")
 }
 
 // sessionRuntimeHandles resolves the state and peek handles for an active

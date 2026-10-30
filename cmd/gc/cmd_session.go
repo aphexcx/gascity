@@ -769,7 +769,12 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
-			cr, err = c.ListSessions(stateFilter, templateFilter, false)
+			cr, err = c.ListSessions(stateFilter, templateFilter, true)
+			// Request the pane observation for parked-menu status; list output
+			// does not expose the pane contents collected for that observation.
+			for i := range cr.Body {
+				cr.Body[i].LastOutput = ""
+			}
 			return err
 		},
 		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
@@ -1022,7 +1027,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 
 	menus := make(map[string]string)
 	for _, info := range sessions {
-		if info.State == session.StateActive {
+		if info.State == session.StateActive && !info.Closed {
 			menu, err := runtime.ObserveStartupMenu(sp, info.SessionName)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc session list: observing startup menu for %s: %v\n", info.ID, err) //nolint:errcheck
