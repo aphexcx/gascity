@@ -828,6 +828,13 @@ remains the faster local/pre-commit target and intentionally checks only
 packages that contain changed Go files. Both accept `LINT_CHANGED_SCOPE` and
 `LINT_CHANGED_REF`; CI uses `tracked` and the event's exact PR base SHA.
 
+The pre-commit lint step never applies fixes: findings refuse the commit and
+print the manual remedy, `make lint-fix`. This target applies available fixes
+in packages containing staged Go files and leaves the edits unstaged. Review
+`git diff` before staging them and retrying the commit. `LINT_FLAGS` accepts
+additional linter options. The hook still formats and re-stages Go files
+before linting.
+
 The golangci configuration enables `govet` explicitly in both scopes.
 Golangci's `govet` execution is not assumed to be semantically equivalent to
 standalone `go vet`: generated-file exclusions and analyzer/configuration drift

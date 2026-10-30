@@ -23,8 +23,11 @@ if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | make --no-print-directory fmt-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
-  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
-  printf '%s\n' "$staged_go_files" | xargs git add
+  if ! make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files"; then
+    echo "Lint failed. To apply available fixes, run: make lint-fix" >&2
+    echo "Review git diff before staging fixes and retrying the commit." >&2
+    exit 1
+  fi
 
   # Direct Go commands need the same CGO environment as Makefile recipes.
   # Keep assignment separate from eval so a make failure stops the hook.

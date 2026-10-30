@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,185 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
+
+// The commit hook must reject lint findings without accepting a fixer's edits.
+//
+//nolint:misspell // The regression fixture intentionally uses a misspelled identifier.
+func TestPreCommitLintPreservesIndex(t *testing.T) {
+	const guardedAssertion = `package example
+
+import (
+	"os/exec"
+	"testing"
+)
+
+func TestProbe(t *testing.T) {
+	out, err := exec.Command("probe").CombinedOutput()
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && len(out) == 0 {
+		t.Skip("probe unavailable")
+	}
+	if err != nil {
+		t.Fatalf("probe: %v: %s", err, out)
+	}
+}
+`
+	const identifier = `package example
+
+import "testing"
+
+func TestShape(t *testing.T) {
+	shape := struct{ labelled bool }{true}
+	if !shape.labelled {
+		t.Fatal("missing label")
+	}
+}
+`
+	for _, tc := range []struct {
+		name, source, lossy string
+	}{
+		{"error assertion guards", guardedAssertion, strings.NewReplacer(
+			"import (", "import (\n\t\"errors\"",
+			"if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && len(out) == 0",
+			"var exitErr *exec.ExitError\n\tif errors.As(err, &exitErr)").Replace(guardedAssertion)},
+		{"identifier references", identifier, strings.Replace(identifier, "labelled", "labeled", 1)},
+		{"clean", "package example\n\nimport \"testing\"\n\nfunc TestClean(_ *testing.T) {}\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			bin := t.TempDir()
+			env := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.invalid",
+				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.invalid",
+				// An ambient request for fixes must not affect the hook.
+				"LINT_FLAGS=--fix",
+			}
+			git := func(args ...string) ([]byte, error) {
+				cmd := testCommand("git", args...)
+				cmd.Dir, cmd.Env = repo, env
+				return cmd.CombinedOutput()
+			}
+			mustGit := func(args ...string) []byte {
+				t.Helper()
+				out, err := git(args...)
+				if err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+				return out
+			}
+			mustGit("init", "-q")
+			installBeadsChainForTempRepo(t, repoRoot(t), repo)
+			writeTestFile(t, filepath.Join(repo, "scripts/lib/go-toolchain.sh"), "gc_go_toolchain() { :; }\n")
+			// Unchanged outputs let a clean commit traverse the real hook's
+			// codegen staging; generators and vet are unrelated collaborators.
+			for _, path := range []string{
+				"internal/api/openapi.json", "docs/reference/schema/openapi.json",
+				"docs/reference/schema/openapi.txt", "internal/api/genclient/client_gen.go",
+				"docs/reference/schema/city-schema.json", "docs/reference/schema/city-schema.txt",
+				"docs/reference/config.md", "docs/reference/cli.md",
+			} {
+				writeTestFile(t, filepath.Join(repo, path), "baseline\n")
+			}
+			mustGit("add", ".")
+			mustGit("-c", "core.hooksPath=/dev/null", "commit", "-qm", "baseline")
+			hook, err := os.ReadFile(filepath.Join(repoRoot(t), ".githooks/pre-commit"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeExecutable(t, filepath.Join(repo, ".githooks/pre-commit"), string(hook))
+			mustGit("config", "core.hooksPath", ".githooks")
+			writeTestFile(t, filepath.Join(repo, "fixture_test.go"), tc.source)
+			if tc.lossy != "" {
+				writeTestFile(t, filepath.Join(repo, "lossy.txt"), tc.lossy)
+			}
+			// Model a linter that applies a lossy suggestion only with --fix.
+			// The real Git index and hook own the refusal/staging contract.
+			writeExecutable(t, filepath.Join(bin, "make"), `#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *' fmt-staged-go '*) cat >/dev/null ;;
+  *' lint-changed '*)
+    if [ -f lossy.txt ]; then
+      case " $* " in
+        *--fix*) cp -f lossy.txt fixture_test.go ;;
+        *) echo 'fixture_test.go: lint finding' >&2; exit 1 ;;
+      esac
+    fi
+    ;;
+esac
+`)
+			for _, tool := range []string{"bd", "go", "npm"} {
+				writeExecutable(t, filepath.Join(bin, tool), "#!/bin/sh\nexit 0\n")
+			}
+			mustGit("add", "fixture_test.go")
+			before := mustGit("diff", "--cached", "--binary")
+			head := mustGit("rev-parse", "HEAD")
+			out, commitErr := git("commit", "-qm", "fixture")
+			if tc.lossy == "" {
+				if commitErr != nil {
+					t.Fatalf("clean commit refused: %v\n%s", commitErr, out)
+				}
+				if got := mustGit("show", "HEAD:fixture_test.go"); string(got) != tc.source {
+					t.Fatalf("clean committed content changed: %s", got)
+				}
+				return
+			}
+			if commitErr == nil {
+				t.Errorf("lint finding was committed instead of refused: %s", out)
+			}
+			if after := mustGit("diff", "--cached", "--binary"); !bytes.Equal(before, after) {
+				t.Error("lint rejection changed the staged diff")
+			}
+			if after := mustGit("rev-parse", "HEAD"); !bytes.Equal(head, after) {
+				t.Error("lint rejection advanced HEAD")
+			}
+			content, err := os.ReadFile(filepath.Join(repo, "fixture_test.go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != tc.source {
+				t.Error("lint rejection rewrote the working file")
+			}
+			for _, remedy := range []string{"make lint-fix", "git diff", "staging"} {
+				if !strings.Contains(string(out), remedy) {
+					t.Errorf("lint rejection missing remedy %q: %s", remedy, out)
+				}
+			}
+		})
+	}
+}
+
+func TestLintFixLeavesChangesForReview(t *testing.T) {
+	fixture := newPRStaticScopeFixture(t, map[string]string{
+		"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+	})
+	// Recursive make reads the fixture's Makefile just as it would in the repo.
+	writeTestFile(t, filepath.Join(fixture.repoRoot, "Makefile"), "include "+fixture.productionMakefile+"\n")
+	writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha/alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+	env := fixture.commandEnv()
+	runGitFixtureCommands(t, fixture.repoRoot, env, "git add alpha/alpha.go")
+	before := runGitFixtureCommands(t, fixture.repoRoot, env, "git diff --cached --binary")
+	writeTestFile(t, filepath.Join(fixture.repoRoot, "unstaged/other.go"), "package unstaged\n")
+	lint, err := os.ReadFile(fixture.fakeLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, fixture.fakeLint, string(lint)+"printf 'package alpha\\n\\nfunc Value() int { return 3 }\\n' > alpha/alpha.go\n")
+	cmd := makeCommand("--no-print-directory", "-f", fixture.productionMakefile,
+		"GOLANGCI_LINT="+fixture.fakeLint, "LINT_FLAGS=--timeout=1m", "lint-fix")
+	cmd.Dir, cmd.Env = fixture.repoRoot, env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("lint-fix failed: %v\n%s", err, out)
+	}
+	fixture.requireCalls(t, []string{"run", "--timeout=1m", "--fix", "./alpha"})
+	if after := runGitFixtureCommands(t, fixture.repoRoot, env, "git diff --cached --binary"); after != before {
+		t.Fatal("lint-fix staged edits before review")
+	}
+	if diff := runGitFixtureCommands(t, fixture.repoRoot, env, "git diff -- alpha/alpha.go"); !strings.Contains(diff, "return 3") {
+		t.Fatalf("lint-fix did not leave its edit for review: %s", diff)
+	}
+}
 
 func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
 	repoRoot := repoRoot(t)
