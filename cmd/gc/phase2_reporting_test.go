@@ -69,6 +69,10 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 
 func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp TemplateParams, cfg runtime.Config) workertest.Result {
 	evidence := phase2ConfigEvidence(tc, tp, cfg)
+	wantPreStart := []string{"echo pre-" + tc.family}
+	if tc.family == "codex" && !tp.IsACP {
+		wantPreStart = appendCodexHookTrustPreStart(wantPreStart, tc.wantCommand, tp.Env["GC_BEADS_SCOPE_ROOT"], tp.WorkDir)
+	}
 	switch {
 	case cfg.Command != tp.Command:
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
@@ -119,9 +123,9 @@ func startupRuntimeConfigMaterializationResult(tc phase2ProviderCase, tp Templat
 	case !startupNudgeMatches(tc, cfg.Nudge):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.Nudge = %q, want startup nudge plus %q", cfg.Nudge, "nudge-"+tc.family)).WithEvidence(evidence)
-	case !reflect.DeepEqual(cfg.PreStart, []string{"echo pre-" + tc.family}):
+	case !reflect.DeepEqual(cfg.PreStart, wantPreStart):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
-			fmt.Sprintf("cfg.PreStart = %v, want %v", cfg.PreStart, []string{"echo pre-" + tc.family})).WithEvidence(evidence)
+			fmt.Sprintf("cfg.PreStart = %v, want %v", cfg.PreStart, wantPreStart)).WithEvidence(evidence)
 	case !reflect.DeepEqual(cfg.SessionSetup, []string{"echo setup-" + tc.family}):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupRuntimeConfigMaterialization,
 			fmt.Sprintf("cfg.SessionSetup = %v, want %v", cfg.SessionSetup, []string{"echo setup-" + tc.family})).WithEvidence(evidence)
