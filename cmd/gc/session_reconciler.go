@@ -3356,16 +3356,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// rebaseline all four fingerprint fields rather than
 						// draining the session. The mismatch is a versioning
 						// artifact, not real config drift. See ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+						generatedHooks := generatedHookFilesAdded(storedHash, infoByID[id].CoreHashBreakdown, agentCfg)
+						if runtime.IsLegacyOrMismatchedVersion(storedHash) || generatedHooks {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
+							label := "legacy hash"
+							if generatedHooks {
+								label, outcome = "generated hooks", TraceOutcomeRepairInPlace
+							}
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
 							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
 							if rebaseErr != nil {
-								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
+								fmt.Fprintf(stderr, "session reconciler: rebaselining %s for %s: %v\n", label, name, rebaseErr) //nolint:errcheck
 							} else {
-								fmt.Fprintf(stderr, "rebaselined legacy hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
+								fmt.Fprintf(stderr, "rebaselined %s for %s (stored=%s current=%s)\n", label, name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
 							}
 							tick.apply(id, rebaseBatch)
 							if trace != nil {
@@ -3669,16 +3674,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Stored hash carries no version prefix or a different
 						// version — silently rebaseline rather than treating
 						// the asleep named session as drifted. ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+						generatedHooks := generatedHookFilesAdded(storedHash, infoByID[id].CoreHashBreakdown, agentCfg)
+						if runtime.IsLegacyOrMismatchedVersion(storedHash) || generatedHooks {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
+							label := "legacy hash"
+							if generatedHooks {
+								label, outcome = "generated hooks", TraceOutcomeRepairInPlace
+							}
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
 							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
 							if rebaseErr != nil {
-								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
+								fmt.Fprintf(stderr, "session reconciler: rebaselining %s for %s: %v\n", label, name, rebaseErr) //nolint:errcheck
 							} else {
-								fmt.Fprintf(stderr, "rebaselined legacy hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
+								fmt.Fprintf(stderr, "rebaselined %s for %s (stored=%s current=%s)\n", label, name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
 							}
 							tick.apply(id, rebaseBatch)
 							if trace != nil {

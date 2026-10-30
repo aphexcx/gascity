@@ -373,15 +373,22 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, targe
 	if provider == "" {
 		provider = "unknown"
 	}
+	drainReason, err := executionDrainReason(p.sp, sessName)
+	if err != nil {
+		fmt.Fprintf(stdout, "execution-claim-nudge: observing startup menu for %s: %v\n", sessName, err) //nolint:errcheck
+	}
 	if delivered == 0 {
 		condition := fmt.Sprintf("0 of %d nudges deliverable", idleClaimNudgeMaxAttempts)
 		if p.content(*s) == "" {
 			condition = "no nudge configured"
 		}
+		if drainReason != executionStalledDrainReason {
+			condition += "; " + drainReason
+		}
 		fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %s (provider %s); holding claim\n", sessName, beadID, p.now.Sub(last).Seconds(), condition, provider) //nolint:errcheck // best-effort
 		return
 	}
-	fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %d of %d nudges delivered (provider %s); draining (%s)\n", sessName, beadID, p.now.Sub(last).Seconds(), delivered, idleClaimNudgeMaxAttempts, provider, executionStalledDrainReason) //nolint:errcheck // best-effort
+	fmt.Fprintf(stdout, "execution-claim-nudge: %s holds %s; quiet for %.0f s, %d of %d nudges delivered (provider %s); draining (%s)\n", sessName, beadID, p.now.Sub(last).Seconds(), delivered, idleClaimNudgeMaxAttempts, provider, drainReason) //nolint:errcheck // best-effort
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}
@@ -509,6 +516,18 @@ func (cr *CityRuntime) requestExecutionStalledDrain(sessionBead beads.Bead) erro
 	if err != nil {
 		return fmt.Errorf("reading session %q before draining: %w", sessionBead.ID, err)
 	}
-	beginSessionDrainInfo(info, cr.sp, cr.sessionDrains, executionStalledDrainReason, clock.Real{}, defaultDrainTimeout)
+	reason, err := executionDrainReason(cr.sp, info.SessionName)
+	if err != nil && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "execution-claim-nudge: observing session %q before draining: %v\n", sessionBead.ID, err) //nolint:errcheck
+	}
+	beginSessionDrainInfo(info, cr.sp, cr.sessionDrains, reason, clock.Real{}, defaultDrainTimeout)
 	return nil
+}
+
+func executionDrainReason(sp runtime.Provider, name string) (string, error) {
+	menu, err := runtime.ObserveStartupMenu(sp, name)
+	if menu != "" {
+		return startupMenuDrainPrefix + menu, nil
+	}
+	return executionStalledDrainReason, err
 }

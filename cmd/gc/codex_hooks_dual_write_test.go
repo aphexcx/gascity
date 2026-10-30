@@ -259,11 +259,9 @@ func TestCodexHooksConvergeWithSkipStaging(t *testing.T) {
 
 // TestMaterializeProviderOverlays_SkipsMergeableCodexHook guards the production
 // caller wiring: materializeProviderOverlaysBeforeFingerprint (the
-// staging-only half of prepareTemplateResolution) must skip the reconciler-owned
-// mergeable .codex/hooks.json while still staging non-mergeable overlay
-// siblings. This is the observation point where skip vs non-skip staging
-// diverge — the trailing hooks.Install converges either way, so only the
-// staging-only state distinguishes a reverted caller wiring.
+// staging-only half of prepareTemplateResolution) must preserve an existing
+// reconciler-owned .codex/hooks.json while still staging overlay siblings.
+// Missing hooks are covered by TestCodexOverlayHookExistsBeforeFingerprint.
 func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
@@ -313,11 +311,18 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs).Rig
 
-	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
+	// Preserve an existing managed document; a missing document must be staged
+	// before the fingerprint even when no install_agent_hooks was requested.
+	seedDriftedHybrid(t, cityDir, workDir)
+	before, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
 
-	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
+	after, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("staging changed an existing managed hook: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
 		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)

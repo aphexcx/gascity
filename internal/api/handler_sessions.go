@@ -185,6 +185,14 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 		isRunning = sp.IsRunning
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
+	if info.State == session.StateActive {
+		menu, err := runtime.ObserveStartupMenu(sp, info.SessionName)
+		if err != nil {
+			log.Printf("session %s: observing startup menu: %v", info.ID, err)
+		} else {
+			r.State, r.Reason = session.DisplayWithStartupMenu(info, r.Reason, menu)
+		}
+	}
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(pr.Metadata, hasDeferredQueue)
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.

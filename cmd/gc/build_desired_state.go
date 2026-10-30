@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -6489,23 +6490,11 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
-	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
-	// runs immediately after this staging on the SAME workDir (see
-	// prepareTemplateResolution), so it must be the sole writer of those files
-	// ON THE RECONCILE TICK. Staging them too leaves two writers with
-	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
-	// The runtime task-worktree staging path keeps staging them — it is their
-	// sole writer.
-	//
-	// "Sole writer" is scoped to the tick on purpose. For a persistent
-	// (non-task) agent the home dir is also the session workDir, and
-	// session-start staging writes these same files through the NON-skipping
-	// path — internal/runtime/tmux.stageStartFiles and
-	// runtime.StageSessionWorkDir (subprocess/acp) both call
-	// StageProviderOverlayDir with a nil skip. So a hybrid document can
-	// reappear at session start; the next tick converges it. That turns the
-	// permanent drift this fix targets into a transient one, which is the
-	// actual invariant — not that nothing else ever writes these paths.
+	// Materialize missing hooks before CopyFiles is fingerprinted, including
+	// provider overlays without explicit install_agent_hooks. Preserve existing
+	// mergeable files so hooks.Install remains their sole writer on a reconcile
+	// tick. The shared staging option still lets later overlay layers override
+	// files created earlier in this same pass.
 	//
 	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
 	// Staging has no version check and writes no backup, so without this it
@@ -6515,14 +6504,16 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// One option value is created here and reused across every staging call
 	// below: it carries the per-pass write-tracking that keeps a path this pass
 	// itself wrote overridable by a later overlay layer (last-writer-wins).
-	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
+	preserveManaged := runtime.WithPreserve(func(rel string, existing []byte) bool {
+		return overlay.IsMergeablePath(rel) || hooks.PreserveManagedFile(rel, existing)
+	})
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
+		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

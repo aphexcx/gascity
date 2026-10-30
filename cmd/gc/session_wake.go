@@ -245,13 +245,18 @@ func beginSessionDrainInfo(
 // the row is demand again -> a fresh seat claims it.
 const executionStalledDrainReason = "execution-stalled"
 
+// Startup-menu drains use the same non-cancelable execution-backstop policy,
+// while retaining the observed menu heading in runtime metadata and logs.
+const startupMenuDrainPrefix = "startup-menu: "
+
 func drainReasonCancelable(reason string) bool {
 	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
-		reason != executionStalledDrainReason
+		reason != executionStalledDrainReason && !strings.HasPrefix(reason, startupMenuDrainPrefix)
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
+	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason &&
+		!strings.HasPrefix(reason, startupMenuDrainPrefix)
 }
 
 // liveClaimDrainReasonCancelable is the live-claim cancel lens: the in-flight
