@@ -412,6 +412,11 @@ lint-new: $(GOLANGCI_LINT)
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(CHECK_ICU) --lint $(LINT_FLAGS) -- $$pkgs || exit $$?; \
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" $(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files $$pkgs
 
+.PHONY: lint-fix
+## lint-fix: apply fixes in staged Go packages; review git diff before staging
+lint-fix:
+	$(MAKE) lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="$(LINT_FLAGS) --fix"
+
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
 	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
