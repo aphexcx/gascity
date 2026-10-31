@@ -29,6 +29,7 @@
           "name",
           "qualified_name",
           "suspended",
+          "implicit",
           "work_query",
           "sling_query"
         ],
@@ -55,6 +56,9 @@
             "type": "string"
           },
           "suspended": {
+            "type": "boolean"
+          },
+          "implicit": {
             "type": "boolean"
           },
           "pool": {
