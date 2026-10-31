@@ -1,0 +1,124 @@
+name: upstream-twin-gates
+
+on:
+  workflow_call:
+    inputs:
+      twin_head:
+        description: "Full existing twin commit SHA in this repository"
+        required: true
+        type: string
+      twin_base:
+        description: "Full upstream base SHA whose staged delta the hook must check"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  commit-hook:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TWIN_HEAD: ${{ inputs.twin_head }}
+      TWIN_BASE: ${{ inputs.twin_base }}
+      NOGO_BUILD_FLAGS: --keep_going --output_groups=nogo_fix --jobs=2
+    steps:
+      - name: Validate immutable inputs
+        shell: bash
+        run: |
+          [[ "$TWIN_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TWIN_BASE" =~ ^[0-9a-f]{40}$ ]]
+          test "$TWIN_HEAD" != "$TWIN_BASE"
+          mkdir -p "$RUNNER_TEMP/twin-evidence"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          path: recipe
+
+      - name: Preserve the recipe outside the twin checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/twin-recipe/scripts/lib"
+          cp -f recipe/scripts/ensure-upstream-golangci-lint recipe/scripts/ensure-golangci-lint "$RUNNER_TEMP/twin-recipe/scripts/"
+          cp -f recipe/scripts/lib/go-toolchain.sh "$RUNNER_TEMP/twin-recipe/scripts/lib/"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.twin_head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the frozen source and base
+        run: |
+          test "$(git rev-parse HEAD)" = "$TWIN_HEAD"
+          git merge-base --is-ancestor "$TWIN_BASE" "$TWIN_HEAD"
+          test -z "$(git status --porcelain)"
+          test -x .githooks/pre-commit
+          git diff --stat "$TWIN_BASE" "$TWIN_HEAD" | tee "$RUNNER_TEMP/twin-evidence/delta.txt"
+          git rev-parse "$TWIN_HEAD^{tree}" > "$RUNNER_TEMP/twin-evidence/input-tree.txt"
+          cp -f .githooks/pre-commit "$RUNNER_TEMP/twin-evidence/pre-commit"
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev tmux jq
+
+      # The twin's pinned bootstrap supports a public read-only cache with local fallback.
+      - uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_FORK_CACHE: "true"
+
+      - name: Build the linter with the twin's Go compiler
+        run: |
+          lint_bin=$(sh "$RUNNER_TEMP/twin-recipe/scripts/ensure-upstream-golangci-lint" "$PWD")
+          dirname "$lint_bin" >> "$GITHUB_PATH"
+          "$lint_bin" version | tee "$RUNNER_TEMP/twin-evidence/linter.txt"
+
+      - name: Commit the complete twin delta through its unchanged hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git config --local core.hooksPath .githooks
+            git config --local user.name 'Upstream twin gate'
+            git config --local user.email 'upstream-twin-gate@users.noreply.github.com'
+            make check-hooks
+            sha256sum .githooks/pre-commit
+            git show -s --format=%B "$TWIN_HEAD" |
+              git interpret-trailers --trim-empty --if-exists replace \
+                --trailer 'Hook-Skipped:' \
+                --trailer "Gate-Evidence: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                > "$RUNNER_TEMP/twin-message.txt"
+            GIT_AUTHOR_NAME="$(git show -s --format=%an "$TWIN_HEAD")"
+            GIT_AUTHOR_EMAIL="$(git show -s --format=%ae "$TWIN_HEAD")"
+            GIT_AUTHOR_DATE="$(git show -s --format=%aI "$TWIN_HEAD")"
+            export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE
+            # Only this disposable CI checkout is reset. The published twin is untouched.
+            git switch -c upstream-gated-twin
+            git reset --soft "$TWIN_BASE"
+            test -n "$(git diff --cached --name-only)"
+            echo 'Running upstream pre-commit: staged formatter, nogo, and code generation.'
+            git commit -F "$RUNNER_TEMP/twin-message.txt"
+            # A generated-source or formatter change requires a new reviewed input.
+            git diff --exit-code "$TWIN_HEAD" HEAD
+            test -z "$(git status --porcelain)"
+            git rev-parse HEAD > "$RUNNER_TEMP/twin-evidence/commit.txt"
+            git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/twin-evidence/output-tree.txt"
+            git bundle create "$RUNNER_TEMP/twin-evidence/twin.bundle" refs/heads/upstream-gated-twin "^$TWIN_BASE"
+            echo 'PASS: unchanged upstream pre-commit accepted the exact input tree.'
+          } 2>&1 | tee "$RUNNER_TEMP/twin-evidence/pre-commit.log"
+
+      - name: Upload hook evidence and the accepted commit
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: upstream-twin-gate
+          path: ${{ runner.temp }}/twin-evidence/
+          if-no-files-found: error
+          retention-days: 14

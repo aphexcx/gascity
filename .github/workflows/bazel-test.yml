@@ -16,6 +16,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      upstream_twin_head:
+        description: "Optional full twin commit SHA: run its unchanged pre-commit on Linux"
+        type: string
+        default: ""
+      upstream_twin_base:
+        description: "Full upstream base SHA for that twin (required with upstream_twin_head)"
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,7 +34,15 @@ permissions:
   contents: read
 
 jobs:
+  upstream-twin:
+    if: github.event_name == 'workflow_dispatch' && inputs.upstream_twin_head != ''
+    uses: ./.github/workflows/upstream-twin-gates.yml
+    with:
+      twin_head: ${{ inputs.upstream_twin_head }}
+      twin_base: ${{ inputs.upstream_twin_base }}
+
   bazel:
+    if: inputs.upstream_twin_head == ''
     name: bazel test (side-by-side)
     runs-on: ubuntu-latest
     timeout-minutes: 90
