@@ -2,6 +2,32 @@ package tmux
 
 import "testing"
 
+func TestNudgeDraftMatches(t *testing.T) {
+	for _, tt := range []struct {
+		name, draft, message string
+		want                 bool
+	}{
+		{"exact", "one copy", "one copy", true},
+		{"spaces", "one  copy", "one\tcopy", true},
+		{"row boundary", "one\ncopy", "one copy", true},
+		{"word split", "one co\npy", "one copy", true},
+		{"blank rows", "one\n\ncopy", "one\ncopy", true},
+		{"unicode whitespace", "one\u00a0copy", "one copy", true},
+		{"different word", "one\nother", "one copy", false},
+		{"different inline spacing", "ab cd", "a bcd", false},
+		{"extra suffix", "one copy", "one copy extra", false},
+		{"truncated message", "one copy extra", "one copy", false},
+		{"empty", "", "", true},
+		{"missing draft", "", "one copy", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nudgeDraftMatches(tt.draft, tt.message); got != tt.want {
+				t.Fatalf("matches(%q, %q)=%v, want %v", tt.draft, tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNudgeComposer(t *testing.T) {
 	for _, tt := range []struct {
 		name, pane, prefix, want string

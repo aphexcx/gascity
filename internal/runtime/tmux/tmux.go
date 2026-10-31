@@ -2821,7 +2821,10 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" {
-			if draft != strings.TrimSpace(message) {
+			if strings.Contains(draft, "[Pasted text #") {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste; payload identity is unavailable", ErrNudgeDraftDeferred, target)
+			}
+			if !nudgeDraftMatches(draft, message) {
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
 			}
 			resumeDraft = true
@@ -2854,7 +2857,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// 2. Send the text as one bracketed paste, with retry on transient errors;
 	// the byte count feeds the delivery receipt (gp-2rq).
 	if resumeDraft {
-		// The exact payload is already in the composer. Both startup and queue
+		// The matching payload is already in the composer. Both startup and queue
 		// retries enter here; they may repeat the submit, never the paste.
 		payloadBytes = len(message)
 	} else {

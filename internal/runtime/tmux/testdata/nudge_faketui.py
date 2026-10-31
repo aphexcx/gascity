@@ -12,6 +12,8 @@ logpath = sys.argv[1]
 busy_delay = float(sys.argv[2])   # seconds after submit before the spinner shows
 busy_hold = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
 retain_draft = len(sys.argv) > 4 and sys.argv[4] == "retain"
+wrap_retry = len(sys.argv) > 4 and sys.argv[4] == "wrap-retry"
+swallow = int(sys.argv[5]) if wrap_retry else 0
 
 state = {"draft": [], "busy_at": None, "done_at": None}
 lock = threading.Lock()
@@ -33,6 +35,9 @@ def render():
             out.append("✻ Thinking… (%ds · ↑ 0 tokens · esc to interrupt)\r\n" % el)
         else:
             out.append("\r\n")
+        if wrap_retry:
+            width = os.get_terminal_size().columns - 2
+            draft = "\r\n  ".join(draft[i:i + width] for i in range(0, len(draft), width))
         out.append("────────────────────\r\n❯ %s\r\n────────────────────\r\n" % draft)
         out.append("  bypass permissions on\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
@@ -54,6 +59,10 @@ try:
             if b == 0x15:                      # C-u: clear composer
                 state["draft"] = []
             elif b in (0x0d, 0x0a):            # CR / LF: submit
+                if swallow > 0:
+                    swallow -= 1
+                    log("SWALLOWED-ENTER")
+                    continue
                 if retain_draft:
                     log("RETAINED-ENTER")
                     continue

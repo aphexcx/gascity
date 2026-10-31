@@ -110,6 +110,25 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	return strings.TrimSpace(strings.Join(parts, "\n")), true
 }
 
+// nudgeDraftMatches collapses whitespace within each displayed row. A row
+// boundary can be whitespace or a soft wrap inside a word; all other content,
+// including word boundaries within a row, must match the requested payload.
+func nudgeDraftMatches(draft, message string) bool {
+	remaining := strings.Join(strings.Fields(message), " ")
+	for _, row := range strings.Split(draft, "\n") {
+		row = strings.Join(strings.Fields(row), " ")
+		if row == "" {
+			continue
+		}
+		var ok bool
+		remaining, ok = strings.CutPrefix(strings.TrimPrefix(remaining, " "), row)
+		if !ok {
+			return false
+		}
+	}
+	return remaining == ""
+}
+
 func codexComposerFooter(line string) bool {
 	if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
 		return false

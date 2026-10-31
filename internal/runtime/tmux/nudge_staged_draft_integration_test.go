@@ -127,4 +127,66 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			t.Fatalf("TUI submits = %d, want 0", got)
 		}
 	})
+
+	t.Run("wrapped Claude draft at 80 columns: retry submits without repaste", func(t *testing.T) {
+		claudeScript, err := filepath.Abs(filepath.Join("testdata", "nudge_faketui.py"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "tui.log")
+		tm := NewTmuxWithConfig(Config{
+			SocketName:        "gcwrappedclaudedraft",
+			NudgeReadyTimeout: 10 * time.Second,
+			NudgeLockTimeout:  30 * time.Second,
+		})
+		t.Cleanup(func() { _, _ = tm.run("kill-server") })
+		command := fmt.Sprintf("python3 %s %s 0.1 30 wrap-retry %d", shellQuote(claudeScript), shellQuote(logPath), submitEnterMaxSends)
+		if _, err := tm.run("new-session", "-d", "-s", "wrapped", "-x", "80", "-y", "30", command); err != nil {
+			t.Fatalf("creating private 80-column pane: %v", err)
+		}
+		if err := tm.SetEnvironment("wrapped", "GC_PROVIDER", "claude"); err != nil {
+			t.Fatal(err)
+		}
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
+		deadline := time.After(5 * time.Second)
+		for {
+			if pane, err := tm.CapturePane("wrapped", 40); err == nil && strings.Contains(pane, "fake-claude-tui") {
+				break
+			}
+			select {
+			case <-poll.C:
+			case <-deadline:
+				t.Fatal("wrapped Claude TUI never painted")
+			}
+		}
+		width, err := tm.run("display-message", "-p", "-t", "wrapped", "#{pane_width}")
+		if err != nil || strings.TrimSpace(width) != "80" {
+			t.Fatalf("pane width=%q err=%v, want 80", width, err)
+		}
+		// Include an unbroken token so a wrap inside a word is covered too.
+		message := "long founder line " + strings.Repeat("abcdefghij", 20) + " with final words"
+		if err := tm.NudgeSession("wrapped", message); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			t.Fatalf("initial submit=%v, want an unconfirmed preserved draft", err)
+		}
+		pane, err := tm.CapturePane("wrapped", 40)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("80-column pane after unconfirmed submit:\n%s", pane)
+		draft, observed := nudgeComposer(pane, "❯ ")
+		if !observed || !strings.Contains(draft, "\n") || draft == message {
+			t.Fatalf("draft=%q observed=%v; expected real wrapped rows", draft, observed)
+		}
+		if err := tm.NudgeSession("wrapped", message); err != nil {
+			t.Fatalf("wrapped draft retry: %v", err)
+		}
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(raw), "\tSUBMIT\t") != 1 || !strings.Contains(string(raw), "\tSUBMIT\t"+message+"\n") {
+			t.Fatalf("want one exact payload, with no second paste:\n%s", raw)
+		}
+	})
 }

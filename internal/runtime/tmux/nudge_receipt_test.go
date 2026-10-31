@@ -131,6 +131,36 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 	})
 }
 
+func TestNudgeDeliveryDefersCollapsedDraft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+		tm := NewTmux()
+		mutations := 0
+		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			switch {
+			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+				return "GC_PROVIDER=claude", nil
+			case slices.Contains(args, "capture-pane"):
+				return "────\n❯ [Pasted text #1 +4 lines]\n────", nil
+			case slices.Contains(args, "send-keys"):
+				mutations++
+			}
+			return "", nil
+		}}
+		receipts := collectReceipts(tm)
+		delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "one\ntwo\nthree\nfour\nfive", func(_, text string, _ time.Duration) (int, error) {
+			mutations++
+			return len(text), nil
+		})
+		if !errors.Is(err, ErrNudgeDraftDeferred) || !strings.Contains(err.Error(), "collapsed paste") {
+			t.Fatalf("err=%v, want an explicit collapsed-paste diagnostic", err)
+		}
+		if mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
+			t.Fatalf("mutations=%d delivery=%+v receipts=%v; unknown payload must stay untouched", mutations, delivery, receipts())
+		}
+	})
+}
+
 func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 	for _, tt := range []struct {
 		provider, prefix, message string
