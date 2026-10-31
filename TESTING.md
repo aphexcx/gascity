@@ -28,6 +28,10 @@ not describe a target as an existing gate.
 
 ## Bazel: the fast feedback loop for agents
 
+For ports onto upstream, use the [upstream twin gate recipe](engdocs/contributors/upstream-twins.md).
+It runs the upstream commit hook on a pinned Linux checkout when the local
+host cannot run upstream's Bazel toolchain.
+
 Everything below describes the `go test` policy that CI enforces. For
 day-to-day iteration, agents should prefer the **Bazel side-by-side
 suite**: same tests, remote-cached, shared across worktrees and CI:

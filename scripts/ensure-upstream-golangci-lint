@@ -1,0 +1,50 @@
+#!/bin/sh
+# Print a validated, externally cached linter for the supplied upstream checkout.
+set -eu
+
+checkout=${1:?usage: ensure-upstream-golangci-lint <upstream-checkout>}
+helper_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+checkout=$(CDPATH='' cd -- "$checkout" && pwd -P)
+lint_version=$(awk '$1 == "GOLANGCI_LINT_VERSION" && $2 == ":=" { print $3; exit }' "$checkout/Makefile")
+required_go=$(awk '$1 == "go" { version = "go" $2 } $1 == "toolchain" && $2 != "default" { toolchain = $2 } END { print toolchain ? toolchain : version }' "$checkout/go.mod")
+if ! printf '%s\n' "$lint_version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+   ! printf '%s\n' "$required_go" | LC_ALL=C grep -Eq '^go[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "upstream-linter: require explicit release pins in Makefile and go.mod" >&2
+  exit 1
+fi
+
+cd "$checkout"
+case "${GOTOOLCHAIN:-auto}" in
+  auto) GOTOOLCHAIN=$required_go ;;
+esac
+export GOTOOLCHAIN
+# shellcheck source=scripts/lib/go-toolchain.sh
+. "$helper_dir/lib/go-toolchain.sh"
+if ! gc_go_toolchain "$checkout"; then
+  echo "upstream-linter: resolve the compiler with GOTOOLCHAIN=$required_go and unset stale GOROOT" >&2
+  exit 1
+fi
+actual_go=$(go env GOVERSION)
+if [ "$actual_go" != "$required_go" ]; then
+  echo "upstream-linter: compiler $actual_go does not match $required_go; rerun with GOTOOLCHAIN=$required_go and unset stale GOROOT" >&2
+  exit 1
+fi
+
+# Use the first GOPATH entry, matching Go's binary installation convention.
+gopath=$(go env GOPATH)
+gopath=${gopath%%:*}
+case "$gopath" in
+  /*) ;;
+  *) echo "upstream-linter: GOPATH must be an absolute external directory" >&2; exit 1 ;;
+esac
+mkdir -p "$gopath"
+gopath=$(CDPATH='' cd -- "$gopath" && pwd -P)
+recipe_root=$(CDPATH='' cd -- "$helper_dir/.." && pwd -P)
+case "$gopath/" in
+  "$checkout/"*|"$recipe_root/"*)
+    echo "upstream-linter: set GOPATH outside both the upstream and recipe checkouts" >&2
+    exit 1 ;;
+esac
+lint_bin="$gopath/bin/gascity-tools/golangci-lint-v$lint_version-$actual_go/golangci-lint"
+sh "$helper_dir/ensure-golangci-lint" "$lint_bin" "$lint_version"
+printf '%s\n' "$lint_bin"

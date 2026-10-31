@@ -84,3 +84,66 @@ esac
 		})
 	}
 }
+
+func TestUpstreamLinterUsesDeclaredCompilerAndExternalCache(t *testing.T) {
+	for _, tc := range []struct {
+		name, directive, actual string
+		mismatch                bool
+	}{
+		{name: "go directive", actual: "go1.27.3"},
+		{name: "toolchain directive", directive: "toolchain go1.27.4\n", actual: "go1.27.4"},
+		{name: "wrong compiler", actual: "go1.26.6", mismatch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := t.TempDir()
+			checkout := filepath.Join(fixture, "upstream")
+			toolRoot := filepath.Join(fixture, "compiler")
+			gopath := filepath.Join(fixture, "cache")
+			if err := os.MkdirAll(filepath.Join(toolRoot, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(checkout, "go.mod"), "module example.com/upstream\n\ngo 1.27.3\n"+tc.directive)
+			writeTestFile(t, filepath.Join(checkout, "Makefile"), "GOLANGCI_LINT_VERSION := 2.14.0\n")
+			installLog := filepath.Join(fixture, "installs")
+			metadata := "lint: " + tc.actual + "\n\tmod\tgithub.com/golangci/golangci-lint/v2\tv2.14.0\n"
+			writeExecutable(t, filepath.Join(toolRoot, "bin", "go"), `#!/bin/sh
+set -eu
+case "$*" in
+  'env GOROOT') printf '%s\n' `+shellQuote(toolRoot)+` ;;
+  'env GOVERSION') printf '%s\n' `+shellQuote(tc.actual)+` ;;
+  'env GOPATH') printf '%s\n' `+shellQuote(gopath)+` ;;
+  'env GOTMPDIR'|'env GOCACHE') printf '\n' ;;
+  version\ -m\ *) cat "$3" ;;
+  'install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0')
+    printf 'install\n' >> `+shellQuote(installLog)+`
+    printf '%s' `+shellQuote(metadata)+` > "$GOBIN/golangci-lint"
+    chmod +x "$GOBIN/golangci-lint"
+    ;;
+  *) echo "unexpected go arguments: $*" >&2; exit 99 ;;
+esac
+`)
+			for attempt := 0; attempt < 2; attempt++ {
+				cmd := testCommand("sh", filepath.Join(repoRoot(t), "scripts", "ensure-upstream-golangci-lint"), checkout)
+				cmd.Env = []string{"PATH=" + filepath.Join(toolRoot, "bin") + ":" + os.Getenv("PATH"), "GOTOOLCHAIN=auto"}
+				out, err := cmd.CombinedOutput()
+				if tc.mismatch {
+					if err == nil || !strings.Contains(string(out), "go1.26.6") || !strings.Contains(string(out), "GOTOOLCHAIN=go1.27.3") {
+						t.Fatalf("mismatch must name actual compiler and remedy: err=%v output=%s", err, out)
+					}
+					if _, err := os.Stat(installLog); !os.IsNotExist(err) {
+						t.Fatalf("mismatch must refuse installation: %v", err)
+					}
+					return
+				}
+				want := filepath.Join(gopath, "bin", "gascity-tools", "golangci-lint-v2.14.0-"+tc.actual, "golangci-lint")
+				if err != nil || !strings.HasSuffix(string(out), want+"\n") {
+					t.Fatalf("linter path: err=%v output=%s want=%s", err, out, want)
+				}
+			}
+			installs, err := os.ReadFile(installLog)
+			if err != nil || string(installs) != "install\n" {
+				t.Fatalf("matching cached binary must be reused: err=%v installs=%q", err, installs)
+			}
+		})
+	}
+}
