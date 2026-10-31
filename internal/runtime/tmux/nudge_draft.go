@@ -111,36 +111,22 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	return strings.TrimSpace(strings.Join(parts, "\n")), true
 }
 
-// nudgeDraftMatches collapses whitespace but joins words across rows only
-// after a row that fills the measured composer width. Without that evidence,
-// a newline remains a word boundary. A nonpositive width disables wrap joins.
+// nudgeDraftMatches preserves payload whitespace while allowing the rendering
+// at the measured composer width. Only trailing row padding removed by the
+// composer reader is ignored. A nonpositive width requires an exact match.
 func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
-	remaining := strings.Join(strings.Fields(message), " ")
-	if strings.Join(strings.Fields(draft), " ") == remaining {
+	message = strings.TrimSpace(message)
+	if draft == message {
 		return true
 	}
 	if wrapWidth <= 0 {
 		return false
 	}
-	first, wrapped := true, false
-	for _, row := range strings.Split(draft, "\n") {
-		columns := runewidth.StringWidth(row)
-		row = strings.Join(strings.Fields(row), " ")
-		if row == "" {
-			wrapped = false
-			continue
-		}
-		if !first && !wrapped && !strings.HasPrefix(remaining, " ") {
-			return false
-		}
-		var ok bool
-		remaining, ok = strings.CutPrefix(strings.TrimPrefix(remaining, " "), row)
-		if !ok {
-			return false
-		}
-		first, wrapped = false, columns == wrapWidth
+	rows := strings.Split(runewidth.Wrap(message, wrapWidth), "\n")
+	for i, row := range rows {
+		rows[i] = strings.TrimRight(row, " ")
 	}
-	return remaining == ""
+	return draft == strings.TrimSpace(strings.Join(rows, "\n"))
 }
 
 func codexComposerFooter(line string) bool {

@@ -86,6 +86,34 @@ func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 }
 
 func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
+	t.Run("quoted whitespace changes payload", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+			tm := NewTmux()
+			mutations := 0
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				switch {
+				case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+					return "GC_PROVIDER=claude", nil
+				case slices.Contains(args, "capture-pane"):
+					return "────\n❯ print(\"a  b\")\n────", nil
+				case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
+					return "80", nil
+				case slices.Contains(args, "send-keys"):
+					mutations++
+				}
+				return "", nil
+			}}
+			receipts := collectReceipts(tm)
+			delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), `print("a b")`, func(_, text string, _ time.Duration) (int, error) {
+				mutations++
+				return len(text), nil
+			})
+			if !errors.Is(err, ErrNudgeDraftDeferred) || mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
+				t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; different payload must stay untouched", err, mutations, delivery, receipts())
+			}
+		})
+	})
 	synctest.Test(t, func(t *testing.T) {
 		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 		tm := NewTmux()
