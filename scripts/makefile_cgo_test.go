@@ -416,14 +416,15 @@ func TestMakefileCGOFixtureIgnoresSavedSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GOENV", goEnvFile)
-	cmd := testCommand("go", "env", "CGO_ENABLED", "GOENV")
+	cmd := testCommand("go", "env", "CGO_ENABLED", "GOENV", "GOTELEMETRYDIR")
 	cmd.Env = filteredMakefileCGOTestEnv(t)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != "1\n\n" {
-		t.Fatalf("fixture inherited saved CGO settings: %s", out)
+	want := "1\n\n" + goEnvValue(t, "GOTELEMETRYDIR") + "\n"
+	if string(out) != want {
+		t.Fatalf("fixture Go settings = %q, want %q", out, want)
 	}
 	for _, entry := range cmd.Env {
 		if entry == "HOME="+os.Getenv("HOME") {
@@ -721,6 +722,9 @@ func filteredMakefileCGOTestEnv(t *testing.T) []string {
 	for _, key := range []string{"GOPATH", "GOMODCACHE", "GOCACHE"} {
 		filtered = replaceScriptEnv(filtered, key, goEnvValue(t, key))
 	}
+	// Go's test override keeps its asynchronous telemetry writer outside
+	// the fixture's temporary HOME, avoiding a race with TempDir cleanup.
+	filtered = replaceScriptEnv(filtered, "TEST_TELEMETRY_DIR", goEnvValue(t, "GOTELEMETRYDIR"))
 	// Preserve the selected toolchain when PATH's Go driver is older than
 	// go.mod requires, including nested make commands with an isolated HOME.
 	return append(filtered,
