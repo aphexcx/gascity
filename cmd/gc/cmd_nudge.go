@@ -1629,6 +1629,10 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				// (gp-2io): fall through to the queue like any other error.
 				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
 			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
+				telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
+				return nudgeErr
+			}
 			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
 				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
 			}
@@ -1903,6 +1907,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
+	if result.Submit == runtime.NudgeSubmitOwnershipLost || errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
+		// Keep terminal ownership loss ahead of the generic retry path,
+		// including providers exposing it through an error-only boundary.
+		ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "failed", "draft_ownership_lost", "provider-nudge-return")
+		return false, errors.Join(bookkeepErr, ackErr)
+	}
 	if err == nil {
 		// The queue must not ack an unconfirmed submit: the payload may be
 		// sitting drafted-but-unsubmitted in the pane (ga-bwm). Before gp-2io
@@ -1938,13 +1948,6 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			return false, errors.Join(bookkeepErr, err)
 		}
 		return false, bookkeepErr
-	}
-	if result.Submit == runtime.NudgeSubmitOwnershipLost {
-		// The prior paste lost ownership before acceptance was established.
-		// Keep the reason in the terminal receipt and remove the queued item;
-		// retrying after its composer clears could duplicate a consumed input.
-		ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "failed", "draft_ownership_lost", "provider-nudge-return")
-		return false, errors.Join(bookkeepErr, ackErr)
 	}
 	if !result.Landed() {
 		// The runtime declined without an error (e.g. the session stopped
@@ -3112,7 +3115,7 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	item.LastError = cause.Error()
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
-	if errors.Is(cause, errNudgeSessionFenceMismatch) {
+	if errors.Is(cause, errNudgeSessionFenceMismatch) || errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}

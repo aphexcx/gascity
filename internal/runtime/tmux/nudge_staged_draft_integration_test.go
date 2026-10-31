@@ -359,7 +359,9 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				} else if ownership.timing == "before-observation" {
 					want = runtime.NudgeSubmitOwnershipLost
 				}
-				if !attached || err != nil || delivery.Submit != want || !delivery.Landed() || delivery.UnconfirmedSubmitError("wrapped") != nil {
+				boundaryErr := delivery.UnconfirmedSubmitError("wrapped")
+				terminalLoss := errors.Is(boundaryErr, runtime.ErrNudgeDraftOwnershipLost)
+				if !attached || err != nil || delivery.Submit != want || !delivery.Landed() || terminalLoss != (want == runtime.NudgeSubmitOwnershipLost) || errors.Is(boundaryErr, ErrNudgeSubmitUnconfirmed) {
 					t.Fatalf("attached=%t delivery=%+v err=%v; want terminal %s without replay", attached, delivery, err, want)
 				}
 				if got := count(t, logPath, "SUBMIT"); got != submits || len(receipts()) != 1 || receipts()[0].Submitted != (want == runtime.NudgeSubmitConfirmed) {

@@ -4282,6 +4282,25 @@ func TestRecordQueuedNudgeFailureRequeuesClaimedNudge(t *testing.T) {
 }
 
 func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
+	t.Run("terminal ownership loss cannot requeue through a live fallback", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		dir := t.TempDir()
+		now := time.Now()
+		item := newQueuedNudge("worker", "preserved input", now)
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatal(err)
+		}
+		if err := recordQueuedNudgeFailure(dir, []string{item.ID}, runtime.ErrNudgeDraftOwnershipLost, now); err != nil {
+			t.Fatal(err)
+		}
+		pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now)
+		if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+			t.Fatalf("terminal loss requeued: pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
+		}
+		if dead[0].LastError != runtime.ErrNudgeDraftOwnershipLost.Error() {
+			t.Fatalf("lost terminal reason: %+v", dead[0])
+		}
+	})
 	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
@@ -6536,7 +6555,8 @@ func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool, submit run
 // pane is idle): the payload lands whole, the agent is never seen taking it.
 type unconfirmedImmediateVouchingFake struct {
 	*runtime.Fake
-	draft string
+	draft  string
+	submit runtime.NudgeSubmit
 }
 
 func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
@@ -6544,7 +6564,11 @@ func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, conten
 		return runtime.NudgeDelivery{}, err
 	}
 	p.draft = runtime.FlattenText(content)
-	return runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitUnconfirmed}, nil
+	submit := p.submit
+	if submit == "" {
+		submit = runtime.NudgeSubmitUnconfirmed
+	}
+	return runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: submit}, nil
 }
 
 func (p *unconfirmedImmediateVouchingFake) NudgeDelivered(_ string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
@@ -6567,6 +6591,39 @@ func TestDeliverSessionNudgeWaitIdleQueuesUnconfirmedSubmit(t *testing.T) {
 
 func TestSendMailNotifyQueuesUnconfirmedSubmit(t *testing.T) {
 	testLiveNudgeFallbackPreservesPayload(t, true)
+	for _, route := range []string{"mail", "sling", "session"} {
+		t.Run("terminal ownership loss via "+route, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			fake := &unconfirmedImmediateVouchingFake{Fake: runtime.NewFake(), submit: runtime.NudgeSubmitOwnershipLost}
+			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			fake.WaitForIdleErrors["sess-worker"] = nil
+			target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "claude"}, sessionName: "sess-worker"}
+			var stdout, stderr bytes.Buffer
+			switch route {
+			case "mail":
+				if err := sendMailNotifyWithProvider(target, fake); !errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
+					t.Errorf("mail must report terminal ownership loss: %v", err)
+				}
+			case "sling":
+				deliverSlingNudge(target, fake, nil, dir, &stdout, &stderr)
+				if !strings.Contains(stderr.String(), runtime.ErrNudgeDraftOwnershipLost.Error()) || stdout.Len() != 0 {
+					t.Errorf("sling must report terminal loss, stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+			case "session":
+				code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+				if code == 0 || !strings.Contains(stderr.String(), runtime.ErrNudgeDraftOwnershipLost.Error()) || stdout.Len() != 0 {
+					t.Errorf("session must report terminal loss, code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+			}
+			pending, inFlight, _, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil || len(pending)+len(inFlight) != 0 {
+				t.Fatalf("terminal loss must not schedule replay: pending=%+v inFlight=%+v err=%v", pending, inFlight, err)
+			}
+		})
+	}
 }
 
 func testLiveNudgeFallbackPreservesPayload(t *testing.T, sendMail bool) {

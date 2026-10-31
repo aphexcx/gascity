@@ -1756,7 +1756,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// preserved draft also leaves the session alive with a diagnostic;
 			// killing it would destroy the input we deliberately retained.
 			// Other errors still fail the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) && !errors.Is(err, ErrNudgeDraftDeferred) {
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) && !errors.Is(err, ErrNudgeDraftDeferred) && !errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
 			// The stderr warning alone is not a durable record (Layer 0

@@ -1750,6 +1750,11 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 				// (gp-2io): fall through to the queue like any other error.
 				nudgeErr = result.UnconfirmedSubmitError(target.agent.QualifiedName())
 			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
+				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nudgeErr)
+				fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", nudgeErr) //nolint:errcheck // best-effort
+				return
+			}
 			if nudgeErr == nil && result.Landed() {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 				var sessFront *session.Store

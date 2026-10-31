@@ -160,8 +160,28 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 							if err != nil || mutations != submits || !delivery.Landed() || delivery.Submit != want || len(receipts()) != 1 || receipts()[0].Submitted != busyAfter {
 								t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; earlier submit evidence must survive", err, mutations, delivery, receipts())
 							}
-							if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {
-								t.Fatalf("ownership loss must never license a replay: %v", err)
+							boundaryErr := delivery.UnconfirmedSubmitError(t.Name())
+							if busyAfter && boundaryErr != nil {
+								t.Errorf("confirmed submit must stay successful: %v", boundaryErr)
+							} else if !busyAfter && (boundaryErr == nil || errors.Is(boundaryErr, ErrNudgeSubmitUnconfirmed) || errors.Is(boundaryErr, ErrNudgeDraftDeferred)) {
+								t.Errorf("ownership loss needs a terminal error, not success or replay: %v", boundaryErr)
+							}
+							if !tt.sentFirst {
+								if err := tm.NudgeSession(t.Name(), tt.message); err == nil || errors.Is(err, ErrNudgeSubmitUnconfirmed) || errors.Is(err, ErrNudgeDraftDeferred) {
+									t.Errorf("direct nudge must report terminal loss before submission: %v", err)
+								}
+								ops := &fakeStartOps{hasSessionResult: true}
+								ops.sendKeysHook = func() { ops.sendKeysErr = tm.NudgeSession(t.Name(), tt.message) }
+								cfg := runtime.Config{Command: "claude", Nudge: tt.message}
+								if err := doStartSession(context.Background(), ops, t.Name(), cfg, DefaultConfig().SetupTimeout); err != nil {
+									t.Fatalf("startup must preserve the session and diagnose terminal loss: %v", err)
+								}
+								callsByMethod(t, ops, "sendKeys", 1)
+								callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+								callsByMethod(t, ops, "killSession", 0)
+								if mutations != 0 {
+									t.Fatalf("terminal loss must not replay input: %d mutations", mutations)
+								}
 							}
 							return
 						}

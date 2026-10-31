@@ -62,6 +62,10 @@ var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmu
 // pending payload. A queue must bound these deferrals and surface exhaustion.
 var ErrNudgeDraftUnowned = errors.New("nudge: draft has no matching paste provenance")
 
+// ErrNudgeDraftOwnershipLost is a terminal delivery failure: the prior paste
+// lost ownership before acceptance was established. Preserve it; never replay.
+var ErrNudgeDraftOwnershipLost = errors.New("nudge: draft ownership lost before acceptance; preserved input requires attention, automatic replay stopped")
+
 // NudgeDelivery is a vouching runtime's evidence about ONE nudge. It is the
 // typed answer behind [NudgeVouchingProvider]: the fields are independent
 // observations, not projections of one another, so a consumer classifying the
@@ -120,9 +124,10 @@ func (d NudgeDelivery) Landed() bool {
 }
 
 // UnconfirmedSubmitError is the ONE translation from delivery evidence to
-// the retry signal that callers without an evidence channel rely on: a
-// non-nil [ErrNudgeSubmitUnconfirmed] when the payload landed ([Landed]) but
-// the submit is unconfirmed, nil otherwise. tmux's NudgeSession/NudgeNow
+// the error that callers without an evidence channel rely on:
+// [ErrNudgeSubmitUnconfirmed] when the payload landed ([Landed]) but the submit
+// is unconfirmed, or terminal [ErrNudgeDraftOwnershipLost] when ownership was
+// lost before acceptance. Only the former permits a retry. tmux's NudgeSession/NudgeNow
 // wrappers apply it on the way out, and every consumer that acks, commits,
 // or reports success on a delivery applies it before doing so.
 //
@@ -130,6 +135,9 @@ func (d NudgeDelivery) Landed() bool {
 // there the same outcome classifies as pending — landed, hold, do not
 // redeliver — which is the whole point of carrying the evidence (gp-2io).
 func (d NudgeDelivery) UnconfirmedSubmitError(target string) error {
+	if d.Submit == NudgeSubmitOwnershipLost {
+		return fmt.Errorf("%w: session %q", ErrNudgeDraftOwnershipLost, target)
+	}
 	if d.Landed() && d.Submit == NudgeSubmitUnconfirmed {
 		return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, target)
 	}
