@@ -2911,6 +2911,7 @@ func TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass(t *testing.T) {
 	darkWork := waitDependencyGetErrorStore{Store: cityStore, prefix: "gcg", err: hardErr}
 
 	_, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		waitDependencyReaderOver(darkWork, nil),
 		beads.NudgesStore{Store: cityStore},
@@ -2933,6 +2934,7 @@ func TestPrepareWaitWakeState_SuspendedFrameRetainsAnUnprovedWait(t *testing.T) 
 	cityStore := waitWakeCityStore(now, depID)
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, nil, nil), true),
 		beads.NudgesStore{Store: cityStore},
@@ -2966,6 +2968,7 @@ func TestPrepareWaitWakeState_ResolvesBindingResidentDependency(t *testing.T) {
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
 		beads.NudgesStore{Store: cityStore},
@@ -3023,6 +3026,7 @@ func TestPrepareWaitWakeState_MigrationPreservedDependencyAnswersFromTheBinding(
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
 		beads.NudgesStore{Store: cityStore},
@@ -3115,6 +3119,7 @@ func TestPrepareWaitWakeState_CoResidentDependencyAnswersFromTheWorkStore(t *tes
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 		beads.NudgesStore{Store: cityStore},
@@ -3157,6 +3162,7 @@ func TestPrepareWaitWakeState_PrefixUncoveredRigDependencyDoesNotReapTheWaiter(t
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "frontend", Prefix: "fe"})
 
 	if _, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(
 			assembleResidencyTopology(cfg, cityStore, map[string]beads.Store{"frontend": rigStore}, nil, nil),
@@ -3200,6 +3206,7 @@ func TestPrepareWaitWakeState_AgreeingPrefixRigStillProvesTheDependencyGone(t *t
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "frontend", Prefix: declaredStoreIDPrefix(rigStore)})
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(
 			assembleResidencyTopology(cfg, cityStore, map[string]beads.Store{"frontend": rigStore}, nil, nil),
@@ -3373,6 +3380,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 			}
 
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				"",
 				sessionFrontDoor(cityStore),
 				waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 				beads.NudgesStore{Store: cityStore},
@@ -4168,6 +4176,7 @@ func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) 
 				t.Fatalf("soleBindingResidency: %v", refused)
 			}
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				"",
 				sessionFrontDoor(cityStore),
 				newWaitDependencyPlanReader(
 					assembleResidencyTopology(nil, cityStore, map[string]beads.Store{"frontend": rigStore}, bindings, nil),

@@ -77,3 +77,32 @@ func TestNudgeDeadLettersCheck(t *testing.T) {
 		t.Fatalf("corrupt queue reported green: %+v", r)
 	}
 }
+
+func TestNudgeDeadLettersCheckPendingTombstones(t *testing.T) {
+	dir := t.TempDir()
+	if err := nudgequeue.WithState(dir, func(*nudgequeue.State) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"tombstones":[
+		{"id":"pending-repair","session_id":"s-1","agent":"worker","source":"wait","terminal_state":"failed","terminal_reason":"dropped","repair_pending":true,"deleted_at":"2026-10-31T14:00:00Z"},
+		{"id":"repaired","repair_pending":false,"repaired_at":"2026-10-31T14:00:00Z"}
+	]}`)
+	if err := os.WriteFile(nudgequeue.StatePath(dir), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check := NewNudgeDeadLettersCheck()
+	check.now = func() time.Time { return time.Date(2026, 10, 31, 14, 30, 0, 0, time.UTC) }
+	r := check.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "0 dead-letter nudges unresolved") || !strings.Contains(r.Message, "1 tombstones awaiting repair") || len(r.Details) != 1 {
+		t.Fatalf("repair backlog missing or counted as replayable: %+v", r)
+	}
+	for _, want := range []string{"pending-repair", "s-1", "payload expired", "failed", "2026-10-31T14:00:00Z"} {
+		if !strings.Contains(r.Details[0], want) {
+			t.Errorf("repair detail omitted %q: %s", want, r.Details[0])
+		}
+	}
+	after, err := os.ReadFile(nudgequeue.StatePath(dir))
+	if err != nil || string(after) != string(data) {
+		t.Fatalf("doctor mutated tombstones: %v", err)
+	}
+}

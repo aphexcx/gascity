@@ -29,9 +29,6 @@ func (c *NudgeDeadLettersCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = err.Error()
 		return r
 	}
-	if len(state.Dead) == 0 {
-		return r
-	}
 	var oldest time.Time
 	now := c.now()
 	for _, item := range state.Dead {
@@ -54,6 +51,16 @@ func (c *NudgeDeadLettersCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		r.Details = append(r.Details, detail)
 	}
+	unresolved := len(r.Details)
+	repairs := 0
+	for _, tombstone := range state.Tombstones {
+		if !tombstone.RepairPending {
+			continue
+		}
+		repairs++
+		r.Details = append(r.Details, fmt.Sprintf("tombstone %s session %s (%s) payload expired at %s; awaiting repair state=%s reason=%q",
+			tombstone.ID, tombstone.Agent, tombstone.SessionID, tombstone.DeletedAt.UTC().Format(time.RFC3339Nano), tombstone.TerminalState, tombstone.TerminalReason))
+	}
 	if len(r.Details) == 0 {
 		return r
 	}
@@ -62,7 +69,10 @@ func (c *NudgeDeadLettersCheck) Run(ctx *CheckContext) *CheckResult {
 		age = max(now.Sub(oldest), 0).Truncate(time.Second).String()
 	}
 	r.Status, r.Severity = StatusWarning, SeverityAdvisory
-	r.Message = fmt.Sprintf("%d dead-letter nudges unresolved; oldest age %s; retention cap 7d", len(r.Details), age)
+	r.Message = fmt.Sprintf("%d dead-letter nudges unresolved; oldest age %s; retention cap 7d", unresolved, age)
+	if repairs > 0 {
+		r.Message += fmt.Sprintf("; %d tombstones awaiting repair", repairs)
+	}
 	return r
 }
 

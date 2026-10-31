@@ -1111,10 +1111,18 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
 		return loadWaitDependencyBead(cityPath, store, depID)
 	})
-	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
+	return prepareWaitWakeStateWithSnapshot(cityPath, cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
-func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+func prepareWaitWakeStateWithSnapshot(cityPath string, sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+	var nudgeState nudgeQueueState
+	if cityPath != "" {
+		var err error
+		nudgeState, err = nudgequeue.LoadState(cityPath)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1183,7 +1191,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 		if state == waitStateReady {
 			// Wait-nudge shadow lookup rides the nudges class; the wait bead
 			// itself is session-class. Route each to its own store; identity today.
-			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now)
+			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now, &nudgeState)
 			if err != nil {
 				return nil, err
 			}
@@ -1265,6 +1273,10 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+	nudgeState, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return err
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1293,6 +1305,11 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
+			continue
+		}
+		if done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now, &nudgeState); err != nil {
+			return err
+		} else if done {
 			continue
 		}
 		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
@@ -1358,13 +1375,17 @@ func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
 // terminal state. sessFront is the session coordination-class front door for the
 // wait bead and cap-diagnostic stamp; nudges is the nudges-class store for the
 // shadow nudge lookup. Identity today (both wrap the same work store).
-func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
+func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time, nudgeState *nudgeQueueState) (bool, error) {
 	nudgeID := wait.NudgeID
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
 	if nudgeID == "" {
 		return false, nil
+	}
+	if tombstone, ok := nudgeState.Tombstone(nudgeID); ok && tombstone.Source == "wait" && tombstone.SessionID == wait.SessionID &&
+		tombstone.Reference != nil && tombstone.Reference.Kind == "bead" && tombstone.Reference.ID == wait.ID {
+		return true, sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, tombstone.TerminalReason, "")
 	}
 	nudge, ok, err := nudgeFrontDoor(nudges).FindIncludingTerminal(nudgeID)
 	if err != nil {

@@ -457,46 +457,8 @@ func TestNudgeDeadLetterOperatorDropIsDisposition(t *testing.T) {
 func TestNudgeDeadLetterExpiredDropRepairsWaitBeforePruning(t *testing.T) {
 	for _, delayedRecovery := range []bool{false, true} {
 		t.Run(fmt.Sprintf("delayed-recovery=%t", delayedRecovery), func(t *testing.T) {
-			dir := t.TempDir()
-			now := time.Now().UTC()
-			store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore(), terminalOnly: true}
+			dir, now, store, wait := droppedWaitNudgeFixture(t)
 			nudges := beads.NudgesStore{Store: store}
-			sessionBead, err := store.Create(beads.Bead{
-				Type: sessionBeadType, Labels: []string{sessionBeadLabel},
-				Metadata: map[string]string{"session_name": "worker", "agent_name": "worker", "continuation_epoch": "1"},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			waitBead, err := store.Create(beads.Bead{
-				Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
-				Metadata: map[string]string{
-					"session_id": sessionBead.ID, "session_name": "worker", "kind": "deps",
-					"state": waitStateReady, "registered_epoch": "1", "delivery_attempt": "1",
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			wait := session.WaitInfoFromBead(waitBead)
-			item := newQueuedNudgeWithOptions("worker", "intentionally dropped wait", "wait", now, queuedNudgeOptions{
-				ID: waitNudgeID(wait), SessionID: sessionBead.ID, ContinuationEpoch: wait.RegisteredEpoch,
-				Reference: &nudgeReference{Kind: "bead", ID: waitBead.ID},
-			})
-			if err := enqueueQueuedNudgeWithStore(dir, nudges, item); err != nil {
-				t.Fatal(err)
-			}
-			shadow, found, err := nudgeFrontDoor(nudges).Find(item.ID)
-			if err != nil || !found {
-				t.Fatalf("shadow: found=%t err=%v", found, err)
-			}
-			store.failID = shadow.BeadID
-			if err := recordQueuedNudgeFailureWithStore(dir, nudges, []string{item.ID}, errNudgeManualDrop, now); err != nil {
-				t.Fatal(err)
-			}
-			if store.terminalFailures == 0 {
-				t.Fatal("terminal write failure was not exercised")
-			}
 			maintain := func(at time.Time) {
 				t.Helper()
 				if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
@@ -505,35 +467,188 @@ func TestNudgeDeadLetterExpiredDropRepairsWaitBeforePruning(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			later := now.Add(3 * time.Hour)
 			if delayedRecovery {
 				maintain(now.Add(2 * time.Hour))
 				state, err := nudgequeue.LoadState(dir)
 				if err != nil || len(state.Dead) != 1 {
 					t.Fatalf("receipt lost before repair: state=%+v err=%v", state, err)
 				}
-				if err := pruneDeadQueuedNudges(&state, nudgeFrontDoor(nudges), now.Add(nudgequeue.DeadLetterRetention), noMaintenanceDeadline()); err != nil || len(state.Dead) != 0 {
-					t.Fatalf("failed repair bypassed the seven-day cap: state=%+v err=%v", state, err)
-				}
+				maintain(now.Add(nudgequeue.DeadLetterRetention))
+				later = now.Add(nudgequeue.DeadLetterRetention + time.Hour)
 			}
 			store.failID = ""
-			later := now.Add(3 * time.Hour)
 			maintain(later)
 			state, err := nudgequeue.LoadState(dir)
 			if err != nil || len(state.Dead) != 0 {
 				t.Fatalf("repaired receipt not pruned: state=%+v err=%v", state, err)
 			}
 			sessFront := cliSessionFrontDoor(store, nil, dir)
-			if done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, later); err != nil || !done {
-				t.Fatalf("dropped wait not finalized after delayed repair: done=%t err=%v", done, err)
+			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, later, &state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sweepStaleNudgeMail(nudges, beads.MailStore{Store: store}, &state, later, time.Minute, 0, 0); err != nil {
+				t.Fatal(err)
 			}
 			if err := dispatchReadyWaitNudgesWithSnapshot(dir, nil, sessFront, nudges, later, nil); err != nil {
 				t.Fatal(err)
 			}
 			state, err = nudgequeue.LoadState(dir)
 			if err != nil || len(state.Pending) != 0 || len(state.InFlight) != 0 {
-				t.Fatalf("dropped wait was re-enqueued: state=%+v err=%v", state, err)
+				t.Fatalf("dropped wait was re-enqueued: dispatch count=%d (want 1), finalized=%t state=%+v err=%v", 1+len(state.Pending)+len(state.InFlight), done, state, err)
+			}
+			if !done {
+				t.Fatal("dropped wait not finalized after delayed repair")
 			}
 		})
+	}
+}
+
+func droppedWaitNudgeFixture(t *testing.T) (string, time.Time, *failingTerminalNudgeStore, session.WaitInfo) {
+	t.Helper()
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore(), terminalOnly: true}
+	nudges := beads.NudgesStore{Store: store}
+	sessionBead, err := store.Create(beads.Bead{
+		Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker", "agent_name": "worker", "continuation_epoch": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id": sessionBead.ID, "session_name": "worker", "kind": "deps",
+			"state": waitStateReady, "registered_epoch": "1", "delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := session.WaitInfoFromBead(waitBead)
+	item := newQueuedNudgeWithOptions("worker", "intentionally dropped wait", "wait", now, queuedNudgeOptions{
+		ID: waitNudgeID(wait), SessionID: sessionBead.ID, ContinuationEpoch: wait.RegisteredEpoch,
+		Reference: &nudgeReference{Kind: "bead", ID: waitBead.ID},
+	})
+	if err := enqueueQueuedNudgeWithStore(dir, nudges, item); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Pending) != 1 {
+		t.Fatalf("initial dispatch count: state=%+v err=%v", state, err)
+	}
+	store.failID = state.Pending[0].BeadID
+	if err := recordQueuedNudgeFailureWithStore(dir, nudges, []string{item.ID}, errNudgeManualDrop, now); err != nil {
+		t.Fatal(err)
+	}
+	if store.terminalFailures == 0 {
+		t.Fatal("terminal write failure was not exercised")
+	}
+	return dir, now, store, wait
+}
+
+func TestNudgeDeadLetterCapWaitDispatchBeforeRepair(t *testing.T) {
+	dir, now, store, wait := droppedWaitNudgeFixture(t)
+	nudges := beads.NudgesStore{Store: store}
+	sessFront := cliSessionFrontDoor(store, nil, dir)
+	capTime := now.Add(nudgequeue.DeadLetterRetention)
+	beforeCap, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := sweepStaleNudgeMail(nudges, beads.MailStore{Store: store}, &beforeCap, capTime, time.Minute, 0, 0); err != nil || result.NudgeClosed != 0 {
+		t.Fatalf("sweep overwrote terminalization intent before cap conversion: %+v err=%v", result, err)
+	}
+	var warnings bytes.Buffer
+	oldWriter, oldNotify := nudgeWarningWriter, nudgeDeadLetterLossNotify
+	t.Cleanup(func() { nudgeWarningWriter, nudgeDeadLetterLossNotify = oldWriter, oldNotify })
+	nudgeWarningWriter = &warnings
+	mailCalls := 0
+	nudgeDeadLetterLossNotify = func(string, queuedNudge, io.Writer) error { mailCalls++; return nil }
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		return pruneDeadQueuedNudges(state, nil, capTime, noMaintenanceDeadline())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Dead) != 0 {
+		t.Fatalf("cap did not persist payload deletion: state=%+v err=%v", state, err)
+	}
+	if len(state.Tombstones) != 1 || !state.Tombstones[0].RepairPending || !state.Tombstones[0].DeletedAt.Equal(capTime) || !nudgeQueueHasWork(&state) {
+		t.Fatalf("pending repair not persisted or maintenance would skip it: %+v", state)
+	}
+	if !queuedNudgeExists(&state, waitNudgeID(wait)) {
+		t.Fatal("enqueue deduplication ignores the tombstone")
+	}
+	if _, err := nudgequeue.PrepareReplay(&state, waitNudgeID(wait), "replay-expired", capTime, time.Hour); err == nil {
+		t.Fatal("expired payload can still be replayed")
+	}
+	data, err := os.ReadFile(nudgequeue.StatePath(dir))
+	if err != nil || bytes.Contains(data, []byte("intentionally dropped wait")) {
+		t.Fatalf("expired payload still persisted: %s err=%v", data, err)
+	}
+	for range 2 {
+		if result, err := sweepStaleNudgeMail(nudges, beads.MailStore{Store: store}, &state, capTime, time.Minute, 0, 0); err != nil || result.NudgeClosed != 0 {
+			t.Fatalf("stale sweep consumed pending repair: %+v err=%v", result, err)
+		}
+		if err := dispatchReadyWaitNudgesWithSnapshot(dir, nil, sessFront, nudges, capTime, nil); err != nil {
+			t.Fatal(err)
+		}
+		state, err = nudgequeue.LoadState(dir)
+		if err != nil || len(state.Pending) != 0 || len(state.InFlight) != 0 {
+			t.Fatalf("dispatch count=%d (want 1) after persisted cap during failed repair: %+v err=%v", 1+len(state.Pending)+len(state.InFlight), state, err)
+		}
+	}
+	updated, err := store.Get(wait.ID)
+	if err != nil || updated.Metadata["state"] != waitStateFailed {
+		t.Fatalf("tombstone did not finalize the wait: %+v err=%v", updated, err)
+	}
+	if strings.Count(warnings.String(), "retention cap") != 1 || mailCalls != 0 {
+		t.Fatalf("dropped loss must log once without mailing: %s calls=%d", warnings.String(), mailCalls)
+	}
+	maintain := func(at time.Time) nudgeQueueState {
+		t.Helper()
+		if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+			return pruneDeadQueuedNudges(state, nudgeFrontDoor(nudges), at, noMaintenanceDeadline())
+		}); err != nil {
+			t.Fatal(err)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	// Metadata can succeed while Close still fails. Neither failure advances
+	// the receipt clock, even after another retention window has elapsed.
+	state = maintain(capTime.Add(nudgequeue.DeadLetterRetention))
+	if len(state.Tombstones) != 1 || !state.Tombstones[0].RepairPending {
+		t.Fatalf("unfinished repair expired: %+v", state)
+	}
+	store.failClose = true
+	state = maintain(capTime.Add(2 * nudgequeue.DeadLetterRetention))
+	if len(state.Tombstones) != 1 || !state.Tombstones[0].RepairPending {
+		t.Fatalf("partial terminalization advanced receipt clock: %+v", state)
+	}
+	store.failID = ""
+	recoveredAt := capTime.Add(3 * nudgequeue.DeadLetterRetention)
+	state = maintain(recoveredAt)
+	if len(state.Tombstones) != 1 || state.Tombstones[0].RepairPending || !state.Tombstones[0].RepairedAt.Equal(recoveredAt) {
+		t.Fatalf("repair did not start receipt retention: %+v", state)
+	}
+	state = maintain(recoveredAt.Add(nudgequeue.DispositionRetention - time.Nanosecond))
+	if len(state.Tombstones) != 1 {
+		t.Fatalf("receipt expired before one hour from repair: %+v", state)
+	}
+	state = maintain(recoveredAt.Add(nudgequeue.DispositionRetention))
+	if len(state.Tombstones) != 0 || nudgeQueueHasWork(&state) {
+		t.Fatalf("repaired receipt retained after its hour: %+v", state)
+	}
+	if strings.Count(warnings.String(), "retention cap") != 1 || mailCalls != 0 {
+		t.Fatalf("repair retried the loss alert: %s calls=%d", warnings.String(), mailCalls)
 	}
 }
 

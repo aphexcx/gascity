@@ -54,11 +54,29 @@ type Item struct {
 	DeadAt            time.Time  `json:"dead_at,omitempty"`
 }
 
+// Tombstone preserves terminalization intent after a dead letter's payload expires.
+// Pending repairs have no expiry; repaired receipts remain for DispositionRetention.
+type Tombstone struct {
+	ID             string     `json:"id"`
+	BeadID         string     `json:"bead_id,omitempty"`
+	Agent          string     `json:"agent"`
+	SessionID      string     `json:"session_id,omitempty"`
+	Source         string     `json:"source"`
+	Reference      *Reference `json:"reference,omitempty"`
+	TerminalState  string     `json:"terminal_state"`
+	TerminalReason string     `json:"terminal_reason"`
+	TerminalAt     time.Time  `json:"terminal_at"`
+	DeletedAt      time.Time  `json:"deleted_at"`
+	RepairPending  bool       `json:"repair_pending"`
+	RepairedAt     time.Time  `json:"repaired_at,omitempty"`
+}
+
 // State is the persisted nudge queue snapshot.
 type State struct {
-	Pending  []Item `json:"pending,omitempty"`
-	InFlight []Item `json:"in_flight,omitempty"`
-	Dead     []Item `json:"dead,omitempty"`
+	Pending    []Item      `json:"pending,omitempty"`
+	InFlight   []Item      `json:"in_flight,omitempty"`
+	Dead       []Item      `json:"dead,omitempty"`
+	Tombstones []Tombstone `json:"tombstones,omitempty"`
 
 	// DispatchSkips counts, by reason, how many times the supervisor
 	// dispatch tick's per-session loop has silently skipped a target
@@ -68,6 +86,18 @@ type State struct {
 	// stays visible to a `gc nudge status` invocation running in a
 	// different process than the supervisor that incremented it.
 	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
+}
+
+// Tombstone returns the retained terminalization intent for an expired payload.
+func (state *State) Tombstone(id string) (Tombstone, bool) {
+	if state != nil {
+		for _, item := range state.Tombstones {
+			if item.ID == id {
+				return item, true
+			}
+		}
+	}
+	return Tombstone{}, false
 }
 
 // SortState orders items deterministically inside each queue bucket.

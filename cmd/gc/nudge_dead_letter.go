@@ -10,8 +10,60 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
+
+func terminalReasonForDeadQueuedNudge(item queuedNudge) string {
+	if reason := strings.TrimSpace(item.LastError); reason != "" {
+		return reason
+	}
+	return "failed"
+}
+
+func repairDeadQueuedNudge(front *nudgequeue.Store, item queuedNudge) bool {
+	if item.BeadID == "" {
+		return true
+	}
+	if front == nil {
+		return false
+	}
+	shadow, found, err := front.FindIncludingTerminal(item.ID)
+	if err != nil {
+		return false
+	}
+	if found && nudgequeue.IsTerminalState(shadow.State) && !shadow.Open {
+		return true
+	}
+	// A missing, reaped shadow needs no repair. Terminalize tolerates that case.
+	return front.Terminalize(item, terminalStateForDeadQueuedNudge(item), terminalReasonForDeadQueuedNudge(item), "", item.DeadAt) == nil
+}
+
+func pruneNudgeTombstones(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) {
+	retained := state.Tombstones[:0]
+	for i, tombstone := range state.Tombstones {
+		if clk.Now().After(deadline) {
+			retained = append(retained, state.Tombstones[i:]...)
+			break
+		}
+		if tombstone.RepairPending && front != nil {
+			// Missing shadows cannot prove repair: retain the intent so wait
+			// finalization can still consume it and dispatch cannot resurrect it.
+			if _, found, err := front.FindIncludingTerminal(tombstone.ID); err == nil && found {
+				item := queuedNudge{ID: tombstone.ID, BeadID: tombstone.BeadID, LastError: tombstone.TerminalReason}
+				if err := front.Terminalize(item, tombstone.TerminalState, tombstone.TerminalReason, "", tombstone.TerminalAt); err == nil {
+					tombstone.RepairPending = false
+					tombstone.RepairedAt = now.UTC()
+				}
+			}
+		}
+		if !tombstone.RepairPending && !tombstone.RepairedAt.IsZero() && !tombstone.RepairedAt.Add(nudgequeue.DispositionRetention).After(now) {
+			continue
+		}
+		retained = append(retained, tombstone)
+	}
+	state.Tombstones = retained
+}
 
 // Only the transaction that adds an item to Dead calls this seam. Notifications
 // run after the queue commit and unlock, so a failed send never requeues input.
@@ -47,6 +99,18 @@ func notifyNudgeDeadLetters(cityPath string, newlyDead, lost []queuedNudge) {
 				fmt.Fprintf(writer, "gc nudge: action required: nudge %q for %q dead-lettered: %s; resolve the preserved pane input, then gc nudge replay %s\n", item.ID, item.Agent, strings.Join(strings.Fields(deadReason(item)), " "), item.ID) //nolint:errcheck
 			}
 		}
+	}
+	// Explicitly disposed losses still need a log when repair is unfinished,
+	// but only unresolved input triggers the existing best-effort loss mail.
+	mailItems := items[:firstLost]
+	for _, item := range items[firstLost:] {
+		if item.UnresolvedDeadLetter() {
+			mailItems = append(mailItems, item)
+		}
+	}
+	items = mailItems
+	if len(items) == 0 {
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nudgeDeadLetterMailBudget)
 	defer cancel()

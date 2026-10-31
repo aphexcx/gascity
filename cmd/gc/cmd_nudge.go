@@ -2528,7 +2528,7 @@ func (m *nudgeMaintenanceStore) close() error {
 // could act on. An empty queue means recover/prune/terminalize are all no-ops,
 // so the Dolt front door need not be opened for this tick.
 func nudgeQueueHasWork(state *nudgeQueueState) bool {
-	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
+	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0 || len(state.Tombstones) > 0
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
@@ -3334,6 +3334,7 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now,
 }
 
 func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
+	pruneNudgeTombstones(state, front, now, deadline, clk)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
 		if clk.Now().After(deadline) {
@@ -3345,48 +3346,18 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 			item.DeadAt = now.UTC()
 		}
 		atCap := !item.DeadAt.Add(nudgequeue.DeadLetterRetention).After(now)
-		if item.BeadID != "" {
-			if front == nil {
-				// Keep the repair record until the store returns or the cap expires.
-				if !atCap {
-					filtered = append(filtered, item)
-				}
-				continue
+		if !repairDeadQueuedNudge(front, item) {
+			if atCap {
+				state.Tombstones = append(state.Tombstones, nudgequeue.Tombstone{
+					ID: item.ID, BeadID: item.BeadID, Agent: item.Agent, SessionID: item.SessionID,
+					Source: item.Source, Reference: item.Reference,
+					TerminalState: terminalStateForDeadQueuedNudge(item), TerminalReason: terminalReasonForDeadQueuedNudge(item),
+					TerminalAt: item.DeadAt, DeletedAt: now.UTC(), RepairPending: true,
+				})
+			} else {
+				filtered = append(filtered, item)
 			}
-			shadow, ok, err := front.FindIncludingTerminal(item.ID)
-			if err != nil {
-				// Lookup errors preserve repair until the seven-day cap.
-				if !atCap {
-					filtered = append(filtered, item)
-				}
-				continue
-			}
-			if !ok || !nudgequeue.IsTerminalState(shadow.State) {
-				// Repair historical dead-letter entries whose queue state was
-				// durable but whose backing bead never received terminal state.
-				reason := strings.TrimSpace(item.LastError)
-				if reason == "" {
-					reason = "failed"
-				}
-				terminalAt := now
-				if !item.DeadAt.IsZero() {
-					terminalAt = item.DeadAt
-				}
-				if err := front.Terminalize(item, terminalStateForDeadQueuedNudge(item), reason, "", terminalAt); err != nil {
-					if !atCap {
-						filtered = append(filtered, item)
-					}
-					continue
-				}
-				// Terminalize's own error return is sufficient confirmation:
-				// nil means either the bead was really terminalized, or it
-				// tolerated a missing bead as a no-op because the bead was
-				// already reaped by an unrelated retention sweep (wisp
-				// compaction etc.). Re-querying FindIncludingTerminal here
-				// would never find a reaped bead again, so entries whose
-				// bead is gone would be retained forever and pay a store
-				// lookup on every sweep (gastownhall/gascity#5278).
-			}
+			continue
 		}
 		// Reconcile the shadow before pruning even an expired receipt: wait
 		// finalization consumes that terminal state to prevent re-enqueueing.
@@ -3415,7 +3386,8 @@ func queuedNudgeExists(state *nudgeQueueState, id string) bool {
 			return true
 		}
 	}
-	return false
+	_, found := state.Tombstone(id)
+	return found
 }
 
 func sortQueuedNudges(state *nudgeQueueState) {
@@ -3439,7 +3411,8 @@ func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error
 			delete(previous, item.ID)
 		}
 		for _, item := range previous {
-			if item.UnresolvedDeadLetter() {
+			_, tombstoned := state.Tombstone(item.ID)
+			if item.UnresolvedDeadLetter() || tombstoned {
 				lost = append(lost, item)
 			}
 		}
