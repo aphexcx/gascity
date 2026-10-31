@@ -62,6 +62,10 @@ var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmu
 // pending payload. A queue must bound these deferrals and surface exhaustion.
 var ErrNudgeDraftUnowned = errors.New("nudge: draft has no matching paste provenance")
 
+// ErrNudgeDraftUnmatched means paste provenance exists but the rendered draft
+// cannot be matched to the payload. Preserve the input and bound queue retries.
+var ErrNudgeDraftUnmatched = errors.New("nudge: owned draft does not match the pending payload")
+
 // ErrNudgeDraftOwnershipLost is a terminal delivery failure: the prior paste
 // lost ownership before acceptance was established. Preserve it; never replay.
 var ErrNudgeDraftOwnershipLost = errors.New("nudge: draft ownership lost before acceptance; preserved input requires attention, automatic replay stopped")

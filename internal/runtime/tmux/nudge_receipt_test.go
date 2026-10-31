@@ -188,6 +188,10 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 						if !errors.Is(err, ErrNudgeDraftDeferred) || mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
 							t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; different payload must stay untouched", err, mutations, delivery, receipts())
 						}
+						ownedUnmatched := tt.stored == runtime.NudgePayloadDigest(tt.message) && tt.attached == "0"
+						if errors.Is(err, runtime.ErrNudgeDraftUnmatched) != ownedUnmatched {
+							t.Fatalf("err=%v, want bounded unmatched hold=%t", err, ownedUnmatched)
+						}
 					})
 				})
 			}

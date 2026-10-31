@@ -40,6 +40,25 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		t.Fatalf("resolving fake TUI: %v", err)
 	}
 
+	cleanup := func(t *testing.T, tm *Tmux) {
+		t.Helper()
+		t.Logf("private tmux socket: %s", tm.cfg.SocketName)
+		t.Cleanup(func() {
+			if err := tm.KillServer(); err != nil {
+				t.Errorf("stopping private tmux server: %v", err)
+				return
+			}
+			if _, err := tm.run("list-sessions"); !errors.Is(err, ErrNoServer) {
+				t.Errorf("private tmux server survived cleanup: %v", err)
+				return
+			}
+			t.Logf("tmux -L %s list-sessions: no server running", tm.cfg.SocketName)
+			if err := os.Remove(namedSocketPath(tm.cfg.SocketName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("removing private tmux socket: %v", err)
+			}
+		})
+	}
+
 	start := func(t *testing.T, socket string, swallow int, busyDelay time.Duration) (*Tmux, string) {
 		t.Helper()
 		logPath := filepath.Join(t.TempDir(), "tui.log")
@@ -49,7 +68,7 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			NudgeLockTimeout:  30 * time.Second,
 		})
 		_, _ = tm.run("kill-server")
-		t.Cleanup(func() { _, _ = tm.run("kill-server") })
+		cleanup(t, tm)
 		cmd := fmt.Sprintf("python3 %s %s %d %.3f 30", shellQuote(script), shellQuote(logPath), swallow, busyDelay.Seconds())
 		if _, err := tm.run("new-session", "-d", "-s", "draft", "-x", "120", "-y", "30", cmd); err != nil {
 			t.Skipf("cannot create tmux session (tmux unavailable?): %v", err)
@@ -135,7 +154,7 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		}
 	})
 
-	for caseNo, ownership := range []struct {
+	for _, ownership := range []struct {
 		edited, removed, global, switched, collapsed bool
 		timing                                       string
 	}{
@@ -159,11 +178,11 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			}
 			logPath := filepath.Join(t.TempDir(), "tui.log")
 			tm := NewTmuxWithConfig(Config{
-				SocketName:        fmt.Sprintf("gcwrappedclaudedraft%d", caseNo),
+				SocketName:        privateSocketName("wd"),
 				NudgeReadyTimeout: 10 * time.Second,
 				NudgeLockTimeout:  30 * time.Second,
 			})
-			t.Cleanup(func() { _, _ = tm.run("kill-server") })
+			cleanup(t, tm)
 			mode := "wrap-retry"
 			if ownership.collapsed {
 				mode = "collapsed-retry"
@@ -213,6 +232,12 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			message := "long founder line " + strings.Repeat("abcdefghij", 20) + " with final words"
 			if edited {
 				message = strings.Repeat("a", 76) + " b"
+				if ownership.timing == "blocking" {
+					// The hard-wrap matcher trims both spaces at column 78,
+					// accepting the edited 76-cell row followed by a newline.
+					// That makes stale provenance observable during the hook.
+					message = strings.Repeat("a", 76) + "  b"
+				}
 			} else if ownership.collapsed {
 				message = strings.Repeat("founder line ", 80) + "end"
 			}
