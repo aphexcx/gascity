@@ -38,13 +38,15 @@ const (
 	// InboundDeliveryPending means the outcome is not concluded in a way a
 	// redelivery could safely repair. It is NOT a failure claim and NOT a
 	// success claim, and a consumer must HOLD on it — never re-post. It
-	// covers three shapes that share that one property:
+	// covers shapes that share that one property:
 	//
 	//   - the fan-out outran the response budget and the sends are still
 	//     running (the whole-receipt PendingInboundDelivery);
 	//   - a member's payload landed whole but the agent was not seen taking
 	//     the turn (submit unconfirmed — the 2026-08-28 gp-2io incident,
 	//     which classified as failed and licensed a 6x duplicate storm);
+	//   - a pasted draft lost ownership before confirmation; its reason
+	//     records a terminal hold requiring attention, never automatic replay;
 	//   - a mixed fan-out in which at least one member holds a whole live
 	//     copy, so a fan-out-wide re-post would duplicate it.
 	//

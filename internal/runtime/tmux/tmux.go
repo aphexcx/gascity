@@ -2868,7 +2868,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 						return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
 					}
 					if !nudgeDraftMatches(draft, message, width-2) {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
+						return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
 					}
 				}
 				resumeOwnedDraft = true
