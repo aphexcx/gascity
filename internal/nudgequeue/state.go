@@ -96,10 +96,10 @@ func SortState(state *State) {
 	})
 }
 
-// ClaimDueBatch claims one target's stable delivery batch. A failed attempt
-// stamps all its items with the same LastAttemptAt; that batch must be retried
-// before fresh arrivals can change its formatted payload. An in-flight batch
-// or a retry still in backoff holds later items without spending their attempts.
+// ClaimDueBatch claims one target's stable delivery batch, recording its shared
+// LastAttemptAt before delivery. That identity survives lease recovery and keeps
+// fresh arrivals from changing its formatted payload. An in-flight batch or a
+// retry still in backoff holds later items without spending their attempts.
 func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(Item) bool) []Item {
 	for _, item := range state.InFlight {
 		if match(item) {
@@ -126,6 +126,11 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 		}
 		item.ClaimedAt = now.UTC()
 		item.LeaseUntil = now.Add(lease).UTC()
+		// Persist the batch identity before any delivery side effect. A process
+		// can exit after pasting but before it records an unconfirmed result.
+		if item.LastAttemptAt.IsZero() {
+			item.LastAttemptAt = now.UTC()
+		}
 		claimed = append(claimed, item)
 		ids[item.ID] = true
 	}

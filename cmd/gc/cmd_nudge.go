@@ -1605,6 +1605,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	if messageID != "" {
 		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
 	}
+	item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 	// Session-class store for the observe/handle reads and the last-nudge stamp
 	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
 	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
@@ -1628,6 +1629,9 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				// (gp-2io): fall through to the queue like any other error.
 				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
 			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
+				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
+			}
 			// The submit Enter can be delivered and the composer drained with
 			// only the busy-indicator OBSERVATION timing out. Delivery is
 			// proven either way, so this must not fall through to the queue
@@ -1645,7 +1649,6 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
@@ -1656,7 +1659,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)); err != nil {
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		return err
 	}
 	if obs.Running {

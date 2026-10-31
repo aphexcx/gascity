@@ -32,7 +32,7 @@ def render():
             out.append("✻ Thinking… (%ds · ↑ 0 tokens · esc to interrupt)\r\n" % el)
         else:
             out.append("\r\n")
-        out.append("❯ %s\r\n\r\n" % draft)
+        out.append("────────────────────\r\n❯ %s\r\n────────────────────\r\n" % draft)
         out.append("  bypass permissions on\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
         time.sleep(0.05)

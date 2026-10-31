@@ -3792,6 +3792,15 @@ func TestClaimDueQueuedNudgesClaimsOnceUntilAck(t *testing.T) {
 }
 
 func TestQueuedNudgeRetryKeepsOriginalBatch(t *testing.T) {
+	testQueuedNudgeRetryKeepsOriginalBatch(t, false)
+}
+
+func TestQueuedNudgeRecoveredLeaseKeepsOriginalBatch(t *testing.T) {
+	testQueuedNudgeRetryKeepsOriginalBatch(t, true)
+}
+
+func testQueuedNudgeRetryKeepsOriginalBatch(t *testing.T, interrupted bool) {
+	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	now := time.Now().UTC()
@@ -3804,14 +3813,21 @@ func TestQueuedNudgeRetryKeepsOriginalBatch(t *testing.T) {
 	if err != nil || len(original) != 1 {
 		t.Fatalf("first claim=%v, %v", original, err)
 	}
-	if err := recordQueuedNudgeFailure(dir, queuedNudgeIDs(original), runtime.ErrNudgeSubmitUnconfirmed, now); err != nil {
-		t.Fatal(err)
+	if !interrupted {
+		if err := recordQueuedNudgeFailure(dir, queuedNudgeIDs(original), runtime.ErrNudgeSubmitUnconfirmed, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	newer := newQueuedNudge("worker", "new reminder", now.Add(-time.Second))
 	if err := enqueueQueuedNudge(dir, newer); err != nil {
 		t.Fatal(err)
 	}
 	retryAt := now.Add(defaultQueuedNudgeRetryDelay + time.Second)
+	if interrupted {
+		// The dispatcher exited after the paste, before recording a result.
+		// Only the persisted in-flight claim survives into the next process.
+		retryAt = now.Add(defaultQueuedNudgeClaimTTL + time.Second)
+	}
 	retry, err := claimDueQueuedNudgesMatching(dir, retryAt, match)
 	if err != nil || formatNudgeInjectOutput(retry) != formatNudgeInjectOutput(original) {
 		t.Fatalf("retry=%v, %v; original formatted batch must survive arrival of another reminder", retry, err)
@@ -6471,6 +6487,15 @@ func (p *unconfirmedImmediateVouchingFake) NudgeDelivered(_ string, content []ru
 // queue — not print an error for a nudge that may be sitting drafted in the
 // composer.
 func TestDeliverSessionNudgeWaitIdleQueuesUnconfirmedSubmit(t *testing.T) {
+	testLiveNudgeFallbackPreservesPayload(t, false)
+}
+
+func TestSendMailNotifyQueuesUnconfirmedSubmit(t *testing.T) {
+	testLiveNudgeFallbackPreservesPayload(t, true)
+}
+
+func testLiveNudgeFallbackPreservesPayload(t *testing.T, sendMail bool) {
+	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fake := &unconfirmedImmediateVouchingFake{Fake: runtime.NewFake()}
@@ -6486,13 +6511,19 @@ func TestDeliverSessionNudgeWaitIdleQueuesUnconfirmedSubmit(t *testing.T) {
 		sessionName: "sess-worker",
 	}
 
-	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0 (queued, as before gp-2io); stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
-		t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+	if sendMail {
+		if err := sendMailNotifyWithProvider(target, fake); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		var stdout, stderr bytes.Buffer
+		code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("deliverSessionNudgeWithProvider = %d, want 0 (queued, as before gp-2io); stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Queued nudge for worker") {
+			t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+		}
 	}
 	nudged := 0
 	for _, call := range fake.Calls {

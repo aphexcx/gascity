@@ -48,7 +48,15 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	if boxed && !framed {
 		return "", false
 	}
-	for _, line := range lines[start+1:] {
+	// An attributed placeholder is evidence of empty input. Without a frame
+	// or that signal, a blank row cannot distinguish a footer from more input.
+	emptySuggestion := false
+	if !framed && strings.TrimSpace(draft) == "" {
+		rawLines := strings.Split(runtime.RenderPeek(content).Output, "\n")
+		rawDraft, ok := lastComposerRemainder([]string{rawLines[start]}, prefix)
+		emptySuggestion = ok && strings.TrimSpace(rawDraft) != ""
+	}
+	for i, line := range lines[start+1:] {
 		trimmed := strings.TrimSpace(line)
 		if composerFrameBoundary(line) {
 			break
@@ -60,8 +68,16 @@ func nudgeComposer(content, prefix string) (string, bool) {
 			parts = append(parts, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "│"), "│")))
 			continue
 		}
-		if !framed && (trimmed == "" || !strings.HasPrefix(line, "  ")) {
-			break
+		if !framed {
+			if trimmed == "" {
+				if strings.TrimSpace(strings.Join(lines[start+1+i:], "\n")) == "" {
+					break
+				}
+				return "", emptySuggestion && strings.TrimSpace(strings.Join(parts, "\n")) == ""
+			}
+			if !strings.HasPrefix(line, "  ") {
+				return "", false
+			}
 		}
 		parts = append(parts, strings.TrimRight(strings.TrimPrefix(line, "  "), " "))
 	}
