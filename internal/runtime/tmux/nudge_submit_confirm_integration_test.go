@@ -27,6 +27,7 @@ func main(){
 	busyAfter:=1
 	if v:=os.Getenv("GC_TEST_BUSY_AFTER"); v!=""{ if n,err:=strconv.Atoi(v); err==nil && n>0 { busyAfter=n } }
 	enters:=0
+	fmt.Print("❯ ")
 	r:=bufio.NewReader(os.Stdin)
 	for{
 		b,err:=r.ReadByte()

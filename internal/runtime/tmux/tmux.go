@@ -2803,19 +2803,32 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// its busy indicator at a tool boundary while the new input is staged.
 	verifySubmit := t.submitVerifyEligible(target)
 	idleBeforePaste := false
+	resumeDraft := false
 	if verifySubmit {
-		lines, err := t.CapturePaneLines(target, promptObservationLines)
+		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines))
 		if err != nil {
-			log.Printf("tmux nudge: cannot read pre-paste state for %q; submit will be unverified: %v", target, err)
-		} else {
-			idleBeforePaste = !paneContainsBusyIndicator(lines)
+			return runtime.NudgeDelivery{}, fmt.Errorf("reading composer before nudge to %q: %w", target, err)
 		}
+		prefix := t.resolveIdlePromptPrefix(session)
+		if marker, ok := t.stagedDraftMarkerFor(target); ok {
+			prefix = marker.promptPrefix
+		}
+		draft, observed := nudgeComposer(content, prefix)
+		if !observed {
+			return runtime.NudgeDelivery{}, fmt.Errorf("nudge to %q deferred: composer is unreadable", target)
+		}
+		if draft != "" {
+			if draft != strings.TrimSpace(message) {
+				return runtime.NudgeDelivery{}, fmt.Errorf("nudge to %q deferred: composer holds a different or opaque draft", target)
+			}
+			resumeDraft = true
+		}
+		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
 	}
 
 	// 1. Preserve existing input on families with submit evidence. An earlier
-	// unverified delivery may still be staged; C-u would erase it. Terminal
-	// captures cannot reliably distinguish drafts from prompt placeholders,
-	// so do not infer that the composer is safe to clear from its text.
+	// unverified delivery may still be staged; C-u would erase it. A matching
+	// draft gets a submit-only retry; other nonempty drafts defer the nudge.
 	// Other families retain their replacement behavior on detached panes.
 	if !verifySubmit && !t.IsSessionAttached(session) {
 		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
@@ -2837,11 +2850,17 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 
 	// 2. Send the text as one bracketed paste, with retry on transient errors;
 	// the byte count feeds the delivery receipt (gp-2rq).
-	written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
-	if err != nil {
-		return runtime.NudgeDelivery{}, err
+	if resumeDraft {
+		// The exact payload is already in the composer. Both startup and queue
+		// retries enter here; they may repeat the submit, never the paste.
+		payloadBytes = len(message)
+	} else {
+		written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
+		if err != nil {
+			return runtime.NudgeDelivery{}, err
+		}
+		payloadBytes = written
 	}
-	payloadBytes = written
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
@@ -3224,6 +3243,10 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 	if !runtime.ContainsFeedbackSurveyModal(content) {
 		return false, nil
 	}
+	if draft, observed := nudgeComposer(content, DefaultReadyPromptPrefix); !observed || draft != "" {
+		log.Printf("tmux feedback survey: skipping dismissal because composer is nonempty or unreadable")
+		return false, nil
+	}
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
@@ -3234,11 +3257,12 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
-// single-digit input handler. No-op when the survey is absent. A parked
+// single-digit input handler. No-op when the survey is absent; nonempty or
+// unreadable composers are left untouched with a logged skip. A parked
 // survey reads idle to WaitForIdle, so callers must not gate this on an
 // idle-wait failure branch -- see the unconditional call from NudgeSession.
-// Best-effort: capture/send failures are swallowed (the caller retries on
-// the next wake).
+// Best-effort: capture/send failures are logged (the caller retries on the
+// next wake).
 func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
@@ -3253,11 +3277,16 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 		return nil
 	}
 
-	content, err := t.CapturePane(target, promptObservationLines)
+	content, err := t.CapturePaneWithAttributes(target, promptObservationLines)
 	if err != nil {
+		log.Printf("tmux feedback survey: skipping dismissal for %q: %v", target, err)
 		return
 	}
-	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	present, err := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	if err != nil {
+		log.Printf("tmux feedback survey: dismissing %q: %v", target, err)
+		return
+	}
 	if !present {
 		return
 	}
@@ -3265,11 +3294,14 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	// The survey can occasionally eat the first digit (e.g. a keystroke lost
 	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
 	// once before giving up for this call.
-	content, err = t.CapturePane(target, promptObservationLines)
+	content, err = t.CapturePaneWithAttributes(target, promptObservationLines)
 	if err != nil {
+		log.Printf("tmux feedback survey: skipping dismissal retry for %q: %v", target, err)
 		return
 	}
-	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	if _, err := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep); err != nil {
+		log.Printf("tmux feedback survey: retrying dismissal for %q: %v", target, err)
+	}
 }
 
 // GetPaneCommand returns the current command running in a pane.

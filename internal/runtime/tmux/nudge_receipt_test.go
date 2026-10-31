@@ -113,17 +113,85 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 				draft += text
 				return len(text), nil
 			})
-			if err != nil || delivery.Submit != runtime.NudgeSubmitUnverified {
-				t.Errorf("delivery %d = %+v, %v; want unverified without a replay signal", i, delivery, err)
+			if i == 0 {
+				if err != nil || delivery.Submit != runtime.NudgeSubmitUnverified {
+					t.Errorf("delivery %d = %+v, %v; want unverified without a replay signal", i, delivery, err)
+				}
+			} else if err == nil || delivery.Landed() {
+				t.Errorf("delivery %d = %+v, %v; different input must wait for the preserved draft", i, delivery, err)
 			}
 			if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {
 				t.Errorf("unverified input licensed a replay: %v", err)
 			}
 		}
-		if draft != "input-0input-1input-2" || pastes != 3 || enters != 3 || clears != 0 {
+		if draft != "input-0" || pastes != 1 || enters != 1 || clears != 0 {
 			t.Errorf("draft=%q pastes=%d enters=%d clears=%d; uncertain input must survive exactly once", draft, pastes, enters, clears)
 		}
 	})
+}
+
+func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
+	for _, tt := range []struct {
+		provider, prefix, message string
+		busy                      bool
+	}{
+		{"claude", "❯ ", "keep exactly one copy", false},
+		{"claude", "❯ ", "keep exactly one copy", true},
+		{"codex", "› ", "keep exactly one copy", false},
+		{"codex", "› ", "keep exactly one copy", true},
+		{"claude", "❯ ", "first line\n\nlast line", false},
+	} {
+		t.Run(tt.provider+"/busy="+strconv.FormatBool(tt.busy)+"/"+tt.message, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+				message := tt.message
+				draft := ""
+				var history []string
+				pastes := 0
+				accept := false
+				busy := tt.busy
+				tm := NewTmux()
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					switch {
+					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+						return "GC_PROVIDER=" + tt.provider, nil
+					case slices.Contains(args, "capture-pane"):
+						pane := "────\n" + tt.prefix + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────"
+						if busy {
+							pane = "esc to interrupt\n" + pane
+						}
+						return pane, nil
+					case slices.Contains(args, "send-keys") && slices.Contains(args, "Enter") && accept:
+						history = append(history, draft)
+						draft, busy = "", true
+					}
+					return "", nil
+				}}
+				send := func() (runtime.NudgeDelivery, error) {
+					return tm.nudgeSessionDeliveryWith(t.Name(), message, func(_, text string, _ time.Duration) (int, error) {
+						pastes++
+						draft += text
+						return len(text), nil
+					})
+				}
+				first, err := send()
+				if err != nil || !first.Delivered || first.Submit == runtime.NudgeSubmitConfirmed || draft != message {
+					t.Fatalf("first delivery = %+v, %v; draft=%q", first, err, draft)
+				}
+				if !tt.busy && !errors.Is(first.UnconfirmedSubmitError(t.Name()), ErrNudgeSubmitUnconfirmed) {
+					t.Fatal("idle unconfirmed delivery lost the caller's retry signal")
+				}
+				accept, busy = true, false
+				second, err := send()
+				if err != nil || second.Submit != runtime.NudgeSubmitConfirmed || second.Bytes != len(message) {
+					t.Fatalf("retry = %+v, %v; want confirmed original payload", second, err)
+				}
+				if pastes != 1 || !slices.Equal(history, []string{message}) {
+					t.Fatalf("pastes=%d input history=%q; want exactly one copy", pastes, history)
+				}
+			})
+		})
+	}
 }
 
 // TestNudgeSessionEmitsReceiptForTheWholePayload covers the gp-2rq receipt: a
@@ -377,14 +445,19 @@ func TestNudgeDeliveredVouchesForARealDelivery(t *testing.T) {
 // reported the delivery as failed with 0 bytes because the submit could not be
 // confirmed.
 //
-// Only the GC_PROVIDER lookup is answered; every other tmux call succeeds with
-// empty output, so capture-pane never contains a busy marker. (runCtx prefixes
-// every invocation with -u and an optional -L <socket>, so the subcommand is
-// not args[0].)
-func claudeNeverBusyExecutor() *fakeExecutor {
+// The composer starts empty and retains the pasted message. No busy marker is
+// rendered, so the submit stays unconfirmed and later calls retry the draft.
+func claudeNeverBusyExecutor(message string) *fakeExecutor {
+	draft := ""
 	return &fakeExecutor{fn: func(args []string) (string, error) {
 		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
 			return "GC_PROVIDER=claude", nil
+		}
+		if slices.Contains(args, "paste-buffer") {
+			draft += message
+		}
+		if slices.Contains(args, "capture-pane") {
+			return "────\n❯ " + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────", nil
 		}
 		return "", nil
 	}}
@@ -402,7 +475,7 @@ func TestNudgeDeliveredVouchesForAPasteWhoseSubmitWasNeverConfirmed(t *testing.T
 	const message = "<system-reminder>\nNew message in shared conversation slack/C0BEZ3CQK5X:\n\n- Taylor (human): are we still on for 3?\n</system-reminder>"
 
 	p := NewProviderWithConfig(DefaultConfig())
-	p.tm.exec = claudeNeverBusyExecutor()
+	p.tm.exec = claudeNeverBusyExecutor(message)
 	p.tm.cfg.NudgeIdleTimeout = 0
 	p.tm.cfg.DebounceMs = 0
 	receipts := collectReceipts(p.tm)
@@ -446,7 +519,7 @@ func TestNudgeDeliveredVouchesForAPasteWhoseSubmitWasNeverConfirmed(t *testing.T
 // take that signal away from the retrying ones.
 func TestNudgeKeepsUnconfirmedSubmitErrorForRetryingCallers(t *testing.T) {
 	p := NewProviderWithConfig(DefaultConfig())
-	p.tm.exec = claudeNeverBusyExecutor()
+	p.tm.exec = claudeNeverBusyExecutor("hello")
 	p.tm.cfg.NudgeIdleTimeout = 0
 	p.tm.cfg.DebounceMs = 0
 
@@ -471,6 +544,9 @@ func claudeEnterRefusedExecutor() *fakeExecutor {
 		}
 		if slices.Contains(args, "send-keys") && args[len(args)-1] == "Enter" {
 			return "", errors.New("no current client")
+		}
+		if slices.Contains(args, "capture-pane") {
+			return "❯ ", nil
 		}
 		return "", nil
 	}}

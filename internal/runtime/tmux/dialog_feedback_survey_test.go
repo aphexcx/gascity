@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"bytes"
+	"log"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 )
 
 // feedbackSurveySessionFixture and feedbackSurveyMemoryFixture are
@@ -32,6 +36,52 @@ const feedbackSurveyMemoryFixture = `⏺ Reading the config.
 │ ❯                                                        │
 ╰──────────────────────────────────────────────────────────╯
   ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+func TestFeedbackSurveyDismissalPreservesDraft(t *testing.T) {
+	for _, initialDraft := range []string{"", "preserve this draft"} {
+		t.Run(initialDraft, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				draft := initialDraft
+				survey := true
+				var keys []string
+				var logs bytes.Buffer
+				originalLog := log.Writer()
+				log.SetOutput(&logs)
+				t.Cleanup(func() { log.SetOutput(originalLog) })
+				tm := NewTmux()
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					switch {
+					case slices.Contains(args, "capture-pane"):
+						if !survey {
+							return "❯ " + draft, nil
+						}
+						return strings.Replace(feedbackSurveySessionFixture, "│ ❯ ", "│ ❯ "+draft, 1), nil
+					case slices.Contains(args, "send-keys"):
+						key := args[len(args)-1]
+						keys = append(keys, key)
+						if key == "0" {
+							draft += "0"
+						} else if key == "Enter" && draft == "0" {
+							survey, draft = false, ""
+						}
+					}
+					return "", nil
+				}}
+				tm.DismissFeedbackSurveyModalIfPresent(t.Name())
+				if draft != initialDraft {
+					t.Fatalf("draft=%q, want byte-identical %q; keys=%q", draft, initialDraft, keys)
+				}
+				if initialDraft == "" {
+					if survey || !slices.Equal(keys, []string{"0", "Enter"}) {
+						t.Fatalf("empty composer: survey=%v keys=%q; want dismissed", survey, keys)
+					}
+				} else if len(keys) != 0 || !strings.Contains(logs.String(), "skip") {
+					t.Fatalf("drafted composer: keys=%q log=%q; want logged skip", keys, logs.String())
+				}
+			})
+		})
+	}
+}
 
 // TestFeedbackSurveyParkedPaneReadsIdle documents the ga-zg7fjq root cause: a
 // pane parked on Claude Code's feedback-survey modal shows neither a busy

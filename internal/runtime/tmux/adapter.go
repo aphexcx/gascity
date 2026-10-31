@@ -1801,12 +1801,12 @@ var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second
 // leaves behind.
 const startupNudgeRetryBudgetFraction = 0.5
 
-// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
-// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
-// backoff and calls send again — re-running the whole cycle re-pastes the
-// nudge text, which self-heals a draft the still-booting TUI cleared or
-// redrew. Any other error, or exhausting the backoffs, returns immediately so
-// a healthy fast boot never pays this cost.
+// sendStartupNudgeWithRetry calls send (e.g. ops.sendKeys) and, if it reports
+// ErrNudgeSubmitUnconfirmed, waits out a backoff and calls send again. The
+// transport reads the composer on each call: a matching draft gets only the
+// submit sequence, while an empty composer gets the text again. Any other
+// error, or exhausting the backoffs, returns immediately so a healthy fast
+// boot never pays this cost.
 //
 // busy is checked once the backoff sleep has elapsed, right before the next
 // resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
@@ -1815,7 +1815,7 @@ const startupNudgeRetryBudgetFraction = 0.5
 // prompt can take several more seconds to render its busy indicator. If busy
 // now reports true, the earlier submit (or a turn that started some other
 // way) has landed, so this returns nil instead of blindly re-running
-// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// send's delivery cycle: Claude Code queues input typed mid-turn
 // rather than rejecting it, so a resend against an already-busy pane risks
 // enqueueing a second copy of the nudge behind the one that just landed
 // (gastownhall/gascity#5019 review discussion). busy may be nil, in which
