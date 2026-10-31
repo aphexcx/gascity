@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strconv"
@@ -140,6 +141,7 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 		{"codex", "› ", "keep exactly one copy", false},
 		{"codex", "› ", "keep exactly one copy", true},
 		{"claude", "❯ ", "first line\n\nlast line", false},
+		{"codex", "› ", "first line\n\nlast line", false},
 	} {
 		t.Run(tt.provider+"/busy="+strconv.FormatBool(tt.busy)+"/"+tt.message, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -157,6 +159,13 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 						return "GC_PROVIDER=" + tt.provider, nil
 					case slices.Contains(args, "capture-pane"):
 						pane := "────\n" + tt.prefix + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────"
+						if tt.provider == "codex" {
+							input := strings.ReplaceAll(draft, "\n", "\n  ")
+							if input == "" {
+								input = "\x1b[2mExplain this codebase\x1b[22m"
+							}
+							pane = tt.prefix + input + "\n\n  gpt-5.5 low · /tmp/probe"
+						}
 						if busy {
 							pane = "esc to interrupt\n" + pane
 						}
@@ -192,6 +201,69 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestStartupNudgeRetriesComposerRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+		const message = "deliver startup exactly once"
+		tm := NewTmux()
+		captures, pastes, enters := 0, 0, 0
+		busy := false
+		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			switch {
+			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+				return "GC_PROVIDER=codex", nil
+			case slices.Contains(args, "capture-pane"):
+				captures++
+				if captures == 1 {
+					return "OpenAI Codex\nConnecting...", nil
+				}
+				pane := "› \x1b[2mExplain this codebase\x1b[22m\n\n  gpt-5.5 low · /tmp/probe"
+				if busy {
+					pane = "• Working (0s • esc to interrupt)\n" + pane
+				}
+				return pane, nil
+			case slices.Contains(args, "send-keys") && slices.Contains(args, "Enter"):
+				enters++
+				busy = true
+			}
+			return "", nil
+		}}
+		receipts := collectReceipts(tm)
+		// Activity from another startup source is not evidence that a deferred
+		// nudge, which has sent no bytes, was delivered.
+		ops := &fakeStartOps{hasSessionResult: true, paneBusyResult: true}
+		ops.sendKeysHook = func() {
+			delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), message, func(_, text string, _ time.Duration) (int, error) {
+				pastes++
+				if text != message {
+					t.Fatalf("pasted %q, want %q", text, message)
+				}
+				return len(text), nil
+			})
+			if err == nil {
+				err = delivery.UnconfirmedSubmitError(t.Name())
+			}
+			ops.sendKeysErr = err
+		}
+		cfg := runtime.Config{Command: "codex", Nudge: message}
+		if err := doStartSession(context.Background(), ops, t.Name(), cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatal(err)
+		}
+		if pastes != 1 || enters != 1 {
+			t.Fatalf("pastes=%d enters=%d, want exactly one delivered startup nudge", pastes, enters)
+		}
+		got := receipts()
+		if len(got) != 1 || !got[0].Submitted {
+			t.Fatalf("receipts=%+v, want one confirmed submit", got)
+		}
+		callsByMethod(t, ops, "sendKeys", 2)
+		callsByMethod(t, ops, "createSession", 1)
+		callsByMethod(t, ops, "killSession", 0)
+		callsByMethod(t, ops, "respawnPane", 0)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 0)
+	})
 }
 
 // TestNudgeSessionEmitsReceiptForTheWholePayload covers the gp-2rq receipt: a

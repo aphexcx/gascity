@@ -1780,8 +1780,8 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 }
 
 // startupNudgeRetryBackoffs are the delays between resend attempts when the
-// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
-// submit injected right after readiness is observed (~0.3s into a booting
+// startup nudge comes back ErrNudgeSubmitUnconfirmed or ErrNudgeDraftDeferred.
+// Proven empirically: a submit injected right after readiness (~0.3s into a booting
 // claude TUI) sits unconfirmed, while the same injection ~6s later lands —
 // readiness detection and the TUI actually accepting input are not the same
 // moment. A var (not a const) so tests can shrink it.
@@ -1804,9 +1804,10 @@ var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second
 const startupNudgeRetryBudgetFraction = 0.5
 
 // sendStartupNudgeWithRetry calls send (e.g. ops.sendKeys) and, if it reports
-// ErrNudgeSubmitUnconfirmed, waits out a backoff and calls send again. The
-// transport reads the composer on each call: a matching draft gets only the
-// submit sequence, while an empty composer gets the text again. Any other
+// ErrNudgeSubmitUnconfirmed or ErrNudgeDraftDeferred, waits out a backoff and
+// calls send again. The transport reads the composer on each call: a matching
+// draft gets only the submit sequence, while an empty composer gets the text
+// again. Any other
 // error, or exhausting the backoffs, returns immediately so a healthy fast
 // boot never pays this cost.
 //
@@ -1824,6 +1825,8 @@ const startupNudgeRetryBudgetFraction = 0.5
 // case this check is skipped and the ladder behaves as before. A busy
 // check's own error is treated the same as "not busy" — best-effort, never
 // a reason to fail the retry loop itself.
+// A deferred read sent no bytes, so activity cannot acknowledge it: that
+// result always retries the composer read within the same budget.
 //
 // ctx is checked before each backoff sleep: if the start is already being
 // canceled elsewhere (e.g. the supervising startup_timeout deadline), this
@@ -1868,7 +1871,8 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = send()
-		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		unconfirmed := errors.Is(err, ErrNudgeSubmitUnconfirmed)
+		if !unconfirmed && !errors.Is(err, ErrNudgeDraftDeferred) {
 			return err
 		}
 		if attempt >= len(startupNudgeRetryBackoffs) {
@@ -1885,7 +1889,7 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 		if ctx.Err() != nil {
 			return err
 		}
-		if busy != nil {
+		if unconfirmed && busy != nil {
 			if isBusy, _ := busy(); isBusy {
 				return nil
 			}

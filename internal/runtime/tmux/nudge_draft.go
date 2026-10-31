@@ -57,6 +57,20 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	if boxed && !framed {
 		return "", false
 	}
+	// Codex separates its composer from the model/effort/cwd footer with
+	// a blank row instead of a box border. Only the final nonblank row can
+	// be that footer: footer-shaped lines inside a draft remain input.
+	footer := false
+	if !framed && !boxed && strings.TrimSpace(prefix) == "›" {
+		end := len(lines)
+		for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
+			end--
+		}
+		if end > start+2 && strings.TrimSpace(lines[end-2]) == "" && codexComposerFooter(lines[end-1]) {
+			lines = lines[:end-2]
+			footer, framed = true, true
+		}
+	}
 	// An attributed placeholder is evidence of empty input. Without a frame
 	// or that signal, a blank row cannot distinguish a footer from more input.
 	emptySuggestion := false
@@ -77,6 +91,9 @@ func nudgeComposer(content, prefix string) (string, bool) {
 			parts = append(parts, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, border), border)))
 			continue
 		}
+		if footer && trimmed != "" && !strings.HasPrefix(line, "  ") {
+			return "", false
+		}
 		if !framed {
 			if trimmed == "" {
 				if strings.TrimSpace(strings.Join(lines[start+1+i:], "\n")) == "" {
@@ -91,6 +108,23 @@ func nudgeComposer(content, prefix string) (string, bool) {
 		parts = append(parts, strings.TrimRight(strings.TrimPrefix(line, "  "), " "))
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n")), true
+}
+
+func codexComposerFooter(line string) bool {
+	if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
+		return false
+	}
+	modelEffort, cwd, ok := strings.Cut(strings.TrimSpace(line), " · ")
+	fields := strings.Fields(modelEffort)
+	if !ok || len(fields) != 2 || (cwd != "~" && !strings.HasPrefix(cwd, "~/") && !strings.HasPrefix(cwd, "/")) {
+		return false
+	}
+	switch fields[1] {
+	case "default", "none", "minimal", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func composerFrameBoundary(line string) bool {

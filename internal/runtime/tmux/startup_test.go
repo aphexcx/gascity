@@ -1061,6 +1061,9 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 	})
 
 	t.Run("preserved opaque draft is not fatal", func(t *testing.T) {
+		origBackoffs := startupNudgeRetryBackoffs
+		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
 		ops := &fakeStartOps{
 			hasSessionResult: true,
 			sendKeysErr:      fmt.Errorf("%w: opaque composer", ErrNudgeDraftDeferred),
@@ -1069,6 +1072,7 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
 			t.Fatalf("preserved startup draft must not fail the live session: %v", err)
 		}
+		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 
