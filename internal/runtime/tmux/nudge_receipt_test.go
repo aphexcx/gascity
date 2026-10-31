@@ -88,54 +88,82 @@ func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 	for _, tt := range []struct {
 		name, draft, message, stored, attached, submitCheck string
+		sentFirst                                           bool
 	}{
-		{"quoted whitespace", `print("a  b")`, `print("a b")`, runtime.NudgePayloadDigest(`print("a b")`), "0", ""},
-		{"explicit newline whitespace", "first\nsecond", "first  \nsecond", runtime.NudgePayloadDigest("first  \nsecond"), "0", ""},
-		{"wrapped explicit newline whitespace", strings.Repeat("a", 78) + "\nfirst\nsecond", strings.Repeat("a", 78) + "first  \nsecond", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "first  \nsecond"), "0", ""},
-		{"wrap boundary collision", strings.Repeat("a", 77) + "\nb", strings.Repeat("a", 77) + " b", "", "0", ""},
-		{"midword wrap without provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", "", "0", ""},
-		{"wrap with different provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest("another payload"), "0", ""},
-		{"two attached clients", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "2", ""},
-		{"unknown attachment state", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "", ""},
-		{"ownership changes before submit", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "0", "draft-ownership-changed"},
+		{"quoted whitespace", `print("a  b")`, `print("a b")`, runtime.NudgePayloadDigest(`print("a b")`), "0", "", false},
+		{"explicit newline whitespace", "first\nsecond", "first  \nsecond", runtime.NudgePayloadDigest("first  \nsecond"), "0", "", false},
+		{"wrapped explicit newline whitespace", strings.Repeat("a", 78) + "\nfirst\nsecond", strings.Repeat("a", 78) + "first  \nsecond", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "first  \nsecond"), "0", "", false},
+		{"wrap boundary collision", strings.Repeat("a", 77) + "\nb", strings.Repeat("a", 77) + " b", "", "0", "", false},
+		{"midword wrap without provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", "", "0", "", false},
+		{"wrap with different provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest("another payload"), "0", "", false},
+		{"two attached clients", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "2", "", false},
+		{"unknown attachment state", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "", "", false},
+		{"ownership changes before submit", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "0", "draft-ownership-changed", false},
+		{"ownership changes after submit", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "0", "draft-ownership-changed", true},
 	} {
 		t.Run(tt.name+" requires exact identity", func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
-				tm := NewTmux()
-				mutations := 0
-				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
-					switch {
-					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
-						return "GC_PROVIDER=claude", nil
-					case slices.Contains(args, "capture-pane"):
-						return "────\n❯ " + strings.ReplaceAll(tt.draft, "\n", "\n  ") + "\n────", nil
-					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
-						return "%0", nil
-					case slices.Contains(args, "show-hooks"):
-						return `client-attached[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
-					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
-						return "80", nil
-					case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
-						return tt.attached, nil
-					case slices.Contains(args, "show-options") && slices.Contains(args, "@gc-nudge-draft-payload"):
-						return tt.stored, nil
-					case slices.Contains(args, "if-shell"):
-						return tt.submitCheck, nil
-					case slices.Contains(args, "send-keys"):
-						mutations++
-					}
-					return "", nil
-				}}
-				receipts := collectReceipts(tm)
-				delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), tt.message, func(_, text string, _ time.Duration) (int, error) {
-					mutations++
-					return len(text), nil
-				})
-				if !errors.Is(err, ErrNudgeDraftDeferred) || mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
-					t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; different payload must stay untouched", err, mutations, delivery, receipts())
+			for _, busyAfter := range []bool{false, true} {
+				if busyAfter && !tt.sentFirst {
+					continue
 				}
-			})
+				t.Run("busy_after="+strconv.FormatBool(busyAfter), func(t *testing.T) {
+					synctest.Test(t, func(t *testing.T) {
+						t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+						tm := NewTmux()
+						mutations := 0
+						submits := 0
+						tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+							switch {
+							case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+								return "GC_PROVIDER=claude", nil
+							case slices.Contains(args, "capture-pane"):
+								pane := "────\n❯ " + strings.ReplaceAll(tt.draft, "\n", "\n  ") + "\n────"
+								if busyAfter && submits > 0 {
+									pane = "esc to interrupt\n" + pane
+								}
+								return pane, nil
+							case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
+								return "%0", nil
+							case slices.Contains(args, "show-hooks"):
+								return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
+							case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
+								return "80", nil
+							case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
+								return tt.attached, nil
+							case slices.Contains(args, "show-options") && slices.Contains(args, "@gc-nudge-draft-payload"):
+								if busyAfter && submits > 0 {
+									return "", nil
+								}
+								return tt.stored, nil
+							case slices.Contains(args, "if-shell"):
+								if tt.sentFirst && submits == 0 {
+									submits++
+									mutations++
+									return "", nil
+								}
+								return tt.submitCheck, nil
+							case slices.Contains(args, "send-keys"):
+								mutations++
+							}
+							return "", nil
+						}}
+						receipts := collectReceipts(tm)
+						delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), tt.message, func(_, text string, _ time.Duration) (int, error) {
+							mutations++
+							return len(text), nil
+						})
+						if tt.sentFirst {
+							if err != nil || mutations != 1 || !delivery.Landed() || delivery.Submit != runtime.NudgeSubmitUnconfirmed || len(receipts()) != 1 || receipts()[0].Submitted {
+								t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; earlier submit evidence must survive", err, mutations, delivery, receipts())
+							}
+							return
+						}
+						if !errors.Is(err, ErrNudgeDraftDeferred) || mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
+							t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; different payload must stay untouched", err, mutations, delivery, receipts())
+						}
+					})
+				})
+			}
 		})
 	}
 	synctest.Test(t, func(t *testing.T) {

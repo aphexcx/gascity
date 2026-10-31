@@ -29,44 +29,53 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 		return "", fmt.Errorf("invalid pane identity %q", pane)
 	}
 	hook := fmt.Sprintf("set-option -p -t %q %s ''", pane, nudgeDraftPayloadOption)
-	hooks, err := t.run("show-hooks", "-t", session, "client-attached")
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(hooks, "\n") {
-		if strings.HasSuffix(line, " "+hook) {
-			return pane, nil
-		}
-	}
-	if !install {
-		return "", fmt.Errorf("draft ownership hook is absent")
-	}
-	if strings.TrimSpace(hooks) == "" {
-		// A local array masks the inherited global array. Preserve its
-		// current commands together before appending the ownership hook.
-		inherited, err := t.run("show-hooks", "-g", "client-attached")
+	for _, event := range []string{"client-attached", "client-session-changed"} {
+		hooks, err := t.run("show-hooks", "-t", session, event)
 		if err != nil {
 			return "", err
 		}
-		var commands []string
-		for _, line := range strings.Split(strings.TrimSpace(inherited), "\n") {
-			if line == "" || line == "client-attached" {
-				continue
+		found := false
+		for _, line := range strings.Split(hooks, "\n") {
+			if strings.HasSuffix(line, " "+hook) {
+				found = true
+				break
 			}
-			_, command, ok := strings.Cut(line, " ")
-			if !ok {
-				return "", fmt.Errorf("cannot read inherited attachment hook")
-			}
-			commands = append(commands, command)
 		}
-		if len(commands) != 0 {
-			if _, err := t.run("set-hook", "-t", session, "client-attached", strings.Join(commands, " ; ")); err != nil {
+		if found {
+			continue
+		}
+		if !install {
+			return "", fmt.Errorf("draft ownership hook %q is absent", event)
+		}
+		if strings.TrimSpace(hooks) == "" {
+			// A local array masks the inherited global array. Preserve its
+			// current commands together before appending the ownership hook.
+			inherited, err := t.run("show-hooks", "-g", event)
+			if err != nil {
 				return "", err
 			}
+			var commands []string
+			for _, line := range strings.Split(strings.TrimSpace(inherited), "\n") {
+				if line == "" || line == event {
+					continue
+				}
+				_, command, ok := strings.Cut(line, " ")
+				if !ok {
+					return "", fmt.Errorf("cannot read inherited attachment hook")
+				}
+				commands = append(commands, command)
+			}
+			if len(commands) != 0 {
+				if _, err := t.run("set-hook", "-t", session, event, strings.Join(commands, " ; ")); err != nil {
+					return "", err
+				}
+			}
+		}
+		if _, err := t.run("set-hook", "-a", "-t", session, event, hook); err != nil {
+			return "", err
 		}
 	}
-	_, err = t.run("set-hook", "-a", "-t", session, "client-attached", hook)
-	return pane, err
+	return pane, nil
 }
 
 // stageNudgeDraftProvenance marks a paste as pending only while detached.
@@ -90,8 +99,9 @@ func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
 
 // sendNudgeDraftSubmitSequence checks ownership in the same tmux command that
 // sends each key, so an attachment during the debounce cannot reuse an old read.
-func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string) error {
+func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string) (bool, error) {
 	condition := fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message))
+	sent := false
 	for i, key := range keys {
 		if i > 0 {
 			time.Sleep(nudgeSubmitKeySettle)
@@ -100,13 +110,14 @@ func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []strin
 			shellquote.Join([]string{"send-keys", "-t", target, key}),
 			"display-message -p draft-ownership-changed")
 		if err != nil {
-			return err
+			return sent, err
 		}
 		if strings.TrimSpace(out) != "" {
-			return fmt.Errorf("%w: draft ownership changed before submit to %q", ErrNudgeDraftDeferred, target)
+			return sent, fmt.Errorf("%w: draft ownership changed before submit to %q", ErrNudgeDraftDeferred, target)
 		}
+		sent = true
 	}
-	return nil
+	return sent, nil
 }
 
 // nudgeComposer reads the last live input, including continuation rows inside

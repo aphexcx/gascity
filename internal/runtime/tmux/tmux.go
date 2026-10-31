@@ -2964,9 +2964,12 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// only for single-key (plain Enter) sequences, which is what every family
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
+	wrappedKeysSent := false
 	sendSubmit := func() error {
 		if resumeWrappedDraft {
-			return t.sendNudgeDraftSubmitSequence(target, message, submitKeys)
+			sent, err := t.sendNudgeDraftSubmitSequence(target, message, submitKeys)
+			wrappedKeysSent = wrappedKeysSent || sent
+			return err
 		}
 		return t.sendNudgeSubmitSequence(target, submitKeys)
 	}
@@ -2991,8 +2994,19 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			return isBusy, err
 		}
 		submit, err := submitEnterAndConfirm(sendSubmit, wake, busy, time.Sleep)
+		if resumeWrappedDraft && submit == runtime.NudgeSubmitConfirmed {
+			stored, readErr := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
+			if readErr != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+				log.Printf("tmux nudge: draft ownership lost while confirming submit to %q; retaining unconfirmed evidence: %v", target, readErr)
+				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, nil
+			}
+		}
 		submitted = submit == runtime.NudgeSubmitConfirmed
 		if errors.Is(err, ErrNudgeDraftDeferred) {
+			if wrappedKeysSent {
+				log.Printf("tmux nudge: ownership changed for %q after an earlier submit; retaining unconfirmed delivery evidence", target)
+				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, nil
+			}
 			delivered = false
 			return runtime.NudgeDelivery{}, err
 		}

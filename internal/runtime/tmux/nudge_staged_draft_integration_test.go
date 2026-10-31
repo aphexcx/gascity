@@ -134,9 +134,9 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		}
 	})
 
-	for _, ownership := range []struct{ edited, removed, global bool }{{false, false, false}, {true, false, false}, {true, false, true}, {false, true, false}} {
+	for _, ownership := range []struct{ edited, removed, global, switched bool }{{false, false, false, false}, {true, false, false, false}, {true, false, true, false}, {false, true, false, false}, {true, false, false, true}} {
 		edited := ownership.edited
-		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t global=%t", edited, ownership.removed, ownership.global), func(t *testing.T) {
+		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t global=%t switched=%t", edited, ownership.removed, ownership.global, ownership.switched), func(t *testing.T) {
 			claudeScript, err := filepath.Abs(filepath.Join("testdata", "nudge_faketui.py"))
 			if err != nil {
 				t.Fatal(err)
@@ -160,7 +160,11 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				if ownership.global {
 					args = []string{"set-hook", "-g"}
 				}
-				if _, err := tm.run(append(args, "client-attached", "set-option -t wrapped @gc-test-user-hook ran")...); err != nil {
+				event := "client-attached"
+				if ownership.switched {
+					event = "client-session-changed"
+				}
+				if _, err := tm.run(append(args, event, "set-option -t wrapped @gc-test-user-hook ran")...); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -203,8 +207,15 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				t.Fatalf("stored payload digest=%q err=%v, want full-paste provenance", stored, err)
 			}
 			if edited {
+				attachedSession := "wrapped"
+				if ownership.switched {
+					attachedSession = "other"
+					if _, err := tm.run("new-session", "-d", "-s", attachedSession); err != nil {
+						t.Fatal(err)
+					}
+				}
 				ctx, cancel := context.WithCancel(context.Background())
-				cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, []string{"-L", tm.cfg.SocketName, "attach-session", "-t", "wrapped"})...)
+				cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, []string{"-L", tm.cfg.SocketName, "attach-session", "-t", attachedSession})...)
 				cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 				cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 				cmd.WaitDelay = testutil.ExecRaceTimeout
@@ -222,11 +233,20 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				go func() { _ = cmd.Wait(); close(done) }()
 				t.Cleanup(func() { _ = stdin.Close(); cancel(); <-done })
 				deadline := time.After(testutil.ExecRaceTimeout)
-				for !tm.IsSessionAttached("wrapped") {
+				for !tm.IsSessionAttached(attachedSession) {
 					select {
 					case <-poll.C:
 					case <-deadline:
 						t.Fatal("human client never attached")
+					}
+				}
+				client, err := tm.run("list-clients", "-F", "#{client_name}")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ownership.switched {
+					if _, err := tm.run("switch-client", "-c", strings.TrimSpace(client), "-t", "wrapped"); err != nil {
+						t.Fatal(err)
 					}
 				}
 				for _, keys := range [][]string{{"C-u"}, {"-l", strings.Repeat("a", 77)}, {"C-v"}, {"-l", "b"}} {
@@ -247,7 +267,12 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 						t.Fatalf("edited draft never rendered: %q, %v", got, err)
 					}
 				}
-				if _, err := tm.run("detach-client", "-s", "wrapped"); err != nil {
+				if ownership.switched {
+					if _, err := tm.run("switch-client", "-c", strings.TrimSpace(client), "-t", attachedSession); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := tm.run("detach-client", "-s", attachedSession); err != nil {
 					t.Fatal(err)
 				}
 				select {
