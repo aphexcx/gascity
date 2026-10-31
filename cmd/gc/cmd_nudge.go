@@ -2540,23 +2540,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		pending := state.Pending[:0]
-		for _, item := range state.Pending {
-			if !match(item) {
-				pending = append(pending, item)
-				continue
-			}
-			if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-				pending = append(pending, item)
-				continue
-			}
-			item.ClaimedAt = now.UTC()
-			item.LeaseUntil = now.Add(defaultQueuedNudgeClaimTTL).UTC()
-			state.InFlight = append(state.InFlight, item)
-			claimed = append(claimed, item)
-		}
-		state.Pending = pending
-		sortQueuedNudges(state)
+		claimed = nudgequeue.ClaimDueBatch(state, now, defaultQueuedNudgeClaimTTL, match)
 		return nil
 	})
 	return claimed, err

@@ -117,7 +117,7 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 				if err != nil || delivery.Submit != runtime.NudgeSubmitUnverified {
 					t.Errorf("delivery %d = %+v, %v; want unverified without a replay signal", i, delivery, err)
 				}
-			} else if err == nil || delivery.Landed() {
+			} else if !errors.Is(err, ErrNudgeDraftDeferred) || delivery.Landed() {
 				t.Errorf("delivery %d = %+v, %v; different input must wait for the preserved draft", i, delivery, err)
 			}
 			if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {

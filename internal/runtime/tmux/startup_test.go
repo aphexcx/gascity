@@ -1060,6 +1060,18 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 
+	t.Run("preserved opaque draft is not fatal", func(t *testing.T) {
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: opaque composer", ErrNudgeDraftDeferred),
+		}
+		cfg := runtime.Config{Command: "codex", Nudge: "startup prompt"}
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("preserved startup draft must not fail the live session: %v", err)
+		}
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
+
 	// Same reasoning as above: a submit proven delivered but never observed
 	// busy (composer drained before the confirm budget saw it) must not fail
 	// the start either. It also gets the same durable artifact as the

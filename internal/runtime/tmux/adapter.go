@@ -1753,8 +1753,10 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// refuses to retry it (retrying would re-inject a message the
 			// session already received), so by the time it reaches here
 			// delivery is proven and only the observation missed it. Any
-			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+			// preserved draft also leaves the session alive with a diagnostic;
+			// killing it would destroy the input we deliberately retained.
+			// Other errors still fail the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) && !errors.Is(err, ErrNudgeDraftDeferred) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
 			// The stderr warning alone is not a durable record (Layer 0
@@ -1763,7 +1765,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// afterward. Persist a diagnostic artifact alongside the
 			// warning so a later observer (gc trace, a human, or an
 			// automated sweep) can find and act on it.
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q remains unresolved: %v\n", name, err)
 			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}

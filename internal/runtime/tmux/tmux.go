@@ -236,6 +236,9 @@ var (
 	// consumer of delivery evidence ([runtime.NudgeDelivery]) translates to
 	// the same error; this name is kept for existing errors.Is callers.
 	ErrNudgeSubmitUnconfirmed = runtime.ErrNudgeSubmitUnconfirmed
+	// ErrNudgeDraftDeferred means the composer could not safely accept a paste.
+	// Startup preserves the live session and records the unresolved nudge.
+	ErrNudgeDraftDeferred = errors.New("nudge: preserved draft deferred delivery")
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -2815,11 +2818,11 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		}
 		draft, observed := nudgeComposer(content, prefix)
 		if !observed {
-			return runtime.NudgeDelivery{}, fmt.Errorf("nudge to %q deferred: composer is unreadable", target)
+			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" {
 			if draft != strings.TrimSpace(message) {
-				return runtime.NudgeDelivery{}, fmt.Errorf("nudge to %q deferred: composer holds a different or opaque draft", target)
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
 			}
 			resumeDraft = true
 		}

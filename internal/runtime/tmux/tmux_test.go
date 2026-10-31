@@ -2611,7 +2611,7 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	sessionName := "gt-test-nudge-codex-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
 
 	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "printf '› '; exec cat -v", map[string]string{
 		"GC_PROVIDER": "codex",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
@@ -2652,6 +2652,7 @@ import (
 	"os"
 )
 func main() {
+	fmt.Print("› ")
 	r := bufio.NewReader(os.Stdin)
 	for {
 		b, err := r.ReadByte()
@@ -2728,7 +2729,7 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	sessionName := "gt-test-nudge-claude-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
 
 	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "printf '❯ '; exec cat -v", map[string]string{
 		"GC_PROVIDER": "claude",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)

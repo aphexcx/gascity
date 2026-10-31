@@ -3791,6 +3791,40 @@ func TestClaimDueQueuedNudgesClaimsOnceUntilAck(t *testing.T) {
 	}
 }
 
+func TestQueuedNudgeRetryKeepsOriginalBatch(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	match := func(item queuedNudge) bool { return item.Agent == "worker" }
+	first := newQueuedNudge("worker", "original reminder", now.Add(-time.Minute))
+	if err := enqueueQueuedNudge(dir, first); err != nil {
+		t.Fatal(err)
+	}
+	original, err := claimDueQueuedNudgesMatching(dir, now, match)
+	if err != nil || len(original) != 1 {
+		t.Fatalf("first claim=%v, %v", original, err)
+	}
+	if err := recordQueuedNudgeFailure(dir, queuedNudgeIDs(original), runtime.ErrNudgeSubmitUnconfirmed, now); err != nil {
+		t.Fatal(err)
+	}
+	newer := newQueuedNudge("worker", "new reminder", now.Add(-time.Second))
+	if err := enqueueQueuedNudge(dir, newer); err != nil {
+		t.Fatal(err)
+	}
+	retryAt := now.Add(defaultQueuedNudgeRetryDelay + time.Second)
+	retry, err := claimDueQueuedNudgesMatching(dir, retryAt, match)
+	if err != nil || formatNudgeInjectOutput(retry) != formatNudgeInjectOutput(original) {
+		t.Fatalf("retry=%v, %v; original formatted batch must survive arrival of another reminder", retry, err)
+	}
+	if err := ackQueuedNudges(dir, queuedNudgeIDs(retry)); err != nil {
+		t.Fatal(err)
+	}
+	next, err := claimDueQueuedNudgesMatching(dir, retryAt, match)
+	if err != nil || len(next) != 1 || next[0].ID != newer.ID {
+		t.Fatalf("next=%v, %v; new reminder must remain independently deliverable", next, err)
+	}
+}
+
 func TestClaimDueQueuedNudgesForTargetLeavesSiblingFencePending(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

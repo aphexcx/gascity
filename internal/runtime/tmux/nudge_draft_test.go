@@ -9,6 +9,9 @@ func TestNudgeComposer(t *testing.T) {
 	}{
 		{"empty", "❯ ", "❯ ", "", true},
 		{"draft", "❯ keep one copy", "❯ ", "keep one copy", true},
+		{"prompt in draft", "────\n❯ first line\n  ❯ \n────", "❯ ", "first line\n❯", true},
+		{"boxed prompt in draft", "╭────╮\n│ ❯ first │\n│   ❯    │\n╰────╯", "❯ ", "first\n❯", true},
+		{"border in draft", "────\n❯ first line\n  ────\n  last line\n────", "❯ ", "first line\n────\nlast line", true},
 		{"boxed empty", feedbackSurveySessionFixture, "❯ ", "", true},
 		{"boxed continuation", "╭────╮\n│ ❯    │\n│  keep me  │\n╰────╯", "❯ ", "keep me", true},
 		{"multiline", "────\n❯ first\n  \n  second\n────\nstatus", "❯ ", "first\n\nsecond", true},
@@ -20,6 +23,7 @@ func TestNudgeComposer(t *testing.T) {
 		{"transcript", "❯ prior text\nanswer\n❯ ", "❯ ", "", true},
 		{"missing prompt", "working", "❯ ", "", false},
 		{"incomplete box", "│ ❯ \nunknown layout", "❯ ", "", false},
+		{"clipped box", "│ ❯ ", "❯ ", "", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, observed := nudgeComposer(tt.pane, tt.prefix)
