@@ -27,7 +27,7 @@ on:
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.upstream_twin_head || 'ordinary' }}
   cancel-in-progress: true
 
 permissions:
