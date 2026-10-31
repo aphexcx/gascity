@@ -1508,7 +1508,12 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	now := time.Now()
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", now, queuedNudgeOptionsFromTarget(target))
+	if undelivered == "submit_unconfirmed" {
+		item, _ = failedQueuedNudge(item, runtime.ErrNudgeSubmitUnconfirmed, now)
+	}
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1923,6 +1928,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)
+		}
+		if errors.Is(err, tmux.ErrNudgeDraftDeferred) {
+			// Surface the blocker to the dispatcher/operator. Retrying a changed
+			// batch must neither modify its old draft nor silently spend attempts.
+			return false, errors.Join(bookkeepErr, err)
 		}
 		return false, bookkeepErr
 	}
@@ -3059,8 +3069,13 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
-	item.Attempts++
-	item.LastAttemptAt = now.UTC()
+	// A preserved draft prevented any paste or submit. Keep the original
+	// batch identity and attempt budget until that input is resolved; normal
+	// expiry still applies. This also covers a batch shortened by withdrawal.
+	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) {
+		item.Attempts++
+		item.LastAttemptAt = now.UTC()
+	}
 	item.LastError = cause.Error()
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}

@@ -12,6 +12,8 @@ func TestNudgeComposer(t *testing.T) {
 		{"prompt in draft", "────\n❯ first line\n  ❯ \n────", "❯ ", "first line\n❯", true},
 		{"boxed prompt in draft", "╭────╮\n│ ❯ first │\n│   ❯    │\n╰────╯", "❯ ", "first\n❯", true},
 		{"border in draft", "────\n❯ first line\n  ────\n  last line\n────", "❯ ", "first line\n────\nlast line", true},
+		{"rounded box in draft", "────\n❯ \n  ╭──╮\n  │draft│\n  ╰──╯\n────", "❯ ", "╭──╮\n│draft│\n╰──╯", true},
+		{"rounded box before prompt in draft", "────\n❯ first\n  ╭──╮\n  ❯ \n  ╰──╯\n────", "❯ ", "first\n╭──╮\n❯\n╰──╯", true},
 		{"boxed empty", feedbackSurveySessionFixture, "❯ ", "", true},
 		{"boxed continuation", "╭────╮\n│ ❯    │\n│  keep me  │\n╰────╯", "❯ ", "keep me", true},
 		{"multiline", "────\n❯ first\n  \n  second\n────\nstatus", "❯ ", "first\n\nsecond", true},

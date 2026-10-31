@@ -69,7 +69,12 @@ func nudgeComposer(content, prefix string) (string, bool) {
 }
 
 func composerFrameBoundary(line string) bool {
+	// Continuation text is indented, even when it contains a box drawing.
+	// Only a border in the composer's frame column can end the input.
+	if strings.TrimLeft(line, " \t") != line {
+		return false
+	}
 	trimmed := strings.TrimSpace(line)
 	return strings.HasPrefix(trimmed, "╭") || strings.HasPrefix(trimmed, "╰") ||
-		(trimmed != "" && !strings.HasPrefix(line, " ") && strings.Trim(trimmed, "─") == "")
+		(trimmed != "" && strings.Trim(trimmed, "─") == "")
 }
