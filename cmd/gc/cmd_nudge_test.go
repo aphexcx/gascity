@@ -5152,9 +5152,9 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 			t.Fatalf("enqueueQueuedNudge(%s): %v", item.ID, err)
 		}
 	}
-	// Dead-letter both at different times: old at -2h, recent at -30m.
+	// Dead-letter both at different times: old beyond seven days, recent at -30m.
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
-		if err := recordQueuedNudgeFailure(dir, []string{"n-old"}, context.DeadlineExceeded, now.Add(-2*time.Hour+time.Duration(i)*time.Second)); err != nil {
+		if err := recordQueuedNudgeFailure(dir, []string{"n-old"}, context.DeadlineExceeded, now.Add(-8*24*time.Hour+time.Duration(i)*time.Second)); err != nil {
 			t.Fatalf("recordQueuedNudgeFailure(n-old, %d): %v", i, err)
 		}
 	}
@@ -5164,7 +5164,7 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 		}
 	}
 
-	// With defaultQueuedNudgeDeadRetention (1h), old should be pruned (has terminal bead), recent kept.
+	// Only the old item has exceeded the seven-day recovery cap.
 	store := openNudgeBeadStore(dir)
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
 		return pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline())
@@ -5244,7 +5244,7 @@ func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
 	}
 	item.BeadID = beadID
 	item.LastError = "expired"
-	item.DeadAt = now.Add(-2 * time.Hour) // older than defaultQueuedNudgeDeadRetention (1h)
+	item.DeadAt = now.Add(-8 * 24 * time.Hour) // beyond the seven-day recovery cap
 
 	// Simulate the backing bead being reaped by an unrelated retention sweep,
 	// independent of the nudge queue's own lifecycle.

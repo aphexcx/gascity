@@ -26,6 +26,9 @@ func TestNudgeDeadLettersCheck(t *testing.T) {
 		s.Dead = []nudgequeue.Item{
 			{ID: "n-old", Agent: "worker-a", SessionID: "s-1", LastError: "draft_ownership_lost", DeadAt: now.Add(-2 * time.Hour)},
 			{ID: "n-new", Agent: "worker-b", LastError: "expired", DeadAt: now.Add(-time.Minute)},
+			{ID: "n-superseded", LastError: "superseded", DeadAt: now.Add(-time.Hour)},
+			{ID: "n-replayed", ReplayID: "n-successor", DeadAt: now.Add(-time.Hour)},
+			{ID: "n-dismissed", DismissedAt: now, DeadAt: now.Add(-time.Hour)},
 		}
 		return nil
 	}); err != nil {
@@ -44,9 +47,27 @@ func TestNudgeDeadLettersCheck(t *testing.T) {
 			t.Fatalf("doctor omitted %q: %+v", value, r)
 		}
 	}
+	for _, detail := range r.Details {
+		if !strings.Contains(detail, "age=") || !strings.Contains(detail, "cap=7d") || !strings.Contains(detail, "expires=") {
+			t.Errorf("missing per-item recovery window: %s", detail)
+		}
+	}
 	after, err := os.ReadFile(nudgequeue.StatePath(dir))
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("doctor mutated queue: %v", err)
+	}
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		for i := range s.Dead {
+			if s.Dead[i].UnresolvedDeadLetter() {
+				s.Dead[i].DismissedAt = now
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := check.Run(ctx); r.Status != StatusOK || len(r.Details) != 0 {
+		t.Fatalf("resolved entries reported unresolved: %+v", r)
 	}
 	if err := os.WriteFile(nudgequeue.StatePath(dir), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)

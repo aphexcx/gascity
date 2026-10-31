@@ -2950,6 +2950,12 @@ stays dead with the new item's ID recorded on it; a second replay is refused.
 The new item retains the original source, reference and session fence, and
 uses the normal delivery bounds. Prints the new item ID on success.
 
+Use --dismiss to record an explicit dismissal without sending the input.
+Unresolved items and disposition receipts remain for seven days from the
+dead transition. Cap expiry removes the item and reports unresolved input
+loss by log and mail. Superseded reminders cannot be replayed and do not
+produce failure alerts or unresolved doctor entries.
+
 Use --dry-run to preview without writing. Find dead items with gc doctor
 or gc nudge status. Dead transitions send one mail to the referenced bead's
 escalation_recipient metadata, falling back to session.park_alert_to. An
@@ -2961,6 +2967,7 @@ gc nudge replay ITEM [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--dismiss` | bool |  | Dismiss the dead letter without replaying its input |
 | `--dry-run` | bool |  | Preview the replay without changing the queue |
 
 ## gc nudge status

@@ -28,7 +28,7 @@ func TestReplayPreservesInputAndProvenance(t *testing.T) {
 	if dead.Reference.ID != "work-1" {
 		t.Fatal("replay aliases the dead item's reference")
 	}
-	if err := RecordReplay(&state, dead.ID, item.ID); err != nil {
+	if err := RecordReplay(&state, dead.ID, item.ID, now); err != nil {
 		t.Fatal(err)
 	}
 	if state.Dead[0].ReplayID != item.ID || !state.Dead[0].DeadAt.Equal(dead.DeadAt) {
@@ -45,5 +45,41 @@ func TestReplayRefusesNonDeadItems(t *testing.T) {
 		if _, err := PrepareReplay(&state, id, "n-new", time.Now(), time.Hour); err == nil || !strings.Contains(err.Error(), id) {
 			t.Fatalf("replay %s: %v", id, err)
 		}
+	}
+}
+
+func TestReplayAndDismissDisposition(t *testing.T) {
+	now := time.Date(2026, 10, 31, 14, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		item Item
+	}{
+		{"superseded", Item{ID: "n-old", LastError: "superseded"}},
+		{"dismissed", Item{ID: "n-old", DismissedAt: now.Add(-time.Hour)}},
+		{"replayed", Item{ID: "n-old", ReplayID: "n-new"}},
+		{"cap", Item{ID: "n-old", DeadAt: now.Add(-DeadLetterRetention)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := State{Dead: []Item{tc.item}}
+			if _, err := PrepareReplay(&state, "n-old", "n-next", now, time.Hour); err == nil {
+				t.Fatal("preview accepted disposed/expired item")
+			}
+			if err := RecordReplay(&state, "n-old", "n-next", now); err == nil {
+				t.Fatal("stale replay committed")
+			}
+			if err := DismissDeadLetter(&state, "n-old", now); err == nil {
+				t.Fatal("stale dismissal committed")
+			}
+			if !reflect.DeepEqual(state.Dead[0], tc.item) {
+				t.Fatal("refusal mutated the disposition")
+			}
+		})
+	}
+	state := State{Dead: []Item{{ID: "n-live", DeadAt: now.Add(-DeadLetterRetention + time.Second)}}}
+	if _, err := PrepareReplay(&state, "n-live", "n-next", now, time.Hour); err != nil {
+		t.Fatalf("recovery window closed early: %v", err)
+	}
+	if err := DismissDeadLetter(&state, "n-live", now); err != nil || !state.Dead[0].DismissedAt.Equal(now) || state.Dead[0].UnresolvedDeadLetter() {
+		t.Fatalf("dismissal not recorded: %+v %v", state, err)
 	}
 }

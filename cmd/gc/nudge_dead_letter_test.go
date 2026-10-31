@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -80,6 +81,58 @@ func TestNudgeDeadLetterExpiryNotification(t *testing.T) {
 		return errors.New("abort")
 	}); err == nil || calls != 1 {
 		t.Fatalf("failed transaction notified: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestNudgeDeadLetterCapReportsLossAfterCommit(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	var warnings bytes.Buffer
+	oldWriter, oldLossNotify := nudgeWarningWriter, nudgeDeadLetterLossNotify
+	nudgeWarningWriter = &warnings
+	t.Cleanup(func() { nudgeWarningWriter, nudgeDeadLetterLossNotify = oldWriter, oldLossNotify })
+	calls := 0
+	nudgeDeadLetterLossNotify = func(cityPath string, item queuedNudge, _ io.Writer) error {
+		calls++
+		state, err := nudgequeue.LoadState(cityPath)
+		if err != nil || len(state.Dead) != 0 {
+			return fmt.Errorf("loss mail preceded commit: %+v: %w", state, err)
+		}
+		subject, body := nudgeDeadLetterLossMail(item)
+		if !strings.Contains(subject, "LOST") || !strings.Contains(body, "n-lost") || strings.Contains(body, "gc nudge replay") {
+			return fmt.Errorf("loss mail promises recovery: %s %s", subject, body)
+		}
+		return nil
+	}
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		s.Dead = []queuedNudge{
+			{ID: "n-lost", Agent: "worker", Message: "unreplayed input", DeadAt: now.Add(-8 * 24 * time.Hour), LastError: "expired"},
+			{ID: "n-replayed", ReplayID: "successor", DeadAt: now.Add(-8 * 24 * time.Hour)},
+			{ID: "n-dismissed", DismissedAt: now.Add(-time.Hour), DeadAt: now.Add(-8 * 24 * time.Hour)},
+			{ID: "n-replaced", LastError: "superseded", DeadAt: now.Add(-8 * 24 * time.Hour)},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
+		if err := pruneDeadQueuedNudges(s, nil, now, noMaintenanceDeadline()); err != nil {
+			return err
+		}
+		return errors.New("abort removal")
+	}); err == nil || calls != 0 || warnings.Len() != 0 {
+		t.Fatalf("uncommitted removal notified: calls=%d err=%v warnings=%s", calls, err, &warnings)
+	}
+	for range 2 {
+		if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
+			return pruneDeadQueuedNudges(s, nil, now, noMaintenanceDeadline())
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Dead) != 0 || calls != 1 || strings.Count(warnings.String(), "retention cap") != 1 || !strings.Contains(warnings.String(), "n-lost") || strings.Contains(warnings.String(), "mail failed") {
+		t.Fatalf("cap loss state=%+v err=%v warnings=%s", state, err, &warnings)
 	}
 }
 
@@ -208,6 +261,12 @@ func TestNudgeReplayEnqueueAndDryRun(t *testing.T) {
 	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error { s.Dead = []queuedNudge{dead}; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	// Routine maintenance must preserve the recovery command beyond one hour.
+	if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
+		return pruneDeadQueuedNudges(s, nudgeFrontDoor(store), now, noMaintenanceDeadline())
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var out, stderr bytes.Buffer
 	if code := doNudgeReplay(dir, store, dead.ID, true, &out, &stderr); code != 0 || !strings.Contains(out.String(), dead.ID) || !strings.Contains(out.String(), "worker") {
 		t.Fatalf("dry run code=%d out=%s err=%s", code, &out, &stderr)
@@ -242,6 +301,61 @@ func TestNudgeReplayEnqueueAndDryRun(t *testing.T) {
 	}
 	if err := enqueueQueuedNudgeWithStore(dir, store, stale); err == nil || !strings.Contains(err.Error(), item.ID) {
 		t.Fatalf("stale enqueue accepted: %v", err)
+	}
+}
+
+func TestNudgeDeadLetterSupersessionDoesNotAlertOrReplay(t *testing.T) {
+	dir := t.TempDir()
+	store := beads.NudgesStore{Store: beads.NewMemStore()}
+	now := time.Now()
+	oldNotify, oldWriter := nudgeDeadLetterNotify, nudgeWarningWriter
+	t.Cleanup(func() { nudgeDeadLetterNotify, nudgeWarningWriter = oldNotify, oldWriter })
+	var warnings bytes.Buffer
+	nudgeWarningWriter = &warnings
+	calls := 0
+	nudgeDeadLetterNotify = func(string, queuedNudge, io.Writer) error { calls++; return nil }
+	old := newQueuedNudgeWithOptions("worker", "old reminder", "sling", now, queuedNudgeOptions{ID: "n-old", Reference: &nudgeReference{Kind: "bead", ID: "work-1"}})
+	newer := old
+	newer.ID, newer.Message = "n-new", "new reminder"
+	for _, item := range []queuedNudge{old, newer} {
+		if err := enqueueQueuedNudgeWithStore(dir, store, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 0 || warnings.Len() != 0 {
+		t.Errorf("supersession sent failure notification: calls=%d warnings=%s", calls, &warnings)
+	}
+	var out, stderr bytes.Buffer
+	if code := doNudgeReplay(dir, store, old.ID, false, &out, &stderr); code == 0 || !strings.Contains(stderr.String(), "superseded") || !strings.Contains(stderr.String(), old.ID) {
+		t.Errorf("superseded replay code=%d err=%s", code, &stderr)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Pending) != 1 || state.Pending[0].ID != newer.ID || state.Pending[0].Message != newer.Message {
+		t.Fatalf("newer reminder displaced: %+v err=%v", state, err)
+	}
+}
+
+func TestNudgeReplayDismissalAndDryRun(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		s.Dead = []queuedNudge{{ID: "n-dismiss", DeadAt: now.Add(-2 * time.Hour), LastError: "expired"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	for _, dryRun := range []bool{true, false} {
+		if code := doNudgeDismiss(dir, "n-dismiss", dryRun, &out, &stderr); code != 0 {
+			t.Fatalf("dismiss dryRun=%t code=%d: %s", dryRun, code, &stderr)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil || len(state.Dead) != 1 || len(state.Pending) != 0 || state.Dead[0].DismissedAt.IsZero() != dryRun {
+			t.Fatalf("dismiss dryRun=%t state=%+v err=%v", dryRun, state, err)
+		}
+	}
+	if code := doNudgeReplay(dir, beads.NudgesStore{}, "n-dismiss", true, &out, &stderr); code == 0 || !strings.Contains(stderr.String(), "dismissed") {
+		t.Fatalf("dismissed item replayed: code=%d err=%s", code, &stderr)
 	}
 }
 

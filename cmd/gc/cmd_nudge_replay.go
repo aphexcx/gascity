@@ -11,7 +11,7 @@ import (
 )
 
 func newNudgeReplayCmd(stdout, stderr io.Writer) *cobra.Command {
-	var dryRun bool
+	var dryRun, dismiss bool
 	cmd := &cobra.Command{
 		Use:   "replay ITEM",
 		Short: "Re-enqueue a dead-letter nudge once",
@@ -21,6 +21,12 @@ Resolve the pane input or delivery failure before replaying. The original
 stays dead with the new item's ID recorded on it; a second replay is refused.
 The new item retains the original source, reference and session fence, and
 uses the normal delivery bounds. Prints the new item ID on success.
+
+Use --dismiss to record an explicit dismissal without sending the input.
+Unresolved items and disposition receipts remain for seven days from the
+dead transition. Cap expiry removes the item and reports unresolved input
+loss by log and mail. Superseded reminders cannot be replayed and do not
+produce failure alerts or unresolved doctor entries.
 
 Use --dry-run to preview without writing. Find dead items with gc doctor
 or gc nudge status. Dead transitions send one mail to the referenced bead's
@@ -33,7 +39,7 @@ unset recipient or mail failure is logged and leaves the doctor row visible.`,
 				return err
 			}
 			var store beads.NudgesStore
-			if !dryRun {
+			if !dryRun && !dismiss {
 				var opened beads.Store
 				store, opened, err = openNudgeBeadStoreOwned(cityPath)
 				if err != nil {
@@ -41,14 +47,47 @@ unset recipient or mail failure is logged and leaves the doctor row visible.`,
 				}
 				defer closeBeadStoreHandle(opened) //nolint:errcheck // enqueue reports its write outcome
 			}
-			if doNudgeReplay(cityPath, store, args[0], dryRun, stdout, stderr) != 0 {
+			var code int
+			if dismiss {
+				code = doNudgeDismiss(cityPath, args[0], dryRun, stdout, stderr)
+			} else {
+				code = doNudgeReplay(cityPath, store, args[0], dryRun, stdout, stderr)
+			}
+			if code != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview the replay without changing the queue")
+	cmd.Flags().BoolVar(&dismiss, "dismiss", false, "Dismiss the dead letter without replaying its input")
 	return cmd
+}
+
+func doNudgeDismiss(cityPath, id string, dryRun bool, stdout, stderr io.Writer) int {
+	dismiss := func(state *nudgequeue.State) error {
+		return nudgequeue.DismissDeadLetter(state, id, time.Now())
+	}
+	var err error
+	if dryRun {
+		var state nudgequeue.State
+		state, err = nudgequeue.LoadState(cityPath)
+		if err == nil {
+			err = dismiss(&state)
+		}
+	} else {
+		err = withNudgeQueueState(cityPath, dismiss)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge replay --dismiss: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	verb := "Dismissed"
+	if dryRun {
+		verb = "Would dismiss"
+	}
+	fmt.Fprintf(stdout, "%s %s without replay\n", verb, id) //nolint:errcheck
+	return 0
 }
 
 func doNudgeReplay(cityPath string, store beads.NudgesStore, id string, dryRun bool, stdout, stderr io.Writer) int {

@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
 // Only the transaction that adds an item to Dead calls this seam. Notifications
 // run after the queue commit and unlock, so a failed send never requeues input.
 var nudgeDeadLetterNotify = sendNudgeDeadLetter
+
+var nudgeDeadLetterLossNotify = sendNudgeDeadLetterLoss
 
 // Mail providers have independent I/O deadlines. Bound both the caller's wait
 // and outstanding sends so an unavailable provider cannot consume claim leases
@@ -23,14 +26,26 @@ const nudgeDeadLetterMailBudget = 2 * time.Second
 
 var nudgeDeadLetterMailSlots = make(chan struct{}, 4)
 
-func notifyNewNudgeDeadLetters(cityPath string, items []queuedNudge) {
+func notifyNudgeDeadLetters(cityPath string, newlyDead, lost []queuedNudge) {
+	items := make([]queuedNudge, 0, len(newlyDead)+len(lost))
+	for _, item := range newlyDead {
+		if item.UnresolvedDeadLetter() {
+			items = append(items, item)
+		}
+	}
+	firstLost := len(items)
+	items = append(items, lost...)
 	if len(items) == 0 {
 		return
 	}
-	writer, notify := nudgeWarningWriter, nudgeDeadLetterNotify
-	for _, item := range items {
+	writer, notify, notifyLoss := nudgeWarningWriter, nudgeDeadLetterNotify, nudgeDeadLetterLossNotify
+	for i, item := range items {
 		if writer != nil {
-			fmt.Fprintf(writer, "gc nudge: action required: nudge %q for %q dead-lettered: %s; resolve the preserved pane input, then gc nudge replay %s\n", item.ID, item.Agent, strings.Join(strings.Fields(deadReason(item)), " "), item.ID) //nolint:errcheck
+			if i >= firstLost {
+				fmt.Fprintf(writer, "gc nudge: dead-letter loss: item %q session %q removed at seven-day retention cap; preserved input is no longer replayable\n", item.ID, item.Agent) //nolint:errcheck
+			} else {
+				fmt.Fprintf(writer, "gc nudge: action required: nudge %q for %q dead-lettered: %s; resolve the preserved pane input, then gc nudge replay %s\n", item.ID, item.Agent, strings.Join(strings.Fields(deadReason(item)), " "), item.ID) //nolint:errcheck
+			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nudgeDeadLetterMailBudget)
@@ -60,6 +75,9 @@ func notifyNewNudgeDeadLetters(cityPath string, items []queuedNudge) {
 				var warning bytes.Buffer
 				err := func() error {
 					defer func() { <-nudgeDeadLetterMailSlots }()
+					if i >= firstLost {
+						return notifyLoss(cityPath, items[i], &warning)
+					}
 					return notify(cityPath, items[i], &warning)
 				}()
 				// Buffered results and private diagnostics remain safe when the
@@ -69,9 +87,13 @@ func notifyNewNudgeDeadLetters(cityPath string, items []queuedNudge) {
 		}()
 	}
 	completed := make([]bool, len(items))
-	report := func(item queuedNudge, err error) {
+	report := func(i int, err error) {
 		if err != nil && writer != nil {
-			fmt.Fprintf(writer, "gc nudge: dead-letter mail failed for item %q session %q reason %q: %v; doctor retains the item\n", item.ID, item.Agent, deadReason(item), err) //nolint:errcheck
+			item, disposition := items[i], "doctor retains the item"
+			if i >= firstLost {
+				disposition = "loss notification failed; item was removed"
+			}
+			fmt.Fprintf(writer, "gc nudge: dead-letter mail failed for item %q session %q reason %q: %v; %s\n", item.ID, item.Agent, deadReason(item), err, disposition) //nolint:errcheck
 		}
 	}
 	for range items {
@@ -81,11 +103,11 @@ func notifyNewNudgeDeadLetters(cityPath string, items []queuedNudge) {
 			if writer != nil {
 				io.WriteString(writer, sent.warning) //nolint:errcheck
 			}
-			report(items[sent.index], sent.err)
+			report(sent.index, sent.err)
 		case <-ctx.Done():
-			for i, item := range items {
+			for i := range items {
 				if !completed[i] {
-					report(item, ctx.Err())
+					report(i, ctx.Err())
 				}
 			}
 			return
@@ -113,6 +135,14 @@ func nudgeDeadLetterRecipient(item queuedNudge, fallback string, lookup func(str
 }
 
 func sendNudgeDeadLetter(cityPath string, item queuedNudge, log io.Writer) error {
+	return sendNudgeDeadLetterMail(cityPath, item, log, false)
+}
+
+func sendNudgeDeadLetterLoss(cityPath string, item queuedNudge, log io.Writer) error {
+	return sendNudgeDeadLetterMail(cityPath, item, log, true)
+}
+
+func sendNudgeDeadLetterMail(cityPath string, item queuedNudge, log io.Writer, lost bool) error {
 	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return fmt.Errorf("loading dead-letter mail configuration: %w", err)
@@ -162,6 +192,9 @@ func sendNudgeDeadLetter(cityPath string, item queuedNudge, log io.Writer) error
 	}
 	mailer := newMailProviderNamedWithSessionStore(name, msgStore, sessStore, false)
 	subject, body := nudgeDeadLetterMail(item)
+	if lost {
+		subject, body = nudgeDeadLetterLossMail(item)
+	}
 	_, err = mailer.Send("nudge-dispatcher", to, subject, body)
 	return err
 }
@@ -184,5 +217,14 @@ func nudgeDeadLetterMail(item queuedNudge) (subject, body string) {
 	subject = fmt.Sprintf("NUDGE DEAD LETTER session %s reason %s item %s", sessionID, reason, item.ID)
 	body = fmt.Sprintf("Item: %s\nSession: %s\nAgent: %s\nReason: %s\nFirst line: %q\nFirst attempt: %s\nDead transition: %s\n\nResolve the preserved pane input, then replay once:\ngc nudge replay %s\n",
 		item.ID, sessionID, item.Agent, reason, string(preview), firstAttempt, item.DeadAt.UTC().Format(time.RFC3339Nano), item.ID)
+	body += fmt.Sprintf("Or dismiss without replay: gc nudge replay %s --dismiss\nRecovery cap: seven days from the dead transition (%s).\n", item.ID, item.DeadAt.Add(nudgequeue.DeadLetterRetention).UTC().Format(time.RFC3339Nano))
+	return subject, body
+}
+
+func nudgeDeadLetterLossMail(item queuedNudge) (subject, body string) {
+	subject, body = nudgeDeadLetterMail(item)
+	subject = strings.Replace(subject, "NUDGE DEAD LETTER", "NUDGE DEAD LETTER LOST", 1)
+	body, _, _ = strings.Cut(body, "\n\n")
+	body += "\n\nThe seven-day retention cap expired without replay or dismissal. The preserved input was removed from the queue and can no longer be replayed. Recover the original message from its source if it is still needed.\n"
 	return subject, body
 }

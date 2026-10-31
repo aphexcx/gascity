@@ -39,11 +39,10 @@ import (
 )
 
 const (
-	defaultQueuedNudgeTTL           = 24 * time.Hour
-	defaultQueuedNudgeClaimTTL      = 2 * time.Minute
-	defaultQueuedNudgeRetryDelay    = 15 * time.Second
-	defaultQueuedNudgeMaxAttempts   = 5
-	defaultQueuedNudgeDeadRetention = 1 * time.Hour
+	defaultQueuedNudgeTTL         = 24 * time.Hour
+	defaultQueuedNudgeClaimTTL    = 2 * time.Minute
+	defaultQueuedNudgeRetryDelay  = 15 * time.Second
+	defaultQueuedNudgeMaxAttempts = 5
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -2796,7 +2795,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		if item.OriginID != "" {
-			if err := nudgequeue.RecordReplay(state, item.OriginID, item.ID); err != nil {
+			if err := nudgequeue.RecordReplay(state, item.OriginID, item.ID, clk.Now()); err != nil {
 				return err
 			}
 		}
@@ -3325,20 +3324,26 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 	return nil
 }
 
-// pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
-// when a durable terminal bead record exists in the store. Items without a confirmed terminal
-// bead are retained so terminal history is not lost if the bead store write failed.
+// pruneDeadQueuedNudges preserves dead letters and disposition receipts for seven
+// days while repairing terminal shadows. Cap losses are notified after commit.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
 }
 
 func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
-	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
+	cutoff := now.Add(-nudgequeue.DeadLetterRetention)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
 		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
+		}
+		if !item.DeadAt.IsZero() && !item.DeadAt.After(cutoff) {
+			continue
+		}
+		// Legacy entries without a transition time get a full recovery window.
+		if item.DeadAt.IsZero() {
+			item.DeadAt = now.UTC()
 		}
 		if item.BeadID != "" {
 			if front == nil {
@@ -3377,13 +3382,6 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 				// bead is gone would be retained forever and pay a store
 				// lookup on every sweep (gastownhall/gascity#5278).
 			}
-			// Keep replay receipts after repairing the terminal shadow so a
-			// duplicate request can name the successor even after delivery.
-			if item.ReplayID == "" && !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
-				// Terminal (or the backing bead is gone entirely) — safe to
-				// prune once past retention.
-				continue
-			}
 		}
 		filtered = append(filtered, item)
 	}
@@ -3415,24 +3413,30 @@ func sortQueuedNudges(state *nudgeQueueState) {
 }
 
 func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
-	var newlyDead []queuedNudge
+	var newlyDead, lost []queuedNudge
 	err := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
-		previous := make(map[string]bool, len(state.Dead))
+		previous := make(map[string]queuedNudge, len(state.Dead))
 		for _, item := range state.Dead {
-			previous[item.ID] = true
+			previous[item.ID] = item
 		}
 		if err := fn(state); err != nil {
 			return err
 		}
 		for _, item := range state.Dead {
-			if !previous[item.ID] {
+			if _, ok := previous[item.ID]; !ok {
 				newlyDead = append(newlyDead, item)
+			}
+			delete(previous, item.ID)
+		}
+		for _, item := range previous {
+			if item.UnresolvedDeadLetter() {
+				lost = append(lost, item)
 			}
 		}
 		return nil
 	})
 	if err == nil {
-		notifyNewNudgeDeadLetters(cityPath, newlyDead)
+		notifyNudgeDeadLetters(cityPath, newlyDead, lost)
 	}
 	return err
 }

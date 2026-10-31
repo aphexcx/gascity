@@ -33,7 +33,11 @@ func (c *NudgeDeadLettersCheck) Run(ctx *CheckContext) *CheckResult {
 		return r
 	}
 	var oldest time.Time
+	now := c.now()
 	for _, item := range state.Dead {
+		if !item.UnresolvedDeadLetter() {
+			continue
+		}
 		if !item.DeadAt.IsZero() && (oldest.IsZero() || item.DeadAt.Before(oldest)) {
 			oldest = item.DeadAt
 		}
@@ -42,17 +46,23 @@ func (c *NudgeDeadLettersCheck) Run(ctx *CheckContext) *CheckResult {
 			detail += fmt.Sprintf(" (%s)", item.SessionID)
 		}
 		detail += fmt.Sprintf(" reason=%q", item.LastError)
-		if item.ReplayID != "" {
-			detail += " replay=" + item.ReplayID
+		if item.DeadAt.IsZero() {
+			detail += " age=not-recorded cap=7d expires=not-recorded"
+		} else {
+			age := max(now.Sub(item.DeadAt), 0).Truncate(time.Second)
+			detail += fmt.Sprintf(" age=%s cap=7d expires=%s", age, item.DeadAt.Add(nudgequeue.DeadLetterRetention).UTC().Format(time.RFC3339Nano))
 		}
 		r.Details = append(r.Details, detail)
 	}
+	if len(r.Details) == 0 {
+		return r
+	}
 	age := "not recorded"
 	if !oldest.IsZero() {
-		age = max(c.now().Sub(oldest), 0).Truncate(time.Second).String()
+		age = max(now.Sub(oldest), 0).Truncate(time.Second).String()
 	}
 	r.Status, r.Severity = StatusWarning, SeverityAdvisory
-	r.Message = fmt.Sprintf("%d dead-letter nudges; oldest age %s", len(state.Dead), age)
+	r.Message = fmt.Sprintf("%d dead-letter nudges unresolved; oldest age %s; retention cap 7d", len(r.Details), age)
 	return r
 }
 

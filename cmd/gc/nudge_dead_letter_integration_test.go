@@ -162,6 +162,41 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatalf("repeat notification: %+v err=%v", letters, err)
 	}
 	t.Logf("gc nudge replay %s => %s; TUI accepted exactly once; original retained dead", item.ID, replayID)
+	// Use the same real mail provider and recipient after the recovery window
+	// expires. No additional process or tmux session is needed for this boundary.
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		lost := s.Dead[0]
+		lost.ID, lost.BeadID, lost.ReplayID = "n-cap-loss", "", ""
+		lost.DeadAt = time.Now().Add(-8 * 24 * time.Hour)
+		s.Dead = append(s.Dead, lost)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
+			return pruneDeadQueuedNudges(s, nudgeFrontDoor(beads.NudgesStore{Store: store}), time.Now(), noMaintenanceDeadline())
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	letters, err = mailbox.Inbox("operator")
+	if err != nil || len(letters) != 2 {
+		t.Fatalf("expected original failure and one cap-loss mail: %+v err=%v", letters, err)
+	}
+	lossLetters := 0
+	for _, letter := range letters {
+		if strings.Contains(letter.Subject, "LOST") && strings.Contains(letter.Body, "n-cap-loss") {
+			lossLetters++
+			if strings.Contains(letter.Body, "gc nudge replay") {
+				t.Fatalf("loss mail advertises impossible replay: %s", letter.Body)
+			}
+		}
+	}
+	if lossLetters != 1 {
+		t.Fatalf("loss mail count=%d", lossLetters)
+	}
+	t.Log("seven-day cap: one loss mail reached the original operator mailbox")
 	if err := client.KillSession("worker"); err != nil {
 		t.Fatal(err)
 	}
