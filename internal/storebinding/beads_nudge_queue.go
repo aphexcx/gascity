@@ -37,11 +37,9 @@ package storebinding
 // (label "gc:nudge"). Queue and shadow stay separate records here, unlike the
 // merged SQL port; the shadow front door is unchanged.
 //
-// Policy (lease, backoff, attempt ceiling, dead retention) mirrors the values
-// the deployed queue applies. They are duplicated rather than imported because
-// the authority lives in cmd/gc, a main package nothing can import; the copies
-// are pinned to it by a test that reads its source, which is the only place the
-// two may meet.
+// Dead-letter retention uses the shared nudgequeue recovery cap. Lease,
+// backoff, and attempt limits mirror cmd/gc, a main package that cannot be
+// imported; a source-reading test pins those remaining private copies.
 
 import (
 	"crypto/rand"
@@ -69,7 +67,7 @@ const (
 	nudgeQueueMaxAttempts = 5
 	// nudgeQueueDeadRetention is how long a dead letter stays in the dead
 	// bucket before it ages into the invisible terminal record.
-	nudgeQueueDeadRetention = time.Hour
+	nudgeQueueDeadRetention = nudgequeue.DeadLetterRetention
 	// nudgeQueueTerminalRetention is how long a terminal record survives
 	// before the sweep deletes it. It is the ttl the deployed queue's
 	// retention sweeper runs with (cmd/gc's defaultQueuedNudgeTTL, also a
