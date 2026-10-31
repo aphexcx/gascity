@@ -1310,6 +1310,9 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now, &nudgeState); err != nil {
 			return err
 		} else if done {
+			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				return err
+			}
 			continue
 		}
 		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)

@@ -652,6 +652,75 @@ func TestNudgeDeadLetterCapWaitDispatchBeforeRepair(t *testing.T) {
 	}
 }
 
+func TestNudgeDeadLetterDispatchFinalizationClearsOnlyIdleHold(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tombstone   bool
+		anotherWait bool
+	}{
+		{name: "terminal-shadow"},
+		{name: "tombstone", tombstone: true},
+		{name: "another-wait", tombstone: true, anotherWait: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, now, store, wait := droppedWaitNudgeFixture(t)
+			nudges := beads.NudgesStore{Store: store}
+			sessFront := cliSessionFrontDoor(store, nil, dir)
+			if err := store.SetMetadataBatch(wait.SessionID, map[string]string{
+				"state": "awake", "wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ready, err := prepareWaitWakeStateForCity(dir, store, now)
+			if err != nil || !ready[wait.SessionID] {
+				t.Fatalf("wait should be ready before terminalization: %v err=%v", ready, err)
+			}
+			if tc.anotherWait {
+				if _, err := store.Create(beads.Bead{
+					Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + wait.SessionID},
+					Metadata: map[string]string{"session_id": wait.SessionID, "kind": "deps", "state": waitStatePending},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The terminal result arrives after preparation's chance to clear
+			// the hold. Dispatch must finish both halves of that transition.
+			at := now.Add(2 * time.Hour)
+			front := nudgeFrontDoor(nudges)
+			if tc.tombstone {
+				at, front = now.Add(nudgequeue.DeadLetterRetention), nil
+			} else {
+				store.failID = ""
+			}
+			if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+				return pruneDeadQueuedNudges(state, front, at, noMaintenanceDeadline())
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := dispatchReadyWaitNudgesWithSnapshot(dir, nil, sessFront, nudges, at, nil); err != nil {
+				t.Fatal(err)
+			}
+			updatedWait, err := store.Get(wait.ID)
+			if err != nil || updatedWait.Status != "closed" || updatedWait.Metadata["state"] != waitStateFailed {
+				t.Fatalf("dispatch did not finalize the wait: %+v err=%v", updatedWait, err)
+			}
+			updatedSession, err := store.Get(wait.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, held := range map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold"} {
+				want := ""
+				if tc.anotherWait {
+					want = held
+				}
+				if got := updatedSession.Metadata[key]; got != want {
+					t.Errorf("%s = %q, want %q after dispatch finalization", key, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestNudgeDeadLetterDispositionRetention(t *testing.T) {
 	now := time.Now()
 	state := nudgeQueueState{Dead: []queuedNudge{
