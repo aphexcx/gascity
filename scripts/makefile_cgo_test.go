@@ -721,8 +721,10 @@ func filteredMakefileCGOTestEnv(t *testing.T) []string {
 	for _, key := range []string{"GOPATH", "GOMODCACHE", "GOCACHE"} {
 		filtered = replaceScriptEnv(filtered, key, goEnvValue(t, key))
 	}
+	// Preserve the selected toolchain when PATH's Go driver is older than
+	// go.mod requires, including nested make commands with an isolated HOME.
 	return append(filtered,
-		"GOTOOLCHAIN=local",
+		"GOTOOLCHAIN="+goEnvValue(t, "GOVERSION"),
 		"HOME="+t.TempDir(),
 		"GOENV=off",
 		"CGO_ENABLED=1",
