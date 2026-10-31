@@ -21,8 +21,13 @@ func nudgeComposer(content, prefix string) (string, bool) {
 		}
 		if remainder, ok := lastComposerRemainder([]string{line}, prefix); ok {
 			candidate := line
-			if trimmed := strings.TrimLeft(line, " \t"); strings.HasPrefix(trimmed, "│") {
-				candidate = strings.TrimPrefix(trimmed, "│")
+			if trimmed := strings.TrimLeft(line, " \t"); strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") {
+				// Only a vertical border in the frame column is structural.
+				// An indented box is continuation text, even if it contains ❯.
+				if trimmed != line {
+					continue
+				}
+				candidate = strings.TrimPrefix(strings.TrimPrefix(line, "│"), "┃")
 			}
 			indent := len(candidate) - len(strings.TrimLeft(candidate, " \t"))
 			if start < 0 || start < frame || indent <= promptIndent {
@@ -33,9 +38,13 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	if start < 0 {
 		return "", false
 	}
-	boxed := strings.HasPrefix(strings.TrimSpace(lines[start]), "│")
+	border := "│"
+	if strings.HasPrefix(lines[start], "┃") {
+		border = "┃"
+	}
+	boxed := strings.HasPrefix(lines[start], border)
 	if boxed {
-		draft = strings.TrimSuffix(strings.TrimSpace(draft), "│")
+		draft = strings.TrimSuffix(strings.TrimSpace(draft), border)
 	}
 	parts := []string{strings.TrimSpace(draft)}
 	framed := false
@@ -62,10 +71,10 @@ func nudgeComposer(content, prefix string) (string, bool) {
 			break
 		}
 		if boxed {
-			if !strings.HasPrefix(trimmed, "│") {
+			if !strings.HasPrefix(trimmed, border) {
 				return "", false
 			}
-			parts = append(parts, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "│"), "│")))
+			parts = append(parts, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, border), border)))
 			continue
 		}
 		if !framed {

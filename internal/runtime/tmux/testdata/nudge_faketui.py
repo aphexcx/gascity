@@ -11,6 +11,7 @@ import sys, os, time, threading, termios, tty
 logpath = sys.argv[1]
 busy_delay = float(sys.argv[2])   # seconds after submit before the spinner shows
 busy_hold = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
+retain_draft = len(sys.argv) > 4 and sys.argv[4] == "retain"
 
 state = {"draft": [], "busy_at": None, "done_at": None}
 lock = threading.Lock()
@@ -53,6 +54,9 @@ try:
             if b == 0x15:                      # C-u: clear composer
                 state["draft"] = []
             elif b in (0x0d, 0x0a):            # CR / LF: submit
+                if retain_draft:
+                    log("RETAINED-ENTER")
+                    continue
                 text = "".join(state["draft"])
                 if text.strip():
                     log("SUBMIT\t%s" % text.replace("\t", " "))
