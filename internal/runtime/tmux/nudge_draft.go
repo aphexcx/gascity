@@ -112,8 +112,9 @@ func nudgeComposer(content, prefix string) (string, bool) {
 }
 
 // nudgeDraftMatches preserves payload whitespace while allowing the rendering
-// at the measured composer width. Only trailing row padding removed by the
-// composer reader is ignored. A nonpositive width requires an exact match.
+// at the measured composer width. Only padding at generated wrap boundaries
+// is ignored; spaces before explicit newlines remain significant even when
+// the composer reader drops them. A nonpositive width requires an exact match.
 func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 	message = strings.TrimSpace(message)
 	if draft == message {
@@ -122,11 +123,15 @@ func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 	if wrapWidth <= 0 {
 		return false
 	}
-	rows := strings.Split(runewidth.Wrap(message, wrapWidth), "\n")
-	for i, row := range rows {
-		rows[i] = strings.TrimRight(row, " ")
+	var rows []string
+	for _, line := range strings.Split(message, "\n") {
+		wrapped := strings.Split(runewidth.Wrap(line, wrapWidth), "\n")
+		for i := 0; i < len(wrapped)-1; i++ {
+			wrapped[i] = strings.TrimRight(wrapped[i], " ")
+		}
+		rows = append(rows, wrapped...)
 	}
-	return draft == strings.TrimSpace(strings.Join(rows, "\n"))
+	return draft == strings.Join(rows, "\n")
 }
 
 func codexComposerFooter(line string) bool {
