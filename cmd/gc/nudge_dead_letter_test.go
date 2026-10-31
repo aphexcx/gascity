@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func TestNudgeDeadLetterNotificationAfterCommitOnce(t *testing.T) {
 	t.Cleanup(func() { nudgeDeadLetterNotify, nudgeWarningWriter = oldNotify, oldWriter })
 	nudgeWarningWriter = &warnings
 	calls := 0
-	nudgeDeadLetterNotify = func(cityPath string, dead queuedNudge) error {
+	nudgeDeadLetterNotify = func(cityPath string, dead queuedNudge, _ io.Writer) error {
 		calls++
 		// Reacquiring the lock proves the notification is outside it and the
 		// committed dead letter is already visible to another queue reader.
@@ -60,7 +61,7 @@ func TestNudgeDeadLetterExpiryNotification(t *testing.T) {
 	old := nudgeDeadLetterNotify
 	t.Cleanup(func() { nudgeDeadLetterNotify = old })
 	calls := 0
-	nudgeDeadLetterNotify = func(_ string, _ queuedNudge) error { calls++; return nil }
+	nudgeDeadLetterNotify = func(_ string, _ queuedNudge, _ io.Writer) error { calls++; return nil }
 	for range 2 {
 		if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
 			return pruneExpiredQueuedNudges(s, nil, now, noMaintenanceDeadline())
@@ -99,6 +100,72 @@ func TestNudgeDeadLetterRecipient(t *testing.T) {
 	item.Reference = nil
 	if to, err := nudgeDeadLetterRecipient(item, "", lookup); to != "" || err == nil || !strings.Contains(err.Error(), "session.park_alert_to") {
 		t.Fatalf("missing recipient: to=%q err=%v", to, err)
+	}
+	item.Reference = &nudgeReference{Kind: "bead", ID: "missing"}
+	failedLookup := func(string) (beads.Bead, error) { return beads.Bead{}, errors.New("store unavailable") }
+	if to, err := nudgeDeadLetterRecipient(item, "", failedLookup); to != "" || err == nil || !strings.Contains(err.Error(), "session.park_alert_to") {
+		t.Fatalf("failed lookup omitted missing fallback: to=%q err=%v", to, err)
+	}
+}
+
+func TestNudgeDeadLetterSlowMailCannotStallQueue(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	oldNotify, oldWriter := nudgeDeadLetterNotify, nudgeWarningWriter
+	t.Cleanup(func() { nudgeDeadLetterNotify, nudgeWarningWriter = oldNotify, oldWriter })
+	var warnings bytes.Buffer
+	nudgeWarningWriter = &warnings
+	items := []queuedNudge{{ID: "slow-1"}, {ID: "slow-2"}, {ID: "slow-3"}}
+	release := make(chan struct{})
+	entered := make(chan struct{}, len(items))
+	finished := make(chan struct{}, len(items))
+	nudgeDeadLetterNotify = func(_ string, _ queuedNudge, log io.Writer) error {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-time.After(2 * nudgeDeadLetterMailBudget):
+		}
+		_, _ = io.WriteString(log, "late provider diagnostic\n")
+		finished <- struct{}{}
+		return nil
+	}
+	dir := t.TempDir()
+	now := time.Now()
+	for i := range items {
+		items[i].Agent = "expired"
+		items[i].ExpiresAt = now.Add(-time.Second)
+	}
+	live := newQueuedNudge("worker", "deliver without waiting for unrelated mail", now)
+	if err := nudgequeue.WithState(dir, func(s *nudgeQueueState) error {
+		s.Pending = append(append([]queuedNudge{}, items...), live)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	claimed, err := claimDueQueuedNudgesMatching(dir, now, func(item queuedNudge) bool { return item.Agent == "worker" })
+	close(release)
+	if elapsed := time.Since(start); elapsed > nudgeDeadLetterMailBudget+time.Second {
+		t.Fatalf("mail blocked queue for %s", elapsed)
+	}
+	if err != nil || len(claimed) != 1 || claimed[0].ID != live.ID || !claimed[0].LeaseUntil.After(time.Now()) {
+		t.Fatalf("claim did not return with a live lease: items=%+v err=%v", claimed, err)
+	}
+	if len(entered) != len(items) {
+		t.Errorf("attempted %d notifications, want %d", len(entered), len(items))
+	}
+	before := warnings.String()
+	for _, item := range items {
+		if !strings.Contains(before, item.ID) || !strings.Contains(before, "deadline exceeded") {
+			t.Errorf("missing timeout diagnostic for %s: %s", item.ID, before)
+		}
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatal("provider did not finish after release")
+		}
+	}
+	if warnings.String() != before {
+		t.Fatalf("provider wrote caller diagnostics after timeout: %s", &warnings)
 	}
 }
 

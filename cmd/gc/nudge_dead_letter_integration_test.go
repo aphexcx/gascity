@@ -26,9 +26,6 @@ import (
 )
 
 func TestNudgeDeadLetterReplayTmux(t *testing.T) {
-	if os.Getenv("GC_TMUX_INTEGRATION") != "1" {
-		t.Skip("set GC_TMUX_INTEGRATION=1 for the private-socket dead-letter/replay proof")
-	}
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
 	guard := tmuxtest.NewGuard(t)

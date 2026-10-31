@@ -121,7 +121,6 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 		"GC_FAST_UNIT",
 		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",
-		"GC_TMUX_INTEGRATION",
 		"GC_TEST_KEEP",
 		"GC_WORKER_REPORT_DIR",
 	}
@@ -193,7 +192,6 @@ func liveEnvKeysForTests() []string {
 func preserveTestControlEnv(key string) bool {
 	return key == "GC_FAST_UNIT" ||
 		key == "GC_REAL_PROCESS_SIGNAL_TESTS" ||
-		key == "GC_TMUX_INTEGRATION" ||
 		key == "GC_WORKER_REPORT_DIR" ||
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
