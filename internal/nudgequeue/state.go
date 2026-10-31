@@ -32,6 +32,8 @@ type Reference struct {
 type Item struct {
 	ID                string     `json:"id"`
 	BeadID            string     `json:"bead_id,omitempty"`
+	OriginID          string     `json:"origin_id,omitempty"`
+	ReplayID          string     `json:"replay_id,omitempty"`
 	Agent             string     `json:"agent"`
 	SessionID         string     `json:"session_id,omitempty"`
 	ContinuationEpoch string     `json:"continuation_epoch,omitempty"`
@@ -42,6 +44,7 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
+	FirstAttemptAt    time.Time  `json:"first_attempt_at,omitempty"`
 	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
 	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
@@ -129,6 +132,9 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 		// Persist the batch identity before any delivery side effect. A process
 		// can exit after pasting but before it records an unconfirmed result.
 		if item.LastAttemptAt.IsZero() {
+			if item.FirstAttemptAt.IsZero() && item.Attempts == 0 {
+				item.FirstAttemptAt = now.UTC()
+			}
 			item.LastAttemptAt = now.UTC()
 		}
 		claimed = append(claimed, item)
