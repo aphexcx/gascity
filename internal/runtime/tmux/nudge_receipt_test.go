@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -31,6 +32,98 @@ func collectReceipts(tm *Tmux) func() []runtime.NudgeReceipt {
 		copy(out, got)
 		return out
 	}
+}
+
+func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
+	for _, toolBoundary := range []bool{false, true} {
+		t.Run(strconv.FormatBool(toolBoundary), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+				pasted, enters, clears := 0, 0, 0
+				tm := NewTmux()
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					switch {
+					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+						return "GC_PROVIDER=claude", nil
+					case slices.Contains(args, "capture-pane"):
+						if toolBoundary && pasted > enters {
+							return "❯ ", nil
+						}
+						return "esc to interrupt\n❯ ", nil
+					case slices.Contains(args, "send-keys"):
+						if slices.Contains(args, "Enter") {
+							enters++
+						}
+						if slices.Contains(args, "C-u") {
+							clears++
+						}
+					}
+					return "", nil
+				}}
+				receipts := collectReceipts(tm)
+				for i := 0; i < 3; i++ {
+					message := "busy-input-" + strconv.Itoa(i)
+					delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), message, func(_, text string, _ time.Duration) (int, error) {
+						pasted++
+						return len(text), nil
+					})
+					if err != nil || !delivery.Delivered || delivery.Submit != runtime.NudgeSubmitUnverified {
+						t.Errorf("delivery %d = %+v, %v; want landed/unverified", i, delivery, err)
+					}
+				}
+				if pasted != 3 || enters != 3 || clears != 0 {
+					t.Errorf("pastes=%d enters=%d clears=%d; want 3/3/0", pasted, enters, clears)
+				}
+				for _, receipt := range receipts() {
+					if receipt.Submitted {
+						t.Errorf("ongoing activity falsely acknowledged receipt %s", receipt.ID)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+		tm := NewTmux()
+		draft := ""
+		pastes, enters, clears := 0, 0, 0
+		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			switch {
+			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+				return "GC_PROVIDER=claude", nil
+			case slices.Contains(args, "capture-pane"):
+				return "esc to interrupt\n❯ " + draft, nil
+			case slices.Contains(args, "send-keys"):
+				if slices.Contains(args, "C-u") {
+					clears++
+					draft = ""
+				}
+				if slices.Contains(args, "Enter") {
+					enters++
+				}
+			}
+			return "", nil
+		}}
+		for i := 0; i < 3; i++ {
+			delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "input-"+strconv.Itoa(i), func(_, text string, _ time.Duration) (int, error) {
+				pastes++
+				draft += text
+				return len(text), nil
+			})
+			if err != nil || delivery.Submit != runtime.NudgeSubmitUnverified {
+				t.Errorf("delivery %d = %+v, %v; want unverified without a replay signal", i, delivery, err)
+			}
+			if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {
+				t.Errorf("unverified input licensed a replay: %v", err)
+			}
+		}
+		if draft != "input-0input-1input-2" || pastes != 3 || enters != 3 || clears != 0 {
+			t.Errorf("draft=%q pastes=%d enters=%d clears=%d; uncertain input must survive exactly once", draft, pastes, enters, clears)
+		}
+	})
 }
 
 // TestNudgeSessionEmitsReceiptForTheWholePayload covers the gp-2rq receipt: a

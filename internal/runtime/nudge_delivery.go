@@ -29,11 +29,11 @@ const (
 	// first case, and the runtime's own retry path (ErrNudgeSubmitUnconfirmed
 	// from Nudge) already covers the second.
 	NudgeSubmitUnconfirmed NudgeSubmit = "unconfirmed"
-	// NudgeSubmitUnverified means no busy probe exists for this transport or
-	// provider family, so the submit was sent best-effort and nothing was
-	// checked. This is the ordinary outcome for every family without a
-	// readable busy indicator and for the hidden-attach transport; it has
-	// always counted as delivery and still does.
+	// NudgeSubmitUnverified means the submit was sent but no usable acceptance
+	// observation exists: the transport has no probe, its baseline was busy,
+	// or the pane could not be read. Ongoing activity cannot acknowledge new
+	// input. This counts as terminal delivery, not proof of harness ingestion;
+	// consumers must not replay a payload that already landed.
 	NudgeSubmitUnverified NudgeSubmit = "unverified"
 )
 

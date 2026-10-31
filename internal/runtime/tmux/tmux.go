@@ -2358,41 +2358,58 @@ const (
 // only while the pane remains idle (submission not yet observed), so a turn
 // that already started can never receive a second submit.
 //
-// Returns:
-//   - (true, nil)  — the agent went busy: the message submitted.
-//   - (false, nil) — the submit sequence was delivered to tmux but busy was
-//     never observed within the budget (best-effort; preserves the
-//     historical "nil == handed to tmux" contract so callers do not
-//     re-paste).
-//   - (false, err) — every submit attempt failed at the tmux layer.
+// An already-busy or unreadable pane gets one submit, reported as unverified:
+// ongoing activity cannot acknowledge this input. Only a known idle baseline
+// permits busy-state confirmation or retries. The caller must also preserve
+// that baseline across the paste, which can itself race a tool boundary.
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (runtime.NudgeSubmit, error) {
+	if isBusy, err := busy(); err != nil || isBusy {
+		if err := sendSubmit(); err != nil {
+			return runtime.NudgeSubmitUnconfirmed, err
+		}
+		wake()
+		return runtime.NudgeSubmitUnverified, nil
+	}
 	var lastErr error
+	sent := false
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
-			// Re-confirm the pane is still idle before re-sending. A turn that
-			// already submitted (busy) must never receive a second Enter.
-			if isBusy, err := busy(); err == nil && isBusy {
-				return true, nil
-			}
 			sleep(submitReEnterBackoff)
+			// Sample after the backoff: a tool boundary during the wait must
+			// not receive another Enter based on an earlier idle observation.
+			isBusy, err := busy()
+			if err != nil || isBusy {
+				if !sent {
+					return runtime.NudgeSubmitUnconfirmed, lastErr
+				}
+				if err != nil {
+					return runtime.NudgeSubmitUnverified, nil
+				}
+				return runtime.NudgeSubmitConfirmed, nil
+			}
 		}
 		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
 		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+		sent = true
 		wake()
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
-			if isBusy, err := busy(); err == nil && isBusy {
-				return true, nil
+			isBusy, err := busy()
+			if err != nil {
+				return runtime.NudgeSubmitUnverified, nil
+			}
+			if isBusy {
+				return runtime.NudgeSubmitConfirmed, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, lastErr
+	return runtime.NudgeSubmitUnconfirmed, lastErr
 }
 
 // Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
@@ -2497,6 +2514,9 @@ const (
 	stagedDraftUnresolved stagedDraftOutcome = iota
 	// stagedDraftSubmittedBusy: the pane went busy, so the submit landed.
 	stagedDraftSubmittedBusy
+	// stagedDraftUnverified: activity is visible while input remains staged.
+	// It cannot acknowledge the draft or license a replay.
+	stagedDraftUnverified
 	// stagedDraftCleared: after a re-send the draft left the composer but no
 	// capture saw the busy indicator. The agent took the message, so this is
 	// delivered-but-unobserved and must not be re-pasted.
@@ -2507,6 +2527,8 @@ func (o stagedDraftOutcome) String() string {
 	switch o {
 	case stagedDraftSubmittedBusy:
 		return "submitted-busy"
+	case stagedDraftUnverified:
+		return "busy-with-draft"
 	case stagedDraftCleared:
 		return "cleared-unobserved"
 	default:
@@ -2533,6 +2555,8 @@ func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (pa
 		switch {
 		case err != nil:
 			return stagedDraftUnresolved
+		case obs.busy && obs.drafted:
+			return stagedDraftUnverified
 		case obs.busy:
 			return stagedDraftSubmittedBusy
 		case !obs.drafted:
@@ -2699,10 +2723,11 @@ func unconfirmedSubmitError(session string, d runtime.NudgeDelivery) error {
 //   - Delivered is set once the payload has been pasted (a receipt was
 //     emitted for it), whatever then happens to the submit sequence.
 //   - Bytes is the paste's size, the same number the receipt carries.
-//   - Submit is confirmed when the pane went busy, unconfirmed when a busy
+//   - Submit is confirmed when an idle pane went busy, unconfirmed when a busy
 //     probe ran and never saw it OR the submit sequence could not be
 //     delivered after the paste, and unverified when no probe exists for
-//     this pane's provider family and the submit went out.
+//     this pane's provider family or the pane was already busy when the
+//     new input arrived and the submit went out.
 //
 // The error return is for the send failing BEFORE anything landed (lock
 // timeout, paste rejected, session gone). A zero delivery accompanies every
@@ -2774,17 +2799,25 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
-	// 1. Clear any pending input already sitting on the line before pasting,
-	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
-	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
-	// the input box, and this paste concatenates on top of it instead of
-	// replacing it: stacked injections merge into one draft that Claude's TUI
-	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
-	//
-	// Skip the clear when a client is attached: a human may be mid-keystroke,
-	// and silently wiping their in-progress input is worse than the
-	// concatenation this clear otherwise prevents (#5192).
-	if !t.IsSessionAttached(session) {
+	// Capture the baseline before the paste: a running turn may briefly lose
+	// its busy indicator at a tool boundary while the new input is staged.
+	verifySubmit := t.submitVerifyEligible(target)
+	idleBeforePaste := false
+	if verifySubmit {
+		lines, err := t.CapturePaneLines(target, promptObservationLines)
+		if err != nil {
+			log.Printf("tmux nudge: cannot read pre-paste state for %q; submit will be unverified: %v", target, err)
+		} else {
+			idleBeforePaste = !paneContainsBusyIndicator(lines)
+		}
+	}
+
+	// 1. Preserve existing input on families with submit evidence. An earlier
+	// unverified delivery may still be staged; C-u would erase it. Terminal
+	// captures cannot reliably distinguish drafts from prompt placeholders,
+	// so do not infer that the composer is safe to clear from its text.
+	// Other families retain their replacement behavior on detached panes.
+	if !verifySubmit && !t.IsSessionAttached(session) {
 		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
 			return runtime.NudgeDelivery{}, err
 		}
@@ -2792,9 +2825,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
-	// the composer; on an attached session it deliberately did not, so a
-	// human draft may still be on the line. That matters: the survey's
+	// the pane (ga-zg7fjq). A draft may still be on the line. The survey's
 	// onDigit handler
 	// only fires on a single-character input value, so a digit landing on
 	// top of other content silently corrupts the draft instead of
@@ -2863,15 +2894,25 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// composer. NudgeSession turns unconfirmed into ErrNudgeSubmitUnconfirmed
 	// for the callers that need a retry signal (see unconfirmedSubmitError).
 	delivered = true
-	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
-		submitted = confirmed
+	if verifySubmit {
+		busy := func() (bool, error) {
+			if !idleBeforePaste {
+				return true, nil // this turn predates the paste; no usable transition
+			}
+			isBusy, err := t.paneBusy(target)
+			if err != nil {
+				log.Printf("tmux nudge: cannot observe submit for %q: %v", target, err)
+			}
+			return isBusy, err
+		}
+		submit, err := submitEnterAndConfirm(sendSubmit, wake, busy, time.Sleep)
+		submitted = submit == runtime.NudgeSubmitConfirmed
 		if err != nil {
 			// Every submit attempt was refused by tmux (or the last one was,
 			// after earlier sends went unconfirmed). The paste landed; the
 			// submit is unknown.
 			log.Printf("tmux nudge: submit sequence to %q failed after the paste landed; reporting the submit as unconfirmed: %v", target, err)
-		} else if !confirmed {
+		} else if submit == runtime.NudgeSubmitUnconfirmed {
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
@@ -2882,6 +2923,8 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
 				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
 				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+				case stagedDraftUnverified:
+					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnverified}, nil
 				case stagedDraftSubmittedBusy:
 					submitted = true
 					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed}, nil
@@ -2908,10 +2951,6 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed},
 					fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
-		}
-		submit := runtime.NudgeSubmitUnconfirmed
-		if confirmed {
-			submit = runtime.NudgeSubmitConfirmed
 		}
 		return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: submit}, nil
 	}
