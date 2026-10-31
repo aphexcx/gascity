@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -48,7 +50,7 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 		}
 		var commands []string
 		for _, line := range strings.Split(strings.TrimSpace(inherited), "\n") {
-			if line == "" {
+			if line == "" || line == "client-attached" {
 				continue
 			}
 			_, command, ok := strings.Cut(line, " ")
@@ -84,6 +86,27 @@ func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
 		fmt.Sprintf("#{==:#{%s},pending:%s}", nudgeDraftPayloadOption, digest),
 		fmt.Sprintf("set-option -p -t %q %s %s", pane, nudgeDraftPayloadOption, digest))
 	return err
+}
+
+// sendNudgeDraftSubmitSequence checks ownership in the same tmux command that
+// sends each key, so an attachment during the debounce cannot reuse an old read.
+func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string) error {
+	condition := fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message))
+	for i, key := range keys {
+		if i > 0 {
+			time.Sleep(nudgeSubmitKeySettle)
+		}
+		out, err := t.run("if-shell", "-F", "-t", target, condition,
+			shellquote.Join([]string{"send-keys", "-t", target, key}),
+			"display-message -p draft-ownership-changed")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != "" {
+			return fmt.Errorf("%w: draft ownership changed before submit to %q", ErrNudgeDraftDeferred, target)
+		}
+	}
+	return nil
 }
 
 // nudgeComposer reads the last live input, including continuation rows inside

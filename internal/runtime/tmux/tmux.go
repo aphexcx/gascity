@@ -2812,6 +2812,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	verifySubmit := t.submitVerifyEligible(target)
 	idleBeforePaste := false
 	resumeDraft := false
+	resumeWrappedDraft := false
 	if verifySubmit {
 		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines))
 		if err != nil {
@@ -2858,6 +2859,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				if !nudgeDraftMatches(draft, message, width-2) {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
 				}
+				resumeWrappedDraft = true
 			}
 			resumeDraft = true
 		} else if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
@@ -2962,7 +2964,12 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// only for single-key (plain Enter) sequences, which is what every family
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
-	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
+	sendSubmit := func() error {
+		if resumeWrappedDraft {
+			return t.sendNudgeDraftSubmitSequence(target, message, submitKeys)
+		}
+		return t.sendNudgeSubmitSequence(target, submitKeys)
+	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	// From here on the paste is in the pane, whatever happens to the submit
 	// sequence: the receipt is emitted and the evidence says Delivered. A
@@ -2985,6 +2992,10 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		}
 		submit, err := submitEnterAndConfirm(sendSubmit, wake, busy, time.Sleep)
 		submitted = submit == runtime.NudgeSubmitConfirmed
+		if errors.Is(err, ErrNudgeDraftDeferred) {
+			delivered = false
+			return runtime.NudgeDelivery{}, err
+		}
 		if err != nil {
 			// Every submit attempt was refused by tmux (or the last one was,
 			// after earlier sends went unconfirmed). The paste landed; the
