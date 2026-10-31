@@ -2755,7 +2755,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 
 // nudgeSessionDeliveryWith is nudgeSessionDelivery with the paste function
 // injected (plain nudges paste whole; startup prompts may chunk for copilot).
-func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (runtime.NudgeDelivery, error) {
+func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2786,9 +2786,22 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// submit-verified and the best-effort arm.
 	payloadBytes := 0
 	submitted := false
+	resumeWrappedDraft := false
 	defer func() {
 		if !delivered {
 			return
+		}
+		// Every observation path, including slow recovery and a drained
+		// composer, requires uninterrupted ownership for a wrapped retry.
+		// Finalize both caller evidence and the receipt before clearing it.
+		if resumeWrappedDraft {
+			stored, err := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
+			if err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+				log.Printf("tmux nudge: draft ownership lost while finalizing submit to %q; retaining unconfirmed evidence: %v", target, err)
+				submitted = false
+				delivery.Submit = runtime.NudgeSubmitUnconfirmed
+				deliveryErr = nil
+			}
 		}
 		if submitted {
 			if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
@@ -2812,7 +2825,6 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	verifySubmit := t.submitVerifyEligible(target)
 	idleBeforePaste := false
 	resumeDraft := false
-	resumeWrappedDraft := false
 	if verifySubmit {
 		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines))
 		if err != nil {
@@ -2994,13 +3006,6 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			return isBusy, err
 		}
 		submit, err := submitEnterAndConfirm(sendSubmit, wake, busy, time.Sleep)
-		if resumeWrappedDraft && submit == runtime.NudgeSubmitConfirmed {
-			stored, readErr := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
-			if readErr != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
-				log.Printf("tmux nudge: draft ownership lost while confirming submit to %q; retaining unconfirmed evidence: %v", target, readErr)
-				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, nil
-			}
-		}
 		submitted = submit == runtime.NudgeSubmitConfirmed
 		if errors.Is(err, ErrNudgeDraftDeferred) {
 			if wrappedKeysSent {
