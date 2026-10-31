@@ -70,6 +70,36 @@ func doNudgeReplay(cityPath string, store beads.NudgesStore, id string, dryRun b
 		fmt.Fprintf(stderr, "gc nudge replay: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if err := startNudgeReplayPoller(cityPath, store, item); err != nil {
+		fmt.Fprintf(stderr, "gc nudge replay: queued %s but could not start its delivery poller: %v\n", item.ID, err) //nolint:errcheck
+	}
 	fmt.Fprintln(stdout, item.ID) //nolint:errcheck
 	return 0
+}
+
+func startNudgeReplayPoller(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return err
+	}
+	// Enqueue already signals the supervisor. Legacy cities need the same
+	// poller startup as other queue producers, even if the old poller exited.
+	if nudgeDispatcherIsSupervisor(cfg) {
+		return nil
+	}
+	if store.Store == nil {
+		return fmt.Errorf("session store unavailable")
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	sessStore := cliSessionStore(store.Store, cfg, cityPath)
+	id, err := resolveSessionID(sessStore, firstNonEmpty(item.SessionID, item.Agent))
+	if err != nil {
+		return err
+	}
+	info, err := sessionFrontDoor(sessStore).Get(id)
+	if err != nil {
+		return err
+	}
+	maybeStartNudgePoller(resolveNudgeTargetFromSessionInfo(cityPath, cfg, info))
+	return nil
 }

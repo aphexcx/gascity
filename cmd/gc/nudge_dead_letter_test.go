@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestNudgeDeadLetterNotificationAfterCommitOnce(t *testing.T) {
@@ -239,6 +242,55 @@ func TestNudgeReplayEnqueueAndDryRun(t *testing.T) {
 	}
 	if err := enqueueQueuedNudgeWithStore(dir, store, stale); err == nil || !strings.Contains(err.Error(), item.ID) {
 		t.Fatalf("stale enqueue accepted: %v", err)
+	}
+}
+
+func TestNudgeReplayStartsOnlyLegacyPoller(t *testing.T) {
+	for _, mode := range []string{"legacy", "supervisor"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			configText := "[workspace]\nname = \"replay-test\"\n[daemon]\nnudge_dispatcher = \"" + mode + "\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NudgesStore{Store: beads.NewMemStore()}
+			owner, err := store.Create(beads.Bead{
+				Type: session.BeadType, Labels: []string{session.LabelSession},
+				Metadata: map[string]string{"session_name": "worker-runtime", "template": "worker", "provider": "codex"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			dead := newQueuedNudgeWithOptions("worker", "replay", "session", now, queuedNudgeOptions{SessionID: owner.ID})
+			dead.DeadAt = now
+			if err := nudgequeue.WithState(dir, func(s *nudgeQueueState) error { s.Dead = []queuedNudge{dead}; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			oldStart, starts := startNudgePoller, 0
+			t.Cleanup(func() { startNudgePoller = oldStart })
+			startNudgePoller = func(cityPath, agentName, sessionName string) error {
+				starts++
+				if cityPath != dir || agentName != owner.ID || sessionName != "worker-runtime" {
+					t.Fatalf("unexpected poller destination: %q %q %q", cityPath, agentName, sessionName)
+				}
+				return nil
+			}
+			var out, stderr bytes.Buffer
+			if code := doNudgeReplay(dir, store, dead.ID, true, &out, &stderr); code != 0 || starts != 0 {
+				t.Fatalf("dry run started delivery: code=%d starts=%d stderr=%s", code, starts, &stderr)
+			}
+			if code := doNudgeReplay(dir, store, dead.ID, false, &out, &stderr); code != 0 {
+				t.Fatalf("replay failed: %s", &stderr)
+			}
+			want := 0
+			if mode == "legacy" {
+				want = 1
+			}
+			if starts != want {
+				t.Fatalf("poller starts=%d, want %d; stderr=%s", starts, want, &stderr)
+			}
+		})
 	}
 }
 

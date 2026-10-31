@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -39,6 +40,13 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+	sessionBead, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "template": "worker", "provider": "codex", "continuation_epoch": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	script, err := filepath.Abs("testdata/nudge_dead_letter_tui.py")
 	if err != nil {
 		t.Fatal(err)
@@ -67,8 +75,8 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 	waitNudgeProofPane(t, capture, "[Pasted Content")
 
 	provider := tmux.NewProviderWithConfig(tmuxConfig)
-	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: "worker"}
-	item := newQueuedNudge("worker", "recover this founder line", time.Now())
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: "worker", sessionID: sessionBead.ID, continuationEpoch: "1"}
+	item := newQueuedNudgeWithOptions("worker", "recover this founder line", "session", time.Now(), queuedNudgeOptions{SessionID: sessionBead.ID, ContinuationEpoch: "1"})
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +118,24 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitNudgeProofPane(t, capture, "Explain this codebase")
+	// There is no existing poller. Exercise automatic delivery from replay's
+	// normal poller-start boundary, using the real provider against this socket.
+	oldStart := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = oldStart })
+	starts := 0
+	var deliveryErr error
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		starts++
+		if cityPath != dir || agentName != sessionBead.ID || sessionName != "worker" {
+			deliveryErr = fmt.Errorf("wrong replay poller destination: %q %q %q", cityPath, agentName, sessionName)
+			return deliveryErr
+		}
+		landed, err := tryDeliverQueuedNudgesByPoller(target, store, store, provider, 0, worker.LiveObservation{Running: true})
+		if err != nil || !landed {
+			deliveryErr = fmt.Errorf("automatic replay delivery: landed=%t err=%v", landed, err)
+		}
+		return deliveryErr
+	}
 	var stdout, stderr bytes.Buffer
 	cmd := newNudgeCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{"replay", item.ID})
@@ -117,8 +143,8 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatalf("gc nudge replay: %v: %s", err, &stderr)
 	}
 	replayID := strings.TrimSpace(stdout.String())
-	if landed, err := tryDeliverQueuedNudgesByPoller(target, store, store, provider, 0, worker.LiveObservation{Running: true}); err != nil || !landed {
-		t.Fatalf("replay delivery: landed=%t err=%v", landed, err)
+	if starts != 1 || deliveryErr != nil {
+		t.Fatalf("replay did not start automatic delivery: starts=%d err=%v stderr=%s", starts, deliveryErr, &stderr)
 	}
 	if landed, err := tryDeliverQueuedNudgesByPoller(target, store, store, provider, 0, worker.LiveObservation{Running: true}); err != nil || landed {
 		t.Fatalf("second dispatch duplicated replay: landed=%t err=%v", landed, err)
