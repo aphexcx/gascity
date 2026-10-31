@@ -9,9 +9,36 @@ import (
 // DeadLetterRetention bounds recovery and disposition receipts from the dead transition.
 const DeadLetterRetention = 7 * 24 * time.Hour
 
+// DispositionRetention keeps duplicate-action receipts for one hour after disposition.
+const DispositionRetention = time.Hour
+
+// ManualDropReason identifies an explicit operator disposition, including old queue entries.
+const ManualDropReason = "dropped by operator (gc nudge drop)"
+
 // UnresolvedDeadLetter reports whether an item in State.Dead needs operator action.
 func (item Item) UnresolvedDeadLetter() bool {
-	return strings.TrimSpace(item.LastError) != "superseded" && item.ReplayID == "" && item.DismissedAt.IsZero()
+	reason := strings.TrimSpace(item.LastError)
+	return reason != "superseded" && reason != ManualDropReason && item.ReplayID == "" && item.DismissedAt.IsZero()
+}
+
+// DeadLetterPruneAt returns the recovery cap or earlier disposition-receipt expiry.
+// Historical receipts without a disposition timestamp use their dead transition.
+func (item Item) DeadLetterPruneAt() time.Time {
+	deadline := item.DeadAt.Add(DeadLetterRetention)
+	if item.UnresolvedDeadLetter() {
+		return deadline
+	}
+	disposedAt := item.DismissedAt
+	if disposedAt.IsZero() {
+		disposedAt = item.ReplayedAt
+	}
+	if disposedAt.IsZero() {
+		disposedAt = item.DeadAt
+	}
+	if receiptDeadline := disposedAt.Add(DispositionRetention); receiptDeadline.Before(deadline) {
+		return receiptDeadline
+	}
+	return deadline
 }
 
 // PrepareReplay copies a dead item's input and destination into a fresh delivery.
@@ -42,6 +69,7 @@ func RecordReplay(state *State, id, newID string, now time.Time) error {
 		return err
 	}
 	dead.ReplayID = newID
+	dead.ReplayedAt = now.UTC()
 	return nil
 }
 
@@ -66,6 +94,9 @@ func replayableItem(state *State, id string, now time.Time) (*Item, error) {
 		}
 		if strings.TrimSpace(item.LastError) == "superseded" {
 			return nil, fmt.Errorf("nudge %q was superseded; the newer reminder carries the message", id)
+		}
+		if strings.TrimSpace(item.LastError) == ManualDropReason {
+			return nil, fmt.Errorf("nudge %q was dropped by the operator", id)
 		}
 		if !item.DismissedAt.IsZero() {
 			return nil, fmt.Errorf("nudge %q was dismissed at %s", id, item.DismissedAt.Format(time.RFC3339Nano))

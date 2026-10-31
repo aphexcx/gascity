@@ -162,11 +162,15 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatalf("repeat notification: %+v err=%v", letters, err)
 	}
 	t.Logf("gc nudge replay %s => %s; TUI accepted exactly once; original retained dead", item.ID, replayID)
+	if row := doctor.NewNudgeDeadLettersCheck().Run(&doctor.CheckContext{CityPath: dir}); row.Status != doctor.StatusOK || len(row.Details) != 0 {
+		t.Fatalf("doctor stayed unhealthy after replay disposed the last failure: %+v", row)
+	}
 	// Use the same real mail provider and recipient after the recovery window
 	// expires. No additional process or tmux session is needed for this boundary.
 	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
 		lost := s.Dead[0]
 		lost.ID, lost.BeadID, lost.ReplayID = "n-cap-loss", "", ""
+		lost.ReplayedAt = time.Time{}
 		lost.DeadAt = time.Now().Add(-8 * 24 * time.Hour)
 		s.Dead = append(s.Dead, lost)
 		return nil

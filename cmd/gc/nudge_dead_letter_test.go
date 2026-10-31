@@ -423,3 +423,93 @@ func TestNudgeDeadLetterFirstAttemptExcludesManualDrop(t *testing.T) {
 		t.Fatalf("retry replaced first attempt: %+v", item)
 	}
 }
+
+func TestNudgeDeadLetterOperatorDropIsDisposition(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	store := beads.NudgesStore{Store: beads.NewMemStore()}
+	item := newQueuedNudge("worker", "intentionally discarded", now)
+	if err := enqueueQueuedNudgeWithStore(dir, store, item); err != nil {
+		t.Fatal(err)
+	}
+	oldNotify, oldWriter := nudgeDeadLetterNotify, nudgeWarningWriter
+	t.Cleanup(func() { nudgeDeadLetterNotify, nudgeWarningWriter = oldNotify, oldWriter })
+	var warnings bytes.Buffer
+	nudgeWarningWriter = &warnings
+	calls := 0
+	nudgeDeadLetterNotify = func(string, queuedNudge, io.Writer) error { calls++; return nil }
+	if err := recordQueuedNudgeFailureWithStore(dir, store, []string{item.ID}, errNudgeManualDrop, now); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || warnings.Len() != 0 {
+		t.Errorf("operator drop sent failure notification: calls=%d warnings=%s", calls, &warnings)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Dead) != 1 || !state.Dead[0].DismissedAt.Equal(now) || state.Dead[0].UnresolvedDeadLetter() {
+		t.Errorf("drop disposition not persisted: %+v err=%v", state, err)
+	}
+	var out, stderr bytes.Buffer
+	if code := doNudgeReplay(dir, store, item.ID, false, &out, &stderr); code == 0 || !strings.Contains(stderr.String(), "dropped") {
+		t.Fatalf("operator drop was replayable: code=%d err=%s", code, &stderr)
+	}
+}
+
+func TestNudgeDeadLetterDispositionRetention(t *testing.T) {
+	now := time.Now()
+	state := nudgeQueueState{Dead: []queuedNudge{
+		{ID: "unresolved", DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "replayed", ReplayID: "successor", DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "replay-boundary", ReplayID: "boundary-successor", ReplayedAt: now.Add(-time.Hour), DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "recent-replay", ReplayID: "recent-successor", ReplayedAt: now.Add(-time.Hour + time.Nanosecond), DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "recent-dismissal", DismissedAt: now.Add(-30 * time.Minute), DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "dismissed", DismissedAt: now.Add(-2 * time.Hour), DeadAt: now.Add(-48 * time.Hour)},
+		{ID: "superseded", LastError: "superseded", DeadAt: now.Add(-2 * time.Hour)},
+	}}
+	if err := pruneDeadQueuedNudges(&state, nil, now, noMaintenanceDeadline()); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Dead) != 3 || state.Dead[0].ID != "unresolved" || state.Dead[1].ID != "recent-replay" || state.Dead[2].ID != "recent-dismissal" {
+		t.Fatalf("disposed items outlived retention or unresolved item vanished: %+v", state.Dead)
+	}
+	if err := pruneDeadQueuedNudges(&state, nil, now.Add(time.Hour), noMaintenanceDeadline()); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Dead) != 1 || state.Dead[0].ID != "unresolved" {
+		t.Fatalf("recent receipts were retained forever: %+v", state.Dead)
+	}
+}
+
+type nudgeReplayBoundaryClock struct{ now time.Time }
+
+func (c *nudgeReplayBoundaryClock) Now() time.Time {
+	now := c.now
+	c.now = c.now.Add(2 * time.Nanosecond)
+	return now
+}
+
+func TestNudgeReplayAtCapUsesOneTransactionTime(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	dead := queuedNudge{ID: "n-boundary", Agent: "worker", Message: "last moment recovery", DeadAt: now.Add(-nudgequeue.DeadLetterRetention + time.Nanosecond)}
+	state := nudgeQueueState{Dead: []queuedNudge{dead}}
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error { *s = state; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := nudgequeue.PrepareReplay(&state, dead.ID, "n-replay", now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldNotify, oldWriter := nudgeDeadLetterLossNotify, nudgeWarningWriter
+	t.Cleanup(func() { nudgeDeadLetterLossNotify, nudgeWarningWriter = oldNotify, oldWriter })
+	calls := 0
+	nudgeDeadLetterLossNotify = func(string, queuedNudge, io.Writer) error { calls++; return nil }
+	var warnings bytes.Buffer
+	nudgeWarningWriter = &warnings
+	if err := enqueueQueuedNudgeWithStoreAndClock(dir, beads.NudgesStore{Store: beads.NewMemStore()}, replay, &nudgeReplayBoundaryClock{now}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = nudgequeue.LoadState(dir)
+	if err != nil || len(state.Pending) != 1 || len(state.Dead) != 1 || calls != 0 || warnings.Len() != 0 {
+		t.Fatalf("successful replay reported lost: state=%+v err=%v calls=%d warnings=%s", state, err, calls, &warnings)
+	}
+}

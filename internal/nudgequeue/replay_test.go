@@ -31,7 +31,7 @@ func TestReplayPreservesInputAndProvenance(t *testing.T) {
 	if err := RecordReplay(&state, dead.ID, item.ID, now); err != nil {
 		t.Fatal(err)
 	}
-	if state.Dead[0].ReplayID != item.ID || !state.Dead[0].DeadAt.Equal(dead.DeadAt) {
+	if state.Dead[0].ReplayID != item.ID || !state.Dead[0].ReplayedAt.Equal(now) || !state.Dead[0].DeadAt.Equal(dead.DeadAt) {
 		t.Fatalf("missing lineage or changed dead state: %+v", state.Dead[0])
 	}
 	if _, err := PrepareReplay(&state, dead.ID, "n-second", now, time.Hour); err == nil || !strings.Contains(err.Error(), item.ID) {
@@ -55,6 +55,7 @@ func TestReplayAndDismissDisposition(t *testing.T) {
 		item Item
 	}{
 		{"superseded", Item{ID: "n-old", LastError: "superseded"}},
+		{"dropped", Item{ID: "n-old", LastError: ManualDropReason}},
 		{"dismissed", Item{ID: "n-old", DismissedAt: now.Add(-time.Hour)}},
 		{"replayed", Item{ID: "n-old", ReplayID: "n-new"}},
 		{"cap", Item{ID: "n-old", DeadAt: now.Add(-DeadLetterRetention)}},

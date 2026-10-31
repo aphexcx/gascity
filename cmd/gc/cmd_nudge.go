@@ -109,7 +109,7 @@ var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 // dropping it.
 type nudgeManualDropCause struct{}
 
-func (nudgeManualDropCause) Error() string { return "dropped by operator (gc nudge drop)" }
+func (nudgeManualDropCause) Error() string { return nudgequeue.ManualDropReason }
 
 func (nudgeManualDropCause) Is(target error) bool { return target == errNudgeSessionFenceMismatch }
 
@@ -2794,12 +2794,12 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 		item.BeadID = beadID
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		now := clk.Now()
 		if item.OriginID != "" {
-			if err := nudgequeue.RecordReplay(state, item.OriginID, item.ID, clk.Now()); err != nil {
+			if err := nudgequeue.RecordReplay(state, item.OriginID, item.ID, now); err != nil {
 				return err
 			}
 		}
-		now := clk.Now()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
@@ -3120,6 +3120,9 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	item.LastError = cause.Error()
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
+	if errors.Is(cause, errNudgeManualDrop) {
+		item.DismissedAt = now.UTC()
+	}
 	if errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
 		item.LastError = "draft_ownership_lost"
 	}
@@ -3324,26 +3327,25 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 	return nil
 }
 
-// pruneDeadQueuedNudges preserves dead letters and disposition receipts for seven
-// days while repairing terminal shadows. Cap losses are notified after commit.
+// pruneDeadQueuedNudges preserves unresolved dead letters for seven days and
+// disposition receipts for one hour. Cap losses are notified after commit.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
 }
 
 func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
-	cutoff := now.Add(-nudgequeue.DeadLetterRetention)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
 		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
 		}
-		if !item.DeadAt.IsZero() && !item.DeadAt.After(cutoff) {
-			continue
-		}
 		// Legacy entries without a transition time get a full recovery window.
 		if item.DeadAt.IsZero() {
 			item.DeadAt = now.UTC()
+		}
+		if !item.DeadLetterPruneAt().After(now) {
+			continue
 		}
 		if item.BeadID != "" {
 			if front == nil {

@@ -217,7 +217,7 @@ func nudgeDeadLetterMail(item queuedNudge) (subject, body string) {
 	subject = fmt.Sprintf("NUDGE DEAD LETTER session %s reason %s item %s", sessionID, reason, item.ID)
 	body = fmt.Sprintf("Item: %s\nSession: %s\nAgent: %s\nReason: %s\nFirst line: %q\nFirst attempt: %s\nDead transition: %s\n\nResolve the preserved pane input, then replay once:\ngc nudge replay %s\n",
 		item.ID, sessionID, item.Agent, reason, string(preview), firstAttempt, item.DeadAt.UTC().Format(time.RFC3339Nano), item.ID)
-	body += fmt.Sprintf("Or dismiss without replay: gc nudge replay %s --dismiss\nRecovery cap: seven days from the dead transition (%s).\n", item.ID, item.DeadAt.Add(nudgequeue.DeadLetterRetention).UTC().Format(time.RFC3339Nano))
+	body += fmt.Sprintf("Or dismiss without replay: gc nudge replay %s --dismiss\nRecovery cap: seven days from the dead transition (%s). Disposition receipts remain for one hour, bounded by this cap.\n", item.ID, item.DeadAt.Add(nudgequeue.DeadLetterRetention).UTC().Format(time.RFC3339Nano))
 	return subject, body
 }
 

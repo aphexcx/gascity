@@ -2951,10 +2951,11 @@ The new item retains the original source, reference and session fence, and
 uses the normal delivery bounds. Prints the new item ID on success.
 
 Use --dismiss to record an explicit dismissal without sending the input.
-Unresolved items and disposition receipts remain for seven days from the
-dead transition. Cap expiry removes the item and reports unresolved input
-loss by log and mail. Superseded reminders cannot be replayed and do not
-produce failure alerts or unresolved doctor entries.
+Unresolved items remain for seven days from the dead transition. Disposed
+receipts remain for one hour after replay, dismissal, drop, or supersession,
+bounded by that seven-day cap. Cap expiry reports unresolved input loss by
+log and mail. Superseded reminders and operator drops cannot be replayed
+and do not produce failure alerts or unresolved doctor entries.
 
 Use --dry-run to preview without writing. Find dead items with gc doctor
 or gc nudge status. Dead transitions send one mail to the referenced bead's

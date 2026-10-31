@@ -34,6 +34,7 @@ type Item struct {
 	BeadID            string     `json:"bead_id,omitempty"`
 	OriginID          string     `json:"origin_id,omitempty"`
 	ReplayID          string     `json:"replay_id,omitempty"`
+	ReplayedAt        time.Time  `json:"replayed_at,omitempty"`
 	DismissedAt       time.Time  `json:"dismissed_at,omitempty"`
 	Agent             string     `json:"agent"`
 	SessionID         string     `json:"session_id,omitempty"`

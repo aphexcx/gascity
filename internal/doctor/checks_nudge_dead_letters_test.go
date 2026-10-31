@@ -29,6 +29,7 @@ func TestNudgeDeadLettersCheck(t *testing.T) {
 			{ID: "n-superseded", LastError: "superseded", DeadAt: now.Add(-time.Hour)},
 			{ID: "n-replayed", ReplayID: "n-successor", DeadAt: now.Add(-time.Hour)},
 			{ID: "n-dismissed", DismissedAt: now, DeadAt: now.Add(-time.Hour)},
+			{ID: "n-dropped", LastError: nudgequeue.ManualDropReason, DeadAt: now.Add(-time.Hour)},
 		}
 		return nil
 	}); err != nil {
