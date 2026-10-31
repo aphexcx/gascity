@@ -37,7 +37,10 @@ def render():
             out.append("\r\n")
         if wrap_retry:
             width = os.get_terminal_size().columns - 2
-            draft = "\r\n  ".join(draft[i:i + width] for i in range(0, len(draft), width))
+            rows = []
+            for line in draft.split("\n"):
+                rows.extend([line[i:i + width] for i in range(0, len(line), width)] or [""])
+            draft = "\r\n  ".join(rows)
         out.append("────────────────────\r\n❯ %s\r\n────────────────────\r\n" % draft)
         out.append("  bypass permissions on\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
@@ -58,6 +61,8 @@ try:
         with lock:
             if b == 0x15:                      # C-u: clear composer
                 state["draft"] = []
+            elif b == 0x16 and wrap_retry:      # C-v: insert an explicit newline
+                state["draft"].append("\n")
             elif b in (0x0d, 0x0a):            # CR / LF: submit
                 if swallow > 0:
                     swallow -= 1

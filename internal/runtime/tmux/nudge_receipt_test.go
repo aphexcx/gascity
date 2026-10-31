@@ -109,6 +109,10 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 						return "GC_PROVIDER=claude", nil
 					case slices.Contains(args, "capture-pane"):
 						return "────\n❯ " + strings.ReplaceAll(tt.draft, "\n", "\n  ") + "\n────", nil
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
+						return "%0", nil
+					case slices.Contains(args, "show-hooks"):
+						return `client-attached[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
 					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
 						return "80", nil
 					case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):

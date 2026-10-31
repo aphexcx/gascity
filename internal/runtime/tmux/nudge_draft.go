@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -11,6 +13,54 @@ import (
 // transport restart but does not follow a replacement pane. It contains only
 // a payload digest, never the message text.
 const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
+
+// nudgeDraftOwnershipHook binds provenance to uninterrupted detached input.
+// Appending preserves other hooks; checking the hook on retry detects another
+// caller replacing or removing it, including the hidden-attach helper.
+func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (string, error) {
+	pane, err := t.run("display-message", "-p", "-t", target, "#{pane_id}")
+	if err != nil {
+		return "", err
+	}
+	pane = strings.TrimSpace(pane)
+	if _, err := strconv.ParseUint(strings.TrimPrefix(pane, "%"), 10, 64); err != nil || !strings.HasPrefix(pane, "%") {
+		return "", fmt.Errorf("invalid pane identity %q", pane)
+	}
+	hook := fmt.Sprintf("set-option -p -t %q %s ''", pane, nudgeDraftPayloadOption)
+	hooks, err := t.run("show-hooks", "-t", session, "client-attached")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(hooks, "\n") {
+		if strings.HasSuffix(line, " "+hook) {
+			return pane, nil
+		}
+	}
+	if !install {
+		return "", fmt.Errorf("draft ownership hook is absent")
+	}
+	_, err = t.run("set-hook", "-a", "-t", session, "client-attached", hook)
+	return pane, err
+}
+
+// stageNudgeDraftProvenance marks a paste as pending only while detached.
+// An attachment clears the marker even if it occurs during the paste.
+func (t *Tmux) stageNudgeDraftProvenance(pane, message string) error {
+	set := fmt.Sprintf("set-option -p -t %q %s ", pane, nudgeDraftPayloadOption)
+	_, err := t.run("if-shell", "-F", "-t", pane, "#{==:#{session_attached},0}",
+		set+"pending:"+runtime.NudgePayloadDigest(message), set+"''")
+	return err
+}
+
+// confirmNudgeDraftProvenance promotes a full paste only if no attachment
+// invalidated its pending marker. The comparison and update run in tmux.
+func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
+	digest := runtime.NudgePayloadDigest(message)
+	_, err := t.run("if-shell", "-F", "-t", pane,
+		fmt.Sprintf("#{==:#{%s},pending:%s}", nudgeDraftPayloadOption, digest),
+		fmt.Sprintf("set-option -p -t %q %s %s", pane, nudgeDraftPayloadOption, digest))
+	return err
+}
 
 // nudgeComposer reads the last live input, including continuation rows inside
 // its frame. Unknown layouts stay unreadable: a missing prompt is not an empty

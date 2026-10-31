@@ -2830,6 +2830,9 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste; payload identity is unavailable", ErrNudgeDraftDeferred, target)
 			}
 			if !nudgeDraftMatches(draft, message, 0) {
+				if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: checking draft ownership for %q: %w", ErrNudgeDraftDeferred, target, err)
+				}
 				stored, err := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
@@ -2892,13 +2895,25 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		// retries enter here; they may repeat the submit, never the paste.
 		payloadBytes = len(message)
 	} else {
+		provenancePane := ""
+		if verifySubmit {
+			pane, err := t.nudgeDraftOwnershipHook(session, target, true)
+			if err == nil {
+				err = t.stageNudgeDraftProvenance(pane, message)
+			}
+			if err != nil {
+				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)
+			} else {
+				provenancePane = pane
+			}
+		}
 		written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
 		if err != nil {
 			return runtime.NudgeDelivery{}, err
 		}
 		payloadBytes = written
-		if verifySubmit && written == len(message) {
-			if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message)); err != nil {
+		if provenancePane != "" && written == len(message) {
+			if err := t.confirmNudgeDraftProvenance(provenancePane, message); err != nil {
 				// The paste already landed. Preserve delivery evidence, but a
 				// later normalized retry must defer without this provenance.
 				log.Printf("tmux nudge: recording pasted draft provenance for %q: %v", target, err)
