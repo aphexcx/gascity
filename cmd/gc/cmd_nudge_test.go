@@ -3020,14 +3020,26 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 
 type failingTerminalNudgeStore struct {
 	*beads.MemStore
-	failID string
+	failID           string
+	terminalOnly     bool
+	failClose        bool
+	terminalFailures int
 }
 
 func (s *failingTerminalNudgeStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if id != "" && id == s.failID {
+	if id != "" && id == s.failID && !s.failClose && (!s.terminalOnly || kvs["state"] == "failed") {
+		s.terminalFailures++
 		return fmt.Errorf("setting metadata on %q: dolt connection refused", id)
 	}
 	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+func (s *failingTerminalNudgeStore) Close(id string) error {
+	if id != "" && id == s.failID && s.failClose {
+		s.terminalFailures++
+		return fmt.Errorf("closing %q: dolt connection refused", id)
+	}
+	return s.MemStore.Close(id)
 }
 
 func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *testing.T) {
@@ -4297,7 +4309,7 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 		if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
 			t.Fatalf("terminal loss requeued: pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
 		}
-		if dead[0].LastError != runtime.ErrNudgeDraftOwnershipLost.Error() {
+		if dead[0].LastError != "draft_ownership_lost" {
 			t.Fatalf("lost terminal reason: %+v", dead[0])
 		}
 	})
@@ -6441,6 +6453,69 @@ func (p *unconfirmedSubmitVouchingFake) NudgeDelivered(name string, content []ru
 // record a failure and requeue, exactly as it did when the runtime surfaced
 // ErrNudgeSubmitUnconfirmed directly, whichever operand carried the landing.
 func TestTryDeliverQueuedNudgesByPollerRequeuesUnconfirmedSubmit(t *testing.T) {
+	for _, failClose := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ownership loss survives terminal write failure close=%t", failClose), func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore(), terminalOnly: true, failClose: failClose}
+			previous := openOwnedNudgeBeadStore
+			openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+				return beads.NudgesStore{Store: store}, store
+			}
+			t.Cleanup(func() { openOwnedNudgeBeadStore = previous })
+			item := newQueuedNudge("worker", "preserved founder line", time.Now().Add(-time.Minute))
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatal(err)
+			}
+			shadow, found, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(item.ID)
+			if err != nil || !found {
+				t.Fatalf("backing bead: %+v found=%t err=%v", shadow, found, err)
+			}
+			store.failID = shadow.BeadID
+			fake := &unconfirmedSubmitVouchingFake{Fake: runtime.NewFake(), submit: runtime.NudgeSubmitOwnershipLost}
+			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "claude"}, sessionName: "sess-worker"}
+			obs := worker.LiveObservation{Running: true}
+			if delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, obs); delivered || err != nil {
+				t.Errorf("terminal queue transition must survive bead failure: delivered=%t err=%v", delivered, err)
+			}
+			if store.terminalFailures == 0 {
+				t.Fatal("terminal store failure was not exercised")
+			}
+			// The user consumes the preserved draft; a later retry would paste it
+			// again. Expire any surviving lease before that next delivery pass.
+			if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+				for i := range state.InFlight {
+					state.InFlight[i].LeaseUntil = time.Now().Add(-time.Minute)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			fake.submit = runtime.NudgeSubmitConfirmed
+			_, _ = tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, obs)
+			calls := 0
+			for _, call := range fake.Calls {
+				if call.Method == "Nudge" {
+					calls++
+				}
+			}
+			state, err := nudgequeue.LoadState(dir)
+			if err != nil || calls != 1 || len(state.Pending)+len(state.InFlight) != 0 || len(state.Dead) != 1 {
+				t.Fatalf("terminal loss replayed after lease expiry: calls=%d state=%+v err=%v", calls, state, err)
+			}
+			store.failID = ""
+			if _, _, _, err := listQueuedNudges(dir, "worker", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			repaired, _, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).FindIncludingTerminal(item.ID)
+			if err != nil || repaired.State != "failed" || repaired.TerminalReason != "draft_ownership_lost" {
+				t.Fatalf("terminal reason lost after recovery: %+v err=%v", repaired, err)
+			}
+		})
+	}
 	for name, flagDown := range map[string]bool{
 		"landed on the Delivered flag":   false,
 		"landed on the byte count alone": true,
@@ -6511,7 +6586,11 @@ func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool, submit run
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
 	if submit != runtime.NudgeSubmitUnconfirmed {
-		if len(pending)+len(inFlight)+len(dead) != 0 {
+		wantDead := 0
+		if submit == runtime.NudgeSubmitOwnershipLost {
+			wantDead = 1
+		}
+		if len(pending)+len(inFlight) != 0 || len(dead) != wantDead {
 			t.Fatalf("terminal %s was requeued: pending=%d inFlight=%d dead=%d", submit, len(pending), len(inFlight), len(dead))
 		}
 		if submit == runtime.NudgeSubmitOwnershipLost {

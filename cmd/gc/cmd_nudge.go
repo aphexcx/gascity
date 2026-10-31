@@ -1908,10 +1908,10 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
 	if result.Submit == runtime.NudgeSubmitOwnershipLost || errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
-		// Keep terminal ownership loss ahead of the generic retry path,
-		// including providers exposing it through an error-only boundary.
-		ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "failed", "draft_ownership_lost", "provider-nudge-return")
-		return false, errors.Join(bookkeepErr, ackErr)
+		// Persist the terminal queue transition before best-effort bead writes.
+		// A backing-store failure must never leave a lease that can replay.
+		terminalErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), runtime.ErrNudgeDraftOwnershipLost, time.Now())
+		return false, errors.Join(bookkeepErr, terminalErr)
 	}
 	if err == nil {
 		// The queue must not ack an unconfirmed submit: the payload may be
@@ -3115,6 +3115,9 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	item.LastError = cause.Error()
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
+	if errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
+		item.LastError = "draft_ownership_lost"
+	}
 	if errors.Is(cause, errNudgeSessionFenceMismatch) || errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
 		item.DeadAt = now.UTC()
 		return item, true
