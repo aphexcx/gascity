@@ -40,7 +40,7 @@ def render():
             out.append("• Working (%ds • esc to interrupt)\r\n" % (int(now - ba) + 1))
         else:
             out.append("\r\n")
-        out.append("› %s\r\n" % (composer_text(draft) or "Explain this codebase"))
+        out.append("› %s\r\n\r\n" % (composer_text(draft) or "\x1b[2mExplain this codebase\x1b[22m"))
         out.append("  gpt-5.5 low · /tmp/probe\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
         time.sleep(0.05)

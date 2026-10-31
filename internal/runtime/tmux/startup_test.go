@@ -1060,6 +1060,22 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
 
+	t.Run("preserved opaque draft is not fatal", func(t *testing.T) {
+		origBackoffs := startupNudgeRetryBackoffs
+		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      fmt.Errorf("%w: opaque composer", ErrNudgeDraftDeferred),
+		}
+		cfg := runtime.Config{Command: "codex", Nudge: "startup prompt"}
+		if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatalf("preserved startup draft must not fail the live session: %v", err)
+		}
+		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+	})
+
 	// Same reasoning as above: a submit proven delivered but never observed
 	// busy (composer drained before the confirm budget saw it) must not fail
 	// the start either. It also gets the same durable artifact as the
@@ -1126,25 +1142,33 @@ func TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt(t *testing.T) {
 // blind resend would enqueue a second copy of the nudge behind whichever
 // submit actually landed.
 func TestSendStartupNudgeWithRetry_StopsRetryingOncePaneGoesBusy(t *testing.T) {
-	calls := 0
-	send := func() error {
-		calls++
-		return ErrNudgeSubmitUnconfirmed
-	}
-	busyCalls := 0
-	busy := func() (bool, error) {
-		busyCalls++
-		return true, nil
-	}
-	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("send calls = %d, want 1 (busy after the first backoff should stop the ladder)", calls)
-	}
-	if busyCalls != 1 {
-		t.Fatalf("busy calls = %d, want 1", busyCalls)
+	for _, deferredRead := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred-read=%v", deferredRead), func(t *testing.T) {
+			calls, pastes, busyCalls := 0, 0, 0
+			send := func() error {
+				calls++
+				if deferredRead && calls == 2 {
+					return ErrNudgeDraftDeferred
+				}
+				pastes++
+				return ErrNudgeSubmitUnconfirmed
+			}
+			busy := func() (bool, error) {
+				busyCalls++
+				return !deferredRead || busyCalls > 1, nil
+			}
+			err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			wantCalls := 1
+			if deferredRead {
+				wantCalls = 2
+			}
+			if calls != wantCalls || busyCalls != wantCalls || pastes != 1 {
+				t.Fatalf("sends=%d busy reads=%d pastes=%d; want %d/%d/1", calls, busyCalls, pastes, wantCalls, wantCalls)
+			}
+		})
 	}
 }
 

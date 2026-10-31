@@ -2611,7 +2611,7 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	sessionName := "gt-test-nudge-codex-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
 
 	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "printf '› '; exec cat -v", map[string]string{
 		"GC_PROVIDER": "codex",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
@@ -2652,6 +2652,7 @@ import (
 	"os"
 )
 func main() {
+	fmt.Print("› ")
 	r := bufio.NewReader(os.Stdin)
 	for {
 		b, err := r.ReadByte()
@@ -2728,7 +2729,7 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	sessionName := "gt-test-nudge-claude-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
 
 	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "cat -v", map[string]string{
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, os.TempDir(), "printf '❯ '; exec cat -v", map[string]string{
 		"GC_PROVIDER": "claude",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
@@ -3003,6 +3004,10 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
 		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		{"Claude collapsed paste is not drained", []string{"❯ [Pasted text #1 +7 lines]"}, "hello", false},
+		{"Claude single-line collapsed paste is not drained", []string{"❯ [Pasted text #2]"}, longSent, false},
+		{"Claude collapsed continuation is not drained", []string{"❯ prefix", "  [Pasted text #1 +7 lines]"}, "hello", false},
+		{"old Claude placeholder above an empty composer", []string{"❯ [Pasted text #1 +7 lines]", "answer", "❯ "}, "hello", true},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},

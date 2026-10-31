@@ -236,6 +236,9 @@ var (
 	// consumer of delivery evidence ([runtime.NudgeDelivery]) translates to
 	// the same error; this name is kept for existing errors.Is callers.
 	ErrNudgeSubmitUnconfirmed = runtime.ErrNudgeSubmitUnconfirmed
+	// ErrNudgeDraftDeferred means the composer could not safely accept a paste.
+	// Startup preserves the live session and records the unresolved nudge.
+	ErrNudgeDraftDeferred = errors.New("nudge: preserved draft deferred delivery")
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -2358,41 +2361,58 @@ const (
 // only while the pane remains idle (submission not yet observed), so a turn
 // that already started can never receive a second submit.
 //
-// Returns:
-//   - (true, nil)  — the agent went busy: the message submitted.
-//   - (false, nil) — the submit sequence was delivered to tmux but busy was
-//     never observed within the budget (best-effort; preserves the
-//     historical "nil == handed to tmux" contract so callers do not
-//     re-paste).
-//   - (false, err) — every submit attempt failed at the tmux layer.
+// An already-busy or unreadable pane gets one submit, reported as unverified:
+// ongoing activity cannot acknowledge this input. Only a known idle baseline
+// permits busy-state confirmation or retries. The caller must also preserve
+// that baseline across the paste, which can itself race a tool boundary.
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (runtime.NudgeSubmit, error) {
+	if isBusy, err := busy(); err != nil || isBusy {
+		if err := sendSubmit(); err != nil {
+			return runtime.NudgeSubmitUnconfirmed, err
+		}
+		wake()
+		return runtime.NudgeSubmitUnverified, nil
+	}
 	var lastErr error
+	sent := false
 	for send := 0; send < submitEnterMaxSends; send++ {
 		if send > 0 {
-			// Re-confirm the pane is still idle before re-sending. A turn that
-			// already submitted (busy) must never receive a second Enter.
-			if isBusy, err := busy(); err == nil && isBusy {
-				return true, nil
-			}
 			sleep(submitReEnterBackoff)
+			// Sample after the backoff: a tool boundary during the wait must
+			// not receive another Enter based on an earlier idle observation.
+			isBusy, err := busy()
+			if err != nil || isBusy {
+				if !sent {
+					return runtime.NudgeSubmitUnconfirmed, lastErr
+				}
+				if err != nil {
+					return runtime.NudgeSubmitUnverified, nil
+				}
+				return runtime.NudgeSubmitConfirmed, nil
+			}
 		}
 		if err := sendSubmit(); err != nil {
 			lastErr = err
 			continue
 		}
 		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+		sent = true
 		wake()
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
-			if isBusy, err := busy(); err == nil && isBusy {
-				return true, nil
+			isBusy, err := busy()
+			if err != nil {
+				return runtime.NudgeSubmitUnverified, nil
+			}
+			if isBusy {
+				return runtime.NudgeSubmitConfirmed, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, lastErr
+	return runtime.NudgeSubmitUnconfirmed, lastErr
 }
 
 // Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
@@ -2474,19 +2494,6 @@ type paneSubmitObservation struct {
 	drafted bool
 }
 
-// observeSubmit reads busy and staged-draft state from a single capture, so
-// the two can never describe different moments.
-func (t *Tmux) observeSubmit(target string, m stagedDraftMarker) (paneSubmitObservation, error) {
-	lines, err := t.CapturePaneLines(target, promptObservationLines)
-	if err != nil {
-		return paneSubmitObservation{}, err
-	}
-	return paneSubmitObservation{
-		busy:    paneContainsBusyIndicator(lines),
-		drafted: paneShowsStagedDraft(lines, m),
-	}, nil
-}
-
 // stagedDraftOutcome is the result of recoverStagedDraft.
 type stagedDraftOutcome int
 
@@ -2497,6 +2504,9 @@ const (
 	stagedDraftUnresolved stagedDraftOutcome = iota
 	// stagedDraftSubmittedBusy: the pane went busy, so the submit landed.
 	stagedDraftSubmittedBusy
+	// stagedDraftUnverified: activity is visible while input remains staged.
+	// It cannot acknowledge the draft or license a replay.
+	stagedDraftUnverified
 	// stagedDraftCleared: after a re-send the draft left the composer but no
 	// capture saw the busy indicator. The agent took the message, so this is
 	// delivered-but-unobserved and must not be re-pasted.
@@ -2507,6 +2517,8 @@ func (o stagedDraftOutcome) String() string {
 	switch o {
 	case stagedDraftSubmittedBusy:
 		return "submitted-busy"
+	case stagedDraftUnverified:
+		return "busy-with-draft"
 	case stagedDraftCleared:
 		return "cleared-unobserved"
 	default:
@@ -2533,6 +2545,8 @@ func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (pa
 		switch {
 		case err != nil:
 			return stagedDraftUnresolved
+		case obs.busy && obs.drafted:
+			return stagedDraftUnverified
 		case obs.busy:
 			return stagedDraftSubmittedBusy
 		case !obs.drafted:
@@ -2699,10 +2713,11 @@ func unconfirmedSubmitError(session string, d runtime.NudgeDelivery) error {
 //   - Delivered is set once the payload has been pasted (a receipt was
 //     emitted for it), whatever then happens to the submit sequence.
 //   - Bytes is the paste's size, the same number the receipt carries.
-//   - Submit is confirmed when the pane went busy, unconfirmed when a busy
+//   - Submit is confirmed when an idle pane went busy, unconfirmed when a busy
 //     probe ran and never saw it OR the submit sequence could not be
 //     delivered after the paste, and unverified when no probe exists for
-//     this pane's provider family and the submit went out.
+//     this pane's provider family or the pane was already busy when the
+//     new input arrived and the submit went out.
 //
 // The error return is for the send failing BEFORE anything landed (lock
 // timeout, paste rejected, session gone). A zero delivery accompanies every
@@ -2727,7 +2742,7 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 
 // nudgeSessionDeliveryWith is nudgeSessionDelivery with the paste function
 // injected (plain nudges paste whole; startup prompts may chunk for copilot).
-func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (runtime.NudgeDelivery, error) {
+func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2758,9 +2773,30 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// submit-verified and the best-effort arm.
 	payloadBytes := 0
 	submitted := false
+	resumeOwnedDraft := false
+	ownershipLost := false
 	defer func() {
 		if !delivered {
 			return
+		}
+		// Confirmation is established by the submit observation. A later
+		// attachment cannot revoke it. Without confirmation, losing ownership
+		// ends retries: a subsequent empty composer must not invite a new paste.
+		if resumeOwnedDraft && !submitted && delivery.Submit != runtime.NudgeSubmitOwnershipLost {
+			stored, err := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
+			if ownershipLost || err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+				log.Printf("tmux nudge: cannot retain draft ownership for %q: %v", target, err)
+				delivery.Submit = runtime.NudgeSubmitOwnershipLost
+				deliveryErr = nil
+			}
+		}
+		if delivery.Submit == runtime.NudgeSubmitOwnershipLost {
+			log.Printf("tmux nudge: target=%q digest=%s reason=draft_ownership_lost; draft preserved, automatic replay stopped", target, runtime.NudgePayloadDigest(message))
+		}
+		if submitted {
+			if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
+				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
+			}
 		}
 		commitPoke()
 		t.emitNudgeReceipt(target, message, payloadBytes, submitted)
@@ -2774,17 +2810,81 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
 
-	// 1. Clear any pending input already sitting on the line before pasting,
-	// mirroring SendKeysReplace (send-keys C-u). Without this, an earlier
-	// nudge's undelivered draft — e.g. a lost submit Enter (ga-bwm) — stays in
-	// the input box, and this paste concatenates on top of it instead of
-	// replacing it: stacked injections merge into one draft that Claude's TUI
-	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
-	//
-	// Skip the clear when a client is attached: a human may be mid-keystroke,
-	// and silently wiping their in-progress input is worse than the
-	// concatenation this clear otherwise prevents (#5192).
-	if !t.IsSessionAttached(session) {
+	// Capture the baseline before the paste: a running turn may briefly lose
+	// its busy indicator at a tool boundary while the new input is staged.
+	verifySubmit := t.submitVerifyEligible(target)
+	idleBeforePaste := false
+	resumeDraft := false
+	if verifySubmit {
+		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines))
+		if err != nil {
+			return runtime.NudgeDelivery{}, fmt.Errorf("reading composer before nudge to %q: %w", target, err)
+		}
+		prefix := t.resolveIdlePromptPrefix(session)
+		if marker, ok := t.stagedDraftMarkerFor(target); ok {
+			prefix = marker.promptPrefix
+		}
+		draft, observed := nudgeComposer(content, prefix)
+		if !observed {
+			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
+		}
+		if draft != "" {
+			collapsed := strings.Contains(draft, "[Pasted text #")
+			deferred := ErrNudgeDraftDeferred
+			if collapsed {
+				deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
+				if !collapsedNudgeDraftMatches(draft, message) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste with a different or ambiguous shape", deferred, target)
+				}
+			}
+			if collapsed || !nudgeDraftMatches(draft, message, 0) {
+				if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
+				}
+				stored, err := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
+				}
+				if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+					if strings.TrimSpace(stored) == "" {
+						deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
+					}
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
+				}
+				attached, err := t.run("display-message", "-t", session, "-p", "#{session_attached}")
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
+				}
+				if strings.TrimSpace(attached) != "0" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
+				}
+				if !collapsed {
+					widthText, err := t.run("display-message", "-p", "-t", target, "#{pane_width}")
+					if err != nil {
+						return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
+					}
+					width, err := strconv.Atoi(strings.TrimSpace(widthText))
+					if err != nil || width <= 2 {
+						return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
+					}
+					if !nudgeDraftMatches(draft, message, width-2) {
+						return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
+					}
+				}
+				resumeOwnedDraft = true
+			}
+			resumeDraft = true
+		} else if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
+			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+		}
+		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
+	}
+
+	// 1. Preserve existing input on families with submit evidence. An earlier
+	// unverified delivery may still be staged; C-u would erase it. A matching
+	// draft gets a submit-only retry; other nonempty drafts defer the nudge.
+	// Other families retain their replacement behavior on detached panes.
+	if !verifySubmit && !t.IsSessionAttached(session) {
 		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
 			return runtime.NudgeDelivery{}, err
 		}
@@ -2792,9 +2892,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
-	// the composer; on an attached session it deliberately did not, so a
-	// human draft may still be on the line. That matters: the survey's
+	// the pane (ga-zg7fjq). A draft may still be on the line. The survey's
 	// onDigit handler
 	// only fires on a single-character input value, so a digit landing on
 	// top of other content silently corrupts the draft instead of
@@ -2806,11 +2904,36 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 
 	// 2. Send the text as one bracketed paste, with retry on transient errors;
 	// the byte count feeds the delivery receipt (gp-2rq).
-	written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
-	if err != nil {
-		return runtime.NudgeDelivery{}, err
+	if resumeDraft {
+		// The matching payload is already in the composer. Both startup and queue
+		// retries enter here; they may repeat the submit, never the paste.
+		payloadBytes = len(message)
+	} else {
+		provenancePane := ""
+		if verifySubmit {
+			pane, err := t.nudgeDraftOwnershipHook(session, target, true)
+			if err == nil {
+				err = t.stageNudgeDraftProvenance(pane, message)
+			}
+			if err != nil {
+				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)
+			} else {
+				provenancePane = pane
+			}
+		}
+		written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
+		if err != nil {
+			return runtime.NudgeDelivery{}, err
+		}
+		payloadBytes = written
+		if provenancePane != "" && written == len(message) {
+			if err := t.confirmNudgeDraftProvenance(provenancePane, message); err != nil {
+				// The paste already landed. Preserve delivery evidence, but a
+				// later normalized retry must defer without this provenance.
+				log.Printf("tmux nudge: recording pasted draft provenance for %q: %v", target, err)
+			}
+		}
 	}
-	payloadBytes = written
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
@@ -2853,7 +2976,17 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// only for single-key (plain Enter) sequences, which is what every family
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
-	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
+	sendSubmit := func() error {
+		if resumeOwnedDraft {
+			if ownershipLost {
+				return ErrNudgeDraftDeferred
+			}
+			_, err := t.sendNudgeDraftSubmitSequence(target, message, submitKeys)
+			ownershipLost = errors.Is(err, ErrNudgeDraftDeferred)
+			return err
+		}
+		return t.sendNudgeSubmitSequence(target, submitKeys)
+	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	// From here on the paste is in the pane, whatever happens to the submit
 	// sequence: the receipt is emitted and the evidence says Delivered. A
@@ -2863,15 +2996,39 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// composer. NudgeSession turns unconfirmed into ErrNudgeSubmitUnconfirmed
 	// for the callers that need a retry signal (see unconfirmedSubmitError).
 	delivered = true
-	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
-		submitted = confirmed
+	if verifySubmit {
+		capture := func() ([]string, error) {
+			if resumeOwnedDraft {
+				if ownershipLost {
+					return nil, ErrNudgeDraftDeferred
+				}
+				lines, err := t.captureNudgeDraftSubmit(target, message)
+				ownershipLost = errors.Is(err, ErrNudgeDraftDeferred)
+				return lines, err
+			}
+			return t.CapturePaneLines(target, promptObservationLines)
+		}
+		busy := func() (bool, error) {
+			if !idleBeforePaste {
+				return true, nil // this turn predates the paste; no usable transition
+			}
+			lines, err := capture()
+			if err != nil {
+				log.Printf("tmux nudge: cannot observe submit for %q: %v", target, err)
+			}
+			return paneContainsBusyIndicator(lines), err
+		}
+		submit, err := submitEnterAndConfirm(sendSubmit, wake, busy, time.Sleep)
+		submitted = submit == runtime.NudgeSubmitConfirmed
+		if errors.Is(err, ErrNudgeDraftDeferred) {
+			return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitOwnershipLost}, nil
+		}
 		if err != nil {
 			// Every submit attempt was refused by tmux (or the last one was,
 			// after earlier sends went unconfirmed). The paste landed; the
 			// submit is unknown.
 			log.Printf("tmux nudge: submit sequence to %q failed after the paste landed; reporting the submit as unconfirmed: %v", target, err)
-		} else if !confirmed {
+		} else if submit == runtime.NudgeSubmitUnconfirmed {
 			// The window may have expired inside a large paste's ingest with
 			// every submit swallowed, leaving the draft staged in the
 			// composer. Where the family's staged-draft marker is known,
@@ -2880,8 +3037,13 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			// clear above is skipped: a human may be composing, and a
 			// re-sent submit would send their draft.
 			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
-				observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
+				observe := func() (paneSubmitObservation, error) {
+					lines, err := capture()
+					return paneSubmitObservation{busy: paneContainsBusyIndicator(lines), drafted: paneShowsStagedDraft(lines, marker)}, err
+				}
 				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+				case stagedDraftUnverified:
+					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnverified}, nil
 				case stagedDraftSubmittedBusy:
 					submitted = true
 					return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed}, nil
@@ -2903,15 +3065,11 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case is
 			// reported as proven delivery, not as unconfirmed.
-			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+			if lines, capErr := capture(); capErr == nil && paneShowsDrainedComposer(lines, message) {
 				submitted = true
 				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed},
 					fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
-		}
-		submit := runtime.NudgeSubmitUnconfirmed
-		if confirmed {
-			submit = runtime.NudgeSubmitConfirmed
 		}
 		return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: submit}, nil
 	}
@@ -3185,6 +3343,10 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 	if !runtime.ContainsFeedbackSurveyModal(content) {
 		return false, nil
 	}
+	if draft, observed := nudgeComposer(content, DefaultReadyPromptPrefix); !observed || draft != "" {
+		log.Printf("tmux feedback survey: skipping dismissal because composer is nonempty or unreadable")
+		return false, nil
+	}
 	if err := sendKeys("0"); err != nil {
 		return true, err
 	}
@@ -3195,11 +3357,12 @@ func dismissFeedbackSurveyModal(content string, sendKeys func(keys ...string) er
 // DismissFeedbackSurveyModalIfPresent clears Claude Code's post-turn
 // feedback survey (ga-zg7fjq) on the session's agent pane so a pending nudge
 // is not corrupted by, or silently swallowed into, the survey's
-// single-digit input handler. No-op when the survey is absent. A parked
+// single-digit input handler. No-op when the survey is absent; nonempty or
+// unreadable composers are left untouched with a logged skip. A parked
 // survey reads idle to WaitForIdle, so callers must not gate this on an
 // idle-wait failure branch -- see the unconditional call from NudgeSession.
-// Best-effort: capture/send failures are swallowed (the caller retries on
-// the next wake).
+// Best-effort: capture/send failures are logged (the caller retries on the
+// next wake).
 func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
@@ -3214,11 +3377,16 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 		return nil
 	}
 
-	content, err := t.CapturePane(target, promptObservationLines)
+	content, err := t.CapturePaneWithAttributes(target, promptObservationLines)
 	if err != nil {
+		log.Printf("tmux feedback survey: skipping dismissal for %q: %v", target, err)
 		return
 	}
-	present, _ := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	present, err := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	if err != nil {
+		log.Printf("tmux feedback survey: dismissing %q: %v", target, err)
+		return
+	}
 	if !present {
 		return
 	}
@@ -3226,11 +3394,14 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	// The survey can occasionally eat the first digit (e.g. a keystroke lost
 	// to a slow-to-wake detached pane); re-check and retry the dismiss pair
 	// once before giving up for this call.
-	content, err = t.CapturePane(target, promptObservationLines)
+	content, err = t.CapturePaneWithAttributes(target, promptObservationLines)
 	if err != nil {
+		log.Printf("tmux feedback survey: skipping dismissal retry for %q: %v", target, err)
 		return
 	}
-	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
+	if _, err := dismissFeedbackSurveyModal(content, sendKeys, time.Sleep); err != nil {
+		log.Printf("tmux feedback survey: retrying dismissal for %q: %v", target, err)
+	}
 }
 
 // GetPaneCommand returns the current command running in a pane.
@@ -4619,6 +4790,9 @@ func paneContainsBusyIndicator(lines []string) bool {
 // matches the prompt prefix at all, the composer cannot be observed, so this
 // conservatively returns false rather than claiming delivery is proven.
 func paneShowsDrainedComposer(lines []string, sent string) bool {
+	if paneShowsStagedDraft(lines, stagedDraftMarker{promptPrefix: DefaultReadyPromptPrefix, marker: "[Pasted text #"}) {
+		return false
+	}
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
 	if !observed {
 		return false

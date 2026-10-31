@@ -29,12 +29,17 @@ const (
 	// first case, and the runtime's own retry path (ErrNudgeSubmitUnconfirmed
 	// from Nudge) already covers the second.
 	NudgeSubmitUnconfirmed NudgeSubmit = "unconfirmed"
-	// NudgeSubmitUnverified means no busy probe exists for this transport or
-	// provider family, so the submit was sent best-effort and nothing was
-	// checked. This is the ordinary outcome for every family without a
-	// readable busy indicator and for the hidden-attach transport; it has
-	// always counted as delivery and still does.
+	// NudgeSubmitUnverified means the submit was sent but no usable acceptance
+	// observation exists: the transport has no probe, its baseline was busy,
+	// or the pane could not be read. Ongoing activity cannot acknowledge new
+	// input. This counts as terminal delivery, not proof of harness ingestion;
+	// consumers must not replay a payload that already landed.
 	NudgeSubmitUnverified NudgeSubmit = "unverified"
+	// NudgeSubmitOwnershipLost means a previously pasted draft lost its input
+	// ownership before acceptance could be established. The draft is preserved,
+	// but its submit can no longer be attributed to this payload. This is a
+	// terminal outcome: consumers must record the loss and never replay it.
+	NudgeSubmitOwnershipLost NudgeSubmit = "ownership_lost"
 )
 
 // ErrNudgeSubmitUnconfirmed is the retry signal for callers that have no
@@ -52,6 +57,14 @@ const (
 // [NudgeDelivery.UnconfirmedSubmitError] for the one place the translation
 // is made.
 var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+
+// ErrNudgeDraftUnowned means a preserved draft lacks evidence tying it to the
+// pending payload. A queue must bound these deferrals and surface exhaustion.
+var ErrNudgeDraftUnowned = errors.New("nudge: draft has no matching paste provenance")
+
+// ErrNudgeDraftOwnershipLost is a terminal delivery failure: the prior paste
+// lost ownership before acceptance was established. Preserve it; never replay.
+var ErrNudgeDraftOwnershipLost = errors.New("nudge: draft ownership lost before acceptance; preserved input requires attention, automatic replay stopped")
 
 // NudgeDelivery is a vouching runtime's evidence about ONE nudge. It is the
 // typed answer behind [NudgeVouchingProvider]: the fields are independent
@@ -111,9 +124,10 @@ func (d NudgeDelivery) Landed() bool {
 }
 
 // UnconfirmedSubmitError is the ONE translation from delivery evidence to
-// the retry signal that callers without an evidence channel rely on: a
-// non-nil [ErrNudgeSubmitUnconfirmed] when the payload landed ([Landed]) but
-// the submit is unconfirmed, nil otherwise. tmux's NudgeSession/NudgeNow
+// the error that callers without an evidence channel rely on:
+// [ErrNudgeSubmitUnconfirmed] when the payload landed ([Landed]) but the submit
+// is unconfirmed, or terminal [ErrNudgeDraftOwnershipLost] when ownership was
+// lost before acceptance. Only the former permits a retry. tmux's NudgeSession/NudgeNow
 // wrappers apply it on the way out, and every consumer that acks, commits,
 // or reports success on a delivery applies it before doing so.
 //
@@ -121,6 +135,9 @@ func (d NudgeDelivery) Landed() bool {
 // there the same outcome classifies as pending — landed, hold, do not
 // redeliver — which is the whole point of carrying the evidence (gp-2io).
 func (d NudgeDelivery) UnconfirmedSubmitError(target string) error {
+	if d.Submit == NudgeSubmitOwnershipLost {
+		return fmt.Errorf("%w: session %q", ErrNudgeDraftOwnershipLost, target)
+	}
 	if d.Landed() && d.Submit == NudgeSubmitUnconfirmed {
 		return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, target)
 	}

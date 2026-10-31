@@ -2,6 +2,7 @@ package nudgequeue
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -10,6 +11,54 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 )
+
+func TestClaimDueBatchKeepsRetryPayloadStable(t *testing.T) {
+	now := time.Unix(100, 0)
+	old := now.Add(-time.Second)
+	future := now.Add(time.Minute)
+	match := func(item Item) bool { return item.Agent == "target" }
+	for _, tt := range []struct {
+		name  string
+		state State
+		want  []string
+	}{
+		{"retry excludes arrivals", State{Pending: []Item{
+			{ID: "new", Agent: "target"},
+			{ID: "b", Agent: "target", LastAttemptAt: old},
+			{ID: "a", Agent: "target", LastAttemptAt: old},
+		}}, []string{"a", "b"}},
+		{"retry backoff blocks arrivals", State{Pending: []Item{
+			{ID: "new", Agent: "target"},
+			{ID: "a", Agent: "target", LastAttemptAt: old, DeliverAfter: future},
+		}}, nil},
+		{"inflight blocks arrivals", State{Pending: []Item{{ID: "new", Agent: "target"}}, InFlight: []Item{{ID: "a", Agent: "target"}}}, nil},
+		{"other target does not block", State{Pending: []Item{{ID: "new", Agent: "target"}}, InFlight: []Item{{ID: "other", Agent: "other"}}}, []string{"new"}},
+		{"fresh order ignores due time", State{Pending: []Item{
+			{ID: "later", Agent: "target", CreatedAt: now},
+			{ID: "earlier", Agent: "target", CreatedAt: old, DeliverAfter: now},
+			{ID: "future", Agent: "target", DeliverAfter: future},
+		}}, []string{"earlier", "later"}},
+		{"oldest retry first", State{Pending: []Item{
+			{ID: "later", Agent: "target", LastAttemptAt: now},
+			{ID: "earlier", Agent: "target", LastAttemptAt: old},
+		}}, []string{"earlier"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			before := len(tt.state.Pending) + len(tt.state.InFlight)
+			claimed := ClaimDueBatch(&tt.state, now, time.Minute, match)
+			var ids []string
+			for _, item := range claimed {
+				ids = append(ids, item.ID)
+				if !item.ClaimedAt.Equal(now) || !item.LeaseUntil.Equal(future) {
+					t.Fatalf("claim did not acquire lease: %+v", item)
+				}
+			}
+			if !slices.Equal(ids, tt.want) || len(tt.state.Pending)+len(tt.state.InFlight) != before {
+				t.Fatalf("claimed=%v want=%v; state=%+v", ids, tt.want, tt.state)
+			}
+		})
+	}
+}
 
 // TestWithState_TimesOutInsteadOfBlockingForever guards ga-2kzci3 FR1/FR2:
 // WithState itself -- not just the withStateBounded helper it wraps -- must

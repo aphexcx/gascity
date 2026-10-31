@@ -182,7 +182,9 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		`case "${GC_REAL_TRANSPORT_STARTUP_PROMPT_SOURCE:-none}" in flag) printf "%s" "${1:-}" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; arg) printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; *) : > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; esac`,
 		`if cmp -s "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" "$GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"; then printf "launch-prompt\n" > "$GC_REAL_TRANSPORT_AUTONOMOUS_PATH"; fi`,
 		`: > "$GC_REAL_TRANSPORT_INPUT_PATH"`,
+		`case "$GC_PROVIDER" in claude) printf "❯ " ;; codex) printf "› " ;; esac`,
 		`i=0; input_lines="${GC_REAL_TRANSPORT_INPUT_LINES:-1}"; while [ "$i" -lt "$input_lines" ]; do IFS= read -r line; if [ "$i" -gt 0 ]; then printf "\n" >> "$GC_REAL_TRANSPORT_INPUT_PATH"; fi; printf "%s" "$line" >> "$GC_REAL_TRANSPORT_INPUT_PATH"; i=$((i + 1)); done`,
+		`case "$GC_PROVIDER" in claude|codex) printf "\n• Working (1s • esc to interrupt)\n" ;; esac`,
 		`while [ ! -f "$GC_REAL_TRANSPORT_STOP_PATH" ]; do sleep 0.05; done`,
 	}, "; ")
 

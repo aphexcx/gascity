@@ -19,10 +19,7 @@ func stripTerminalSGR(text string) string {
 	return terminalSGR.ReplaceAllString(text, "")
 }
 
-// RenderPeek labels faint text in the final framed Claude input box. Faint
-// output elsewhere remains ordinary text. Grey foreground alone is not a
-// suggestion: the prompt marker and status text also use grey.
-func RenderPeek(capture string) PeekView {
+func terminalTextAndFaint(capture string) (string, []bool) {
 	var plain strings.Builder
 	var faint []bool
 	dim, pos := false, 0
@@ -38,7 +35,28 @@ func RenderPeek(capture string) PeekView {
 		pos = match[1]
 	}
 	appendText(capture[pos:])
-	text := plain.String()
+	return plain.String(), faint
+}
+
+// ComposerInputText removes SGR styling and faint suggestion text for input
+// inspection. Callers must locate the live composer in the result; this is not
+// a transcript renderer, since faint output outside the composer is omitted too.
+func ComposerInputText(capture string) string {
+	text, faint := terminalTextAndFaint(capture)
+	var input strings.Builder
+	for i := range len(text) {
+		if !faint[i] || text[i] == '\n' {
+			input.WriteByte(text[i])
+		}
+	}
+	return input.String()
+}
+
+// RenderPeek labels faint text in the final framed Claude input box. Faint
+// output elsewhere remains ordinary text. Grey foreground alone is not a
+// suggestion: the prompt marker and status text also use grey.
+func RenderPeek(capture string) PeekView {
+	text, faint := terminalTextAndFaint(capture)
 	view := PeekView{Text: text, Output: text}
 	lines := strings.Split(text, "\n")
 	starts := make([]int, len(lines))

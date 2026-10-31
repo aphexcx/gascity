@@ -1753,8 +1753,10 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// refuses to retry it (retrying would re-inject a message the
 			// session already received), so by the time it reaches here
 			// delivery is proven and only the observation missed it. Any
-			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+			// preserved draft also leaves the session alive with a diagnostic;
+			// killing it would destroy the input we deliberately retained.
+			// Other errors still fail the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) && !errors.Is(err, ErrNudgeDraftDeferred) && !errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
 			// The stderr warning alone is not a durable record (Layer 0
@@ -1763,7 +1765,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// afterward. Persist a diagnostic artifact alongside the
 			// warning so a later observer (gc trace, a human, or an
 			// automated sweep) can find and act on it.
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q remains unresolved: %v\n", name, err)
 			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}
@@ -1778,8 +1780,8 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 }
 
 // startupNudgeRetryBackoffs are the delays between resend attempts when the
-// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
-// submit injected right after readiness is observed (~0.3s into a booting
+// startup nudge comes back ErrNudgeSubmitUnconfirmed or ErrNudgeDraftDeferred.
+// Proven empirically: a submit injected right after readiness (~0.3s into a booting
 // claude TUI) sits unconfirmed, while the same injection ~6s later lands —
 // readiness detection and the TUI actually accepting input are not the same
 // moment. A var (not a const) so tests can shrink it.
@@ -1801,12 +1803,13 @@ var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second
 // leaves behind.
 const startupNudgeRetryBudgetFraction = 0.5
 
-// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
-// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
-// backoff and calls send again — re-running the whole cycle re-pastes the
-// nudge text, which self-heals a draft the still-booting TUI cleared or
-// redrew. Any other error, or exhausting the backoffs, returns immediately so
-// a healthy fast boot never pays this cost.
+// sendStartupNudgeWithRetry calls send (e.g. ops.sendKeys) and, if it reports
+// ErrNudgeSubmitUnconfirmed or ErrNudgeDraftDeferred, waits out a backoff and
+// calls send again. The transport reads the composer on each call: a matching
+// draft gets only the submit sequence, while an empty composer gets the text
+// again. Any other
+// error, or exhausting the backoffs, returns immediately so a healthy fast
+// boot never pays this cost.
 //
 // busy is checked once the backoff sleep has elapsed, right before the next
 // resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
@@ -1815,13 +1818,15 @@ const startupNudgeRetryBudgetFraction = 0.5
 // prompt can take several more seconds to render its busy indicator. If busy
 // now reports true, the earlier submit (or a turn that started some other
 // way) has landed, so this returns nil instead of blindly re-running
-// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// send's delivery cycle: Claude Code queues input typed mid-turn
 // rather than rejecting it, so a resend against an already-busy pane risks
 // enqueueing a second copy of the nudge behind the one that just landed
 // (gastownhall/gascity#5019 review discussion). busy may be nil, in which
 // case this check is skipped and the ladder behaves as before. A busy
 // check's own error is treated the same as "not busy" — best-effort, never
 // a reason to fail the retry loop itself.
+// A deferred read sends no bytes of its own. Activity can acknowledge it
+// only if an earlier attempt may have delivered this nudge.
 //
 // ctx is checked before each backoff sleep: if the start is already being
 // canceled elsewhere (e.g. the supervising startup_timeout deadline), this
@@ -1864,9 +1869,12 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 	}
 
 	var err error
+	mayHaveDelivered := false
 	for attempt := 0; ; attempt++ {
 		err = send()
-		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		unconfirmed := errors.Is(err, ErrNudgeSubmitUnconfirmed)
+		mayHaveDelivered = mayHaveDelivered || unconfirmed
+		if !unconfirmed && !errors.Is(err, ErrNudgeDraftDeferred) {
 			return err
 		}
 		if attempt >= len(startupNudgeRetryBackoffs) {
@@ -1883,7 +1891,7 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 		if ctx.Err() != nil {
 			return err
 		}
-		if busy != nil {
+		if mayHaveDelivered && busy != nil {
 			if isBusy, _ := busy(); isBusy {
 				return nil
 			}

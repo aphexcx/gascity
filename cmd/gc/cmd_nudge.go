@@ -1508,7 +1508,12 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	now := time.Now()
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", now, queuedNudgeOptionsFromTarget(target))
+	if undelivered == "submit_unconfirmed" {
+		item, _ = failedQueuedNudge(item, runtime.ErrNudgeSubmitUnconfirmed, now)
+	}
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1600,6 +1605,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	if messageID != "" {
 		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
 	}
+	item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 	// Session-class store for the observe/handle reads and the last-nudge stamp
 	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
 	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
@@ -1623,6 +1629,13 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 				// (gp-2io): fall through to the queue like any other error.
 				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
 			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
+				telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
+				return nudgeErr
+			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
+				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
+			}
 			// The submit Enter can be delivered and the composer drained with
 			// only the busy-indicator OBSERVATION timing out. Delivery is
 			// proven either way, so this must not fall through to the queue
@@ -1640,7 +1653,6 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
 		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
 			return err
 		}
@@ -1651,7 +1663,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)); err != nil {
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		return err
 	}
 	if obs.Running {
@@ -1895,6 +1907,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
+	if result.Submit == runtime.NudgeSubmitOwnershipLost || errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
+		// Persist the terminal queue transition before best-effort bead writes.
+		// A backing-store failure must never leave a lease that can replay.
+		terminalErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), runtime.ErrNudgeDraftOwnershipLost, time.Now())
+		return false, errors.Join(bookkeepErr, terminalErr)
+	}
 	if err == nil {
 		// The queue must not ack an unconfirmed submit: the payload may be
 		// sitting drafted-but-unsubmitted in the pane (ga-bwm). Before gp-2io
@@ -1923,6 +1941,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)
+		}
+		if errors.Is(err, tmux.ErrNudgeDraftDeferred) {
+			// Surface the blocker to the dispatcher/operator. Retrying a changed
+			// batch must neither modify its old draft nor silently spend attempts.
+			return false, errors.Join(bookkeepErr, err)
 		}
 		return false, bookkeepErr
 	}
@@ -2540,23 +2563,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		pending := state.Pending[:0]
-		for _, item := range state.Pending {
-			if !match(item) {
-				pending = append(pending, item)
-				continue
-			}
-			if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-				pending = append(pending, item)
-				continue
-			}
-			item.ClaimedAt = now.UTC()
-			item.LeaseUntil = now.Add(defaultQueuedNudgeClaimTTL).UTC()
-			state.InFlight = append(state.InFlight, item)
-			claimed = append(claimed, item)
-		}
-		state.Pending = pending
-		sortQueuedNudges(state)
+		claimed = nudgequeue.ClaimDueBatch(state, now, defaultQueuedNudgeClaimTTL, match)
 		return nil
 	})
 	return claimed, err
@@ -3008,8 +3015,10 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
+	var unownedDeferred []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
+		unownedDeferred = unownedDeferred[:0]
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -3054,11 +3063,23 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		state.InFlight = inFlight
 		state.Pending = append(state.Pending, requeued...)
 		state.Dead = append(state.Dead, dead...)
+		if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+			for _, item := range requeued {
+				if item.Attempts == 1 {
+					unownedDeferred = append(unownedDeferred, item)
+				}
+			}
+		}
 		sortQueuedNudges(state)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, item := range unownedDeferred {
+		if nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q cannot own the preserved pane input: %v; resolve it before retrying; automatic hold expires at %s or after %d attempts\n", item.ID, item.Agent, cause, item.ExpiresAt.Format(time.RFC3339), defaultQueuedNudgeMaxAttempts) //nolint:errcheck
+		}
 	}
 	// Mark backing beads terminal outside the queue lock, best-effort. The
 	// dead-letter transition above is authoritative; a failed bead write must
@@ -3067,6 +3088,9 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	// pruneDeadQueuedNudges repairs dead entries whose backing bead missed
 	// terminal state, so drift converges on later queue operations.
 	for _, item := range deadLettered {
+		if errors.Is(cause, runtime.ErrNudgeDraftUnowned) && nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q dead-lettered after %d attempts: %v; resolve the preserved pane input before retrying\n", item.ID, item.Agent, item.Attempts, cause) //nolint:errcheck
+		}
 		if markErr := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); markErr != nil && nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
 		}
@@ -3075,12 +3099,26 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
-	item.Attempts++
-	item.LastAttemptAt = now.UTC()
+	// Known different input retains its batch identity without spending an
+	// attempt. Missing ownership has a bounded hold: five attempts and at most
+	// one minute until expiry, whichever comes first, with the draft untouched.
+	if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+		limit := now.Add(time.Duration(defaultQueuedNudgeMaxAttempts-1) * defaultQueuedNudgeRetryDelay).UTC()
+		if item.ExpiresAt.IsZero() || item.ExpiresAt.After(limit) {
+			item.ExpiresAt = limit
+		}
+	}
+	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+		item.Attempts++
+		item.LastAttemptAt = now.UTC()
+	}
 	item.LastError = cause.Error()
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
-	if errors.Is(cause, errNudgeSessionFenceMismatch) {
+	if errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
+		item.LastError = "draft_ownership_lost"
+	}
+	if errors.Is(cause, errNudgeSessionFenceMismatch) || errors.Is(cause, runtime.ErrNudgeDraftOwnershipLost) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}

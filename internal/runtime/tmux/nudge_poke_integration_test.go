@@ -4,7 +4,11 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,16 +32,20 @@ func TestNudgePokeRealTmux(t *testing.T) {
 	}
 
 	t.Run("never-busy claude nudge burns full submitEnterAndConfirm budget, still stamps at completion", func(t *testing.T) {
+		if _, err := exec.LookPath("python3"); err != nil {
+			t.Skip("python3 required for the fake TUI")
+		}
 		tm := NewTmuxWithConfig(Config{SocketName: "gcdogfoodnudgea", NudgeReadyTimeout: 10 * time.Second, NudgeLockTimeout: 10 * time.Second})
 		const sess = "dogfood-neverbusy"
 		_, _ = tm.run("kill-server")
 		t.Cleanup(func() { _, _ = tm.run("kill-server") })
-		if _, err := tm.run("new-session", "-d", "-s", sess, "-x", "80", "-y", "24"); err != nil {
+		cmd := fmt.Sprintf("python3 %s %s 600 30 retain", shellQuote(fakeTUIScript(t)), shellQuote(filepath.Join(t.TempDir(), "submits.log")))
+		if _, err := tm.run("new-session", "-d", "-s", sess, "-x", "80", "-y", "24", cmd); err != nil {
 			t.Skipf("cannot create tmux session (tmux unavailable?): %v", err)
 		}
 		// GC_PROVIDER=claude routes through submitVerifyEligible ->
-		// submitEnterAndConfirm. The plain shell pane never shows Claude's busy
-		// indicator, so this burns the FULL confirm budget
+		// submitEnterAndConfirm. The fake TUI retains its draft and never shows
+		// a busy indicator, so this burns the FULL confirm budget
 		// (submitEnterMaxSends=3 sends x submitConfirmPollsPerSend=4 polls x
 		// submitConfirmPollInterval=150ms, plus submitReEnterBackoff=200ms
 		// between sends) — well over pokeEcho(3s). A naive "stamp at entry"
@@ -45,7 +53,16 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		if err := tm.SetEnvironment(sess, "GC_PROVIDER", "claude"); err != nil {
 			t.Fatalf("SetEnvironment: %v", err)
 		}
-		time.Sleep(300 * time.Millisecond)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if out, err := tm.CapturePane(sess, 40); err == nil && strings.Contains(out, "fake-claude-tui") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("fake TUI never painted its composer")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 
 		callStart := time.Now()
 		// A never-busy claude pane cannot confirm the submit, so

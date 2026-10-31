@@ -96,6 +96,63 @@ func SortState(state *State) {
 	})
 }
 
+// ClaimDueBatch claims one target's stable delivery batch, recording its shared
+// LastAttemptAt before delivery. That identity survives lease recovery and keeps
+// fresh arrivals from changing its formatted payload. An in-flight batch or a
+// retry still in backoff holds later items without spending their attempts.
+func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(Item) bool) []Item {
+	for _, item := range state.InFlight {
+		if match(item) {
+			return nil
+		}
+	}
+	var retryAt time.Time
+	for _, item := range state.Pending {
+		if match(item) && !item.LastAttemptAt.IsZero() && (retryAt.IsZero() || item.LastAttemptAt.Before(retryAt)) {
+			retryAt = item.LastAttemptAt
+		}
+	}
+	var claimed []Item
+	ids := make(map[string]bool)
+	for _, item := range state.Pending {
+		if !match(item) || !item.LastAttemptAt.Equal(retryAt) {
+			continue
+		}
+		if item.DeliverAfter.After(now) {
+			if !retryAt.IsZero() {
+				return nil
+			}
+			continue
+		}
+		item.ClaimedAt = now.UTC()
+		item.LeaseUntil = now.Add(lease).UTC()
+		// Persist the batch identity before any delivery side effect. A process
+		// can exit after pasting but before it records an unconfirmed result.
+		if item.LastAttemptAt.IsZero() {
+			item.LastAttemptAt = now.UTC()
+		}
+		claimed = append(claimed, item)
+		ids[item.ID] = true
+	}
+	// Retry backoffs replace DeliverAfter, so it cannot define payload order.
+	sort.Slice(claimed, func(i, j int) bool {
+		if !claimed[i].CreatedAt.Equal(claimed[j].CreatedAt) {
+			return claimed[i].CreatedAt.Before(claimed[j].CreatedAt)
+		}
+		return claimed[i].ID < claimed[j].ID
+	})
+	pending := state.Pending[:0]
+	for _, item := range state.Pending {
+		if !ids[item.ID] {
+			pending = append(pending, item)
+		}
+	}
+	state.Pending = pending
+	state.InFlight = append(state.InFlight, claimed...)
+	SortState(state)
+	return claimed
+}
+
 // defaultLockWaitTimeout bounds how long WithState waits to acquire the
 // queue's exclusive flock before giving up with a descriptive error
 // (ga-2kzci3 FR1/FR2). Set to 4x nudgeEnqueueMaintenanceBudget (cmd/gc,

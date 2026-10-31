@@ -2,12 +2,81 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // noSleep is a sleep stub so the confirm loop runs instantly under test.
 func noSleep(time.Duration) {}
+
+// Ongoing activity cannot acknowledge a new input, even across a tool boundary.
+func TestSubmitEnterAndConfirmAlreadyBusy(t *testing.T) {
+	for _, unreadable := range []bool{false, true} {
+		t.Run(fmt.Sprint("unreadable=", unreadable), func(t *testing.T) {
+			sends := 0
+			confirmed, err := submitEnterAndConfirm(
+				func() error { sends++; return nil }, func() {},
+				func() (bool, error) {
+					if unreadable {
+						return false, errors.New("capture unavailable")
+					}
+					return true, nil
+				}, noSleep)
+			if err != nil || confirmed != runtime.NudgeSubmitUnverified || sends != 1 {
+				t.Fatalf("confirmed=%v err=%v sends=%d; want unverified single submit", confirmed, err, sends)
+			}
+		})
+	}
+}
+
+func TestSubmitEnterAndConfirmRechecksAfterBackoff(t *testing.T) {
+	sends := 0
+	busy := false
+	confirmed, err := submitEnterAndConfirm(
+		func() error { sends++; return nil }, func() {},
+		func() (bool, error) { return busy, nil },
+		func(d time.Duration) {
+			if d == submitReEnterBackoff {
+				busy = true
+			}
+		})
+	if err != nil || confirmed != runtime.NudgeSubmitConfirmed || sends != 1 {
+		t.Fatalf("confirmed=%v err=%v sends=%d; want confirmation without another Enter at tool boundary", confirmed, err, sends)
+	}
+}
+
+func TestSubmitEnterAndConfirmProbeLostAfterSend(t *testing.T) {
+	sends := 0
+	submit, err := submitEnterAndConfirm(
+		func() error { sends++; return nil }, func() {},
+		func() (bool, error) {
+			if sends > 0 {
+				return false, errors.New("capture unavailable")
+			}
+			return false, nil
+		}, noSleep)
+	if err != nil || submit != runtime.NudgeSubmitUnverified || sends != 1 {
+		t.Fatalf("submit=%v err=%v sends=%d; lost observation must not repeat input", submit, err, sends)
+	}
+}
+
+func TestSubmitEnterAndConfirmBusyCannotConfirmRefusedSend(t *testing.T) {
+	for _, initiallyBusy := range []bool{false, true} {
+		t.Run(fmt.Sprint("initiallyBusy=", initiallyBusy), func(t *testing.T) {
+			sends := 0
+			sendErr := errors.New("send refused")
+			submit, err := submitEnterAndConfirm(
+				func() error { sends++; return sendErr }, func() {},
+				func() (bool, error) { return initiallyBusy || sends > 0, nil }, noSleep)
+			if !errors.Is(err, sendErr) || submit != runtime.NudgeSubmitUnconfirmed || sends != 1 {
+				t.Fatalf("submit=%v err=%v sends=%d; ongoing work cannot confirm a refused send", submit, err, sends)
+			}
+		})
+	}
+}
 
 // TestSubmitEnterAndConfirmReEntersWhileIdle proves the ga-bwm fix: when the
 // first Enter is lost (the pane stays idle with the message still drafted), the
@@ -23,7 +92,7 @@ func TestSubmitEnterAndConfirmReEntersWhileIdle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !confirmed {
+	if confirmed != runtime.NudgeSubmitConfirmed {
 		t.Fatal("confirmed = false, want true (re-sent Enter should submit)")
 	}
 	if enters != 2 {
@@ -42,7 +111,7 @@ func TestSubmitEnterAndConfirmStopsWhenBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !confirmed {
+	if confirmed != runtime.NudgeSubmitConfirmed {
 		t.Fatal("confirmed = false, want true")
 	}
 	if enters != 1 {
@@ -59,7 +128,7 @@ func TestSubmitEnterAndConfirmNoDoubleSubmitOnFastTurn(t *testing.T) {
 	busy := func() (bool, error) {
 		busyCalls++
 		// Idle for the first send's polls; busy at the pre-re-send check.
-		return busyCalls > submitConfirmPollsPerSend, nil
+		return busyCalls > submitConfirmPollsPerSend+1, nil
 	}
 	sendEnter := func() error { enters++; return nil }
 
@@ -67,7 +136,7 @@ func TestSubmitEnterAndConfirmNoDoubleSubmitOnFastTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if !confirmed {
+	if confirmed != runtime.NudgeSubmitConfirmed {
 		t.Fatal("confirmed = false, want true")
 	}
 	if enters != 1 {
@@ -87,7 +156,7 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
-	if confirmed {
+	if confirmed != runtime.NudgeSubmitUnconfirmed {
 		t.Fatal("confirmed = true, want false")
 	}
 	if enters != submitEnterMaxSends {
@@ -114,7 +183,7 @@ func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want nil (later send succeeded)", err)
 	}
-	if confirmed {
+	if confirmed != runtime.NudgeSubmitUnconfirmed {
 		t.Fatal("confirmed = true, want false (never busy)")
 	}
 	if enters != submitEnterMaxSends {
@@ -131,7 +200,7 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	busy := func() (bool, error) { return false, nil }
 
 	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
-	if confirmed {
+	if confirmed != runtime.NudgeSubmitUnconfirmed {
 		t.Fatal("confirmed = true, want false")
 	}
 	if !errors.Is(err, sendErr) {
@@ -235,13 +304,12 @@ func TestRecoverStagedDraftBusyAtEntrySendsNothing(t *testing.T) {
 	got := recoverStagedDraft(
 		func() error { sends++; return nil },
 		func() {},
-		// Busy with the draft still on screen: busy wins, as it does in
-		// submitEnterAndConfirm.
+		// The draft is still present: activity cannot acknowledge this input.
 		func() (paneSubmitObservation, error) { return paneSubmitObservation{busy: true, drafted: true}, nil },
 		noSleep,
 	)
-	if got != stagedDraftSubmittedBusy {
-		t.Fatalf("outcome = %v, want stagedDraftSubmittedBusy", got)
+	if got != stagedDraftUnverified {
+		t.Fatalf("outcome = %v, want stagedDraftUnverified", got)
 	}
 	if sends != 0 {
 		t.Fatalf("sends = %d, want 0 (busy pane re-submitted)", sends)

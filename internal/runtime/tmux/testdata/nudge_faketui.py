@@ -6,11 +6,15 @@ SUBMITTED line with a monotonic timestamp, and only renders a busy indicator
 after a configurable delay -- modelling the render lag between "Enter landed"
 and "the spinner is on screen".
 """
-import sys, os, time, threading, termios, tty
+import sys, os, time, threading, termios, tty, textwrap
 
 logpath = sys.argv[1]
 busy_delay = float(sys.argv[2])   # seconds after submit before the spinner shows
 busy_hold = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
+retain_draft = len(sys.argv) > 4 and sys.argv[4] == "retain"
+collapse = len(sys.argv) > 4 and sys.argv[4] == "collapsed-retry"
+wrap_retry = len(sys.argv) > 4 and sys.argv[4] in ("wrap-retry", "collapsed-retry")
+swallow = int(sys.argv[5]) if wrap_retry else 0
 
 state = {"draft": [], "busy_at": None, "done_at": None}
 lock = threading.Lock()
@@ -32,7 +36,19 @@ def render():
             out.append("✻ Thinking… (%ds · ↑ 0 tokens · esc to interrupt)\r\n" % el)
         else:
             out.append("\r\n")
-        out.append("❯ %s\r\n" % draft)
+        if collapse and len(draft) > 800:
+            draft = "[Pasted text #1]"
+        elif wrap_retry:
+            # Measured from the detached Claude 2.1.316 composer at 80 columns:
+            # whole words wrap and a long token splits after 76 cells.
+            width = os.get_terminal_size().columns - 4
+            rows = []
+            for line in draft.split("\n"):
+                rows.extend(textwrap.wrap(line, width=width, expand_tabs=False,
+                                          replace_whitespace=False, drop_whitespace=False,
+                                          break_on_hyphens=False) or [""])
+            draft = "\r\n  ".join(rows)
+        out.append("────────────────────\r\n❯ %s\r\n────────────────────\r\n" % draft)
         out.append("  bypass permissions on\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
         time.sleep(0.05)
@@ -52,7 +68,16 @@ try:
         with lock:
             if b == 0x15:                      # C-u: clear composer
                 state["draft"] = []
+            elif b == 0x16 and wrap_retry:      # C-v: insert an explicit newline
+                state["draft"].append("\n")
             elif b in (0x0d, 0x0a):            # CR / LF: submit
+                if swallow > 0:
+                    swallow -= 1
+                    log("SWALLOWED-ENTER")
+                    continue
+                if retain_draft:
+                    log("RETAINED-ENTER")
+                    continue
                 text = "".join(state["draft"])
                 if text.strip():
                     log("SUBMIT\t%s" % text.replace("\t", " "))
