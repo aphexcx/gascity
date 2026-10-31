@@ -90,8 +90,8 @@ at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
 For local dispatch, code beads require --allow-implicit to use a rig's
-implicit claude, codex, or codex-astra provider slot. Use a configured
-role lane for work that needs its worktree and prompt configuration.
+implicit provider slot. Use a configured role lane for work that needs
+its worktree and prompt configuration.
 Only city-prefix beads labeled mayor-tool are exempt. --force does not
 bypass this check.
 

@@ -19,6 +19,60 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
+func TestDoAgentListMarksImplicitSlots(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[providers.claude-opus]
+base = "builtin:claude"
+
+[[rigs]]
+name = "frontend"
+path = "/city/frontend"
+
+[[agent]]
+name = "claude-opus"
+provider = "claude-opus"
+`)
+	var stdout, stderr bytes.Buffer
+	if code := doAgentList(fs, "/city", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doAgentList = %d; stderr: %s", code, stderr.String())
+	}
+	rows := make(map[string]string)
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 {
+			rows[fields[0]] = strings.Join(fields[1:], " ")
+		}
+	}
+	if got := rows["frontend/claude-opus"]; got != "active (implicit provider slot)" {
+		t.Errorf("implicit slot row = %q", got)
+	}
+	if got := rows["claude-opus"]; got != "active" {
+		t.Errorf("configured same-name lane row = %q", got)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doAgentList(fs, "/city", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doAgentList --json = %d; stderr: %s", code, stderr.String())
+	}
+	var result struct {
+		Agents []struct {
+			QualifiedName string `json:"qualified_name"`
+			Implicit      *bool  `json:"implicit"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range result.Agents {
+		want := item.QualifiedName == "frontend/claude-opus"
+		if item.Implicit == nil || *item.Implicit != want {
+			t.Errorf("%s implicit = %v, want %v", item.QualifiedName, item.Implicit, want)
+		}
+	}
+}
+
 func TestDoAgentListJSON(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]

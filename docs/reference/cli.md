@@ -145,8 +145,9 @@ gc agent add --name worker --prompt-template ./worker.md --suspended
 
 List configured agents from the resolved city configuration.
 
+Provider-derived agents are marked as implicit provider slots.
 Use --json to inspect agent routing fields, including effective work_query
-and sling_query values.
+and sling_query values, and the implicit flag.
 
 ```
 gc agent list [flags]
@@ -4671,8 +4672,8 @@ at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
 For local dispatch, code beads require --allow-implicit to use a rig's
-implicit claude, codex, or codex-astra provider slot. Use a configured
-role lane for work that needs its worktree and prompt configuration.
+implicit provider slot. Use a configured role lane for work that needs
+its worktree and prompt configuration.
 Only city-prefix beads labeled mayor-tool are exempt. --force does not
 bypass this check.
 

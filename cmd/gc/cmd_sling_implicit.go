@@ -13,16 +13,7 @@ import (
 // guardedImplicitSlingTarget scopes the fork's local dispatch policy to bare
 // provider slots. An explicitly configured agent with the same name is a lane.
 func guardedImplicitSlingTarget(a config.Agent) bool {
-	if !a.Implicit || a.Dir == "" {
-		return false
-	}
-	// Numbered pool members retain the implicit slot's provider identity.
-	for _, name := range []string{a.Name, a.Provider} {
-		if name == "claude" || name == "codex" || name == "codex-astra" {
-			return true
-		}
-	}
-	return false
+	return a.Implicit && a.Dir != ""
 }
 
 // implicitSlingRefusal implements the fork's code-work rule: a non-city prefix
@@ -43,5 +34,9 @@ func implicitSlingRefusal(cfg *config.City, a config.Agent, b beads.Bead) string
 	if available == "" {
 		available = "none; configure a rig agent with its work directory and prompt"
 	}
-	return fmt.Sprintf("gc sling: refusing code work %q on implicit provider slot %q; configured role lanes for rig %q: %s. Use --allow-implicit to opt in", b.ID, a.QualifiedName(), a.Dir, available)
+	slot := fmt.Sprintf("%q", a.QualifiedName())
+	if base := config.BuiltinFamily(a.Provider, cfg.Providers); base != "" && base != a.Provider {
+		slot += fmt.Sprintf(" (base %s%s)", config.BasePrefixBuiltin, base)
+	}
+	return fmt.Sprintf("gc sling: refusing code work %q on implicit provider slot %s; configured role lanes for rig %q: %s. Use --allow-implicit to opt in", b.ID, slot, a.Dir, available)
 }
