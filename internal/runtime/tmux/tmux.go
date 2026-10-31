@@ -2790,6 +2790,11 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		if !delivered {
 			return
 		}
+		if submitted {
+			if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
+				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
+			}
+		}
 		commitPoke()
 		t.emitNudgeReceipt(target, message, payloadBytes, submitted)
 	}()
@@ -2825,6 +2830,20 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste; payload identity is unavailable", ErrNudgeDraftDeferred, target)
 			}
 			if !nudgeDraftMatches(draft, message, 0) {
+				stored, err := t.run("show-options", "-p", "-qv", "-t", target, nudgeDraftPayloadOption)
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+				}
+				if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", ErrNudgeDraftDeferred, target)
+				}
+				attached, err := t.run("display-message", "-t", session, "-p", "#{session_attached}")
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", ErrNudgeDraftDeferred, session, err)
+				}
+				if strings.TrimSpace(attached) != "0" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for wrapped-draft retry", ErrNudgeDraftDeferred, target)
+				}
 				widthText, err := t.run("display-message", "-p", "-t", target, "#{pane_width}")
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
@@ -2838,6 +2857,8 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				}
 			}
 			resumeDraft = true
+		} else if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, ""); err != nil {
+			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
 	}
@@ -2876,6 +2897,13 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			return runtime.NudgeDelivery{}, err
 		}
 		payloadBytes = written
+		if verifySubmit && written == len(message) {
+			if _, err := t.run("set-option", "-p", "-t", target, nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message)); err != nil {
+				// The paste already landed. Preserve delivery evidence, but a
+				// later normalized retry must defer without this provenance.
+				log.Printf("tmux nudge: recording pasted draft provenance for %q: %v", target, err)
+			}
+		}
 	}
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take

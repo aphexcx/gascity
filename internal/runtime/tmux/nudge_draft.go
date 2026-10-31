@@ -7,6 +7,11 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+// nudgeDraftPayloadOption belongs to the pane, so paste provenance survives a
+// transport restart but does not follow a replacement pane. It contains only
+// a payload digest, never the message text.
+const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
+
 // nudgeComposer reads the last live input, including continuation rows inside
 // its frame. Unknown layouts stay unreadable: a missing prompt is not an empty
 // composer. ComposerInputText removes attributed suggestions, not typed input.
@@ -111,7 +116,9 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	return strings.TrimSpace(strings.Join(parts, "\n")), true
 }
 
-// nudgeDraftMatches preserves payload whitespace while allowing the rendering
+// nudgeDraftMatches checks rendering compatibility, not payload identity.
+// Callers need full-paste provenance before relying on a normalized match.
+// It preserves payload whitespace while allowing the rendering
 // at the measured composer width. Only padding at generated wrap boundaries
 // is ignored; spaces before explicit newlines remain significant even when
 // the composer reader drops them. A nonpositive width requires an exact match.

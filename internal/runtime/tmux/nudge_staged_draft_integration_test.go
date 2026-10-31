@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestNudgeRecoversStagedDraftSwallowedByPasteIngest reproduces the staged-draft
@@ -149,7 +152,7 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		}
 		poll := time.NewTicker(50 * time.Millisecond)
 		defer poll.Stop()
-		deadline := time.After(5 * time.Second)
+		deadline := time.After(testutil.ExecRaceTimeout)
 		for {
 			if pane, err := tm.CapturePane("wrapped", 40); err == nil && strings.Contains(pane, "fake-claude-tui") {
 				break
@@ -178,8 +181,18 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		if !observed || !strings.Contains(draft, "\n") || draft == message {
 			t.Fatalf("draft=%q observed=%v; expected real wrapped rows", draft, observed)
 		}
+		stored, err := tm.run("show-options", "-p", "-qv", "-t", "wrapped", "@gc-nudge-draft-payload")
+		if err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+			t.Fatalf("stored payload digest=%q err=%v, want full-paste provenance", stored, err)
+		}
+		// The pane owns the evidence, so retry works with a new transport too.
+		tm = NewTmuxWithConfig(tm.cfg)
 		if err := tm.NudgeSession("wrapped", message); err != nil {
 			t.Fatalf("wrapped draft retry: %v", err)
+		}
+		stored, err = tm.run("show-options", "-p", "-qv", "-t", "wrapped", "@gc-nudge-draft-payload")
+		if err != nil || strings.TrimSpace(stored) != "" {
+			t.Fatalf("stored payload digest=%q err=%v, want cleared provenance after submit", stored, err)
 		}
 		raw, err := os.ReadFile(logPath)
 		if err != nil {

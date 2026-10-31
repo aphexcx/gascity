@@ -87,13 +87,18 @@ func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 
 func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 	for _, tt := range []struct {
-		name, draft, message string
+		name, draft, message, stored, attached string
 	}{
-		{"quoted whitespace", `print("a  b")`, `print("a b")`},
-		{"explicit newline whitespace", "first\nsecond", "first  \nsecond"},
-		{"wrapped explicit newline whitespace", strings.Repeat("a", 78) + "\nfirst\nsecond", strings.Repeat("a", 78) + "first  \nsecond"},
+		{"quoted whitespace", `print("a  b")`, `print("a b")`, runtime.NudgePayloadDigest(`print("a b")`), "0"},
+		{"explicit newline whitespace", "first\nsecond", "first  \nsecond", runtime.NudgePayloadDigest("first  \nsecond"), "0"},
+		{"wrapped explicit newline whitespace", strings.Repeat("a", 78) + "\nfirst\nsecond", strings.Repeat("a", 78) + "first  \nsecond", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "first  \nsecond"), "0"},
+		{"wrap boundary collision", strings.Repeat("a", 77) + "\nb", strings.Repeat("a", 77) + " b", "", "0"},
+		{"midword wrap without provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", "", "0"},
+		{"wrap with different provenance", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest("another payload"), "0"},
+		{"two attached clients", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), "2"},
+		{"unknown attachment state", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", runtime.NudgePayloadDigest(strings.Repeat("a", 78) + "b"), ""},
 	} {
-		t.Run(tt.name+" changes payload", func(t *testing.T) {
+		t.Run(tt.name+" requires exact identity", func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 				tm := NewTmux()
@@ -106,6 +111,10 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 						return "────\n❯ " + strings.ReplaceAll(tt.draft, "\n", "\n  ") + "\n────", nil
 					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
 						return "80", nil
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
+						return tt.attached, nil
+					case slices.Contains(args, "show-options") && slices.Contains(args, "@gc-nudge-draft-payload"):
+						return tt.stored, nil
 					case slices.Contains(args, "send-keys"):
 						mutations++
 					}
