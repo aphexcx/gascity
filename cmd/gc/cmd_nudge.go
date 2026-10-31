@@ -3344,20 +3344,21 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 		if item.DeadAt.IsZero() {
 			item.DeadAt = now.UTC()
 		}
-		if !item.DeadLetterPruneAt().After(now) {
-			continue
-		}
+		atCap := !item.DeadAt.Add(nudgequeue.DeadLetterRetention).After(now)
 		if item.BeadID != "" {
 			if front == nil {
-				// No store available — retain the item to avoid data loss.
-				filtered = append(filtered, item)
+				// Keep the repair record until the store returns or the cap expires.
+				if !atCap {
+					filtered = append(filtered, item)
+				}
 				continue
 			}
 			shadow, ok, err := front.FindIncludingTerminal(item.ID)
 			if err != nil {
-				// Fail open: store lookup errors retain the item rather than
-				// blocking the entire queue operation. Pruning is best-effort.
-				filtered = append(filtered, item)
+				// Lookup errors preserve repair until the seven-day cap.
+				if !atCap {
+					filtered = append(filtered, item)
+				}
 				continue
 			}
 			if !ok || !nudgequeue.IsTerminalState(shadow.State) {
@@ -3372,7 +3373,9 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 					terminalAt = item.DeadAt
 				}
 				if err := front.Terminalize(item, terminalStateForDeadQueuedNudge(item), reason, "", terminalAt); err != nil {
-					filtered = append(filtered, item)
+					if !atCap {
+						filtered = append(filtered, item)
+					}
 					continue
 				}
 				// Terminalize's own error return is sufficient confirmation:
@@ -3384,6 +3387,11 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 				// bead is gone would be retained forever and pay a store
 				// lookup on every sweep (gastownhall/gascity#5278).
 			}
+		}
+		// Reconcile the shadow before pruning even an expired receipt: wait
+		// finalization consumes that terminal state to prevent re-enqueueing.
+		if !item.DeadLetterPruneAt().After(now) {
+			continue
 		}
 		filtered = append(filtered, item)
 	}
