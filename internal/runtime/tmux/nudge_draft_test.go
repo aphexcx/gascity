@@ -1,6 +1,9 @@
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNudgeDraftMatches(t *testing.T) {
 	for _, tt := range []struct {
@@ -10,7 +13,10 @@ func TestNudgeDraftMatches(t *testing.T) {
 		{"exact", "one copy", "one copy", true},
 		{"spaces", "one  copy", "one\tcopy", true},
 		{"row boundary", "one\ncopy", "one copy", true},
-		{"word split", "one co\npy", "one copy", true},
+		{"short row cannot split a word", "one co\npy", "one copy", false},
+		{"short newline changes meaning", "I am now\nhere", "I am nowhere", false},
+		{"full row splits a word", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", true},
+		{"wide full row splits a word", strings.Repeat("界", 39) + "\nend", strings.Repeat("界", 39) + "end", true},
 		{"blank rows", "one\n\ncopy", "one\ncopy", true},
 		{"unicode whitespace", "one\u00a0copy", "one copy", true},
 		{"different word", "one\nother", "one copy", false},
@@ -21,10 +27,13 @@ func TestNudgeDraftMatches(t *testing.T) {
 		{"missing draft", "", "one copy", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := nudgeDraftMatches(tt.draft, tt.message); got != tt.want {
+			if got := nudgeDraftMatches(tt.draft, tt.message, 78); got != tt.want {
 				t.Fatalf("matches(%q, %q)=%v, want %v", tt.draft, tt.message, got, tt.want)
 			}
 		})
+	}
+	if nudgeDraftMatches(strings.Repeat("a", 78)+"\nb", strings.Repeat("a", 78)+"b", 0) {
+		t.Fatal("unknown pane width must not join a word across rows")
 	}
 }
 

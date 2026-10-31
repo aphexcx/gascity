@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/mattn/go-runewidth"
 )
 
 // nudgeComposer reads the last live input, including continuation rows inside
@@ -110,21 +111,34 @@ func nudgeComposer(content, prefix string) (string, bool) {
 	return strings.TrimSpace(strings.Join(parts, "\n")), true
 }
 
-// nudgeDraftMatches collapses whitespace within each displayed row. A row
-// boundary can be whitespace or a soft wrap inside a word; all other content,
-// including word boundaries within a row, must match the requested payload.
-func nudgeDraftMatches(draft, message string) bool {
+// nudgeDraftMatches collapses whitespace but joins words across rows only
+// after a row that fills the measured composer width. Without that evidence,
+// a newline remains a word boundary. A nonpositive width disables wrap joins.
+func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 	remaining := strings.Join(strings.Fields(message), " ")
+	if strings.Join(strings.Fields(draft), " ") == remaining {
+		return true
+	}
+	if wrapWidth <= 0 {
+		return false
+	}
+	first, wrapped := true, false
 	for _, row := range strings.Split(draft, "\n") {
+		columns := runewidth.StringWidth(row)
 		row = strings.Join(strings.Fields(row), " ")
 		if row == "" {
+			wrapped = false
 			continue
+		}
+		if !first && !wrapped && !strings.HasPrefix(remaining, " ") {
+			return false
 		}
 		var ok bool
 		remaining, ok = strings.CutPrefix(strings.TrimPrefix(remaining, " "), row)
 		if !ok {
 			return false
 		}
+		first, wrapped = false, columns == wrapWidth
 	}
 	return remaining == ""
 }

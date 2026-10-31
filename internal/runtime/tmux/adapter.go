@@ -1825,8 +1825,8 @@ const startupNudgeRetryBudgetFraction = 0.5
 // case this check is skipped and the ladder behaves as before. A busy
 // check's own error is treated the same as "not busy" — best-effort, never
 // a reason to fail the retry loop itself.
-// A deferred read sent no bytes, so activity cannot acknowledge it: that
-// result always retries the composer read within the same budget.
+// A deferred read sends no bytes of its own. Activity can acknowledge it
+// only if an earlier attempt may have delivered this nudge.
 //
 // ctx is checked before each backoff sleep: if the start is already being
 // canceled elsewhere (e.g. the supervising startup_timeout deadline), this
@@ -1869,9 +1869,11 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 	}
 
 	var err error
+	mayHaveDelivered := false
 	for attempt := 0; ; attempt++ {
 		err = send()
 		unconfirmed := errors.Is(err, ErrNudgeSubmitUnconfirmed)
+		mayHaveDelivered = mayHaveDelivered || unconfirmed
 		if !unconfirmed && !errors.Is(err, ErrNudgeDraftDeferred) {
 			return err
 		}
@@ -1889,7 +1891,7 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 		if ctx.Err() != nil {
 			return err
 		}
-		if unconfirmed && busy != nil {
+		if mayHaveDelivered && busy != nil {
 			if isBusy, _ := busy(); isBusy {
 				return nil
 			}

@@ -2824,8 +2824,18 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			if strings.Contains(draft, "[Pasted text #") {
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste; payload identity is unavailable", ErrNudgeDraftDeferred, target)
 			}
-			if !nudgeDraftMatches(draft, message) {
-				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
+			if !nudgeDraftMatches(draft, message, 0) {
+				widthText, err := t.run("display-message", "-p", "-t", target, "#{pane_width}")
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
+				}
+				width, err := strconv.Atoi(strings.TrimSpace(widthText))
+				if err != nil || width <= 2 {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
+				}
+				if !nudgeDraftMatches(draft, message, width-2) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, target)
+				}
 			}
 			resumeDraft = true
 		}
