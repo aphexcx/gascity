@@ -39,6 +39,30 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 	if !install {
 		return "", fmt.Errorf("draft ownership hook is absent")
 	}
+	if strings.TrimSpace(hooks) == "" {
+		// A local array masks the inherited global array. Preserve its
+		// current commands together before appending the ownership hook.
+		inherited, err := t.run("show-hooks", "-g", "client-attached")
+		if err != nil {
+			return "", err
+		}
+		var commands []string
+		for _, line := range strings.Split(strings.TrimSpace(inherited), "\n") {
+			if line == "" {
+				continue
+			}
+			_, command, ok := strings.Cut(line, " ")
+			if !ok {
+				return "", fmt.Errorf("cannot read inherited attachment hook")
+			}
+			commands = append(commands, command)
+		}
+		if len(commands) != 0 {
+			if _, err := t.run("set-hook", "-t", session, "client-attached", strings.Join(commands, " ; ")); err != nil {
+				return "", err
+			}
+		}
+	}
 	_, err = t.run("set-hook", "-a", "-t", session, "client-attached", hook)
 	return pane, err
 }

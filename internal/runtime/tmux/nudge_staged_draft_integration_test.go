@@ -134,9 +134,9 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		}
 	})
 
-	for _, ownership := range []struct{ edited, removed bool }{{false, false}, {true, false}, {false, true}} {
+	for _, ownership := range []struct{ edited, removed, global bool }{{false, false, false}, {true, false, false}, {true, false, true}, {false, true, false}} {
 		edited := ownership.edited
-		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t", edited, ownership.removed), func(t *testing.T) {
+		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t global=%t", edited, ownership.removed, ownership.global), func(t *testing.T) {
 			claudeScript, err := filepath.Abs(filepath.Join("testdata", "nudge_faketui.py"))
 			if err != nil {
 				t.Fatal(err)
@@ -156,7 +156,11 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				t.Fatal(err)
 			}
 			if edited {
-				if _, err := tm.run("set-hook", "-t", "wrapped", "client-attached", "set-option -t wrapped @gc-test-user-hook ran"); err != nil {
+				args := []string{"set-hook", "-t", "wrapped"}
+				if ownership.global {
+					args = []string{"set-hook", "-g"}
+				}
+				if _, err := tm.run(append(args, "client-attached", "set-option -t wrapped @gc-test-user-hook ran")...); err != nil {
 					t.Fatal(err)
 				}
 			}
