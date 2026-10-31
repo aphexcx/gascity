@@ -43,8 +43,12 @@ func pruneNudgeTombstones(state *nudgeQueueState, front *nudgequeue.Store, now, 
 	retained := state.Tombstones[:0]
 	for i, tombstone := range state.Tombstones {
 		if clk.Now().After(deadline) {
-			retained = append(retained, state.Tombstones[i:]...)
-			break
+			// Persist the untouched suffix ahead of attempted repairs. The next
+			// pass resumes there even after a restart or a queue-state sort.
+			next := append([]nudgequeue.Tombstone(nil), state.Tombstones[i:]...)
+			next = append(next, retained...)
+			state.Tombstones = next
+			return
 		}
 		if tombstone.RepairPending && front != nil {
 			// Missing shadows cannot prove repair: retain the intent so wait

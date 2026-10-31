@@ -3334,7 +3334,10 @@ func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now,
 }
 
 func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
-	pruneNudgeTombstones(state, front, now, deadline, clk)
+	// Give capped payloads the first use of the budget, before retrying any
+	// retained repair. Each lookup here removes a payload even if it fails,
+	// so later passes advance instead of retrying an unchanged prefix.
+	var tombstones []nudgequeue.Tombstone
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
 		if clk.Now().After(deadline) {
@@ -3345,18 +3348,33 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 		if item.DeadAt.IsZero() {
 			item.DeadAt = now.UTC()
 		}
-		atCap := !item.DeadAt.Add(nudgequeue.DeadLetterRetention).After(now)
-		if !repairDeadQueuedNudge(front, item) {
-			if atCap {
-				state.Tombstones = append(state.Tombstones, nudgequeue.Tombstone{
+		if !item.DeadAt.Add(nudgequeue.DeadLetterRetention).After(now) {
+			if !repairDeadQueuedNudge(front, item) {
+				tombstones = append(tombstones, nudgequeue.Tombstone{
 					ID: item.ID, BeadID: item.BeadID, Agent: item.Agent, SessionID: item.SessionID,
 					Source: item.Source, Reference: item.Reference,
 					TerminalState: terminalStateForDeadQueuedNudge(item), TerminalReason: terminalReasonForDeadQueuedNudge(item),
 					TerminalAt: item.DeadAt, DeletedAt: now.UTC(), RepairPending: true,
 				})
-			} else {
-				filtered = append(filtered, item)
 			}
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	state.Dead = filtered
+
+	pruneNudgeTombstones(state, front, now, deadline, clk)
+	// These repairs were attempted during expiry; do not retry them twice
+	// in one pass. Rotation of the older backlog is persisted ahead of them.
+	state.Tombstones = append(state.Tombstones, tombstones...)
+	filtered = state.Dead[:0]
+	for i, item := range state.Dead {
+		if clk.Now().After(deadline) {
+			filtered = append(filtered, state.Dead[i:]...)
+			break
+		}
+		if !repairDeadQueuedNudge(front, item) {
+			filtered = append(filtered, item)
 			continue
 		}
 		// Reconcile the shadow before pruning even an expired receipt: wait

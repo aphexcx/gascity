@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -718,6 +720,100 @@ func TestNudgeDeadLetterDispatchFinalizationClearsOnlyIdleHold(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type slowFailingNudgeLookupStore struct {
+	*beads.MemStore
+	clk      *clock.Fake
+	attempts []string
+}
+
+func (s *slowFailingNudgeLookupStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.attempts = append(s.attempts, strings.TrimPrefix(q.Label, "nudge:"))
+	s.clk.Advance(750 * time.Millisecond)
+	return nil, errors.New("shadow lookup unavailable")
+}
+
+func TestNudgeDeadLetterCapProgressDespiteSlowRepairs(t *testing.T) {
+	for _, budget := range []time.Duration{nudgeEnqueueMaintenanceBudget, nudgeMaintenanceSweepBudget} {
+		t.Run(budget.String(), func(t *testing.T) {
+			now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+			clk := &clock.Fake{Time: now}
+			store := &slowFailingNudgeLookupStore{MemStore: beads.NewMemStore(), clk: clk}
+			state := nudgeQueueState{}
+			for i := 0; i < int(budget/(750*time.Millisecond))+5; i++ {
+				state.Tombstones = append(state.Tombstones, nudgequeue.Tombstone{
+					ID: fmt.Sprintf("repair-%03d", i), BeadID: fmt.Sprintf("shadow-%03d", i), RepairPending: true,
+				})
+			}
+			state.Dead = []queuedNudge{
+				{ID: "recent", BeadID: "recent-shadow", DeadAt: now.Add(-time.Hour)},
+				{ID: "capped", BeadID: "capped-shadow", Message: "expired secret payload", DeadAt: now.Add(-nudgequeue.DeadLetterRetention)},
+			}
+			if err := pruneDeadQueuedNudgesWithClock(&state, nudgeFrontDoor(beads.NudgesStore{Store: store}), now, now.Add(budget), clk); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("budget=%s lookup_cost=750ms attempts=%d elapsed=%s", budget, len(store.attempts), clk.Now().Sub(now))
+			if len(store.attempts) == 0 || !clk.Now().After(now.Add(budget)) {
+				t.Fatal("fixture did not exhaust the repair budget")
+			}
+			if len(state.Dead) != 1 || state.Dead[0].ID != "recent" {
+				t.Fatalf("repair backlog starved payload expiry: dead=%+v", state.Dead)
+			}
+			if tombstone, ok := state.Tombstone("capped"); !ok || !tombstone.RepairPending || !tombstone.DeletedAt.Equal(now) {
+				t.Fatalf("cap lost terminalization intent: %+v found=%t", tombstone, ok)
+			}
+			data, err := json.Marshal(state)
+			if err != nil || bytes.Contains(data, []byte("expired secret payload")) {
+				t.Fatalf("expired payload survives persistence: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestNudgeDeadLetterRepairProgressSurvivesReload(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := &slowFailingNudgeLookupStore{MemStore: beads.NewMemStore(), clk: clk}
+	state := nudgeQueueState{Tombstones: []nudgequeue.Tombstone{
+		{ID: "old-receipt", RepairedAt: now.Add(-nudgequeue.DispositionRetention)},
+	}}
+	const backlog = 8
+	for i := range backlog {
+		state.Tombstones = append(state.Tombstones, nudgequeue.Tombstone{
+			ID: fmt.Sprintf("repair-%d", i), BeadID: fmt.Sprintf("shadow-%d", i), RepairPending: true,
+		})
+	}
+	for pass := range 3 {
+		at := clk.Now()
+		if err := pruneDeadQueuedNudgesWithClock(&state, nudgeFrontDoor(beads.NudgesStore{Store: store}), at, at.Add(nudgeEnqueueMaintenanceBudget), clk); err != nil {
+			t.Fatal(err)
+		}
+		// Queue writes sort then serialize; reload discards all process memory.
+		nudgequeue.SortState(&state)
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state = nudgeQueueState{}
+		if err := json.Unmarshal(data, &state); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pass=%d attempts=%v", pass+1, store.attempts)
+	}
+	if len(state.Tombstones) != backlog {
+		t.Fatalf("expired receipt retained or pending repair lost: %+v", state.Tombstones)
+	}
+	if len(store.attempts) < backlog {
+		t.Fatalf("only %d attempts for %d repairs", len(store.attempts), backlog)
+	}
+	seen := make(map[string]bool)
+	for _, id := range store.attempts[:backlog] {
+		if seen[id] {
+			t.Fatalf("repair repeated before every tombstone got a turn: %v", store.attempts)
+		}
+		seen[id] = true
 	}
 }
 
