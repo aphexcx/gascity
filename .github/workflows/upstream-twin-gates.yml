@@ -69,8 +69,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev tmux jq
 
-      # This is the twin's own pinned Bazel bootstrap, with no RBE credentials.
+      # The twin's pinned bootstrap supports a public read-only cache with local fallback.
       - uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_FORK_CACHE: "true"
 
       - name: Build the linter with the twin's Go compiler
         run: |

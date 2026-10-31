@@ -27,8 +27,10 @@ Use the existing assigned lane. The `bazel-test` workflow has an optional
 dispatch path into `upstream-twin-gates`; ordinary fork runs retain their
 existing build and test commands. The opt-in job uses Ubuntu 24.04, the
 twin's Go version, the helper above, system ICU development files, and the
-twin's own pinned `.github/actions/setup-bazel` bootstrap. It needs no RBE
-credentials and cannot push a branch.
+twin's own pinned `.github/actions/setup-bazel` bootstrap. Its public read-only
+cache reuses validated actions; cache misses and unavailable-cache fallbacks
+execute locally with the two-action limit. It needs no RBE credentials and
+cannot push a branch.
 
 First publish the reviewed source snapshot and the recipe branch to the
 fork through their required gates. The twin input may be an existing WIP
