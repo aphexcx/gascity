@@ -27,7 +27,7 @@ func seedDeadBacklog(t *testing.T, cityPath string, now time.Time, n int) map[st
 				ID: id, BeadID: "bead-" + id,
 				Agent: "gascity/deployer", Source: "sling", Message: "backlog",
 				CreatedAt: now.Add(-2 * time.Hour), DeadAt: now.Add(-2 * time.Hour),
-				LastError: "expired",
+				DismissedAt: now.Add(-2 * time.Hour), LastError: "expired",
 			})
 		}
 		return nil
