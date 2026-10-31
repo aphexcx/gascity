@@ -507,8 +507,9 @@ func newAgentListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "List configured agents",
 		Long: `List configured agents from the resolved city configuration.
 
+Provider-derived agents are marked as implicit provider slots.
 Use --json to inspect agent routing fields, including effective work_query
-and sling_query values.`,
+and sling_query values, and the implicit flag.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdAgentList(jsonOutput, stdout, stderr) != 0 {
@@ -539,6 +540,7 @@ type AgentListItem struct {
 	Provider             string    `json:"provider,omitempty"`
 	Session              string    `json:"session,omitempty"`
 	Suspended            bool      `json:"suspended"`
+	Implicit             bool      `json:"implicit"`
 	Pool                 *PoolJSON `json:"pool,omitempty"`
 	WorkQuery            string    `json:"work_query"`
 	SlingQuery           string    `json:"sling_query"`
@@ -581,6 +583,9 @@ func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io
 		if item.Suspended {
 			status = "suspended"
 		}
+		if item.Implicit {
+			status += " (implicit provider slot)"
+		}
 		fmt.Fprintf(stdout, "  %-24s %s\n", item.QualifiedName, status) //nolint:errcheck // best-effort stdout
 	}
 	return 0
@@ -602,6 +607,7 @@ func agentListItems(cfg *config.City, topo config.QueryTopology) []AgentListItem
 			Provider:             a.Provider,
 			Session:              a.Session,
 			Suspended:            a.Suspended,
+			Implicit:             a.Implicit,
 			WorkQuery:            a.EffectiveWorkQueryFor(topo),
 			SlingQuery:           a.EffectiveSlingQuery(),
 			ConfiguredWorkQuery:  a.WorkQuery,

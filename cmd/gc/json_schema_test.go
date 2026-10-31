@@ -379,8 +379,8 @@ func TestJSONSchemaRoleSpecificResultForRigAgentRoutingCommands(t *testing.T) {
 				t.Fatalf("stderr = %q, want empty", stderr.String())
 			}
 			var schema struct {
-				Required   []string       `json:"required"`
-				Properties map[string]any `json:"properties"`
+				Required   []string                   `json:"required"`
+				Properties map[string]json.RawMessage `json:"properties"`
 			}
 			if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
 				t.Fatalf("result schema is not JSON: %v\n%s", err, stdout.String())
@@ -390,6 +390,22 @@ func TestJSONSchemaRoleSpecificResultForRigAgentRoutingCommands(t *testing.T) {
 			}
 			if schema.Properties["schema_version"] == nil {
 				t.Fatalf("schema missing schema_version property: %+v", schema.Properties)
+			}
+			if args[0] == "agent" {
+				var agents struct {
+					Items struct {
+						Required   []string `json:"required"`
+						Properties map[string]struct {
+							Type string `json:"type"`
+						} `json:"properties"`
+					} `json:"items"`
+				}
+				if err := json.Unmarshal(schema.Properties["agents"], &agents); err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Contains(agents.Items.Required, "implicit") || agents.Items.Properties["implicit"].Type != "boolean" {
+					t.Fatalf("agent items must declare implicit as a required boolean: %+v", agents.Items)
+				}
 			}
 		})
 	}
