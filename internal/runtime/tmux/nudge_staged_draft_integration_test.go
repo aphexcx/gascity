@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -134,21 +135,40 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		}
 	})
 
-	for _, ownership := range []struct{ edited, removed, global, switched bool }{{false, false, false, false}, {true, false, false, false}, {true, false, true, false}, {false, true, false, false}, {true, false, false, true}} {
+	for caseNo, ownership := range []struct {
+		edited, removed, global, switched, collapsed bool
+		timing                                       string
+	}{
+		{},
+		{edited: true},
+		{edited: true, global: true},
+		{removed: true},
+		{edited: true, switched: true},
+		{timing: "late-confirmed"},
+		{timing: "before-confirmation"},
+		{timing: "before-observation"},
+		{edited: true, switched: true, timing: "blocking"},
+		{collapsed: true},
+		{collapsed: true, removed: true},
+	} {
 		edited := ownership.edited
-		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t global=%t switched=%t", edited, ownership.removed, ownership.global, ownership.switched), func(t *testing.T) {
+		t.Run(fmt.Sprintf("wrapped Claude draft at 80 columns: edited=%t hook-removed=%t global=%t switched=%t collapsed=%t timing=%s", edited, ownership.removed, ownership.global, ownership.switched, ownership.collapsed, ownership.timing), func(t *testing.T) {
 			claudeScript, err := filepath.Abs(filepath.Join("testdata", "nudge_faketui.py"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			logPath := filepath.Join(t.TempDir(), "tui.log")
 			tm := NewTmuxWithConfig(Config{
-				SocketName:        "gcwrappedclaudedraft",
+				SocketName:        fmt.Sprintf("gcwrappedclaudedraft%d", caseNo),
 				NudgeReadyTimeout: 10 * time.Second,
 				NudgeLockTimeout:  30 * time.Second,
 			})
 			t.Cleanup(func() { _, _ = tm.run("kill-server") })
-			command := fmt.Sprintf("python3 %s %s 0.1 30 wrap-retry %d", shellQuote(claudeScript), shellQuote(logPath), submitEnterMaxSends)
+			mode := "wrap-retry"
+			if ownership.collapsed {
+				mode = "collapsed-retry"
+			}
+			command := fmt.Sprintf("python3 %s %s 0.1 30 %s %d", shellQuote(claudeScript), shellQuote(logPath), mode, submitEnterMaxSends)
 			if _, err := tm.run("new-session", "-d", "-s", "wrapped", "-x", "80", "-y", "30", command); err != nil {
 				t.Fatalf("creating private 80-column pane: %v", err)
 			}
@@ -164,7 +184,11 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				if ownership.switched {
 					event = "client-session-changed"
 				}
-				if _, err := tm.run(append(args, event, "set-option -t wrapped @gc-test-user-hook ran")...); err != nil {
+				command := "set-option -t wrapped @gc-test-user-hook ran"
+				if ownership.timing == "blocking" {
+					command += " ; run-shell 'sleep 10'"
+				}
+				if _, err := tm.run(append(args, event, command)...); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -188,7 +212,9 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			// Include an unbroken token so a wrap inside a word is covered too.
 			message := "long founder line " + strings.Repeat("abcdefghij", 20) + " with final words"
 			if edited {
-				message = strings.Repeat("a", 77) + " b"
+				message = strings.Repeat("a", 76) + " b"
+			} else if ownership.collapsed {
+				message = strings.Repeat("founder line ", 80) + "end"
 			}
 			if err := tm.NudgeSession("wrapped", message); !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 				t.Fatalf("initial submit=%v, want an unconfirmed preserved draft", err)
@@ -199,14 +225,18 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			}
 			t.Logf("80-column pane after unconfirmed submit:\n%s", pane)
 			draft, observed := nudgeComposer(pane, "❯ ")
-			if !observed || !strings.Contains(draft, "\n") || draft == message {
+			if ownership.collapsed {
+				if !observed || draft != "[Pasted text #1]" {
+					t.Fatalf("draft=%q observed=%v; expected collapsed paste", draft, observed)
+				}
+			} else if !observed || !strings.Contains(draft, "\n") || draft == message {
 				t.Fatalf("draft=%q observed=%v; expected real wrapped rows", draft, observed)
 			}
 			stored, err := tm.run("show-options", "-p", "-qv", "-t", "wrapped", "@gc-nudge-draft-payload")
 			if err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
 				t.Fatalf("stored payload digest=%q err=%v, want full-paste provenance", stored, err)
 			}
-			if edited {
+			attachAndEdit := func() {
 				attachedSession := "wrapped"
 				if ownership.switched {
 					attachedSession = "other"
@@ -249,16 +279,20 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				for _, keys := range [][]string{{"C-u"}, {"-l", strings.Repeat("a", 77)}, {"C-v"}, {"-l", "b"}} {
+				var editKeys [][]string
+				if edited {
+					editKeys = [][]string{{"C-u"}, {"-l", strings.Repeat("a", 76)}, {"C-v"}, {"-l", "b"}}
+				}
+				for _, keys := range editKeys {
 					if _, err := tm.run(append([]string{"send-keys", "-t", "wrapped"}, keys...)...); err != nil {
 						t.Fatal(err)
 					}
 				}
 				deadline = time.After(testutil.ExecRaceTimeout)
-				for {
+				for edited {
 					pane, err := tm.CapturePane("wrapped", 40)
 					got, ok := nudgeComposer(pane, "❯ ")
-					if err == nil && ok && got == strings.Repeat("a", 77)+"\nb" {
+					if err == nil && ok && got == strings.Repeat("a", 76)+"\nb" {
 						break
 					}
 					select {
@@ -280,9 +314,14 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 				case <-time.After(testutil.ExecRaceTimeout):
 					t.Fatal("human client never detached")
 				}
-				if value, err := tm.run("show-options", "-qv", "-t", "wrapped", "@gc-test-user-hook"); err != nil || strings.TrimSpace(value) != "ran" {
-					t.Fatalf("existing attach hook did not run: %q, %v", value, err)
+				if edited {
+					if value, err := tm.run("show-options", "-qv", "-t", "wrapped", "@gc-test-user-hook"); err != nil || strings.TrimSpace(value) != "ran" {
+						t.Fatalf("existing attach hook did not run: %q, %v", value, err)
+					}
 				}
+			}
+			if edited {
+				attachAndEdit()
 			}
 			if ownership.removed {
 				if _, err := tm.run("set-hook", "-u", "-t", "wrapped", "client-attached"); err != nil {
@@ -291,6 +330,50 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			}
 			// The pane owns the evidence, so retry works with a new transport too.
 			tm = NewTmuxWithConfig(tm.cfg)
+			if ownership.timing == "late-confirmed" || ownership.timing == "before-confirmation" || ownership.timing == "before-observation" {
+				real := tm.exec
+				attached := false
+				entered := false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					capture := slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane "))
+					send := slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ")
+					if !attached && ((ownership.timing == "before-confirmation" && send) || (ownership.timing == "before-observation" && capture && entered)) {
+						attached = true
+						attachAndEdit()
+					}
+					out, err := real.execute(args)
+					entered = entered || send
+					if !attached && ownership.timing == "late-confirmed" && capture && strings.Contains(out, "esc to interrupt") {
+						// The observation is established; attach before returning it
+						// to the confirmation loop and its deferred finalizer.
+						attached = true
+						attachAndEdit()
+					}
+					return out, err
+				}}
+				receipts := collectReceipts(tm)
+				delivery, err := tm.nudgeSessionDelivery("wrapped", message)
+				want, submits := runtime.NudgeSubmitConfirmed, 1
+				if ownership.timing == "before-confirmation" {
+					want, submits = runtime.NudgeSubmitOwnershipLost, 0
+				} else if ownership.timing == "before-observation" {
+					want = runtime.NudgeSubmitOwnershipLost
+				}
+				if !attached || err != nil || delivery.Submit != want || !delivery.Landed() || delivery.UnconfirmedSubmitError("wrapped") != nil {
+					t.Fatalf("attached=%t delivery=%+v err=%v; want terminal %s without replay", attached, delivery, err, want)
+				}
+				if got := count(t, logPath, "SUBMIT"); got != submits || len(receipts()) != 1 || receipts()[0].Submitted != (want == runtime.NudgeSubmitConfirmed) {
+					t.Fatalf("submits=%d receipts=%v; want %d submits", got, receipts(), submits)
+				}
+				if submits == 0 {
+					pane, err := tm.CapturePane("wrapped", 40)
+					got, ok := nudgeComposer(pane, "❯ ")
+					if err != nil || !ok || got != draft {
+						t.Fatalf("ownership loss changed the draft: %q, %v", got, err)
+					}
+				}
+				return
+			}
 			if edited || ownership.removed {
 				receipts := collectReceipts(tm)
 				if err := tm.NudgeSession("wrapped", message); !errors.Is(err, ErrNudgeDraftDeferred) {

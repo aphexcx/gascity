@@ -4282,35 +4282,70 @@ func TestRecordQueuedNudgeFailureRequeuesClaimedNudge(t *testing.T) {
 }
 
 func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	dir := t.TempDir()
-	item := newQueuedNudge("worker", "stuck reminder", time.Now().Add(-time.Hour))
-	if err := enqueueQueuedNudge(dir, item); err != nil {
-		t.Fatalf("enqueueQueuedNudge: %v", err)
-	}
+	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			item := newQueuedNudge("worker", "stuck reminder", time.Now().Add(-time.Hour))
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatalf("enqueueQueuedNudge: %v", err)
+			}
 
-	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
-		if err := recordQueuedNudgeFailure(dir, []string{item.ID}, context.DeadlineExceeded, time.Now().Add(time.Duration(i)*time.Second)); err != nil {
-			t.Fatalf("recordQueuedNudgeFailure(%d): %v", i, err)
+			for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
+				if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, time.Now().Add(time.Duration(i)*time.Second)); err != nil {
+					t.Fatalf("recordQueuedNudgeFailure(%d): %v", i, err)
+				}
+			}
+
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != 0 {
+				t.Fatalf("pending = %d, want 0", len(pending))
+			}
+			if len(inFlight) != 0 {
+				t.Fatalf("inFlight = %d, want 0", len(inFlight))
+			}
+			if len(dead) != 1 {
+				t.Fatalf("dead = %d, want 1", len(dead))
+			}
+			if dead[0].Attempts != defaultQueuedNudgeMaxAttempts {
+				t.Fatalf("attempts = %d, want %d", dead[0].Attempts, defaultQueuedNudgeMaxAttempts)
+			}
+			if dead[0].LastError != cause.Error() {
+				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, cause.Error())
+			}
+		})
+	}
+	t.Run("unowned draft expires with a visible reason even without five retries", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		var warnings bytes.Buffer
+		previous := nudgeWarningWriter
+		nudgeWarningWriter = &warnings
+		t.Cleanup(func() { nudgeWarningWriter = previous })
+		dir := t.TempDir()
+		now := time.Now()
+		item := newQueuedNudge("worker", "preserved reminder", now)
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
-	if err != nil {
-		t.Fatalf("listQueuedNudges: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending = %d, want 0", len(pending))
-	}
-	if len(inFlight) != 0 {
-		t.Fatalf("inFlight = %d, want 0", len(inFlight))
-	}
-	if len(dead) != 1 {
-		t.Fatalf("dead = %d, want 1", len(dead))
-	}
-	if dead[0].Attempts != defaultQueuedNudgeMaxAttempts {
-		t.Fatalf("attempts = %d, want %d", dead[0].Attempts, defaultQueuedNudgeMaxAttempts)
-	}
+		cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+		if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
+			t.Fatal(err)
+		}
+		pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
+		if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
+			t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
+		}
+		pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
+		if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+			t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
+		}
+		if dead[0].LastError != cause.Error() || !strings.Contains(warnings.String(), "action required") || !strings.Contains(warnings.String(), "automatic hold expires at") {
+			t.Fatalf("ownership failure must remain visible: dead=%+v warnings=%q", dead[0], warnings.String())
+		}
+	})
 }
 
 func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {
@@ -6359,16 +6394,21 @@ func TestResolveNudgePollInterval(t *testing.T) {
 type unconfirmedSubmitVouchingFake struct {
 	*runtime.Fake
 	flagDown bool
+	submit   runtime.NudgeSubmit
 }
 
 func (p *unconfirmedSubmitVouchingFake) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
 	if err := p.Nudge(name, content); err != nil {
 		return runtime.NudgeDelivery{}, err
 	}
+	submit := p.submit
+	if submit == "" {
+		submit = runtime.NudgeSubmitUnconfirmed
+	}
 	return runtime.NudgeDelivery{
 		Delivered: !p.flagDown,
 		Bytes:     len(runtime.FlattenText(content)),
-		Submit:    runtime.NudgeSubmitUnconfirmed,
+		Submit:    submit,
 	}, nil
 }
 
@@ -6387,21 +6427,27 @@ func TestTryDeliverQueuedNudgesByPollerRequeuesUnconfirmedSubmit(t *testing.T) {
 		"landed on the byte count alone": true,
 	} {
 		t.Run(name, func(t *testing.T) {
-			testPollerRequeuesUnconfirmedSubmit(t, flagDown)
+			testPollerRequeuesUnconfirmedSubmit(t, flagDown, runtime.NudgeSubmitUnconfirmed)
+		})
+	}
+	for _, submit := range []runtime.NudgeSubmit{runtime.NudgeSubmitConfirmed, runtime.NudgeSubmitOwnershipLost} {
+		t.Run(string(submit)+" is terminal", func(t *testing.T) {
+			testPollerRequeuesUnconfirmedSubmit(t, false, submit)
 		})
 	}
 }
 
-func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool) {
+func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool, submit runtime.NudgeSubmit) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	now := time.Now().Add(-1 * time.Minute)
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+	item := newQueuedNudge("worker", "review the deploy logs", now)
+	if err := enqueueQueuedNudge(dir, item); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
 	store := openNudgeBeadStore(dir)
-	fake := &unconfirmedSubmitVouchingFake{Fake: runtime.NewFake(), flagDown: flagDown}
+	fake := &unconfirmedSubmitVouchingFake{Fake: runtime.NewFake(), flagDown: flagDown, submit: submit}
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -6426,7 +6472,7 @@ func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool) {
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
-	if delivered {
+	if submit == runtime.NudgeSubmitUnconfirmed && delivered {
 		t.Fatal("delivered = true: the dispatcher acked a nudge whose submit was never confirmed — " +
 			"the draft may be sitting unsubmitted in the pane and would be silently lost")
 	}
@@ -6444,6 +6490,35 @@ func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool) {
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if submit != runtime.NudgeSubmitUnconfirmed {
+		if len(pending)+len(inFlight)+len(dead) != 0 {
+			t.Fatalf("terminal %s was requeued: pending=%d inFlight=%d dead=%d", submit, len(pending), len(inFlight), len(dead))
+		}
+		if submit == runtime.NudgeSubmitOwnershipLost {
+			if delivered {
+				t.Fatal("ownership loss must not claim successful injection")
+			}
+			shadow, found, err := nudgeFrontDoor(store).FindIncludingTerminal(item.ID)
+			if err != nil || !found || shadow.Open || shadow.TerminalReason != "draft_ownership_lost" {
+				t.Fatalf("terminal receipt=%+v found=%t err=%v; want visible ownership-loss reason", shadow, found, err)
+			}
+		} else if !delivered {
+			t.Fatal("confirmed submit must ack delivery")
+		}
+		if _, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		for _, call := range fake.Calls {
+			if call.Method == "Nudge" {
+				calls++
+			}
+		}
+		if calls != 1 {
+			t.Fatalf("terminal input replayed: %d nudges", calls)
+		}
+		return
 	}
 	if len(pending) != 1 {
 		t.Fatalf("pending = %d, want 1 (the item must requeue, not ack): inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))

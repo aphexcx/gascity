@@ -3004,6 +3004,10 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
 		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		{"Claude collapsed paste is not drained", []string{"❯ [Pasted text #1 +7 lines]"}, "hello", false},
+		{"Claude single-line collapsed paste is not drained", []string{"❯ [Pasted text #2]"}, longSent, false},
+		{"Claude collapsed continuation is not drained", []string{"❯ prefix", "  [Pasted text #1 +7 lines]"}, "hello", false},
+		{"old Claude placeholder above an empty composer", []string{"❯ [Pasted text #1 +7 lines]", "answer", "❯ "}, "hello", true},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},

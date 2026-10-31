@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +18,8 @@ import (
 const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
 
 // nudgeDraftOwnershipHook binds provenance to uninterrupted detached input.
-// Appending preserves other hooks; checking the hook on retry detects another
-// caller replacing or removing it, including the hidden-attach helper.
+// Invalidation runs before user hooks, which may block. Checking that ordering
+// on retry also detects another caller replacing or moving the clear.
 func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (string, error) {
 	pane, err := t.run("display-message", "-p", "-t", target, "#{pane_id}")
 	if err != nil {
@@ -34,44 +35,36 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 		if err != nil {
 			return "", err
 		}
-		found := false
-		for _, line := range strings.Split(hooks, "\n") {
-			if strings.HasSuffix(line, " "+hook) {
-				found = true
-				break
-			}
-		}
-		if found {
+		firstLine, _, _ := strings.Cut(strings.TrimSpace(hooks), "\n")
+		_, firstCommand, _ := strings.Cut(firstLine, " ")
+		if firstCommand == hook || strings.HasPrefix(firstCommand, hook+" ; ") {
 			continue
 		}
 		if !install {
-			return "", fmt.Errorf("draft ownership hook %q is absent", event)
+			return "", fmt.Errorf("draft ownership hook %q is not first", event)
 		}
 		if strings.TrimSpace(hooks) == "" {
 			// A local array masks the inherited global array. Preserve its
-			// current commands together before appending the ownership hook.
-			inherited, err := t.run("show-hooks", "-g", event)
+			// current commands after our non-blocking invalidation command.
+			hooks, err = t.run("show-hooks", "-g", event)
 			if err != nil {
 				return "", err
 			}
-			var commands []string
-			for _, line := range strings.Split(strings.TrimSpace(inherited), "\n") {
-				if line == "" || line == event {
-					continue
-				}
-				_, command, ok := strings.Cut(line, " ")
-				if !ok {
-					return "", fmt.Errorf("cannot read inherited attachment hook")
-				}
+		}
+		commands := []string{hook}
+		for _, line := range strings.Split(strings.TrimSpace(hooks), "\n") {
+			if line == "" || line == event {
+				continue
+			}
+			_, command, ok := strings.Cut(line, " ")
+			if !ok {
+				return "", fmt.Errorf("cannot read attachment hook %q", event)
+			}
+			if command != hook {
 				commands = append(commands, command)
 			}
-			if len(commands) != 0 {
-				if _, err := t.run("set-hook", "-t", session, event, strings.Join(commands, " ; ")); err != nil {
-					return "", err
-				}
-			}
 		}
-		if _, err := t.run("set-hook", "-a", "-t", session, event, hook); err != nil {
+		if _, err := t.run("set-hook", "-t", session, event, strings.Join(commands, " ; ")); err != nil {
 			return "", err
 		}
 	}
@@ -100,7 +93,7 @@ func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
 // sendNudgeDraftSubmitSequence checks ownership in the same tmux command that
 // sends each key, so an attachment during the debounce cannot reuse an old read.
 func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string) (bool, error) {
-	condition := fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message))
+	condition := nudgeDraftOwnershipCondition(message)
 	sent := false
 	for i, key := range keys {
 		if i > 0 {
@@ -118,6 +111,26 @@ func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []strin
 		sent = true
 	}
 	return sent, nil
+}
+
+func nudgeDraftOwnershipCondition(message string) string {
+	return fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, runtime.NudgePayloadDigest(message))
+}
+
+// captureNudgeDraftSubmit observes acceptance only while the draft still belongs
+// to this payload. Ownership and capture share a tmux command so a later attach
+// cannot invalidate the snapshot that already established confirmation.
+func (t *Tmux) captureNudgeDraftSubmit(target, message string) ([]string, error) {
+	out, err := t.run("if-shell", "-F", "-t", target, nudgeDraftOwnershipCondition(message),
+		shellquote.Join([]string{"capture-pane", "-p", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines)}),
+		"display-message -p draft-ownership-changed")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "draft-ownership-changed" {
+		return nil, fmt.Errorf("%w: draft ownership changed before observation of %q", ErrNudgeDraftDeferred, target)
+	}
+	return strings.Split(out, "\n"), nil
 }
 
 // nudgeComposer reads the last live input, including continuation rows inside
@@ -226,10 +239,10 @@ func nudgeComposer(content, prefix string) (string, bool) {
 
 // nudgeDraftMatches checks rendering compatibility, not payload identity.
 // Callers need full-paste provenance before relying on a normalized match.
-// It preserves payload whitespace while allowing the rendering
-// at the measured composer width. Only padding at generated wrap boundaries
-// is ignored; spaces before explicit newlines remain significant even when
-// the composer reader drops them. A nonpositive width requires an exact match.
+// A positive width permits renderer-inserted row boundaries standing for a
+// space or nothing. Provenance establishes identity; the renderer's word-wrap
+// and cursor margins need not be reconstructed. Explicit newlines and interior
+// whitespace remain significant. A nonpositive width requires an exact match.
 func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 	message = strings.TrimSpace(message)
 	if draft == message {
@@ -238,15 +251,54 @@ func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 	if wrapWidth <= 0 {
 		return false
 	}
-	var rows []string
-	for _, line := range strings.Split(message, "\n") {
-		wrapped := strings.Split(runewidth.Wrap(line, wrapWidth), "\n")
-		for i := 0; i < len(wrapped)-1; i++ {
-			wrapped[i] = strings.TrimRight(wrapped[i], " ")
+	rows := strings.Split(draft, "\n")
+	positions := map[int]bool{0: true}
+	for i, row := range rows {
+		if runewidth.StringWidth(row) > wrapWidth {
+			return false
 		}
-		rows = append(rows, wrapped...)
+		next := make(map[int]bool)
+		match := func(pos int) {
+			if strings.HasPrefix(message[pos:], row) {
+				next[pos+len(row)] = true
+			}
+		}
+		for pos := range positions {
+			switch {
+			case i == 0:
+				match(pos)
+			case pos < len(message) && message[pos] == '\n':
+				match(pos + 1)
+			case row != "" && rows[i-1] != "":
+				match(pos)
+				if pos < len(message) && message[pos] == ' ' {
+					match(pos + 1)
+				}
+			}
+		}
+		positions = next
 	}
-	return draft == strings.Join(rows, "\n")
+	return positions[len(message)]
+}
+
+var claudeCollapsedPaste = regexp.MustCompile(`^\[Pasted text #[1-9][0-9]*(?: \+([1-9][0-9]*) lines)?\]$`)
+
+// collapsedNudgeDraftMatches checks the renderer's line-count evidence only;
+// callers still need full-paste provenance and uninterrupted detached ownership.
+func collapsedNudgeDraftMatches(draft, message string) bool {
+	match := claudeCollapsedPaste.FindStringSubmatch(draft)
+	if match == nil {
+		return false
+	}
+	lines := 0
+	if match[1] != "" {
+		var err error
+		lines, err = strconv.Atoi(match[1])
+		if err != nil {
+			return false
+		}
+	}
+	return lines == strings.Count(message, "\n")
 }
 
 func codexComposerFooter(line string) bool {

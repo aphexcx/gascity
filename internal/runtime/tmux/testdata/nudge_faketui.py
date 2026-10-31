@@ -6,13 +6,14 @@ SUBMITTED line with a monotonic timestamp, and only renders a busy indicator
 after a configurable delay -- modelling the render lag between "Enter landed"
 and "the spinner is on screen".
 """
-import sys, os, time, threading, termios, tty
+import sys, os, time, threading, termios, tty, textwrap
 
 logpath = sys.argv[1]
 busy_delay = float(sys.argv[2])   # seconds after submit before the spinner shows
 busy_hold = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
 retain_draft = len(sys.argv) > 4 and sys.argv[4] == "retain"
-wrap_retry = len(sys.argv) > 4 and sys.argv[4] == "wrap-retry"
+collapse = len(sys.argv) > 4 and sys.argv[4] == "collapsed-retry"
+wrap_retry = len(sys.argv) > 4 and sys.argv[4] in ("wrap-retry", "collapsed-retry")
 swallow = int(sys.argv[5]) if wrap_retry else 0
 
 state = {"draft": [], "busy_at": None, "done_at": None}
@@ -35,11 +36,17 @@ def render():
             out.append("✻ Thinking… (%ds · ↑ 0 tokens · esc to interrupt)\r\n" % el)
         else:
             out.append("\r\n")
-        if wrap_retry:
-            width = os.get_terminal_size().columns - 2
+        if collapse and len(draft) > 800:
+            draft = "[Pasted text #1]"
+        elif wrap_retry:
+            # Measured from the detached Claude 2.1.316 composer at 80 columns:
+            # whole words wrap and a long token splits after 76 cells.
+            width = os.get_terminal_size().columns - 4
             rows = []
             for line in draft.split("\n"):
-                rows.extend([line[i:i + width] for i in range(0, len(line), width)] or [""])
+                rows.extend(textwrap.wrap(line, width=width, expand_tabs=False,
+                                          replace_whitespace=False, drop_whitespace=False,
+                                          break_on_hyphens=False) or [""])
             draft = "\r\n  ".join(rows)
         out.append("────────────────────\r\n❯ %s\r\n────────────────────\r\n" % draft)
         out.append("  bypass permissions on\r\n")

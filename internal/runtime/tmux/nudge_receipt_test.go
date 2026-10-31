@@ -116,7 +116,7 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 							switch {
 							case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
 								return "GC_PROVIDER=claude", nil
-							case slices.Contains(args, "capture-pane"):
+							case slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")):
 								pane := "────\n❯ " + strings.ReplaceAll(tt.draft, "\n", "\n  ") + "\n────"
 								if busyAfter && submits > 0 {
 									pane = "esc to interrupt\n" + pane
@@ -152,9 +152,16 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 							mutations++
 							return len(text), nil
 						})
-						if tt.sentFirst {
-							if err != nil || mutations != 1 || !delivery.Landed() || delivery.Submit != runtime.NudgeSubmitUnconfirmed || len(receipts()) != 1 || receipts()[0].Submitted {
+						if tt.submitCheck != "" {
+							want := runtime.NudgeSubmitOwnershipLost
+							if busyAfter {
+								want = runtime.NudgeSubmitConfirmed
+							}
+							if err != nil || mutations != submits || !delivery.Landed() || delivery.Submit != want || len(receipts()) != 1 || receipts()[0].Submitted != busyAfter {
 								t.Fatalf("err=%v mutations=%d delivery=%+v receipts=%v; earlier submit evidence must survive", err, mutations, delivery, receipts())
+							}
+							if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {
+								t.Fatalf("ownership loss must never license a replay: %v", err)
 							}
 							return
 						}
@@ -187,7 +194,7 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 					switch {
 					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
 						return "GC_PROVIDER=" + tt.provider, nil
-					case slices.Contains(args, "capture-pane"):
+					case slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")):
 						draft := strings.Repeat("a", 78) + "\n  b"
 						if tt.provider == "codex" && submits > 0 {
 							draft = "[Pasted Content 79 chars]"
@@ -228,8 +235,12 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 					pastes++
 					return len(text), nil
 				})
-				if err != nil || pastes != 0 || submits != tt.lossAfter || !delivery.Landed() || delivery.Submit != runtime.NudgeSubmitUnconfirmed || len(receipts()) != 1 || receipts()[0].Submitted {
-					t.Fatalf("err=%v pastes=%d submits=%d delivery=%+v receipts=%v; lost ownership must retain only unconfirmed evidence", err, pastes, submits, delivery, receipts())
+				want := runtime.NudgeSubmitConfirmed
+				if tt.keepDraft {
+					want = runtime.NudgeSubmitOwnershipLost
+				}
+				if (err != nil && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)) || pastes != 0 || submits != tt.lossAfter || !delivery.Landed() || delivery.Submit != want || len(receipts()) != 1 || receipts()[0].Submitted == tt.keepDraft {
+					t.Fatalf("err=%v pastes=%d submits=%d delivery=%+v receipts=%v; later ownership loss must preserve confirmation", err, pastes, submits, delivery, receipts())
 				}
 			})
 		})
@@ -279,34 +290,60 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 	})
 }
 
-func TestNudgeDeliveryDefersCollapsedDraft(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
-		tm := NewTmux()
-		mutations := 0
-		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
-			switch {
-			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
-				return "GC_PROVIDER=claude", nil
-			case slices.Contains(args, "capture-pane"):
-				return "────\n❯ [Pasted text #1 +4 lines]\n────", nil
-			case slices.Contains(args, "send-keys"):
-				mutations++
-			}
-			return "", nil
-		}}
-		receipts := collectReceipts(tm)
-		delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "one\ntwo\nthree\nfour\nfive", func(_, text string, _ time.Duration) (int, error) {
-			mutations++
-			return len(text), nil
+func TestNudgeDeliveryHandlesCollapsedDraft(t *testing.T) {
+	for _, tc := range []struct {
+		name, draft, message string
+		owned, accept        bool
+	}{
+		{"owned multiline", "[Pasted text #1 +7 lines]", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight", true, true},
+		{"owned long line", "[Pasted text #2]", strings.Repeat("x", 801), true, true},
+		{"no provenance", "[Pasted text #1 +4 lines]", "one\ntwo\nthree\nfour\nfive", false, false},
+		{"wrong line count", "[Pasted text #1 +3 lines]", "one\ntwo\nthree\nfour\nfive", true, false},
+		{"mixed input", "[Pasted text #1 +4 lines] edited", "one\ntwo\nthree\nfour\nfive", true, false},
+		{"multiple placeholders", "[Pasted text #1 +4 lines]\n[Pasted text #2]", "one\ntwo\nthree\nfour\nfive", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
+				tm := NewTmux()
+				pastes, submits := 0, 0
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					switch {
+					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
+						return "GC_PROVIDER=claude", nil
+					case slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")):
+						if submits > 0 {
+							return "esc to interrupt\n────\n❯ \n────", nil
+						}
+						return "────\n❯ " + tc.draft + "\n────", nil
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
+						return "%0", nil
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
+						return "0", nil
+					case slices.Contains(args, "show-hooks"):
+						return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
+					case slices.Contains(args, "show-options") && tc.owned:
+						return runtime.NudgePayloadDigest(tc.message), nil
+					case slices.Contains(args, "if-shell"), slices.Contains(args, "send-keys"):
+						submits++
+					}
+					return "", nil
+				}}
+				receipts := collectReceipts(tm)
+				delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, func(_, text string, _ time.Duration) (int, error) {
+					pastes++
+					return len(text), nil
+				})
+				if tc.accept {
+					if err != nil || pastes != 0 || submits != 1 || delivery.Submit != runtime.NudgeSubmitConfirmed || len(receipts()) != 1 || !receipts()[0].Submitted {
+						t.Fatalf("delivery=%+v err=%v pastes=%d submits=%d receipts=%v; want one submit of the owned paste", delivery, err, pastes, submits, receipts())
+					}
+				} else if !errors.Is(err, ErrNudgeDraftDeferred) || !errors.Is(err, runtime.ErrNudgeDraftUnowned) || pastes != 0 || submits != 0 || delivery.Landed() || len(receipts()) != 0 {
+					t.Fatalf("delivery=%+v err=%v pastes=%d submits=%d; unowned input must remain untouched with bounded deferral", delivery, err, pastes, submits)
+				}
+			})
 		})
-		if !errors.Is(err, ErrNudgeDraftDeferred) || !strings.Contains(err.Error(), "collapsed paste") {
-			t.Fatalf("err=%v, want an explicit collapsed-paste diagnostic", err)
-		}
-		if mutations != 0 || delivery.Landed() || len(receipts()) != 0 {
-			t.Fatalf("mutations=%d delivery=%+v receipts=%v; unknown payload must stay untouched", mutations, delivery, receipts())
-		}
-	})
+	}
 }
 
 func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {

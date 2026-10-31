@@ -35,6 +35,11 @@ const (
 	// input. This counts as terminal delivery, not proof of harness ingestion;
 	// consumers must not replay a payload that already landed.
 	NudgeSubmitUnverified NudgeSubmit = "unverified"
+	// NudgeSubmitOwnershipLost means a previously pasted draft lost its input
+	// ownership before acceptance could be established. The draft is preserved,
+	// but its submit can no longer be attributed to this payload. This is a
+	// terminal outcome: consumers must record the loss and never replay it.
+	NudgeSubmitOwnershipLost NudgeSubmit = "ownership_lost"
 )
 
 // ErrNudgeSubmitUnconfirmed is the retry signal for callers that have no
@@ -52,6 +57,10 @@ const (
 // [NudgeDelivery.UnconfirmedSubmitError] for the one place the translation
 // is made.
 var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+
+// ErrNudgeDraftUnowned means a preserved draft lacks evidence tying it to the
+// pending payload. A queue must bound these deferrals and surface exhaustion.
+var ErrNudgeDraftUnowned = errors.New("nudge: draft has no matching paste provenance")
 
 // NudgeDelivery is a vouching runtime's evidence about ONE nudge. It is the
 // typed answer behind [NudgeVouchingProvider]: the fields are independent

@@ -1,11 +1,78 @@
 package tmux
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
 
+func TestNudgeDraftOwnershipHookPrecedesUserHooks(t *testing.T) {
+	const invalidate = `set-option -p -t "%0" @gc-nudge-draft-payload ''`
+	const user = `run-shell "sleep 10"`
+	for _, global := range []bool{false, true} {
+		t.Run(map[bool]string{false: "local", true: "global"}[global], func(t *testing.T) {
+			tm := NewTmux()
+			installed := make(map[string]string)
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				switch {
+				case slices.Contains(args, "display-message"):
+					return "%0", nil
+				case slices.Contains(args, "show-hooks"):
+					event := args[len(args)-1]
+					if command, ok := installed[event]; ok && !slices.Contains(args, "-g") {
+						return event + "[0] " + command, nil
+					}
+					if slices.Contains(args, "-g") == global {
+						return event + "[0] " + user, nil
+					}
+				case slices.Contains(args, "set-hook"):
+					event, command := args[len(args)-2], args[len(args)-1]
+					if slices.Contains(args, "-a") {
+						command = user + " ; " + command
+					}
+					installed[event] = command
+				}
+				return "", nil
+			}}
+			if _, err := tm.nudgeDraftOwnershipHook("session", "%0", true); err != nil {
+				t.Fatal(err)
+			}
+			for event, command := range installed {
+				if command != invalidate+" ; "+user {
+					t.Errorf("%s = %q; ownership must clear before the blocking user hook", event, command)
+				}
+			}
+			if _, err := tm.nudgeDraftOwnershipHook("session", "%0", false); err != nil {
+				t.Fatalf("checking installed hook: %v", err)
+			}
+			installed["client-attached"] = user + " ; " + invalidate
+			if _, err := tm.nudgeDraftOwnershipHook("session", "%0", false); err == nil {
+				t.Fatal("a clear behind a blocking user command must not establish ownership")
+			}
+		})
+	}
+}
+
 func TestNudgeDraftMatches(t *testing.T) {
+	t.Run("live Claude 2.1.316 word wrap at 80 columns", func(t *testing.T) {
+		// Byte-for-byte composer rows from the private, detached live probe.
+		const pane = "────────────────────────────────────────────────────────────────────────────────\n" +
+			"❯ The founder expects this complete message to arrive exactly once even when\n" +
+			"  the composer wraps whole words onto another row. Keep every word intact and\n" +
+			"  preserve the original spaces while the transport retries only the submit\n" +
+			"  key.\n────────────────────────────────────────────────────────────────────────────────"
+		const message = "The founder expects this complete message to arrive exactly once even when the composer wraps whole words onto another row. Keep every word intact and preserve the original spaces while the transport retries only the submit key."
+		draft, observed := nudgeComposer(pane, "❯ ")
+		if !observed || !nudgeDraftMatches(draft, message, 78) {
+			t.Fatalf("live wrapped draft must match with provenance: %q, observed=%t", draft, observed)
+		}
+		if nudgeDraftMatches(draft, message, 0) {
+			t.Fatal("word-wrap matching must still require provenance")
+		}
+		if !nudgeDraftMatches(strings.Repeat("a", 76)+"\na b", strings.Repeat("a", 77)+" b", 78) {
+			t.Fatal("live Claude long-word rendering must match with provenance")
+		}
+	})
 	for _, tt := range []struct {
 		name, draft, message string
 		want                 bool
@@ -13,13 +80,13 @@ func TestNudgeDraftMatches(t *testing.T) {
 		{"exact", "one copy", "one copy", true},
 		{"spaces", "one  copy", "one\tcopy", false},
 		{"quoted spaces", `print("a  b")`, `print("a b")`, false},
-		{"row boundary", "one\ncopy", "one copy", false},
+		{"owned word-wrap boundary", "one\ncopy", "one copy", true},
 		{"identical multiline", "one\n\ncopy", "one\n\ncopy", true},
 		{"explicit newline spaces", "first\nsecond", "first  \nsecond", false},
 		{"wrapped explicit newline spaces", strings.Repeat("a", 78) + "\nfirst\nsecond", strings.Repeat("a", 78) + "first  \nsecond", false},
 		{"full row explicit newline spaces", strings.Repeat("a", 77) + "\nb", strings.Repeat("a", 77) + " \nb", false},
-		{"short row cannot split a word", "one co\npy", "one copy", false},
-		{"short newline changes meaning", "I am now\nhere", "I am nowhere", false},
+		{"owned row splits a word", "one co\npy", "one copy", true},
+		{"ownership disambiguates inserted newlines", "I am now\nhere", "I am nowhere", true},
 		{"full row splits a word", strings.Repeat("a", 78) + "\nb", strings.Repeat("a", 78) + "b", true},
 		{"wide full row splits a word", strings.Repeat("界", 39) + "\nend", strings.Repeat("界", 39) + "end", true},
 		{"wrap trims trailing row space", strings.Repeat("a", 77) + "\n b", strings.Repeat("a", 77) + "  b", true},

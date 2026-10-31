@@ -1939,6 +1939,13 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		}
 		return false, bookkeepErr
 	}
+	if result.Submit == runtime.NudgeSubmitOwnershipLost {
+		// The prior paste lost ownership before acceptance was established.
+		// Keep the reason in the terminal receipt and remove the queued item;
+		// retrying after its composer clears could duplicate a consumed input.
+		ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "failed", "draft_ownership_lost", "provider-nudge-return")
+		return false, errors.Join(bookkeepErr, ackErr)
+	}
 	if !result.Landed() {
 		// The runtime declined without an error (e.g. the session stopped
 		// between observation and delivery). Release the claims so the next
@@ -3005,8 +3012,10 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
+	var unownedDeferred []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
+		unownedDeferred = unownedDeferred[:0]
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -3051,11 +3060,23 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		state.InFlight = inFlight
 		state.Pending = append(state.Pending, requeued...)
 		state.Dead = append(state.Dead, dead...)
+		if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+			for _, item := range requeued {
+				if item.Attempts == 1 {
+					unownedDeferred = append(unownedDeferred, item)
+				}
+			}
+		}
 		sortQueuedNudges(state)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, item := range unownedDeferred {
+		if nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q cannot own the preserved pane input: %v; resolve it before retrying; automatic hold expires at %s or after %d attempts\n", item.ID, item.Agent, cause, item.ExpiresAt.Format(time.RFC3339), defaultQueuedNudgeMaxAttempts) //nolint:errcheck
+		}
 	}
 	// Mark backing beads terminal outside the queue lock, best-effort. The
 	// dead-letter transition above is authoritative; a failed bead write must
@@ -3064,6 +3085,9 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	// pruneDeadQueuedNudges repairs dead entries whose backing bead missed
 	// terminal state, so drift converges on later queue operations.
 	for _, item := range deadLettered {
+		if errors.Is(cause, runtime.ErrNudgeDraftUnowned) && nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q dead-lettered after %d attempts: %v; resolve the preserved pane input before retrying\n", item.ID, item.Agent, item.Attempts, cause) //nolint:errcheck
+		}
 		if markErr := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); markErr != nil && nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
 		}
@@ -3072,10 +3096,16 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
-	// A preserved draft prevented any paste or submit. Keep the original
-	// batch identity and attempt budget until that input is resolved; normal
-	// expiry still applies. This also covers a batch shortened by withdrawal.
-	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) {
+	// Known different input retains its batch identity without spending an
+	// attempt. Missing ownership has a bounded hold: five attempts and at most
+	// one minute until expiry, whichever comes first, with the draft untouched.
+	if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+		limit := now.Add(time.Duration(defaultQueuedNudgeMaxAttempts-1) * defaultQueuedNudgeRetryDelay).UTC()
+		if item.ExpiresAt.IsZero() || item.ExpiresAt.After(limit) {
+			item.ExpiresAt = limit
+		}
+	}
+	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
 		item.Attempts++
 		item.LastAttemptAt = now.UTC()
 	}
