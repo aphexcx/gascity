@@ -42,6 +42,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/twin-recipe/scripts/lib"
           cp -f recipe/scripts/ensure-upstream-golangci-lint recipe/scripts/ensure-golangci-lint "$RUNNER_TEMP/twin-recipe/scripts/"
           cp -f recipe/scripts/lib/go-toolchain.sh "$RUNNER_TEMP/twin-recipe/scripts/lib/"
+          cp -f recipe/.github/scripts/upstream-twin-resources.sh "$RUNNER_TEMP/twin-recipe/"
+          cp -f recipe/.github/workflows/upstream-twin-gates.yml "$RUNNER_TEMP/twin-recipe/"
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -80,10 +82,37 @@ jobs:
           dirname "$lint_bin" >> "$GITHUB_PATH"
           "$lint_bin" version | tee "$RUNNER_TEMP/twin-evidence/linter.txt"
 
+      - name: Preserve frozen inputs before the hook
+        run: |
+          mkdir -p "$RUNNER_TEMP/twin-evidence/inputs"
+          cp -f "$RUNNER_TEMP/twin-evidence/"{linter.txt,input-tree.txt,delta.txt,pre-commit} "$RUNNER_TEMP/twin-evidence/inputs/"
+          cp -Rf "$RUNNER_TEMP/twin-recipe" "$RUNNER_TEMP/twin-evidence/inputs/recipe"
+          printf 'head=%s\nbase=%s\nrecipe=%s\n' "$TWIN_HEAD" "$TWIN_BASE" "$GITHUB_SHA" |
+            tee "$RUNNER_TEMP/twin-evidence/inputs/revisions.txt"
+          nproc
+          free -m
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+
+      - name: Upload frozen inputs before the hook
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: upstream-twin-inputs
+          path: ${{ runner.temp }}/twin-evidence/inputs/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Commit the complete twin delta through its unchanged hook
         shell: bash
         run: |
           set -euo pipefail
+          bash "$RUNNER_TEMP/twin-recipe/upstream-twin-resources.sh" > >(tee "$RUNNER_TEMP/twin-evidence/resources.log") 2>&1 &
+          sampler_pid=$!
+          stop_sampler() {
+            kill "$sampler_pid" 2>/dev/null || true
+            wait "$sampler_pid" || true
+          }
+          trap stop_sampler EXIT
           {
             git config --local core.hooksPath .githooks
             git config --local user.name 'Upstream twin gate'
@@ -104,7 +133,7 @@ jobs:
             git reset --soft "$TWIN_BASE"
             test -n "$(git diff --cached --name-only)"
             echo 'Running upstream pre-commit: staged formatter, nogo, and code generation.'
-            git commit -F "$RUNNER_TEMP/twin-message.txt"
+            stdbuf -oL -eL git commit -F "$RUNNER_TEMP/twin-message.txt"
             # A generated-source or formatter change requires a new reviewed input.
             git diff --exit-code "$TWIN_HEAD" HEAD
             test -z "$(git status --porcelain)"
