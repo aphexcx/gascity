@@ -34,6 +34,10 @@ JOB_COUNT="$TEST_DIR/test-local-job-count"
 LOCAL_PARALLEL="$TEST_DIR/test-local-parallel"
 INNER_LIB="$TEST_DIR/lib/inner-parallelism.sh"
 
+scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-load-test.XXXXXX")"
+scratch="$(cd "$scratch" && pwd -P)"
+trap 'rm -rf "$scratch"' EXIT
+
 pass=0; fail=0
 record_pass() { echo "  ok   $1"; pass=$((pass + 1)); }
 record_fail() { echo "  FAIL $1 — $2"; fail=$((fail + 1)); }
@@ -78,6 +82,32 @@ MALFORMED_OUT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" 
 MALFORMED_RC=$?
 assert_true "loadavg.malformed_nonzero_exit" test "$MALFORMED_RC" -ne 0
 assert_contains "loadavg.malformed_names_var" "$MALFORMED_OUT" "GC_TEST_LOCAL_LOADAVG"
+
+# Exercise both OS readers with fixed inputs; no dependence on this host's
+# changing load or on whether the test runs on Linux or Darwin.
+mkdir -p "$scratch/bin"
+cat >"$scratch/bin/sysctl" <<'SH'
+#!/usr/bin/env bash
+[[ "$*" == '-n vm.loadavg' ]] || exit 1
+printf '%s\n' "${GC_LOAD_TEST_SYSCTL:-{ 26.75 18.00 12.00 }}"
+SH
+chmod +x "$scratch/bin/sysctl"
+printf '%s\n' '29.9 12.0 10.0 1/100 42' >"$scratch/loadavg"
+GOT="$(PATH="$scratch/bin:$PATH" GC_TEST_LOCAL_CPUS=32 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG='' GC_TEST_LOCAL_LOADAVG_FILE="$scratch/loadavg" "$JOB_COUNT" 2>"$scratch/diagnostic")"
+assert_eq "loadavg.proc_reader_precedes_sysctl" "$GOT" "3"
+DIAGNOSTIC="$(cat "$scratch/diagnostic")"
+assert_contains "loadavg.diagnostic_cpus" "$DIAGNOSTIC" "cpus=32"
+assert_contains "loadavg.diagnostic_memory" "$DIAGNOSTIC" "memory_jobs=16"
+assert_contains "loadavg.diagnostic_headroom" "$DIAGNOSTIC" "load_adjusted_jobs=3"
+
+GOT="$(PATH="$scratch/bin:$PATH" GC_TEST_LOCAL_CPUS=32 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG='' GC_TEST_LOCAL_LOADAVG_FILE="$scratch/missing" "$JOB_COUNT")"
+assert_eq "loadavg.darwin_reader_subtracts_load" "$GOT" "6"
+GOT="$(PATH="$scratch/bin:$PATH" GC_LOAD_TEST_SYSCTL=unavailable GC_TEST_LOCAL_CPUS=32 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" GC_TEST_LOCAL_LOADAVG='' GC_TEST_LOCAL_LOADAVG_FILE="$scratch/missing" "$JOB_COUNT" 2>"$scratch/diagnostic")"
+assert_eq "loadavg.unavailable_preserves_cpu_memory_budget" "$GOT" "16"
+assert_contains "loadavg.unavailable_is_visible" "$(cat "$scratch/diagnostic")" "loadavg=unknown"
+
+GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB=4194304 GC_TEST_LOCAL_LOADAVG=28 "$JOB_COUNT")"
+assert_eq "loadavg.floor_does_not_exceed_memory_budget" "$GOT" "1"
 
 assert_true "loadavg.script_defines_min_auto_jobs_2" grep -qE 'min_auto_jobs=2' "$JOB_COUNT"
 assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$JOB_COUNT"

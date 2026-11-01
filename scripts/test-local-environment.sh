@@ -5,6 +5,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-local-env-test.XXXXXX")"
+scratch="$(cd "$scratch" && pwd -P)"
+default_log_root="$(cd /var/tmp && pwd -P)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin" "$scratch/user-tmp" "$scratch/caller tmp"
 
@@ -13,7 +15,12 @@ cat >"$scratch/bin/xargs" <<'SH'
 set -euo pipefail
 # Consume the original jobs, then exercise their unchanged worker with one
 # command that exposes only the environment values this test owns.
-cat >/dev/null
+while IFS= read -r -d '' spec; do
+  case "$spec" in
+    unit-core*|unit-cmd-gc*) printf 'probe_jobspec=%s\n' "$spec" ;;
+    integration-*) [[ "$spec" != *GO_TEST_TIMEOUT* ]] || exit 1 ;;
+  esac
+done
 shift 4 # -0 -n1 -P <jobs>
 printf 'probe_log_dir=%s\n' "$LOCAL_TEST_LOG_DIR"
 "$@" 'environment::test "$(command -v go)" = "$GOROOT/bin/go" && test "$(go env GOTOOLDIR)" = "$GOROOT/pkg/tool/$(go env GOHOSTOS)_$(go env GOHOSTARCH)" && printf "probe_toolchain=%s\nprobe_tmpdir=%s\nprobe_goflags=%s\n" "$GOTOOLCHAIN" "$TMPDIR" "$GOFLAGS"'
@@ -34,7 +41,7 @@ chmod +x "$scratch/bin/"*
 export PATH="$scratch/bin:$PATH"
 export GC_ENV_TEST_OS=Darwin GC_ENV_TEST_USER_TMP="$scratch/user-tmp/"
 export LOCAL_TEST_JOBS=1 CMD_GC_PROCESS_TOTAL=1 GC_PUSH_GATE_NO_CAP=1 GC_TEST_NO_SLICE=1
-unset TMPDIR LOCAL_TEST_LOG_DIR GC_TEST_INNER_P
+unset TMPDIR LOCAL_TEST_LOG_DIR GC_TEST_INNER_P GO_TEST_TIMEOUT
 cd "$repo_root"
 
 assert_contains() {
@@ -57,18 +64,24 @@ output="$(TMPDIR="$scratch/caller tmp" bash scripts/test-local-parallel fast 2>&
 assert_contains "probe_tmpdir=$scratch/caller tmp"
 log_dir="$(printf '%s\n' "$output" | sed -n 's/^probe_log_dir=//p')"
 [[ "$log_dir" == "$scratch/caller tmp/"* ]]
-test ! -e "$log_dir"
-echo 'ok: caller TMPDIR wins; default logs use it and are removed on success'
+test -f "$log_dir/environment.log"
+[[ "${log_dir##*/}" == gc-local-tests.[0-9]*.* ]]
+assert_contains "All fast jobs passed; logs are in $log_dir"
+echo 'ok: caller TMPDIR wins; dated default logs survive success'
 
 output="$(bash scripts/test-local-parallel fast 2>&1)"
 assert_contains "probe_tmpdir=$scratch/user-tmp"
 log_dir="$(printf '%s\n' "$output" | sed -n 's/^probe_log_dir=//p')"
-[[ "$log_dir" == "$scratch/user-tmp/"* ]]
-test ! -e "$log_dir"
-echo 'ok: Darwin default logs and workers share the per-user TMPDIR'
+[[ "$log_dir" == "$default_log_root"/gc-local-tests.* ]]
+test -f "$log_dir/environment.log"
+rm -rf "$log_dir"
+echo 'ok: Darwin default logs survive outside disposable worker scratch'
 
 output="$(GC_ENV_TEST_OS=Linux bash scripts/test-local-parallel fast 2>&1)"
 assert_contains 'probe_tmpdir=/var/tmp'
+log_dir="$(printf '%s\n' "$output" | sed -n 's/^probe_log_dir=//p')"
+test -f "$log_dir/environment.log"
+rm -rf "$log_dir"
 echo 'ok: non-Darwin default remains /var/tmp'
 
 for getconf_status in 0 1; do
@@ -76,7 +89,9 @@ for getconf_status in 0 1; do
   fallback_tmp="$(printf '%s\n' "$output" | sed -n 's/^probe_tmpdir=//p')"
   [[ "$fallback_tmp" == /var/tmp/gc-local-tmp.* ]]
   log_dir="$(printf '%s\n' "$output" | sed -n 's/^probe_log_dir=//p')"
-  [[ "$log_dir" == "$fallback_tmp/"* ]]
+  [[ "$log_dir" == "$default_log_root"/gc-local-tests.* ]]
+  test -f "$log_dir/environment.log"
+  rm -rf "$log_dir"
   if [[ -e "$fallback_tmp" ]]; then
     rmdir "$fallback_tmp"
     echo 'runner left its fallback scratch directory behind' >&2
@@ -119,4 +134,21 @@ assert_contains "probe_tmpdir=$scratch/caller tmp"
 test -f "$scratch/make caller logs/environment.log"
 echo 'ok: Make preserves caller TMPDIR'
 
-echo 'local-environment tests: 9 passed'
+# The real jobspecs must use the scaled budget in both core and cmd/gc jobs.
+for sizing in '2:20m' '4:30m' '8:40m' '16:50m'; do
+  jobs="${sizing%:*}"
+  budget="${sizing#*:}"
+  output="$(LOCAL_TEST_JOBS="$jobs" LOCAL_TEST_LOG_DIR="$scratch/budget-$jobs" bash scripts/test-local-parallel fast 2>&1)"
+  assert_contains "-timeout $budget "
+  assert_contains "GO_TEST_TIMEOUT=$budget "
+  assert_contains "LOCAL_TEST_JOBS=$jobs "
+done
+output="$(LOCAL_TEST_JOBS=16 GO_TEST_TIMEOUT=37m LOCAL_TEST_LOG_DIR="$scratch/budget-override" bash scripts/test-local-parallel fast 2>&1)"
+assert_contains '-timeout 37m '
+assert_contains 'GO_TEST_TIMEOUT=37m '
+echo 'ok: fan-out scales the shared package budget; explicit timeout wins'
+
+output="$(GO_TEST_TIMEOUT=37m LOCAL_TEST_LOG_DIR="$scratch/integration-budget" bash scripts/test-local-parallel integration 2>&1)"
+echo 'ok: integration jobs do not inherit the shared package budget'
+
+echo 'local-environment tests: 11 passed'

@@ -146,14 +146,25 @@ detect_loadavg() {
     return
   fi
 
-  local loadavg_file="/proc/loadavg"
-  [[ -r "$loadavg_file" ]] || return 1
-  awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
+  local loadavg_file="${GC_TEST_LOCAL_LOADAVG_FILE:-/proc/loadavg}" value
+  if [[ -r "$loadavg_file" ]]; then
+    value="$(awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null)"
+    if [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      printf '%s\n' "$value"
+      return
+    fi
+  fi
+
+  # Darwin reports "{ <1m> <5m> <15m> }" rather than /proc/loadavg.
+  value="$(sysctl -n vm.loadavg 2>/dev/null | awk '$1 == "{" { print $2; exit }' || true)"
+  [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+  printf '%s\n' "$value"
 }
 
 cpus="$(detect_cpus)"
 memory_kib="$(detect_memory_kib || true)"
 jobs="$cpus"
+memory_jobs="$unknown_memory_jobs"
 
 if [[ -n "$memory_kib" ]]; then
   memory_jobs=$((memory_kib / job_memory_kib))
@@ -169,9 +180,10 @@ fi
 
 # A small machine has no meaningful headroom to trade away for load
 # awareness — skip it outright and let the raw cpu/memory budget stand.
+loadavg=unknown
+load_jobs="$cpus"
 if [[ "$cpus" -gt $((min_auto_jobs * 2)) ]]; then
-  loadavg="$(detect_loadavg || true)"
-  if [[ -n "$loadavg" ]]; then
+  if loadavg="$(detect_loadavg)"; then
     load_int="${loadavg%%.*}"
     load_jobs=$((cpus - load_int))
     if [[ "$load_jobs" -lt "$min_auto_jobs" ]]; then
@@ -180,6 +192,11 @@ if [[ "$cpus" -gt $((min_auto_jobs * 2)) ]]; then
     if [[ "$load_jobs" -lt "$jobs" ]]; then
       jobs="$load_jobs"
     fi
+  else
+    # Invalid explicit input is an error; an unavailable OS reading leaves
+    # the CPU/memory budget intact and is visible in the diagnostic below.
+    [[ -z "${GC_TEST_LOCAL_LOADAVG:-}" ]] || exit 1
+    loadavg=unknown
   fi
 fi
 
@@ -187,4 +204,6 @@ if [[ "$jobs" -gt "$max_auto_jobs" ]]; then
   jobs="$max_auto_jobs"
 fi
 
+printf 'test-local-job-count: cpus=%s memory_jobs=%s load_adjusted_jobs=%s loadavg=%s jobs=%s\n' \
+  "$cpus" "$memory_jobs" "$load_jobs" "$loadavg" "$jobs" >&2
 printf '%s\n' "$jobs"

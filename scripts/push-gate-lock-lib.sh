@@ -49,8 +49,13 @@
 #   scripts/push-ownership-guard.sh's unrelated exit-1 contract.
 #
 # CONTRACT
+#   - scripts/with-push-gate-slot -- CMD ... runs an otherwise ungated
+#     command under this same bound. It preserves argv and exit status,
+#     returns 75 on slot timeout, and severs lock-FD inheritance. Commands
+#     must supply their own execution budget (e.g. go test -timeout=40m).
 #   - Slot content is diagnostic only: "<pid> <iso8601-utc> <label>
-#     <hostname>" (mpr's own global slot only stamps pid+timestamp; this
+#     <hostname> [logs=<LOCAL_TEST_LOG_DIR>]" (mpr's own global slot only
+#     stamps pid+timestamp; this
 #     adds label+hostname per FR8, since callers here span an entire city
 #     of heterogeneous rigs/roles rather than one single-purpose script).
 #     Slot files are never sourced or eval'd — display only.
@@ -339,7 +344,9 @@ push_gate_acquire_slot() {
             fi
             eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
             if flock -n "$_pgl_fd"; then
-                printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
+                printf '%s %s %s %s%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    "$_pgl_label" "$_pgl_host" "${LOCAL_TEST_LOG_DIR:+ logs=$LOCAL_TEST_LOG_DIR}" \
+                    >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"
                 if [[ "$_pgl_announced" -eq 1 ]]; then
                     echo "push-gate: slot-${_pgl_i} acquired after wait" >&2

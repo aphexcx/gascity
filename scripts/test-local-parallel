@@ -9,13 +9,14 @@ usage() {
 usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 
 Environment:
-  LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
+  LOCAL_TEST_JOBS        max concurrent jobs (default: CPU, memory and load aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
   CORE_SHARD_TOTAL      non-cmd/gc package shard count (default: 6)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
-  GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
-  LOCAL_TEST_LOG_DIR    create and retain logs here (default: temporary directory)
+  GO_TEST_TIMEOUT       per-package budget, <n>s|m|h (default: 20m at <=2 jobs,
+                         plus 10m per doubling of fan-out)
+  LOCAL_TEST_LOG_DIR    retained logs (default: dated directory in TMPDIR or /var/tmp)
   OBSERVABLE_FAILURE_LINES  failure detail line budget (default: 240, incl. tail)
   TMPDIR                scratch root (default: Darwin per-user temp; else /var/tmp)
 USAGE
@@ -44,6 +45,21 @@ source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
 # shellcheck source=lib/inner-parallelism.sh
 source "$repo_root/scripts/lib/inner-parallelism.sh"
+
+# Logs outlive both successful runs and disposable worker scratch. Resolve
+# before acquiring a slot so contention diagnostics point to this same path.
+if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
+  log_dir="$LOCAL_TEST_LOG_DIR"
+  if ! mkdir -p "$log_dir" 2>/dev/null; then
+    echo "cannot create LOCAL_TEST_LOG_DIR: $log_dir" >&2
+    exit 1
+  fi
+else
+  log_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-local-tests.$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+fi
+log_dir="$(cd "$log_dir" && pwd -P)"
+export LOCAL_TEST_LOG_DIR="$log_dir"
+echo "Logs: $log_dir"
 
 # Cross-invocation concurrency bound (ga-owh20p): at most
 # PUSH_GATE_MAX_CONCURRENT heavy-suite invocations run at once, city-wide,
@@ -104,17 +120,29 @@ core_total="${CORE_SHARD_TOTAL:-6}"
 # default fires on aggregate load rather than on a real hang: six packages
 # panicked with "test timed out after 10m0s" while still working through their
 # test lists, which made this target unusable as the merge baseline (ga-9au).
-# The unit sweep and the cmd/gc shards contend for the same box, so they share
-# one number — two independently tuned budgets are what drifted apart before.
+# On citadel, scripts took 315.958s at four jobs but timed out at 1200.148s
+# at sixteen under contention (10/31, gf-sdo measurements). Keep one shared
+# budget: 20m at up to two jobs, plus 10m per doubling (4=30m, 8=40m, 16=50m).
+# Logarithmic scaling gives larger fan-outs headroom without a linear growth
+# in hang-detection time. An explicit GO_TEST_TIMEOUT always wins.
 # GO_TEST_TIMEOUT deliberately does not reach the integration jobs: it is not
 # in the per-job `env -i` allowlist below and is not prefixed onto their
 # jobspecs, so scripts/test-integration-shard keeps its own 30m default.
-# Adding it there would silently cut that budget from 30m to 20m.
+# Adding it there would silently replace integration's independent budget.
 go_test_timeout="${GO_TEST_TIMEOUT:-20m}"
 
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
   echo "LOCAL_TEST_JOBS must be a positive integer" >&2
   exit 1
+fi
+if [[ -z "${GO_TEST_TIMEOUT:-}" ]]; then
+  budget_jobs="$local_jobs"
+  budget_minutes=20
+  while (( budget_jobs > 2 )); do
+    budget_minutes=$((budget_minutes + 10))
+    budget_jobs=$(((budget_jobs + 1) / 2))
+  done
+  go_test_timeout="${budget_minutes}m"
 fi
 if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
   echo "CMD_GC_PROCESS_TOTAL must be a positive integer" >&2
@@ -308,18 +336,6 @@ if [[ ( "$mode" == fast || "$mode" == full ) && -n "${GC_ICU_CHECK_HELPER:-}" ]]
   GC_FAST_UNIT=1 sh "$GC_ICU_CHECK_HELPER" -test ./...
 fi
 
-cleanup_log_dir=1
-if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
-  log_dir="$LOCAL_TEST_LOG_DIR"
-  if ! mkdir -p "$log_dir" 2>/dev/null; then
-    echo "cannot create LOCAL_TEST_LOG_DIR: $log_dir" >&2
-    exit 1
-  fi
-  cleanup_log_dir=0
-else
-  log_dir="$(mktemp -d "$test_tmpdir/gc-local-tests.XXXXXX")"
-fi
-export LOCAL_TEST_LOG_DIR="$log_dir"
 export TEST_LOCAL_GOPATH="$gopath_val"
 export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
@@ -349,7 +365,7 @@ export TEST_LOCAL_NICE="$nice_prefix"
 sweep_min_age_seconds="$(gc_harness_duration_seconds "$go_test_timeout")" || sweep_min_age_seconds=3600
 gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
 
-echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
+echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p} GO_TEST_TIMEOUT=${go_test_timeout}"
 
 # Keep failure markers with three lines of context and reserve the final 80
 # lines for the log tail. The shared observable-test knob caps content lines;
@@ -468,13 +484,10 @@ status=$?
 set -e
 
 if [[ "$status" -eq 0 ]]; then
-  if [[ "$cleanup_log_dir" -eq 1 ]]; then
-    rm -rf "$log_dir"
-  fi
   if [[ "$cleanup_test_tmpdir" -eq 1 ]]; then
     rm -rf "$test_tmpdir"
   fi
-  echo "All ${mode} jobs passed"
+  echo "All ${mode} jobs passed; logs are in ${log_dir}"
 else
   echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
 fi
