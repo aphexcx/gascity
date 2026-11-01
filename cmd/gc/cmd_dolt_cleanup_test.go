@@ -724,6 +724,9 @@ func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 		{PID: 105, Argv: []string{"dolt", "sql-server", "--data-dir", filepath.Dir(currentConfig)}, CWDState: procPathStateLive},
 		{PID: 106, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-7", "config.yaml")}, CWDState: procPathStateLive},
 	}
+	for i := range procs {
+		procs[i].HostNamespace = true
+	}
 	var stdout, stderr bytes.Buffer
 	code := runDoltCleanup(cleanupOptions{
 		FS: fsys.NewFake(), JSON: true, TempDir: tempDir,

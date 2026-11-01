@@ -88,6 +88,7 @@ func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
 		t.Error("a newer basetemp must not discard the older run's live owner")
 	}
 	proc := DoltProcInfo{PID: 101, Argv: []string{"dolt", "sql-server", "--config", config}, CWDState: procPathStateLive}
+	proc.HostNamespace = true
 	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
 		t.Errorf("concurrent older run: action = %q, want protect", got.Action)
 	}
@@ -198,6 +199,50 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	}
 	if !pytestRootMayBeLive(root) {
 		t.Error("a replaced basetemp must stay protected")
+	}
+}
+
+func TestDoltProcHostNamespaceAt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mnt       string
+		pid       string
+		otherRoot bool
+		want      bool
+	}{
+		{"host", "mnt:[1]", "pid:[1]", false, true},
+		{"foreign mount namespace", "mnt:[2]", "pid:[1]", false, false},
+		{"foreign PID namespace", "mnt:[1]", "pid:[2]", false, false},
+		{"unreadable namespace", "", "pid:[1]", false, false},
+		{"chroot", "mnt:[1]", "pid:[1]", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			for _, dir := range []string{"self/ns", "123/ns", "rootfs", "other-rootfs"} {
+				if err := os.MkdirAll(filepath.Join(procRoot, dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			links := map[string]string{
+				"self/ns/mnt": "mnt:[1]", "self/ns/pid": "pid:[1]",
+				"123/ns/mnt": tc.mnt, "123/ns/pid": tc.pid,
+				"self/root": filepath.Join(procRoot, "rootfs"),
+				"123/root":  filepath.Join(procRoot, "rootfs"),
+			}
+			if tc.otherRoot {
+				links["123/root"] = filepath.Join(procRoot, "other-rootfs")
+			}
+			for name, target := range links {
+				if target != "" {
+					if err := os.Symlink(target, filepath.Join(procRoot, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if got := doltProcHostNamespaceAt(procRoot, 123); got != tc.want {
+				t.Errorf("host namespace = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

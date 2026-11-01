@@ -170,13 +170,19 @@ func TestIsTestConfigPath_Pytest(t *testing.T) {
 }
 
 func TestClassifyDoltProcess_PytestContainerNamespace(t *testing.T) {
-	p := DoltProcInfo{
-		PID: 123, ContainerRuntime: "docker", CWDState: procPathStateLive,
-		Argv: []string{"dolt", "sql-server", "--config", "/var/tmp/python/pytest-of-root/pytest-9/config.yaml"},
-	}
-	got := classifyDoltProcess(p, nil, "", "/var/tmp/python", nil)
-	if got.Action != "protect" || !strings.Contains(got.Reason, "container") {
-		t.Errorf("configured container = %+v, want protection without consulting host pytest paths", got)
+	for _, cgroup := range []string{
+		"0::/system.slice/docker-123.scope\n",
+		"0::/kubepods.slice/cri-containerd-123.scope\n",
+		"0::/unrecognized-sandbox\n",
+	} {
+		p := DoltProcInfo{
+			PID: 123, ContainerRuntime: containerRuntimeFromCgroup([]byte(cgroup)), CWDState: procPathStateLive,
+			Argv: []string{"dolt", "sql-server", "--config", "/var/tmp/python/pytest-of-root/pytest-9/config.yaml"},
+		}
+		got := classifyDoltProcess(p, nil, "", "/var/tmp/python", nil)
+		if got.Action != "protect" {
+			t.Errorf("cgroup %q: %+v, want protection without consulting host pytest paths", cgroup, got)
+		}
 	}
 }
 
@@ -782,6 +788,16 @@ func TestContainerRuntimeFromCgroup(t *testing.T) {
 			name:   "plain host process",
 			cgroup: "0::/user.slice/user-1000.slice/session-3.scope\n",
 			want:   "",
+		},
+		{
+			name:   "containerd scope",
+			cgroup: "0::/kubepods.slice/cri-containerd-123.scope\n",
+			want:   "containerd",
+		},
+		{
+			name:   "CRI-O scope",
+			cgroup: "0::/kubepods.slice/crio-123.scope\n",
+			want:   "cri-o",
 		},
 		{
 			name:   "empty cgroup file",

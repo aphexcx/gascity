@@ -149,6 +149,7 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 			CWDState:         doltProcCWDState(pid),
 			ConfigPathState:  doltConfigPathState(argv),
 			ContainerRuntime: doltProcContainerRuntime(pid),
+			HostNamespace:    doltProcHostNamespace(pid),
 		})
 	}
 	return out, nil
@@ -169,6 +170,7 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 		// No /proc on this host, so CWDState stays unknown (protect-leaning),
 		// but the --config path can still be checked on disk.
 		proc.ConfigPathState = doltConfigPathState(proc.Argv)
+		proc.HostNamespace = doltProcHostNamespace(proc.PID)
 		out = append(out, proc)
 	}
 	return out, nil
@@ -265,14 +267,10 @@ func doltProcCWDState(pid int) string {
 
 // doltProcContainerRuntime reports the container runtime managing pid, by
 // scanning every line of /proc/<pid>/cgroup for that runtime's cgroup path
-// markers. Both the systemd-driver shapes (`libpod-<id>.scope`,
-// `docker-<id>.scope`, used by cgroup v2 and v1-with-systemd) and the
-// cgroupfs-driver shape `/docker/<id>` (emitted by cgroup v1, which carries no
-// `docker-` marker at all) are matched, and every line is checked because
-// cgroup v1 emits one line per controller in no guaranteed order. Returns ""
-// for a normal host process, a process whose cgroup can't be read (host with
-// no /proc, timeout, permission), or cgroup lines that carry no marker —
-// classifyDoltProcess treats "" as no signal (ga-sm1cvj).
+// markers. It recognizes Docker, Podman, containerd, and CRI-O systemd scopes,
+// plus Docker cgroupfs paths. Every line is checked because cgroup v1 emits
+// one line per controller in no guaranteed order. An empty result means the
+// runtime is unidentified; it does not establish namespace compatibility.
 func doltProcContainerRuntime(pid int) string {
 	if pid <= 0 {
 		return ""
@@ -282,6 +280,40 @@ func doltProcContainerRuntime(pid int) string {
 		return ""
 	}
 	return containerRuntimeFromCgroup(data)
+}
+
+// doltProcHostNamespace verifies the namespace boundary independently of cgroup
+// naming. Native platforms without Linux namespaces share the host PID space.
+func doltProcHostNamespace(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	return doltProcHostNamespaceAt("/proc", pid)
+}
+
+func doltProcHostNamespaceAt(procRoot string, pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	processDir := filepath.Join(procRoot, strconv.Itoa(pid))
+	selfDir := filepath.Join(procRoot, "self")
+	for _, ns := range []string{"mnt", "pid"} {
+		self, err := os.Readlink(filepath.Join(selfDir, "ns", ns))
+		if err != nil || self == "" {
+			return false
+		}
+		process, err := os.Readlink(filepath.Join(processDir, "ns", ns))
+		if err != nil || process != self {
+			return false
+		}
+	}
+	// A chroot can change absolute-path meaning without changing namespaces.
+	selfRoot, err := statWithTimeout(filepath.Join(selfDir, "root"))
+	if err != nil {
+		return false
+	}
+	processRoot, err := statWithTimeout(filepath.Join(processDir, "root"))
+	return err == nil && os.SameFile(selfRoot, processRoot)
 }
 
 // containerRuntimeFromCgroup is doltProcContainerRuntime's pure parser over
@@ -294,6 +326,10 @@ func containerRuntimeFromCgroup(data []byte) string {
 			return "podman"
 		case strings.Contains(line, "docker-"), strings.Contains(line, "/docker/"):
 			return "docker"
+		case strings.Contains(line, "cri-containerd-"):
+			return "containerd"
+		case strings.Contains(line, "crio-"):
+			return "cri-o"
 		}
 	}
 	return ""

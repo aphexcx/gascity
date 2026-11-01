@@ -42,13 +42,11 @@ const (
 // on disk, live when it does, unknown for absent or relative configs and for
 // stat errors. ConfigPathState is not a standalone reap trigger: a deleted
 // config protects (with a confirm-manually reason) unless the deleted-cwd
-// signal corroborates that the scope is truly gone. ContainerRuntime is the
-// runtime name ("docker" or "podman") when /proc/<pid>/cgroup's first line
-// carries that runtime's cgroup marker, or "" for a normal host process or a
-// host with no /proc (ga-sm1cvj). classifyDoltProcess treats a non-empty
-// value as an unconditional protect signal for a bare (no --config) server:
-// gc does not own container lifecycle, and killing the in-container PID
-// would leave a broken container rather than free anything.
+// signal corroborates that the scope is truly gone. ContainerRuntime is a
+// recognized runtime name from /proc/<pid>/cgroup, or "" when unidentified.
+// Recognized containers are protected for bare servers and pytest paths.
+// Pytest eligibility also requires HostNamespace proof, so an unidentified
+// runtime does not establish that the process uses the host's paths and PIDs.
 type DoltProcInfo struct {
 	PID              int
 	Argv             []string
@@ -59,6 +57,9 @@ type DoltProcInfo struct {
 	CWDState         string
 	ConfigPathState  string
 	ContainerRuntime string
+	// HostNamespace verifies that host paths and PIDs are meaningful for this
+	// process. Linux discovery compares mount/PID namespaces and filesystem roots.
+	HostNamespace bool
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -336,6 +337,13 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			return reapClassification{
 				Action:     "protect",
 				Reason:     fmt.Sprintf("container-managed dolt server (%s); pytest ownership cannot be verified on the host", p.ContainerRuntime),
+				ConfigPath: cfgPath,
+			}
+		}
+		if !p.HostNamespace {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "process namespaces are not verified; refusing to use host pytest paths or owner PIDs",
 				ConfigPath: cfgPath,
 			}
 		}
