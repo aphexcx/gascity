@@ -640,7 +640,7 @@ func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[s
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -2560,7 +2560,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		claimed = nudgequeue.ClaimDueBatch(state, now, defaultQueuedNudgeClaimTTL, match)
@@ -2584,7 +2584,7 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -2694,7 +2694,7 @@ func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now
 		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(cityPath, state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -2807,7 +2807,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(cityPath, state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
@@ -2908,7 +2908,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		var terminal []queuedNudge
@@ -2962,7 +2962,7 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		var released []queuedNudge
@@ -3032,7 +3032,7 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
 		}
 		var requeued []queuedNudge
@@ -3265,7 +3265,7 @@ func runNudgeQueueMaintenanceSweep(cityPath string, now time.Time) error {
 		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
-		return pruneDeadQueuedNudges(state, front, now, deadline)
+		return pruneDeadQueuedNudges(cityPath, state, front, now, deadline)
 	})
 }
 
@@ -3335,11 +3335,11 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 
 // pruneDeadQueuedNudges preserves unresolved dead letters for seven days and
 // disposition receipts for one hour. Cap losses are notified after commit.
-func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
-	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+func pruneDeadQueuedNudges(cityPath string, state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return pruneDeadQueuedNudgesWithClock(cityPath, state, front, now, deadline, clock.Real{})
 }
 
-func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
+func pruneDeadQueuedNudgesWithClock(cityPath string, state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	// Give capped payloads the first use of the budget, before retrying any
 	// retained repair. Each lookup here removes a payload even if it fails,
 	// so later passes advance instead of retrying an unchanged prefix.
@@ -3369,7 +3369,7 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 	}
 	state.Dead = filtered
 
-	pruneNudgeTombstones(state, front, now, deadline, clk)
+	pruneNudgeTombstones(cityPath, state, front, now, deadline, clk)
 	// These repairs were attempted during expiry; do not retry them twice
 	// in one pass. Rotation of the older backlog is persisted ahead of them.
 	state.Tombstones = append(state.Tombstones, tombstones...)

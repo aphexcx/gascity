@@ -308,7 +308,7 @@ func TestPruneDeadQueuedNudgesRepairsMissingTerminalBeadRecord(t *testing.T) {
 	item.DeadAt = now.Add(-30 * time.Minute)
 
 	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+	if err := pruneDeadQueuedNudges("", state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
 	}
 	if len(state.Dead) != 1 {
@@ -5210,7 +5210,7 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 	// Only the old item has exceeded the seven-day recovery cap.
 	store := openNudgeBeadStore(dir)
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline())
+		return pruneDeadQueuedNudges("", state, nudgeFrontDoor(store), now, noMaintenanceDeadline())
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
@@ -5248,7 +5248,7 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 	}
 
 	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		return pruneDeadQueuedNudges(state, nil, now, noMaintenanceDeadline())
+		return pruneDeadQueuedNudges("", state, nil, now, noMaintenanceDeadline())
 	})
 	if err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
@@ -5296,7 +5296,7 @@ func TestPruneDeadQueuedNudges_PrunesItemsWhoseBeadWasReaped(t *testing.T) {
 	}
 
 	state := &nudgeQueueState{Dead: []queuedNudge{item}}
-	if err := pruneDeadQueuedNudges(state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
+	if err := pruneDeadQueuedNudges("", state, nudgeFrontDoor(store), now, noMaintenanceDeadline()); err != nil {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
 	}
 	if len(state.Dead) != 0 {
