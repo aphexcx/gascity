@@ -756,17 +756,16 @@ func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 	}
 }
 
-func TestRunDoltCleanup_ForceProtectsActiveDataDirFromPS(t *testing.T) {
+func TestRunDoltCleanup_ForceProtectsActiveDataDir(t *testing.T) {
 	tempDir := t.TempDir()
 	root := filepath.Join(tempDir, "TestLive123")
 	for _, configArgs := range []string{"", " --config /tmp/TestOld/config.yaml"} {
 		t.Run(configArgs, func(t *testing.T) {
-			line := "12345 Sun May 17 09:31:24 2026 dolt sql-server" + configArgs + " --data-dir " + filepath.Join(root, "dolt")
-			proc, ok := parseDoltPSLine(line, nil)
-			if !ok {
-				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+			argv := []string{"dolt", "sql-server", "--data-dir", filepath.Join(root, "dolt")}
+			if configArgs != "" {
+				argv = append(argv, "--config", "/tmp/TestOld/config.yaml")
 			}
-			proc.CWDState = procPathStateLive
+			proc := DoltProcInfo{PID: 12345, Argv: argv, StartTimeTicks: 10, CWDState: procPathStateLive}
 			var signals []int
 			var removed []string
 			var stdout, stderr bytes.Buffer
@@ -798,6 +797,37 @@ func TestRunDoltCleanup_ForceProtectsActiveDataDirFromPS(t *testing.T) {
 				t.Errorf("protected = %v, want [12345]", report.Reaped.ProtectedPIDs)
 			}
 		})
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsAmbiguousPSPath(t *testing.T) {
+	line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/TestOwner/config.yaml --data-dir /tmp/TestRun - copy/dolt"
+	proc, ok := parseDoltPSLine(line, nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true,
+		ActiveTestRoots:   []string{},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if len(signals) != 0 || len(removed) != 0 {
+		t.Errorf("ambiguous ps path: signals=%v, removed=%v; want no mutations", signals, removed)
 	}
 }
 

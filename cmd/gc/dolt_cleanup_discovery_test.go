@@ -104,6 +104,33 @@ func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_PytestCurrentAlias(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	older := filepath.Join(userRoot, "pytest-9")
+	current := filepath.Join(userRoot, "pytest-10")
+	for _, root := range []string{older, current} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	alias := filepath.Join(userRoot, "pytest-current")
+	if err := os.Symlink(current, alias); err != nil {
+		t.Fatal(err)
+	}
+	proc := DoltProcInfo{
+		PID: 101, HostNamespace: true, CWDState: procPathStateLive,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", filepath.Join(alias, "test_city", "data")},
+	}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("pytest-current data directory: action = %q, want protect", got.Action)
+	}
+	if isTestConfigPath(filepath.Join(alias, "config.yaml"), "", tempDir) {
+		t.Error("pytest-current must not authorize cleanup")
+	}
+}
+
 func TestPytestOwnerMayBeLive(t *testing.T) {
 	root := t.TempDir()
 	lock := filepath.Join(root, ".lock")
@@ -423,7 +450,7 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 	}
 }
 
-func TestParseDoltPSLine_PytestDataDirProtectsCurrentRun(t *testing.T) {
+func TestClassifyDoltProcess_PytestDataDirProtectsCurrentRun(t *testing.T) {
 	tempDir := t.TempDir()
 	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
 	current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
@@ -437,40 +464,13 @@ func TestParseDoltPSLine_PytestDataDirProtectsCurrentRun(t *testing.T) {
 	dataDir := filepath.Join(current, "test city", "data")
 	for _, sep := range []string{" ", "="} {
 		t.Run("separator="+sep, func(t *testing.T) {
-			line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config" + sep + config + " --data-dir" + sep + dataDir + " --port 3306"
-			proc, ok := parseDoltPSLine(line, nil)
-			if !ok {
-				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+			argv := []string{"dolt", "sql-server", "--config", config, "--data-dir", dataDir}
+			if sep == "=" {
+				argv = []string{"dolt", "sql-server", "--config=" + config, "--data-dir=" + dataDir}
 			}
-			if got := extractConfigPath(proc.Argv); got != config {
-				t.Errorf("config = %q, want %q", got, config)
-			}
-			if got := extractDataDirPath(proc.Argv); got != dataDir {
-				t.Errorf("data-dir = %q, want %q", got, dataDir)
-			}
-			proc.HostNamespace = true
-			proc.CWDState = procPathStateLive
+			proc := DoltProcInfo{PID: 12345, Argv: argv, HostNamespace: true, CWDState: procPathStateLive}
 			if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
 				t.Errorf("current data directory with older config: action = %q, want protect", got.Action)
-			}
-		})
-	}
-}
-
-func TestParseDoltPSLine_DataDirBeforeShortOptions(t *testing.T) {
-	dataDir := "/city with spaces/.beads/dolt"
-	for _, sep := range []string{" ", "="} {
-		t.Run("separator="+sep, func(t *testing.T) {
-			command := "dolt sql-server --data-dir" + sep + dataDir + " -P 3306"
-			proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 "+command, nil)
-			if !ok {
-				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
-			}
-			if got := extractDataDirPath(proc.Argv); got != dataDir {
-				t.Errorf("data-dir = %q, want %q", got, dataDir)
-			}
-			if !doltSQLServerProcessOwnsDataDir(proc.PID, proc.Argv, command, dataDir) {
-				t.Error("standalone server ownership must survive trailing short options")
 			}
 		})
 	}

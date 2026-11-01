@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
@@ -168,7 +169,11 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 			continue
 		}
 		// No /proc on this host, so CWDState stays unknown (protect-leaning),
-		// but the --config path can still be checked on disk.
+		// and flattened ps arguments require verification before cleanup.
+		if argv, verified := readDoltSQLServerArgv(proc.PID); verified {
+			proc.Argv = argv
+			proc.ArgvUnverified = false
+		}
 		proc.ConfigPathState = doltConfigPathState(proc.Argv)
 		proc.HostNamespace = doltProcHostNamespace(proc.PID)
 		out = append(out, proc)
@@ -452,8 +457,8 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	return activeTestRootUnder(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
 }
 
-// pytestTestRoot recognizes pytest's default numbered basetemps, not custom
-// --basetemp paths or the pytest-current alias. Match whole path components.
+// pytestTestRoot recognizes pytest's default basetemps and pytest-current
+// alias, not custom --basetemp paths. Match whole path components.
 func pytestTestRoot(path, tempDir string) (string, bool) {
 	clean := cleanPytestPath(path)
 	for _, root := range []string{tempDir, "/tmp"} {
@@ -469,7 +474,7 @@ func pytestTestRoot(path, tempDir string) (string, bool) {
 		if len(parts) < 2 || !strings.HasPrefix(parts[0], "pytest-of-") || parts[0] == "pytest-of-" {
 			continue
 		}
-		if _, ok := pytestRunNumber(parts[1]); ok {
+		if _, ok := pytestRunNumber(parts[1]); ok || parts[1] == "pytest-current" {
 			return filepath.Join(root, parts[0], parts[1]), true
 		}
 	}
@@ -509,6 +514,9 @@ func pytestRunNumber(name string) (uint64, bool) {
 // roots with a live pytest owner. Unreadable state fails closed. Missing
 // basetemps retain the existing deleted-scope rule.
 func pytestRootMayBeLive(root string) bool {
+	if filepath.Base(root) == "pytest-current" {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
 	defer cancel()
 	ch := make(chan bool, 1)
@@ -667,15 +675,23 @@ func readProcRSSBytes(pid int) int64 {
 	return pages * int64(os.Getpagesize())
 }
 
-// readDoltSQLServerArgv reads /proc/<pid>/cmdline and returns the NUL-split
-// argv if and only if the process looks like `dolt sql-server`. The boolean
-// is false for any non-dolt process so callers can skip cheaply.
+// readDoltSQLServerArgv reads argument boundaries from /proc or Darwin's
+// kern.procargs2. Flattened ps output cannot authorize cleanup.
 func readDoltSQLServerArgv(pid int) ([]string, bool) {
-	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil || len(data) == 0 {
-		return nil, false
+	var argv []string
+	if runtime.GOOS == "darwin" {
+		var err error
+		argv, err = pidutil.Cmdline(pid)
+		if err != nil {
+			return nil, false
+		}
+	} else {
+		data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		if err != nil || len(data) == 0 {
+			return nil, false
+		}
+		argv = splitCmdline(data)
 	}
-	argv := splitCmdline(data)
 	if !looksLikeDoltSQLServer(argv) {
 		return nil, false
 	}
@@ -723,10 +739,11 @@ func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
 		return DoltProcInfo{}, false
 	}
 	return DoltProcInfo{
-		PID:           pid,
-		Argv:          argv,
-		Ports:         pidPorts[pid],
-		StartIdentity: strings.Join(fields[1:6], " "),
+		PID:            pid,
+		Argv:           argv,
+		ArgvUnverified: true,
+		Ports:          pidPorts[pid],
+		StartIdentity:  strings.Join(fields[1:6], " "),
 	}, true
 }
 
@@ -770,10 +787,8 @@ func parseDoltPSCommandLine(command string) []string {
 		return fields
 	}
 	argv := []string{fields[0], fields[1]}
-	for _, flag := range []string{"--config", "--data-dir"} {
-		if path, ok := pathFromPSCommandLine(tail, flag); ok {
-			argv = append(argv, flag, path)
-		}
+	if cfg, ok := configPathFromPSCommandLine(tail); ok {
+		argv = append(argv, "--config", cfg)
 	}
 	return argv
 }
@@ -794,18 +809,18 @@ func doltSQLServerPSTail(command string) (string, bool) {
 	return "", false
 }
 
-func pathFromPSCommandLine(command, flag string) (string, bool) {
+func configPathFromPSCommandLine(command string) (string, bool) {
 	spans := commandFieldSpans(command)
 	for i, span := range spans {
 		field := command[span.start:span.end]
-		if strings.HasPrefix(field, flag+"=") {
-			value := trimPSPathValue(command[span.start+len(flag)+1:])
+		if strings.HasPrefix(field, "--config=") {
+			value := strings.TrimSpace(strings.TrimPrefix(field, "--config="))
 			if value == "" {
 				return "", false
 			}
-			return value, true
+			return trimPSConfigValue(value), true
 		}
-		if field == flag {
+		if field == "--config" {
 			if i+1 >= len(spans) {
 				return "", false
 			}
@@ -813,7 +828,7 @@ func pathFromPSCommandLine(command, flag string) (string, bool) {
 			if value == "" {
 				return "", false
 			}
-			return trimPSPathValue(value), true
+			return trimPSConfigValue(value), true
 		}
 	}
 	return "", false
@@ -847,8 +862,8 @@ func commandFieldSpans(s string) []commandFieldSpan {
 	return spans
 }
 
-func trimPSPathValue(value string) string {
-	for _, sep := range []string{" -", "\t-"} {
+func trimPSConfigValue(value string) string {
+	for _, sep := range []string{" --", "\t--"} {
 		if i := strings.Index(value, sep); i >= 0 {
 			value = value[:i]
 		}

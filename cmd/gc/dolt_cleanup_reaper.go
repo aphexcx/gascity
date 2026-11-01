@@ -60,6 +60,9 @@ type DoltProcInfo struct {
 	// HostNamespace verifies that host paths and PIDs are meaningful for this
 	// process. Linux discovery compares mount/PID namespaces and filesystem roots.
 	HostNamespace bool
+	// ArgvUnverified marks flattened ps arguments whose boundaries have not
+	// been verified through a native process record. They cannot authorize cleanup.
+	ArgvUnverified bool
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -174,8 +177,8 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 		return false
 	}
 	clean := filepath.Clean(p)
-	if _, ok := pytestTestRoot(clean, tempDir); ok {
-		return true
+	if root, ok := pytestTestRoot(clean, tempDir); ok {
+		return filepath.Base(root) != "pytest-current"
 	}
 	if hasTestChildPrefix(clean, "/tmp", testConfigPathPrefixes()) {
 		return true
@@ -252,7 +255,8 @@ func pathUnderActiveTestRoot(path string, activeTestRoots []string) bool {
 }
 
 // classifyDoltProcess applies the architect's reaper decision rules (§4.3) to a
-// single dolt sql-server process. Order matters:
+// single dolt sql-server process. Unverified argv always protects; otherwise,
+// order matters:
 //
 //  1. Any port match against rigPortByPort → protected (active rig server),
 //     even if the cmdline says it's a test path or its scope looks deleted
@@ -295,6 +299,9 @@ func pathUnderActiveTestRoot(path string, activeTestRoots []string) bool {
 //     operators can decide whether to kill it manually (architect Open Q 0).
 //     Unknown state is never a reap signal.
 func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) reapClassification {
+	if p.ArgvUnverified {
+		return reapClassification{Action: "protect", Reason: "process argument boundaries are unverified"}
+	}
 	for _, port := range p.Ports {
 		if name, ok := rigPortByPort[port]; ok {
 			return reapClassification{
