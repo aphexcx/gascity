@@ -43,8 +43,15 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 		if err := query(append([]string{"where", "--json"}, selector...), &location); err != nil {
 			return identity{}, err
 		}
-		if !filepath.IsAbs(location.Path) || !filepath.IsAbs(location.DatabasePath) {
+		if !filepath.IsAbs(location.Path) || (location.DatabasePath != "" && !filepath.IsAbs(location.DatabasePath)) {
 			return identity{}, fmt.Errorf("bd where returned no absolute path/database_path: %q / %q", location.Path, location.DatabasePath)
+		}
+		// Proxied stores can keep their data outside the workspace, in which
+		// case bd where omits database_path. The canonical project still
+		// identifies the binding; compare its backend and database below.
+		dataPath := location.DatabasePath
+		if dataPath != "" {
+			dataPath = normalizePathForCompare(dataPath)
 		}
 		var config struct {
 			Backend  string `json:"backend"`
@@ -63,7 +70,7 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 		}
 		return identity{
 			project:  normalizePathForCompare(location.Path),
-			dataPath: normalizePathForCompare(location.DatabasePath),
+			dataPath: dataPath,
 			backend:  config.Backend,
 			database: config.Database,
 		}, nil

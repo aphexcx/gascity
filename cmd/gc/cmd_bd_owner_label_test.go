@@ -166,7 +166,8 @@ case "$1" in
     if [ -n "${INFO_EXPECT_BEADS_DIR:-}" ] && [ "$BEADS_DIR" != "$INFO_EXPECT_BEADS_DIR" ]; then exit 1; fi
     database="${BEADS_DIR}/dolt"
     if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
-    printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database" ;;
+    if [ "${INFO_OMIT_DATABASE_PATH:-}" = "1" ]; then printf '{"path":"%s"}\n' "${database%/*}";
+    else printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database"; fi ;;
   dolt)
     if [ "$2" = "show" ]; then
       if [ "${INFO_BACKEND:-dolt}" = "dolt" ]; then printf '{"backend":"dolt","database":"demo"}\n';
@@ -838,17 +839,20 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 		dir      string
 		override bool
 		backend  string
+		proxied  bool
 	}{
-		{"no selector", "", false, ""},
-		{"rig root", ".", false, ""},
-		{"rig beads directory", ".beads", false, ""},
-		{"subdirectory without a store", "plain", false, ""},
-		{"empty beads directory", "empty", false, ""},
-		{"redirected beads directory", "redirect", false, ""},
-		{"nested store", "nested", true, ""},
-		{"nested beads directory", "nested/.beads", true, ""},
-		{"below nested store", "nested/deep", true, ""},
-		{"non-Dolt configured store", ".", false, "doltlite"},
+		{"no selector", "", false, "", false},
+		{"rig root", ".", false, "", false},
+		{"rig beads directory", ".beads", false, "", false},
+		{"subdirectory without a store", "plain", false, "", false},
+		{"empty beads directory", "empty", false, "", false},
+		{"redirected beads directory", "redirect", false, "", false},
+		{"nested store", "nested", true, "", false},
+		{"nested beads directory", "nested/.beads", true, "", false},
+		{"below nested store", "nested/deep", true, "", false},
+		{"non-Dolt configured store", ".", false, "doltlite", false},
+		{"proxied store with alternate root", ".", false, "dolt", true},
+		{"nested proxied store with alternate root", "nested", true, "dolt", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rigDir := t.TempDir()
@@ -867,6 +871,11 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 			t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
 			t.Setenv("INFO_EXPECT_BEADS_DIR", filepath.Join(rigDir, ".beads"))
 			t.Setenv("INFO_BACKEND", tt.backend)
+			if tt.proxied {
+				// An alternate sidecar root has no local .beads/dolt, so bd
+				// where reports the workspace but omits database_path.
+				t.Setenv("INFO_OMIT_DATABASE_PATH", "1")
+			}
 			if tt.override {
 				t.Setenv("INFO_SELECTED_DATABASE", filepath.Join(rigDir, "nested/.beads/dolt"))
 			}
