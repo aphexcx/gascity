@@ -154,6 +154,21 @@ func extractDataDirPath(argv []string) string {
 	return v
 }
 
+// pytestInvocationPathVerified limits pytest eligibility to a single literal
+// path option. With additional options, a flat argv scan cannot distinguish
+// another option's value from a config flag or reproduce Dolt's parsing.
+func pytestInvocationPathVerified(argv []string, configPath, dataPath string) bool {
+	flag, path := "--config", configPath
+	if path == "" {
+		flag, path = "--data-dir", dataPath
+	}
+	if path == "" || len(argv) < 3 || argv[1] != "sql-server" {
+		return false
+	}
+	return (len(argv) == 4 && argv[2] == flag && argv[3] == path) ||
+		(len(argv) == 3 && argv[2] == flag+"="+path)
+}
+
 // reapDataDir returns a test-owned --data-dir eligible for directory removal.
 // The data path must independently pass the test-config-path allowlist; a
 // config match alone does not establish ownership of an unrelated data path.
@@ -362,17 +377,6 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		if !ok {
 			continue
 		}
-		// Path helpers trim argv for legacy ownership comparisons. For
-		// pytest eligibility, a padded argument can name a different file.
-		for _, arg := range p.Argv {
-			if arg != strings.TrimSpace(arg) {
-				return reapClassification{
-					Action:     "protect",
-					Reason:     "pytest process has whitespace-padded arguments; exact ownership is unverified",
-					ConfigPath: cfgPath,
-				}
-			}
-		}
 		if p.ContainerRuntime != "" {
 			return reapClassification{
 				Action:     "protect",
@@ -395,6 +399,13 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			return reapClassification{
 				Action:     "protect",
 				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),
+				ConfigPath: cfgPath,
+			}
+		}
+		if !pytestInvocationPathVerified(p.Argv, cfgPath, dataPath) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "pytest cleanup requires a single literal --config or --data-dir path; invocation is unverified",
 				ConfigPath: cfgPath,
 			}
 		}

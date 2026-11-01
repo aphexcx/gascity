@@ -987,7 +987,13 @@ func TestRunDoltCleanup_ForceProtectsNativePSDataDir(t *testing.T) {
 }
 
 func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
-	for _, kind := range []string{"owned", "current", "external", "relative", "default", "malformed", "missing", "oversize", "current-with-argv", "linked", "interpolated", "merged", "padded-config", "padded-config-equals", "padded-data"} {
+	for _, kind := range []string{
+		"owned", "owned-equals", "owned-data", "owned-data-equals",
+		"current", "external", "relative", "default", "malformed", "missing",
+		"oversize", "current-with-argv", "linked", "interpolated", "merged",
+		"padded-config", "padded-config-equals", "padded-data",
+		"leading-config-equals", "leading-data-equals", "option-value",
+	} {
 		t.Run(kind, func(t *testing.T) {
 			tempDir := t.TempDir()
 			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
@@ -1042,6 +1048,19 @@ func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
 				proc.Argv = append(proc.Argv, "--data-dir", older)
 			}
 			switch kind {
+			case "owned-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--config=" + configPath}
+			case "owned-data":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir", older}
+			case "owned-data-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir=" + older}
+			case "leading-config-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--config=\t" + configPath}
+			case "leading-data-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir=\t" + older}
+			case "option-value":
+				// The apparent config flag is the password option's value.
+				proc.Argv = []string{"dolt", "sql-server", "--mcp-password", "--config=" + configPath}
 			case "padded-config", "padded-config-equals":
 				// Both filenames exist; trimming validates a different config.
 				if err := os.WriteFile(configPath+" ", []byte("data_dir: /srv/live\n"), 0o600); err != nil {
@@ -1072,7 +1091,8 @@ func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
 				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
 			}
 			want := 0
-			if kind == "owned" {
+			switch kind {
+			case "owned", "owned-equals", "owned-data", "owned-data-equals":
 				want = 1
 			}
 			if len(signals) != want {
