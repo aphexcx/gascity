@@ -234,17 +234,17 @@ func hasTestChildPrefix(cleanPath, root string, prefixes []string) bool {
 	return false
 }
 
-func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool {
-	if configPath == "" {
+func pathUnderActiveTestRoot(path string, activeTestRoots []string) bool {
+	if path == "" {
 		return false
 	}
-	cleanConfig := filepath.Clean(configPath)
+	cleanPath := filepath.Clean(path)
 	for _, root := range activeTestRoots {
 		cleanRoot := filepath.Clean(root)
 		if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
 			continue
 		}
-		if cleanConfig == cleanRoot || strings.HasPrefix(cleanConfig, cleanRoot+string(filepath.Separator)) {
+		if cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
 			return true
 		}
 	}
@@ -262,9 +262,10 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //     proxy.pid record beside it. Checked before every reap rule below,
 //     including the test-config-path allowlist, because a real-bd lifecycle
 //     test in t.TempDir() produces exactly that shape.
-//  3. Else protect if the --config sits under an active test root, even when
+//  3. Else protect if --config or --data-dir sits under an active test root, even when
 //     the config file itself is momentarily gone (mid-teardown of a test
-//     that is still running).
+//     that is still running). Pytest roots also require verified host namespaces
+//     and exited owner evidence; current or unverified basetemps stay protected.
 //  4. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
@@ -321,14 +322,14 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			ConfigPath: cfgPath,
 		}
 	}
-	if configUnderActiveTestRoot(cfgPath, activeTestRoots) {
-		return reapClassification{
-			Action:     "protect",
-			Reason:     fmt.Sprintf("config %q is under an active test root", cfgPath),
-			ConfigPath: cfgPath,
-		}
-	}
 	for _, path := range []string{cfgPath, extractDataDirPath(p.Argv)} {
+		if pathUnderActiveTestRoot(path, activeTestRoots) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("path %q is under an active test root", path),
+				ConfigPath: cfgPath,
+			}
+		}
 		root, ok := pytestTestRoot(path, tempDir)
 		if !ok {
 			continue

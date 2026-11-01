@@ -457,6 +457,25 @@ func TestParseDoltPSLine_PytestDataDirProtectsCurrentRun(t *testing.T) {
 	}
 }
 
+func TestParseDoltPSLine_DataDirBeforeShortOptions(t *testing.T) {
+	dataDir := "/city with spaces/.beads/dolt"
+	for _, sep := range []string{" ", "="} {
+		t.Run("separator="+sep, func(t *testing.T) {
+			command := "dolt sql-server --data-dir" + sep + dataDir + " -P 3306"
+			proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 "+command, nil)
+			if !ok {
+				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+			}
+			if got := extractDataDirPath(proc.Argv); got != dataDir {
+				t.Errorf("data-dir = %q, want %q", got, dataDir)
+			}
+			if !doltSQLServerProcessOwnsDataDir(proc.PID, proc.Argv, command, dataDir) {
+				t.Error("standalone server ownership must survive trailing short options")
+			}
+		})
+	}
+}
+
 func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
 	line := "12345 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
 	if got, ok := parseDoltPSLine(line, nil); ok {

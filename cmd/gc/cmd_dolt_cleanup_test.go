@@ -756,6 +756,51 @@ func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceProtectsActiveDataDirFromPS(t *testing.T) {
+	tempDir := t.TempDir()
+	root := filepath.Join(tempDir, "TestLive123")
+	for _, configArgs := range []string{"", " --config /tmp/TestOld/config.yaml"} {
+		t.Run(configArgs, func(t *testing.T) {
+			line := "12345 Sun May 17 09:31:24 2026 dolt sql-server" + configArgs + " --data-dir " + filepath.Join(root, "dolt")
+			proc, ok := parseDoltPSLine(line, nil)
+			if !ok {
+				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+			}
+			proc.CWDState = procPathStateLive
+			var signals []int
+			var removed []string
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{root},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				RemoveDataDir: func(path string) error {
+					removed = append(removed, path)
+					return nil
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			if len(signals) != 0 || len(removed) != 0 {
+				t.Errorf("active test root: signals=%v, removed=%v; want no mutations", signals, removed)
+			}
+			var report CleanupReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{12345}) {
+				t.Errorf("protected = %v, want [12345]", report.Reaped.ProtectedPIDs)
+			}
+		})
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
 

@@ -848,7 +848,7 @@ func commandFieldSpans(s string) []commandFieldSpan {
 }
 
 func trimPSPathValue(value string) string {
-	for _, sep := range []string{" --", "\t--"} {
+	for _, sep := range []string{" -", "\t-"} {
 		if i := strings.Index(value, sep); i >= 0 {
 			value = value[:i]
 		}
