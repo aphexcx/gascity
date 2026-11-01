@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,105 @@ func TestDoltProcRigOwner_MatchesDataDirUnderRigRoot(t *testing.T) {
 	owner, ok := doltProcRigOwner(proc, rigs)
 	if !ok || owner != "alpha" {
 		t.Errorf("doltProcRigOwner = (%q, %v), want (alpha, true)", owner, ok)
+	}
+}
+
+func TestActiveTestRootFromPath_Pytest(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	for _, name := range []string{"pytest-8", "pytest-9", "pytest-10"} {
+		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A current link can lag directory creation by a concurrent pytest run.
+	if err := os.Symlink("pytest-9", filepath.Join(userRoot, "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"pytest-8", false},
+		{"pytest-9", true},
+		{"pytest-10", true},
+		{"pytest-7", false},
+	} {
+		root := filepath.Join(userRoot, tc.name)
+		got, ok := activeTestRootFromPath(filepath.Join(root, "test_city", "config.yaml"), "", tempDir)
+		if ok != tc.want || (ok && got != root) {
+			t.Errorf("active root for %s = (%q, %v), want (%q, %v)", tc.name, got, ok, root, tc.want)
+		}
+	}
+	if err := os.Remove(filepath.Join(userRoot, "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"pytest-9", false}, {"pytest-10", true}} {
+		_, ok := activeTestRootFromPath(filepath.Join(userRoot, tc.name, "config.yaml"), "", tempDir)
+		if ok != tc.want {
+			t.Errorf("without current link, %s active = %v, want %v", tc.name, ok, tc.want)
+		}
+	}
+}
+
+func TestPytestTempRootDarwinAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS temp directory aliases")
+	}
+	path := "/private/var/folders/example/T/pytest-of-user/pytest-10/config.yaml"
+	if !isTestConfigPath(path, "", "/var/folders/example/T") {
+		t.Error("pytest resolves the macOS temp directory before creating its basetemp")
+	}
+	parent := t.TempDir()
+	oldRoot := filepath.Join(parent, "pytest-of-user", "pytest-9")
+	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(oldRoot), "pytest-10"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(resolved, filepath.Join(filepath.Dir(oldRoot), "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestRootMayBeLive(oldRoot) {
+		t.Error("the absolute current symlink must protect the same root through its macOS alias")
+	}
+}
+
+func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "pytest-1")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(parent, "pytest-2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(parent, "pytest-current")
+	if err := os.WriteFile(current, []byte("not a symlink"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestRootMayBeLive(root) {
+		t.Error("an unreadable current link must protect the older root")
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if pytestRootMayBeLive(root) {
+		t.Error("a missing basetemp must retain deleted-scope cleanup")
+	}
+	if err := os.Symlink(parent, root); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestRootMayBeLive(root) {
+		t.Error("a replaced basetemp must stay protected")
 	}
 }
 

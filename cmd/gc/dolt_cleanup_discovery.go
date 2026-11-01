@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -392,6 +393,11 @@ func discoverActiveTestRootsFromPS(homeDir, tempDir string) []string {
 
 func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
+	if root, ok := pytestTestRoot(clean, tempDir); ok {
+		// A leaked watchdog can keep an older basetemp in its argv forever.
+		// Only the current basetemp is evidence of a possibly live pytest run.
+		return root, pytestRootMayBeLive(root)
+	}
 	for _, root := range []string{"/tmp", tempDir} {
 		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
 			return testRoot, true
@@ -408,6 +414,109 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 		return "", false
 	}
 	return activeTestRootUnder(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
+}
+
+// pytestTestRoot recognizes pytest's default numbered basetemps, not custom
+// --basetemp paths or the pytest-current alias. Match whole path components.
+func pytestTestRoot(path, tempDir string) (string, bool) {
+	clean := cleanPytestPath(path)
+	for _, root := range []string{tempDir, "/tmp"} {
+		root = cleanPytestPath(root)
+		if root == "." || root == string(filepath.Separator) {
+			continue
+		}
+		rel, ok := strings.CutPrefix(clean, root+string(filepath.Separator))
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rel, string(filepath.Separator), 3)
+		if len(parts) < 2 || !strings.HasPrefix(parts[0], "pytest-of-") || parts[0] == "pytest-of-" {
+			continue
+		}
+		if _, ok := pytestRunNumber(parts[1]); ok {
+			return filepath.Join(root, parts[0], parts[1]), true
+		}
+	}
+	return "", false
+}
+
+// cleanPytestPath matches pytest's resolved macOS temp paths without following
+// arbitrary symlinks or requiring a leaked process's config to still exist.
+func cleanPytestPath(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "darwin" {
+		for _, root := range []string{"/private/tmp", "/private/var"} {
+			if path == root || strings.HasPrefix(path, root+"/") {
+				return strings.TrimPrefix(path, "/private")
+			}
+		}
+	}
+	return path
+}
+
+func pytestRunNumber(name string) (uint64, bool) {
+	suffix, ok := strings.CutPrefix(name, "pytest-")
+	if !ok || suffix == "" {
+		return 0, false
+	}
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseUint(suffix, 10, 64)
+	return n, err == nil
+}
+
+// pytestRootMayBeLive protects pytest-current's target and the highest numbered
+// directory, including the window before pytest updates the symlink. Unreadable
+// state fails closed. Missing basetemps retain the existing deleted-scope rule.
+func pytestRootMayBeLive(root string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() { ch <- pytestRootMayBeLiveOnDisk(root) }()
+	select {
+	case live := <-ch:
+		return live
+	case <-ctx.Done():
+		return true
+	}
+}
+
+func pytestRootMayBeLiveOnDisk(root string) bool {
+	parent := filepath.Dir(root)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	var highest uint64
+	found := false
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(root) {
+			if !entry.IsDir() {
+				return true // Never trust a replaced basetemp (file or symlink).
+			}
+			found = true
+		}
+		if n, ok := pytestRunNumber(entry.Name()); ok && entry.IsDir() && n > highest {
+			highest = n
+		}
+	}
+	if !found {
+		return false
+	}
+	if n, _ := pytestRunNumber(filepath.Base(root)); n == highest {
+		return true
+	}
+	current, err := os.Readlink(filepath.Join(parent, "pytest-current"))
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	if !filepath.IsAbs(current) {
+		current = filepath.Join(parent, current)
+	}
+	return cleanPytestPath(current) == cleanPytestPath(root)
 }
 
 func activeTestRootUnder(cleanPath, root string, prefixes []string) (string, bool) {

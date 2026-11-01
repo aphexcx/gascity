@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -700,6 +702,52 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 	if len(r.Reaped.ProtectedPIDs) != 0 {
 		t.Errorf("ProtectedPIDs = %v, want none for os.TempDir()/Test* config", r.Reaped.ProtectedPIDs)
+	}
+}
+
+func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	for _, name := range []string{"pytest-9", "pytest-10"} {
+		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldConfig := filepath.Join(userRoot, "pytest-9", "test_city", "config.yaml")
+	currentConfig := filepath.Join(userRoot, "pytest-10", "test_city", "config.yaml")
+	procs := []DoltProcInfo{
+		{PID: 101, Argv: []string{"dolt", "sql-server", "--config", oldConfig}, CWDState: procPathStateLive},
+		{PID: 102, Argv: []string{"dolt", "sql-server", "--config", currentConfig}, CWDState: procPathStateLive},
+		{PID: 103, Argv: []string{"dolt", "sql-server", "--config", "/srv/pytest-of-user/pytest-9/config.yaml"}, CWDState: procPathStateLive},
+		{PID: 104, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-8", "config.yaml")}, CWDState: procPathStateDeleted},
+		{PID: 105, Argv: []string{"dolt", "sql-server", "--data-dir", filepath.Dir(currentConfig)}, CWDState: procPathStateLive},
+	}
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{}, // No process argv is needed to protect the current basetemp.
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+		KillProcess: func(int, syscall.Signal) error {
+			t.Fatal("dry run attempted to kill a process")
+			return nil
+		},
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var report CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	var targets []int
+	for _, target := range report.Reaped.Targets {
+		targets = append(targets, target.PID)
+	}
+	if !equalIntSlice(targets, []int{101, 104}) {
+		t.Errorf("reap targets = %v, want older and deleted basetemps [101 104]", targets)
+	}
+	if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{102, 103, 105}) {
+		t.Errorf("protected = %v, want current basetemp and non-temp path [102 103 105]", report.Reaped.ProtectedPIDs)
 	}
 }
 

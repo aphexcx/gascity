@@ -163,7 +163,8 @@ func reapDataDir(argv []string, homeDir, tempDir string) string {
 }
 
 // isTestConfigPath reports whether p matches the cleanup allowlist for test
-// Dolt configs: Go test temp roots, plus known Gas City unit-test prefixes
+// Dolt configs: Go test temp roots, pytest-of-<user>/pytest-<N> under /tmp
+// or os.TempDir(), plus known Gas City unit-test prefixes
 // that use short socket-safe directories under os.TempDir(). Also allowlists
 // the fleet GOTMPDIR root (AGENTS.md pins /var/tmp/gotmp; the GOTMPDIR env var
 // is checked too when set, in case it differs on a given host) — ga-sm1cvj.
@@ -172,6 +173,9 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 		return false
 	}
 	clean := filepath.Clean(p)
+	if _, ok := pytestTestRoot(clean, tempDir); ok {
+		return true
+	}
 	if hasTestChildPrefix(clean, "/tmp", testConfigPathPrefixes()) {
 		return true
 	}
@@ -321,6 +325,15 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			Action:     "protect",
 			Reason:     fmt.Sprintf("config %q is under an active test root", cfgPath),
 			ConfigPath: cfgPath,
+		}
+	}
+	for _, path := range []string{cfgPath, extractDataDirPath(p.Argv)} {
+		if root, ok := pytestTestRoot(path, tempDir); ok && pytestRootMayBeLive(root) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("path %q is under a current or unverified pytest basetemp", path),
+				ConfigPath: cfgPath,
+			}
 		}
 	}
 	if p.CWDState == procPathStateDeleted {

@@ -147,6 +147,28 @@ func TestIsTestConfigPath_NotTest(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_Pytest(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/tmp/pytest-of-user/pytest-12/test_city/config.yaml", true},
+		{"/var/tmp/python/pytest-of-user/pytest-0/config.yaml", true},
+		{"/srv/pytest-of-user/pytest-12/config.yaml", false},
+		{"/tmp/other/pytest-of-user/pytest-12/config.yaml", false},
+		{"/tmp/pytest-of-/pytest-12/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-current/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-12suffix/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest--1/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-12/../../production/config.yaml", false},
+	} {
+		if got := isTestConfigPath(tc.path, "", "/var/tmp/python"); got != tc.want {
+			t.Errorf("isTestConfigPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestClassifyDoltProcess_ProtectedByRigPort(t *testing.T) {
 	p := DoltProcInfo{
 		PID:   1234,
