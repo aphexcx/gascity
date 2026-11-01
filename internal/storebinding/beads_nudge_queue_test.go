@@ -971,6 +971,9 @@ const deployedNudgeQueuePolicySource = "cmd/gc/cmd_nudge.go"
 // it does not understand fails the test instead of quietly dropping out of the
 // comparison.
 func TestBeadsNudgeQueuePolicyMatchesTheDeployedQueue(t *testing.T) {
+	if nudgeQueueDeadRetention != nudgequeue.DeadLetterRetention {
+		t.Errorf("dead retention = %s, want shared recovery cap %s", nudgeQueueDeadRetention, nudgequeue.DeadLetterRetention)
+	}
 	deployed := parseDeployedNudgeQueuePolicy(t)
 	durations := []struct {
 		name, constant string
@@ -978,7 +981,6 @@ func TestBeadsNudgeQueuePolicyMatchesTheDeployedQueue(t *testing.T) {
 	}{
 		{"claim lease", "defaultQueuedNudgeClaimTTL", nudgeQueueClaimLease},
 		{"retry delay", "defaultQueuedNudgeRetryDelay", nudgeQueueRetryDelay},
-		{"dead retention", "defaultQueuedNudgeDeadRetention", nudgeQueueDeadRetention},
 		{"terminal retention", "defaultQueuedNudgeTTL", nudgeQueueTerminalRetention},
 	}
 	for _, policy := range durations {

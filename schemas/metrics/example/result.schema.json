@@ -219,7 +219,8 @@
               "storage-preflight",
               "nudge-drop",
               "beads-city-migrate-proxied",
-              "maintenance-owner-backfill"
+              "maintenance-owner-backfill",
+              "nudge-replay"
             ]
           },
           "event_id": {

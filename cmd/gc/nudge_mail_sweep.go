@@ -84,7 +84,7 @@ func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stder
 // sweepStaleNudgeMail closes stale consumed nudge beads and read mail beads.
 //
 // Nudge candidates are open beads with label gc:nudge created before now-nudgeTTL
-// whose nudge_id is not present in nudgeState.Pending or nudgeState.InFlight.
+// whose nudge_id has no queued delivery or retained terminalization intent.
 // Terminal metadata is stamped via nudgequeue.Store.SweepStale before each close
 // so the bead audit trail is intact.
 //
@@ -200,7 +200,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	return result, nil
 }
 
-// liveNudgeIDSet returns the set of nudge IDs currently in pending or in-flight state.
+// liveNudgeIDSet protects queued deliveries and retained terminalization intents.
 // Returns nil (no live IDs) when nudgeState is nil.
 func liveNudgeIDSet(state *nudgequeue.State) map[string]bool {
 	if state == nil {
@@ -211,6 +211,12 @@ func liveNudgeIDSet(state *nudgequeue.State) map[string]bool {
 		live[item.ID] = true
 	}
 	for _, item := range state.InFlight {
+		live[item.ID] = true
+	}
+	for _, item := range state.Dead {
+		live[item.ID] = true
+	}
+	for _, item := range state.Tombstones {
 		live[item.ID] = true
 	}
 	return live

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "nudgequeue",
     srcs = [
+        "replay.go",
         "state.go",
         "store.go",
         "waits.go",
@@ -20,6 +21,8 @@ go_library(
 go_test(
     name = "nudgequeue_test",
     srcs = [
+        "first_attempt_test.go",
+        "replay_test.go",
         "state_test.go",
         "store_test.go",
         "testenv_import_test.go",

@@ -126,14 +126,15 @@ func seedNudgeBudgetPreservationBacklog(t *testing.T, cityPath string, now time.
 			id := fmt.Sprintf("nudge-dead-preserve-%03d", i)
 			buckets[id] = "dead"
 			state.Dead = append(state.Dead, queuedNudge{
-				ID:        id,
-				BeadID:    "bead-" + id,
-				Agent:     "gascity/deployer",
-				Source:    "sling",
-				Message:   "dead backlog",
-				CreatedAt: now.Add(-2 * time.Hour),
-				DeadAt:    now.Add(-2 * time.Hour),
-				LastError: "expired",
+				ID:          id,
+				BeadID:      "bead-" + id,
+				Agent:       "gascity/deployer",
+				Source:      "sling",
+				Message:     "dead backlog",
+				CreatedAt:   now.Add(-2 * time.Hour),
+				DeadAt:      now.Add(-2 * time.Hour),
+				DismissedAt: now.Add(-2 * time.Hour),
+				LastError:   "expired",
 			})
 		}
 		return nil
