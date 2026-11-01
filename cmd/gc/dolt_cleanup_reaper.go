@@ -331,7 +331,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		if root, ok := pytestTestRoot(path, tempDir); ok && pytestRootMayBeLive(root) {
 			return reapClassification{
 				Action:     "protect",
-				Reason:     fmt.Sprintf("path %q is under a current or unverified pytest basetemp", path),
+				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),
 				ConfigPath: cfgPath,
 			}
 		}

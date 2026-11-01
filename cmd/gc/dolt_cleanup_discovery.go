@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -395,7 +396,7 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	if root, ok := pytestTestRoot(clean, tempDir); ok {
 		// A leaked watchdog can keep an older basetemp in its argv forever.
-		// Only the current basetemp is evidence of a possibly live pytest run.
+		// Pytest's own live owner still protects an overlapping older run.
 		return root, pytestRootMayBeLive(root)
 	}
 	for _, root := range []string{"/tmp", tempDir} {
@@ -469,8 +470,9 @@ func pytestRunNumber(name string) (uint64, bool) {
 }
 
 // pytestRootMayBeLive protects pytest-current's target and the highest numbered
-// directory, including the window before pytest updates the symlink. Unreadable
-// state fails closed. Missing basetemps retain the existing deleted-scope rule.
+// directory, including the window before pytest updates the symlink, and older
+// roots with a live pytest owner. Unreadable state fails closed. Missing
+// basetemps retain the existing deleted-scope rule.
 func pytestRootMayBeLive(root string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
 	defer cancel()
@@ -506,6 +508,12 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 	if !found {
 		return false
 	}
+	if pytestOwnerMayBeLive(root, func(pid int) bool {
+		// Only ESRCH proves absence; permission and other errors protect.
+		return syscall.Kill(pid, 0) != syscall.ESRCH
+	}) {
+		return true
+	}
 	if n, _ := pytestRunNumber(filepath.Base(root)); n == highest {
 		return true
 	}
@@ -517,6 +525,26 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 		current = filepath.Join(parent, current)
 	}
 	return cleanPytestPath(current) == cleanPytestPath(root)
+}
+
+// pytestOwnerMayBeLive reads pytest's cleanup lock, which contains the owning
+// runner PID and is removed on normal exit. A stale file alone is not liveness:
+// the process table is authoritative. Invalid or unreadable locks protect.
+func pytestOwnerMayBeLive(root string, alive func(int) bool) bool {
+	f, err := os.Open(filepath.Join(root, ".lock"))
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	defer f.Close() //nolint:errcheck // Read-only ownership evidence.
+	data, err := io.ReadAll(io.LimitReader(f, 32))
+	if err != nil || len(data) == 32 {
+		return true
+	}
+	pid, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 32)
+	if err != nil || pid <= 0 {
+		return true
+	}
+	return alive(int(pid))
 }
 
 func activeTestRootUnder(cleanPath, root string, prefixes []string) (string, bool) {

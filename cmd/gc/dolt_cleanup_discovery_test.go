@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,71 @@ func TestActiveTestRootFromPath_Pytest(t *testing.T) {
 		if ok != tc.want {
 			t.Errorf("without current link, %s active = %v, want %v", tc.name, ok, tc.want)
 		}
+	}
+}
+
+func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	newer := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, newer} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(newer, filepath.Join(filepath.Dir(older), "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	// Pytest writes its owner PID into this lock until the run finishes.
+	lock := filepath.Join(older, ".lock")
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(older, "test_city", "config.yaml")
+	if _, active := activeTestRootFromPath(config, "", tempDir); !active {
+		t.Error("a newer basetemp must not discard the older run's live owner")
+	}
+	proc := DoltProcInfo{PID: 101, Argv: []string{"dolt", "sql-server", "--config", config}, CWDState: procPathStateLive}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("concurrent older run: action = %q, want protect", got.Action)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "reap" {
+		t.Errorf("completed older run: action = %q, want reap", got.Action)
+	}
+}
+
+func TestPytestOwnerMayBeLive(t *testing.T) {
+	root := t.TempDir()
+	lock := filepath.Join(root, ".lock")
+	for _, tc := range []struct {
+		name string
+		data string
+		live bool
+		want bool
+	}{
+		{"live owner", "1234\n", true, true},
+		{"exited owner", "1234", false, false},
+		{"empty lock", "", false, true},
+		{"invalid owner", "-1", false, true},
+		{"overflow", "2147483648", false, true},
+		{"oversize", strings.Repeat("1", 33), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(lock, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := pytestOwnerMayBeLive(root, func(pid int) bool {
+				if pid != 1234 {
+					t.Errorf("queried PID %d, want 1234", pid)
+				}
+				return tc.live
+			}); got != tc.want {
+				t.Errorf("owner live = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
