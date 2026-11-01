@@ -573,6 +573,8 @@ type OrphanSessionsCheck struct {
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	// AllowFix requires an explicit request to stop orphan sessions.
+	AllowFix bool
 }
 
 // NewOrphanSessionsCheck creates a check for orphaned sessions.
@@ -584,29 +586,14 @@ func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, 
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
 // Run finds sessions with the city prefix that don't match any configured agent.
-func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
+func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	prefix := "" // per-city socket isolation: all sessions belong to this city
-	running, err := c.sp.ListRunning(prefix)
+	orphans, err := c.orphanSessions(ctx)
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("listing sessions: %v", err)
 		return r
-	}
-
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
-
-	var orphans []string
-	for _, s := range running {
-		if !expected[s] {
-			orphans = append(orphans, s)
-		}
 	}
 
 	if len(orphans) == 0 {
@@ -625,12 +612,15 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	} else {
 		r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
 	}
-	r.Details = orphans
+	for _, orphan := range orphans {
+		r.Details = append(r.Details, orphan.name+": "+orphan.reason+"; agent not configured")
+	}
+	r.FixHint = "inspect the candidates, then use gc doctor --fix --fix-orphans while the controller is stopped"
 	return r
 }
 
-// CanFix returns true — orphan sessions can be killed.
-func (c *OrphanSessionsCheck) CanFix() bool { return true }
+// CanFix reports whether stopping orphan sessions was explicitly requested.
+func (c *OrphanSessionsCheck) CanFix() bool { return c.AllowFix }
 
 // Fix kills all orphaned sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles orphan
@@ -639,24 +629,29 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
 	}
-	prefix := "" // per-city socket isolation: all sessions belong to this city
-	running, err := c.sp.ListRunning(prefix)
+	if !c.AllowFix {
+		return fmt.Errorf("orphan cleanup requires --fix --fix-orphans")
+	}
+	if c.cfg == nil || len(c.cfg.Agents) == 0 {
+		return fmt.Errorf("refusing orphan cleanup: loaded config has no agents (empty expected set)")
+	}
+	if _, err := c.expectedSessionNames(); err != nil {
+		return err
+	}
+	scoped, ok := c.sp.(interface{ IsCityScoped(string) bool })
+	if !ok || !scoped.IsCityScoped(c.cityName) {
+		return fmt.Errorf("refusing orphan cleanup: runtime cannot confirm a city-scoped socket for %q (default, shared, or unknown socket)", c.cityName)
+	}
+	orphans, err := c.orphanSessions(ctx)
 	if runtime.IsPartialListError(err) {
 		return fmt.Errorf("listing sessions partially failed: %w", err)
 	}
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
-	for _, s := range running {
-		if !expected[s] {
-			if err := c.sp.Stop(s); err != nil {
-				return fmt.Errorf("killing orphan session %q: %w", s, err)
-			}
+	for _, orphan := range orphans {
+		if err := c.sp.Stop(orphan.name); err != nil {
+			return fmt.Errorf("killing orphan session %q: %w", orphan.name, err)
 		}
 	}
 	return nil

@@ -28,7 +28,13 @@ func TestBuildDoctorChecks_NameSetUnchanged(t *testing.T) {
 		ControllerRunning:    false,
 		SkipCityDoltCheck:    true,
 		SkipManagedDoltCheck: true,
+		FixOrphans:           true,
 	})
+	for _, check := range checks {
+		if check.Name() == "orphan-sessions" && !check.CanFix() {
+			t.Fatal("explicit orphan cleanup opt-in was not passed to the check")
+		}
+	}
 	names := doctorCheckNames(checks)
 
 	data, err := os.ReadFile(filepath.Join("testdata", "doctor_check_names.golden"))

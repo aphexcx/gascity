@@ -67,6 +67,13 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	}
 }
 
+// IsCityScoped reports whether commands explicitly target this city's named
+// socket. An omitted -L, -L default, or a different/custom socket cannot prove
+// city isolation and must not authorize destructive orphan cleanup.
+func (p *Provider) IsCityScoped(cityName string) bool {
+	return cityName != "" && cityName != "default" && p.cfg.SocketName == cityName
+}
+
 // Start creates a new detached tmux session and performs a multi-step
 // startup sequence to ensure agent readiness. The sequence handles zombie
 // detection, command launch verification, permission warning dismissal,

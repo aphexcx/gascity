@@ -1467,6 +1467,8 @@ the host's [daemon] formula_v2 setting cannot satisfy), v2 config
 deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
+Stopping orphan sessions additionally requires --fix-orphans and a confirmed
+city-scoped runtime socket; inspect the reported candidates before opting in.
 
 --check runs only the checks you name, so a caller after one verdict does
 not pay for the whole sweep. It is repeatable and also accepts a comma
@@ -1499,6 +1501,7 @@ gc doctor --check controller,events-log --json
 | `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
+| `--fix-orphans` | bool |  | allow stopping this city's orphan sessions (requires --fix and a city-scoped runtime socket) |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
