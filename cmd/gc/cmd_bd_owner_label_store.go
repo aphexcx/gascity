@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -58,12 +60,25 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 	if err != nil {
 		return false, fmt.Errorf("configured store: %w", err)
 	}
-	// The diagnostic commands resolve redirects before loading database names.
-	// A redirected configured scope can preserve source metadata on data commands
-	// that these diagnostics do not report. Do not authorize a read through that
-	// ambiguous configured scope; ordinary -C redirects into this scope are safe.
+	// bd's data commands preserve a configured redirect source's raw database
+	// name. Its no-store diagnostics resolve the target before reading that name.
+	// Recover this one field from the known scope, leaving discovery to bd.
 	if configured.project != normalizePathForCompare(filepath.Join(scopeRoot, ".beads")) {
-		return false, nil
+		data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("reading configured redirect metadata: %w", err)
+		}
+		if err == nil {
+			var source struct {
+				Database string `json:"dolt_database"`
+			}
+			if err := json.Unmarshal(data, &source); err != nil {
+				return false, fmt.Errorf("reading configured redirect database: %w", err)
+			}
+			if source.Database != "" {
+				configured.database = source.Database
+			}
+		}
 	}
 	selected, err := probe([]string{"--directory", directory})
 	if err != nil {

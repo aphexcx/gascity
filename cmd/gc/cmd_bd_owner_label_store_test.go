@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -36,7 +37,7 @@ func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
 		{"same store", response(store), response(store), 0, true, ""},
 		{"normalized store", response(store), response(filepath.Dir(store) + "/./dolt"), 0, true, ""},
 		{"different store", response(store), response(filepath.Join(dir, ".beads", "dolt")), 0, false, ""},
-		{"redirected configured scope", response(filepath.Join(dir, ".beads", "dolt")), response(filepath.Join(dir, ".beads", "dolt")), 0, false, ""},
+		{"redirected scope without source metadata", response(filepath.Join(dir, ".beads", "dolt")), response(filepath.Join(dir, ".beads", "dolt")), 0, true, ""},
 		{"baseline failure", "", "", 1, false, "probe unavailable"},
 		{"selected failure", response(store), "", 3, false, "probe unavailable"},
 		{"database probe failure", response(store), response(store), 2, false, "probe unavailable"},
@@ -91,6 +92,45 @@ func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
 				if !slices.Equal(call, wantCalls[i]) {
 					t.Errorf("probe %d = %q, want %q", i, call, wantCalls[i])
 				}
+			}
+		})
+	}
+}
+
+func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
+	for _, tt := range []struct {
+		name, metadata string
+		want, wantErr  bool
+	}{
+		{"no metadata", "", true, false},
+		{"no source database", `{}`, true, false},
+		{"same database", `{"dolt_database":"target"}`, true, false},
+		{"different database", `{"dolt_database":"source"}`, false, false},
+		{"invalid metadata", `{`, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.metadata != "" {
+				if err := os.Mkdir(filepath.Join(root, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte(tt.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run := func(_ context.Context, _ []string, stdout, _ io.Writer) int {
+				if err := json.NewEncoder(stdout).Encode(struct {
+					Path         string `json:"path"`
+					DatabasePath string `json:"database_path"`
+					Database     string `json:"database"`
+				}{filepath.Join(root, "target", ".beads"), filepath.Join(root, "shared-data"), "target"}); err != nil {
+					t.Fatal(err)
+				}
+				return 0
+			}
+			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, root)
+			if got != tt.want || (err != nil) != tt.wantErr {
+				t.Fatalf("match=%v, err=%v; want match=%v, error=%v", got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
