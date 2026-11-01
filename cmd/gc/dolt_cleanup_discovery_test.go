@@ -423,6 +423,40 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 	}
 }
 
+func TestParseDoltPSLine_PytestDataDirProtectsCurrentRun(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, current} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	config := filepath.Join(older, "test city", "config.yaml")
+	dataDir := filepath.Join(current, "test city", "data")
+	for _, sep := range []string{" ", "="} {
+		t.Run("separator="+sep, func(t *testing.T) {
+			line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config" + sep + config + " --data-dir" + sep + dataDir + " --port 3306"
+			proc, ok := parseDoltPSLine(line, nil)
+			if !ok {
+				t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+			}
+			if got := extractConfigPath(proc.Argv); got != config {
+				t.Errorf("config = %q, want %q", got, config)
+			}
+			if got := extractDataDirPath(proc.Argv); got != dataDir {
+				t.Errorf("data-dir = %q, want %q", got, dataDir)
+			}
+			proc.HostNamespace = true
+			proc.CWDState = procPathStateLive
+			if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+				t.Errorf("current data directory with older config: action = %q, want protect", got.Action)
+			}
+		})
+	}
+}
+
 func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
 	line := "12345 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
 	if got, ok := parseDoltPSLine(line, nil); ok {

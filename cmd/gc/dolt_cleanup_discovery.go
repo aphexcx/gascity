@@ -770,8 +770,10 @@ func parseDoltPSCommandLine(command string) []string {
 		return fields
 	}
 	argv := []string{fields[0], fields[1]}
-	if cfg, ok := configPathFromPSCommandLine(tail); ok {
-		argv = append(argv, "--config", cfg)
+	for _, flag := range []string{"--config", "--data-dir"} {
+		if path, ok := pathFromPSCommandLine(tail, flag); ok {
+			argv = append(argv, flag, path)
+		}
 	}
 	return argv
 }
@@ -792,18 +794,18 @@ func doltSQLServerPSTail(command string) (string, bool) {
 	return "", false
 }
 
-func configPathFromPSCommandLine(command string) (string, bool) {
+func pathFromPSCommandLine(command, flag string) (string, bool) {
 	spans := commandFieldSpans(command)
 	for i, span := range spans {
 		field := command[span.start:span.end]
-		if strings.HasPrefix(field, "--config=") {
-			value := strings.TrimSpace(strings.TrimPrefix(field, "--config="))
+		if strings.HasPrefix(field, flag+"=") {
+			value := trimPSPathValue(command[span.start+len(flag)+1:])
 			if value == "" {
 				return "", false
 			}
-			return trimPSConfigValue(value), true
+			return value, true
 		}
-		if field == "--config" {
+		if field == flag {
 			if i+1 >= len(spans) {
 				return "", false
 			}
@@ -811,7 +813,7 @@ func configPathFromPSCommandLine(command string) (string, bool) {
 			if value == "" {
 				return "", false
 			}
-			return trimPSConfigValue(value), true
+			return trimPSPathValue(value), true
 		}
 	}
 	return "", false
@@ -845,7 +847,7 @@ func commandFieldSpans(s string) []commandFieldSpan {
 	return spans
 }
 
-func trimPSConfigValue(value string) string {
+func trimPSPathValue(value string) string {
 	for _, sep := range []string{" --", "\t--"} {
 		if i := strings.Index(value, sep); i >= 0 {
 			value = value[:i]
