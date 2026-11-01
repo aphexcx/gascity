@@ -777,7 +777,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// same bd binary and environment as the create: bd owns store discovery,
 	// including redirects, empty .beads directories, and selector precedence.
 	override := bdOwnerLabelDatabaseOverride(bdArgs, env, true)
-	if dir := extractBdDirectoryFlag(bdArgs); !override && dir != "" {
+	if dir := extractBdDirectoryFlag(bdArgs); !override && strings.TrimSpace(dir) != "" {
 		runner := &bdWatchRunner{bdPath: bdPath, dir: target.ScopeRoot, env: env, cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr}
 		matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), runner.run, target.ScopeRoot, dir)
 		override = !matches

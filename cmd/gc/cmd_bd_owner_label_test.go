@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -164,7 +165,7 @@ case "$1" in
     # precedence over BEADS_DIR. The directory table supplies its measured
     # nested-store result; other selectors resolve to the projected store.
     if [ -n "${INFO_EXPECT_BEADS_DIR:-}" ] && [ "$BEADS_DIR" != "$INFO_EXPECT_BEADS_DIR" ]; then exit 1; fi
-    database="${BEADS_DIR}/dolt"
+    database="${INFO_CONFIGURED_DATABASE:-${BEADS_DIR}/dolt}"
     if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
     if [ "${INFO_OMIT_DATABASE_PATH:-}" = "1" ]; then printf '{"path":"%s"}\n' "${database%/*}";
     else printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database"; fi ;;
@@ -912,6 +913,46 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 			notice := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database")
 			if notice != tt.override {
 				t.Errorf("database override notice = %v, want %v; stderr=%q", notice, tt.override, stderr.String())
+			}
+		})
+	}
+}
+
+func TestGcBdCreateBlankDirectoryKeepsConfiguredStore(t *testing.T) {
+	for _, directory := range []string{"", " ", "\t", " \t "} {
+		t.Run(fmt.Sprintf("%q", directory), func(t *testing.T) {
+			rigDir, targetDir := t.TempDir(), t.TempDir()
+			beadsDir := filepath.Join(rigDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, data := range map[string]string{
+				"redirect":      targetDir + "\n",
+				"metadata.json": `{"backend":"dolt","dolt_database":"source"}`,
+			} {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("INFO_CONFIGURED_DATABASE", filepath.Join(targetDir, "dolt"))
+			var stdout, stderr bytes.Buffer
+			if code := doBd([]string{"--rig", "work", "create", "child", "--parent", "demo-0", "-C", directory}, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if !slices.Contains(calls, "show --json demo-0") || !slices.Contains(calls, "create --labels=owner:jadegate child --parent demo-0 -C "+directory) {
+				t.Errorf("blank selector must preserve parent ownership; calls=%q", calls)
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "where ") || strings.HasPrefix(call, "dolt show ") {
+					t.Errorf("blank selector must not probe another store: %q", call)
+				}
+			}
+			if strings.Contains(stderr.String(), "owner label not applied") {
+				t.Errorf("blank selector produced an override notice: %s", stderr.String())
 			}
 		})
 	}
