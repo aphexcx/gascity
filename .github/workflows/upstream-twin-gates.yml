@@ -86,15 +86,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cpus=$(nproc)
           memory_mib=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
-          local_cpus=$((cpus > 1 ? cpus - 1 : 1))
           local_memory_mib=$((memory_mib / 2))
           # Bazel 9 uses --local_resources for CPU and memory scheduling.
-          # Leave room for the JVM, Go generators, and the Actions runner.
+          # One local CPU action keeps large Go compiles from overlapping on
+          # the 16 GiB runner. jobs=2 still permits concurrent cache lookups.
           {
             echo 'startup --host_jvm_args=-Xmx2048m'
-            printf 'build --local_resources=cpu=%s\n' "$local_cpus"
+            echo 'build --local_resources=cpu=1'
             printf 'build --local_resources=memory=%s\n' "$local_memory_mib"
             echo 'build --jobs=2'
             # Keep the twin's disk action cache disabled: no extra disk growth.
@@ -154,6 +153,8 @@ jobs:
             exit "$result"
           }
           trap stop_sampler EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           {
             git config --local core.hooksPath .githooks
             git config --local user.name 'Upstream twin gate'

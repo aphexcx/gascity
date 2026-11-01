@@ -54,9 +54,10 @@ with upstream's unchanged `.githooks/pre-commit`. That hook owns staged
 formatting, `make lint-changed` / Bazel nogo, and generation. No step is
 substituted by a success flag. `NOGO_BUILD_FLAGS` retains the hook's normal
 output group and failure behavior with two concurrent jobs. An external rc
-caps the Bazel JVM at 2 GiB and reserves one CPU and half the runner's RAM
-from action scheduling (`--local_resources` on Bazel 9). These scheduling
-limits do not impose a hard memory limit on an individual compiler process.
+caps the Bazel JVM heap at 2 GiB and gives action scheduling one CPU slot and
+half the runner's RAM (`--local_resources` on Bazel 9). This prevents large
+local Go compiles from overlapping while cache lookups can overlap. These
+scheduling limits do not impose a hard memory limit on an individual compiler process.
 The disk action cache stays disabled; the twin's verified repository download
 cache remains under `RUNNER_TEMP`. The probe and effective limits are included
 in the frozen input artifact.
@@ -70,8 +71,8 @@ published twin branch.
 
 Before the hook starts, `upstream-twin-inputs` preserves the frozen revisions,
 input tree, linter version, hook, and recipe. During the hook, `TWIN_RESOURCE`
-samples stream memory, disk, and Bazel server RSS to the Actions job log every
-15 seconds. These server-side records remain available if the runner stops
+samples stream memory, disk, Bazel server RSS, and the largest processes to the
+Actions job log every 15 seconds. These server-side records remain available if the runner stops
 before the final upload.
 
 Download the `upstream-twin-gate` artifact into the work item's external

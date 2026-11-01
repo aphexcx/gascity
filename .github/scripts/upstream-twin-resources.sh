@@ -10,6 +10,9 @@ sample() {
     /bazel\([^)]*\)/ && /java/ { rss += $1 }
     END { printf "TWIN_RESOURCE bazel_jvm_rss_kib=%d\n", rss }
   '
+  ps -eo rss=,comm= --sort=-rss | awk '
+    NR <= 5 { printf "TWIN_RESOURCE process_rss_kib=%d command=%s\n", $1, $2 }
+  '
 }
 
 printf 'TWIN_RESOURCE cpus=%s\n' "$(nproc)"
