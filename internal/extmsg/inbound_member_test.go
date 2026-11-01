@@ -175,6 +175,27 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 			reason:   "pasted whole; send path errored: " + sendErr.Error(),
 		},
 		{
+			name:     "landed whole, ownership lost: terminal hold, never redeliver",
+			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(true, expected, runtime.NudgeSubmitOwnershipLost)},
+			status:   InboundDeliveryPending,
+			bytes:    expected,
+			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver",
+		},
+		{
+			name:     "ownership lost with a fragment: never license replay of unattributable input",
+			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(false, 41, runtime.NudgeSubmitOwnershipLost)},
+			status:   InboundDeliveryPending,
+			bytes:    41,
+			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver",
+		},
+		{
+			name:     "ownership lost and send path errored: terminal reason survives",
+			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(true, expected, runtime.NudgeSubmitOwnershipLost), Err: sendErr},
+			status:   InboundDeliveryPending,
+			bytes:    expected,
+			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver; send path errored: " + sendErr.Error(),
+		},
+		{
 			name:     "unknown submit state from a newer runtime: landed, so hold rather than guess",
 			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(true, expected, runtime.NudgeSubmit("queued"))},
 			status:   InboundDeliveryPending,

@@ -61,6 +61,7 @@ type InboundMemberOutcome struct {
 //	not landed, no error                               → failed, 0 bytes, "not delivered live[: reason]"
 //	landed, runtime did not vouch (Submit == "")       → delivered, expected bytes (pre-receipt reading);
 //	                                                     pending if the send path also errored
+//	landed, ownership lost before confirmation       → pending, its bytes (terminal hold; never replay)
 //	landed, vouched, 0 < bytes < expected              → partial, its bytes (truncated; whatever Delivered says)
 //	landed, vouched, bytes > expected                  → pending, its bytes (contradiction; hold)
 //	landed, vouched, no bytes (Delivered flag only)    → pending, 0 bytes (contradiction; hold)
@@ -72,7 +73,8 @@ type InboundMemberOutcome struct {
 // A vouching runtime's byte count is read before its Delivered flag and
 // before its submit verdict: positive bytes are proof that at least that much
 // is in the terminal, and a truncated paste is truncated whether or not the
-// agent took it.
+// agent took it. Terminal ownership loss is the exception: replay is unsafe
+// even for a fragment whose submit can no longer be attributed to this payload.
 //
 // "Unconfirmed" is the row this function was written for (gp-2io). The tmux
 // runtime pastes the payload, sends Enter, and then watches for the agent's
@@ -109,6 +111,12 @@ func ClassifyInboundMember(e InboundMemberEvidence) InboundMemberOutcome {
 	}
 	hold := func(bytes int, reason string) InboundMemberOutcome {
 		return InboundMemberOutcome{Status: InboundDeliveryPending, DeliveredBytes: bytes, Reason: withErr(reason)}
+	}
+
+	if e.Submit == runtime.NudgeSubmitOwnershipLost {
+		// Pending is the existing non-replayable receipt status. The reason
+		// records that this hold is terminal, even if the send path errored.
+		return hold(max(e.Bytes, 0), "draft ownership lost before confirmation; terminal outcome, do not redeliver")
 	}
 
 	if e.Submit == "" {

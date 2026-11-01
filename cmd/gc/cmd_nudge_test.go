@@ -4313,7 +4313,7 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 			t.Fatalf("lost terminal reason: %+v", dead[0])
 		}
 	})
-	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)} {
+	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned), errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
@@ -4349,34 +4349,40 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 			}
 		})
 	}
-	t.Run("unowned draft expires with a visible reason even without five retries", func(t *testing.T) {
-		t.Setenv("GC_BEADS", "file")
-		var warnings bytes.Buffer
-		previous := nudgeWarningWriter
-		nudgeWarningWriter = &warnings
-		t.Cleanup(func() { nudgeWarningWriter = previous })
-		dir := t.TempDir()
-		now := time.Now()
-		item := newQueuedNudge("worker", "preserved reminder", now)
-		if err := enqueueQueuedNudge(dir, item); err != nil {
-			t.Fatal(err)
-		}
-		cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
-		if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
-			t.Fatal(err)
-		}
-		pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
-		if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
-			t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
-		}
-		pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
-		if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
-			t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
-		}
-		if dead[0].LastError != cause.Error() || !strings.Contains(warnings.String(), "action required") || !strings.Contains(warnings.String(), "automatic hold expires at") {
-			t.Fatalf("ownership failure must remain visible: dead=%+v warnings=%q", dead[0], warnings.String())
-		}
-	})
+	for _, draftCause := range []error{runtime.ErrNudgeDraftUnowned, runtime.ErrNudgeDraftUnmatched} {
+		t.Run(draftCause.Error()+" expires with a visible reason even without five retries", func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			var warnings bytes.Buffer
+			previous := nudgeWarningWriter
+			nudgeWarningWriter = &warnings
+			t.Cleanup(func() { nudgeWarningWriter = previous })
+			dir := t.TempDir()
+			now := time.Now()
+			item := newQueuedNudge("worker", "preserved reminder", now)
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatal(err)
+			}
+			cause := errors.Join(tmux.ErrNudgeDraftDeferred, draftCause)
+			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
+				t.Fatal(err)
+			}
+			// A subsequent persisted retry must not extend the first hold.
+			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now.Add(15*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
+			if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
+				t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
+			}
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
+			if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+				t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
+			}
+			if dead[0].LastError != cause.Error() || !strings.Contains(warnings.String(), "action required") || !strings.Contains(warnings.String(), "automatic hold expires at") {
+				t.Fatalf("ownership failure must remain visible: dead=%+v warnings=%q", dead[0], warnings.String())
+			}
+		})
+	}
 }
 
 func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {
