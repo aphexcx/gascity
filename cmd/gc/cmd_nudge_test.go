@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -4294,6 +4295,37 @@ func TestRecordQueuedNudgeFailureRequeuesClaimedNudge(t *testing.T) {
 }
 
 func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
+	checkNotification := func(t *testing.T) func(queuedNudge) {
+		t.Helper()
+		var warnings bytes.Buffer
+		notifications := make(chan queuedNudge, 4)
+		oldNotify, oldWriter := nudgeDeadLetterNotify, nudgeWarningWriter
+		nudgeWarningWriter = &warnings
+		nudgeDeadLetterNotify = func(_ string, item queuedNudge, _ io.Writer) error {
+			notifications <- item
+			return nil
+		}
+		t.Cleanup(func() { nudgeDeadLetterNotify, nudgeWarningWriter = oldNotify, oldWriter })
+		return func(item queuedNudge) {
+			t.Helper()
+			if len(notifications) != 1 || strings.Count(warnings.String(), "dead-lettered") != 1 {
+				t.Fatalf("want one terminal notification: mails=%d warnings=%q", len(notifications), warnings.String())
+			}
+			if strings.Contains(item.LastError, "preserved pane input") && !strings.Contains(warnings.String(), "automatic hold expires at") {
+				t.Fatalf("bounded hold warning missing: %q", warnings.String())
+			}
+			notified := <-notifications
+			_, body := nudgeDeadLetterMail(notified)
+			for _, want := range []string{item.ID, item.Agent, strings.Join(strings.Fields(item.LastError), " "), "gc nudge replay " + item.ID} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("mail omitted %q: %s", want, body)
+				}
+			}
+			if notified.ID != item.ID || notified.LastError != item.LastError || !item.UnresolvedDeadLetter() {
+				t.Fatalf("notification differs from replayable record: notified=%+v dead=%+v", notified, item)
+			}
+		}
+	}
 	t.Run("terminal ownership loss cannot requeue through a live fallback", func(t *testing.T) {
 		t.Setenv("GC_BEADS", "file")
 		dir := t.TempDir()
@@ -4313,8 +4345,9 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 			t.Fatalf("lost terminal reason: %+v", dead[0])
 		}
 	})
-	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)} {
+	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned), errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)} {
 		t.Run(cause.Error(), func(t *testing.T) {
+			check := checkNotification(t)
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
 			item := newQueuedNudge("worker", "stuck reminder", time.Now().Add(-time.Hour))
@@ -4344,39 +4377,49 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 			if dead[0].Attempts != defaultQueuedNudgeMaxAttempts {
 				t.Fatalf("attempts = %d, want %d", dead[0].Attempts, defaultQueuedNudgeMaxAttempts)
 			}
-			if dead[0].LastError != cause.Error() {
-				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, cause.Error())
+			wantReason := cause.Error()
+			if errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched) {
+				wantReason += "; after 5 attempts; resolve the preserved pane input before retrying"
 			}
+			if dead[0].LastError != wantReason {
+				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, wantReason)
+			}
+			check(dead[0])
 		})
 	}
-	t.Run("unowned draft expires with a visible reason even without five retries", func(t *testing.T) {
-		t.Setenv("GC_BEADS", "file")
-		var warnings bytes.Buffer
-		previous := nudgeWarningWriter
-		nudgeWarningWriter = &warnings
-		t.Cleanup(func() { nudgeWarningWriter = previous })
-		dir := t.TempDir()
-		now := time.Now()
-		item := newQueuedNudge("worker", "preserved reminder", now)
-		if err := enqueueQueuedNudge(dir, item); err != nil {
-			t.Fatal(err)
-		}
-		cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
-		if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
-			t.Fatal(err)
-		}
-		pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
-		if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
-			t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
-		}
-		pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
-		if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
-			t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
-		}
-		if dead[0].LastError != cause.Error() || !strings.Contains(warnings.String(), "action required") || !strings.Contains(warnings.String(), "automatic hold expires at") {
-			t.Fatalf("ownership failure must remain visible: dead=%+v warnings=%q", dead[0], warnings.String())
-		}
-	})
+	for _, draftCause := range []error{runtime.ErrNudgeDraftUnowned, runtime.ErrNudgeDraftUnmatched} {
+		t.Run(draftCause.Error()+" expires with a visible reason even without five retries", func(t *testing.T) {
+			check := checkNotification(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			now := time.Now()
+			item := newQueuedNudge("worker", "preserved reminder", now)
+			if err := enqueueQueuedNudge(dir, item); err != nil {
+				t.Fatal(err)
+			}
+			cause := errors.Join(tmux.ErrNudgeDraftDeferred, draftCause)
+			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
+				t.Fatal(err)
+			}
+			// A subsequent persisted retry must not extend the first hold.
+			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now.Add(15*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
+			if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
+				t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
+			}
+			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
+			if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
+				t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
+			}
+			wantReason := cause.Error() + "; after 2 attempts; resolve the preserved pane input before retrying"
+			if dead[0].LastError != wantReason {
+				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, wantReason)
+			}
+			check(dead[0])
+		})
+	}
 }
 
 func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {

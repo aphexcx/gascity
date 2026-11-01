@@ -66,7 +66,7 @@ type Section struct {
 	// Hardened is an OPTIONAL second listener ([supervisor.hardened]) that
 	// serves the same mux as the primary listener but with a write-auth verify
 	// key of its own, so every per-city mutation arriving on it must carry a
-	// signed X-GC-City-Write grant while the primary (loopback) listener keeps
+	// signed write grant while the primary (loopback) listener keeps
 	// serving first-party callers — the dashboard SPA, workspace-service
 	// adapters, the local gc client — that mint no grant. It exists for the
 	// deployment where one supervisor must be BOTH the trusted local control

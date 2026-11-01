@@ -3020,10 +3020,11 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
-	var unownedDeferred []queuedNudge
+	var boundedDeferred []queuedNudge
+	boundedDraft := errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched)
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
-		unownedDeferred = unownedDeferred[:0]
+		boundedDeferred = boundedDeferred[:0]
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -3068,10 +3069,10 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		state.InFlight = inFlight
 		state.Pending = append(state.Pending, requeued...)
 		state.Dead = append(state.Dead, dead...)
-		if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+		if boundedDraft {
 			for _, item := range requeued {
 				if item.Attempts == 1 {
-					unownedDeferred = append(unownedDeferred, item)
+					boundedDeferred = append(boundedDeferred, item)
 				}
 			}
 		}
@@ -3081,9 +3082,9 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	if err != nil {
 		return nil, err
 	}
-	for _, item := range unownedDeferred {
+	for _, item := range boundedDeferred {
 		if nudgeWarningWriter != nil {
-			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q cannot own the preserved pane input: %v; resolve it before retrying; automatic hold expires at %s or after %d attempts\n", item.ID, item.Agent, cause, item.ExpiresAt.Format(time.RFC3339), defaultQueuedNudgeMaxAttempts) //nolint:errcheck
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q cannot verify the preserved pane input: %v; resolve it before retrying; automatic hold expires at %s or after %d attempts\n", item.ID, item.Agent, cause, item.ExpiresAt.Format(time.RFC3339), defaultQueuedNudgeMaxAttempts) //nolint:errcheck
 		}
 	}
 	// Mark backing beads terminal outside the queue lock, best-effort. The
@@ -3105,19 +3106,24 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 		item.FirstAttemptAt = now.UTC()
 	}
 	// Known different input retains its batch identity without spending an
-	// attempt. Missing ownership has a bounded hold: five attempts and at most
-	// one minute until expiry, whichever comes first, with the draft untouched.
-	if errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+	// attempt. Missing ownership or unmatched owned input has a bounded hold:
+	// five attempts and at most one minute until expiry, whichever comes first,
+	// with the draft untouched.
+	boundedDraft := errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched)
+	if boundedDraft {
 		limit := now.Add(time.Duration(defaultQueuedNudgeMaxAttempts-1) * defaultQueuedNudgeRetryDelay).UTC()
 		if item.ExpiresAt.IsZero() || item.ExpiresAt.After(limit) {
 			item.ExpiresAt = limit
 		}
 	}
-	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || errors.Is(cause, runtime.ErrNudgeDraftUnowned) {
+	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || boundedDraft {
 		item.Attempts++
 		item.LastAttemptAt = now.UTC()
 	}
 	item.LastError = cause.Error()
+	if boundedDraft {
+		item.LastError = fmt.Sprintf("%v; after %d attempts; resolve the preserved pane input before retrying", cause, item.Attempts)
+	}
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
 	if errors.Is(cause, errNudgeManualDrop) {
