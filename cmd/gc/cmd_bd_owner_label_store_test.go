@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -105,12 +106,14 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 	for _, tt := range []struct {
 		name, metadata string
 		want, wantErr  bool
+		gitRoot        bool
 	}{
-		{"no metadata", "", true, false},
-		{"no source database", `{}`, true, false},
-		{"same database", `{"dolt_database":"target"}`, true, false},
-		{"different database", `{"dolt_database":"source"}`, false, false},
-		{"invalid metadata", `{`, false, true},
+		{"no metadata", "", true, false, false},
+		{"no source database", `{}`, true, false, false},
+		{"same database", `{"dolt_database":"target"}`, true, false, false},
+		{"different database", `{"dolt_database":"source"}`, false, false, false},
+		{"invalid metadata", `{`, false, true, false},
+		{"Git root preserves source for both", `{"dolt_database":"source"}`, true, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -119,6 +122,18 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte(tt.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.gitRoot {
+				if out, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v: %s", err, out)
+				}
+				target := filepath.Join(root, "target", ".beads")
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".beads", "redirect"), []byte(target+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}

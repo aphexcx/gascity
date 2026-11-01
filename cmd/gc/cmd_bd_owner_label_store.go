@@ -72,11 +72,38 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 	if err != nil {
 		return false, fmt.Errorf("configured store: %w", err)
 	}
+	selected, err := probe([]string{"--directory", directory})
+	if err != nil {
+		return false, fmt.Errorf("directory-selected store: %w", err)
+	}
 	// bd's data commands preserve a configured redirect source's raw database
 	// name. Its no-store diagnostics resolve the target before reading that name.
 	// Recover this one field from the known scope, leaving discovery to bd.
 	if configured.backend == "dolt" && configured.project != normalizePathForCompare(filepath.Join(scopeRoot, ".beads")) {
-		data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+		sourceRoot := scopeRoot
+		sharedSource := false
+		gitRoot, inRepo, err := localGitRepoRoot(scopeRoot)
+		if err != nil {
+			return false, fmt.Errorf("resolving configured scope Git root: %w", err)
+		}
+		if inRepo {
+			gitBeads := filepath.Join(gitRoot, ".beads")
+			if _, err := os.Stat(filepath.Join(gitBeads, "redirect")); err == nil {
+				gitStore, err := probe([]string{"--directory", gitRoot})
+				if err != nil {
+					return false, fmt.Errorf("git-root redirect: %w", err)
+				}
+				if gitStore.project != normalizePathForCompare(gitBeads) {
+					// GetRedirectInfo checks the subprocess's Git root before
+					// BEADS_DIR. -C selects a project without changing that cwd,
+					// so this source database applies to both data commands.
+					sourceRoot, sharedSource = gitRoot, true
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("checking Git-root redirect: %w", err)
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(sourceRoot, ".beads", "metadata.json"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("reading configured redirect metadata: %w", err)
 		}
@@ -89,12 +116,11 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 			}
 			if source.Database != "" {
 				configured.database = source.Database
+				if sharedSource && selected.backend == "dolt" {
+					selected.database = source.Database
+				}
 			}
 		}
-	}
-	selected, err := probe([]string{"--directory", directory})
-	if err != nil {
-		return false, fmt.Errorf("directory-selected store: %w", err)
 	}
 	return configured == selected, nil
 }
