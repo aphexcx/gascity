@@ -808,21 +808,59 @@ func TestBdOwnerLabelDatabaseOverride(t *testing.T) {
 	}
 }
 
-func TestGcBdCreateDirectoryWithinOpenedRigKeepsOwner(t *testing.T) {
-	rigDir := t.TempDir()
-	capture := filepath.Join(t.TempDir(), "args")
-	fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
-	t.Setenv("CAPTURE_PATH", capture)
-	t.Setenv("GC_RIG", "")
-	var stdout, stderr bytes.Buffer
-	args := []string{"create", "child", "--parent", "demo-0", "-C" + rigDir}
-	if code := doBd(args, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd = %d: %s", code, stderr.String())
-	}
-	calls := fakeBdCalls(t, capture)
-	want := "create --labels=owner:jadegate child --parent demo-0 -C" + rigDir
-	if !slices.Contains(calls, want) {
-		t.Fatalf("bd calls = %q, want %q", calls, want)
+func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		dir      string
+		override bool
+	}{
+		{"no selector", "", false},
+		{"rig root", ".", false},
+		{"rig beads directory", ".beads", false},
+		{"subdirectory without a store", "plain", false},
+		{"nested store", "nested", true},
+		{"nested beads directory", "nested/.beads", true},
+		{"below nested store", "nested/deep", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rigDir := t.TempDir()
+			for _, dir := range []string{".beads", "plain", "nested/.beads", "nested/deep"} {
+				if err := os.MkdirAll(filepath.Join(rigDir, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("GC_RIG", "work")
+			args := []string{"create", "child", "--parent", "demo-0"}
+			if tt.dir != "" {
+				args = append(args, "-C", filepath.Join(rigDir, tt.dir))
+			}
+			var stdout, stderr bytes.Buffer
+			// Pin the scope so prefix-discovery probes do not mask owner reads.
+			if code := doBd(append([]string{"--rig", "work"}, args...), &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if readParent := slices.Contains(calls, "show --json demo-0"); readParent == tt.override {
+				t.Errorf("parent read = %v, want %v; calls=%q", readParent, !tt.override, calls)
+			}
+			want := strings.Join(args, " ")
+			if !tt.override {
+				want = "create --labels=owner:jadegate " + strings.Join(args[1:], " ")
+			}
+			if !slices.Contains(calls, want) {
+				t.Errorf("bd calls = %q, want create %q", calls, want)
+			}
+			if tt.override && len(calls) != 1 {
+				t.Errorf("database override should only create, calls=%q", calls)
+			}
+			notice := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database")
+			if notice != tt.override {
+				t.Errorf("database override notice = %v, want %v; stderr=%q", notice, tt.override, stderr.String())
+			}
+		})
 	}
 }
 

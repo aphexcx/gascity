@@ -775,8 +775,21 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// and a create naming one carries nothing (the notice below says so).
 	directoryMatchesScope := false
 	if dir := extractBdDirectoryFlag(bdArgs); dir != "" {
-		rig, ok, err := resolveRigForDir(cfg, cityPath, dir)
-		directoryMatchesScope = err == nil && ok && normalizePathForCompare(bdRigScopeTarget(cityPath, rig).ScopeRoot) == normalizePathForCompare(target.ScopeRoot)
+		// A directory within the rig can select a nested store. Compare the
+		// nearest .beads directory, not the enclosing rig's identity.
+		for current := normalizePathForCompare(dir); ; current = filepath.Dir(current) {
+			beadsDir := filepath.Join(current, ".beads")
+			if filepath.Base(current) == ".beads" {
+				beadsDir = current
+			}
+			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+				directoryMatchesScope = normalizePathForCompare(beadsDir) == normalizePathForCompare(filepath.Join(target.ScopeRoot, ".beads"))
+				break
+			}
+			if current == filepath.Dir(current) {
+				break
+			}
+		}
 	}
 	override := bdOwnerLabelDatabaseOverride(bdArgs, env, directoryMatchesScope)
 	var store beads.Store
