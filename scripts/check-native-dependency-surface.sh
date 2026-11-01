@@ -11,7 +11,13 @@ set -euo pipefail
 # pulled through by the google.golang.org/api bump MVS forced alongside it. None
 # of the OpenAPI stack links into gc -- only bd's internal/httpapi/apigen imports
 # it, which the root beads package never reaches.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
+# Fork baseline 2026-10-31: 0a663a8eee3c (#74) adds mvdan.cc/sh/v3 for
+# shell-preserving Codex launcher inspection, plus its graph dependencies
+# github.com/go-quicktest/qt, github.com/google/renameio/v2 and
+# mvdan.cc/editorconfig. Measured 737 before and 741 after, no removals;
+# upstream base 26172ff4bd29 remains 737. Retain the parser and cap the
+# justified fork graph exactly, without changing the measured surface.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-741}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made
@@ -21,7 +27,14 @@ max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # grows the binary ~90KB/day, so 180,000,000 gives ~88 days of headroom.
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-180000000}"
+# Fork rebaseline 2026-10-31: Linux/amd64 CI measures 180,015,848 bytes.
+# PR #76 (045a366c664f) crosses the old cap: matching Go 1.26.6 cross-builds
+# measure 179,827,358 at its parent and 180,011,984 after (+184,626).
+# Adopt upstream's 190,000,000 cap from fb076128589b (#7074), whose measured
+# growth was ~210KB/day. This leaves 9,984,152 bytes above the fork's CI
+# measurement (~48 days at that rate), retaining the draft-preserving
+# input fixes and the same size check and build flags.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-190000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
