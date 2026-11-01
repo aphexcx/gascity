@@ -39,6 +39,35 @@ func TestReplayPreservesInputAndProvenance(t *testing.T) {
 	}
 }
 
+func TestReplayRefusesSourceOwnedReminders(t *testing.T) {
+	now := time.Date(2026, 11, 1, 20, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, source, recovery string
+		ref                    *Reference
+	}{
+		{"wait", "wait", "gc wait ready", &Reference{Kind: "bead", ID: "wait-1"}},
+		{"wait-without-reference", "wait", "gc wait ready", nil},
+		{"mail", "mail", "gc mail read", &Reference{Kind: "mail", ID: "mail-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dead := Item{ID: "n-dead", Source: tc.source, Reference: tc.ref, DeadAt: now, Message: "preserved input"}
+			state := State{Dead: []Item{dead}}
+			if _, err := PrepareReplay(&state, dead.ID, "n-next", now, time.Hour); err == nil || !strings.Contains(err.Error(), tc.recovery) {
+				t.Errorf("preview must direct recovery to %s: %v", tc.recovery, err)
+			}
+			if err := RecordReplay(&state, dead.ID, "n-next", now); err == nil || !strings.Contains(err.Error(), tc.recovery) {
+				t.Errorf("commit must refuse source-owned replay: %v", err)
+			}
+			if !reflect.DeepEqual(state.Dead[0], dead) || !state.Dead[0].UnresolvedDeadLetter() {
+				t.Fatal("refused replay changed the original or hid it from doctor")
+			}
+			if err := DismissDeadLetter(&state, dead.ID, now); err != nil || state.Dead[0].UnresolvedDeadLetter() {
+				t.Fatalf("source-owned reminder cannot be dismissed: %v", err)
+			}
+		})
+	}
+}
+
 func TestReplayRefusesNonDeadItems(t *testing.T) {
 	state := State{Pending: []Item{{ID: "n-pending"}}, InFlight: []Item{{ID: "n-flight"}}}
 	for _, id := range []string{"n-pending", "n-flight", "n-missing"} {

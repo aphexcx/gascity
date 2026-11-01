@@ -48,6 +48,9 @@ func PrepareReplay(state *State, id, newID string, now time.Time, ttl time.Durat
 	if err != nil {
 		return Item{}, err
 	}
+	if err := validateReplaySource(dead); err != nil {
+		return Item{}, err
+	}
 	item := Item{
 		ID: newID, OriginID: id, Agent: dead.Agent, SessionID: dead.SessionID,
 		ContinuationEpoch: dead.ContinuationEpoch, Source: dead.Source,
@@ -68,8 +71,24 @@ func RecordReplay(state *State, id, newID string, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if err := validateReplaySource(dead); err != nil {
+		return err
+	}
 	dead.ReplayID = newID
 	dead.ReplayedAt = now.UTC()
+	return nil
+}
+
+// Source-owned reminders need their owner's recovery path: a fresh queue ID
+// cannot retry a failed wait or make a resolved mail message unread again.
+// Check at both preview and commit, while keeping dismissal independent.
+func validateReplaySource(item *Item) error {
+	if item.Source == "wait" {
+		return fmt.Errorf("nudge %q is a wait reminder; use gc wait ready for its wait, or gc nudge replay --dismiss %q", item.ID, item.ID)
+	}
+	if item.Source == "mail" && item.Reference != nil && item.Reference.Kind == "mail" && item.Reference.ID != "" {
+		return fmt.Errorf("nudge %q is a mail reminder; use gc mail read %q to inspect its message, or gc nudge replay --dismiss %q", item.ID, item.Reference.ID, item.ID)
+	}
 	return nil
 }
 

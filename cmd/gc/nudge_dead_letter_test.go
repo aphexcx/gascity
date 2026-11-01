@@ -14,6 +14,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -303,6 +305,121 @@ func TestNudgeReplayEnqueueAndDryRun(t *testing.T) {
 	}
 	if err := enqueueQueuedNudgeWithStore(dir, store, stale); err == nil || !strings.Contains(err.Error(), item.ID) {
 		t.Fatalf("stale enqueue accepted: %v", err)
+	}
+}
+
+// A refused replay must retain the dead letter even after delivery rechecks its source.
+func TestNudgeReplayRefusesFinalizedSource(t *testing.T) {
+	for _, source := range []string{"wait", "mail"} {
+		t.Run(source, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			now := time.Now().UTC()
+			store, err := openCityStoreAt(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nudges := beads.NudgesStore{Store: store}
+			sessFront := cliSessionFrontDoor(store, nil, dir)
+			mp := mail.NewFake()
+			sessionBead, err := store.Create(beads.Bead{
+				Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{"session_name": "worker", "agent_name": "worker", "continuation_epoch": "1"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wait session.WaitInfo
+			itemID, recovery := "n-mail", "gc mail read"
+			var ref *nudgeReference
+			if source == "wait" {
+				waitBead, err := store.Create(beads.Bead{
+					Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+					Metadata: map[string]string{
+						"session_id": sessionBead.ID, "session_name": "worker", "kind": "deps",
+						"state": waitStateReady, "registered_epoch": "1", "delivery_attempt": "1",
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wait = session.WaitInfoFromBead(waitBead)
+				itemID, recovery = waitNudgeID(wait), "gc wait ready"
+				ref = &nudgeReference{Kind: "bead", ID: wait.ID}
+			} else {
+				msg, err := mp.Send("sender", "worker", "subject", "body")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref = &nudgeReference{Kind: "mail", ID: msg.ID}
+			}
+			item := newQueuedNudgeWithOptions("worker", "preserved reminder", source, now, queuedNudgeOptions{
+				ID: itemID, SessionID: sessionBead.ID, ContinuationEpoch: "1", Reference: ref,
+			})
+			if err := enqueueQueuedNudgeWithStore(dir, nudges, item); err != nil {
+				t.Fatal(err)
+			}
+			if err := recordQueuedNudgeFailureWithStore(dir, nudges, []string{item.ID}, runtime.ErrNudgeDraftOwnershipLost, now); err != nil {
+				t.Fatal(err)
+			}
+			state, err := nudgequeue.LoadState(dir)
+			if err != nil || len(state.Dead) != 1 {
+				t.Fatalf("dead-letter transition: dead=%d err=%v", len(state.Dead), err)
+			}
+			if source == "wait" {
+				if done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now, &state); err != nil || !done {
+					t.Fatalf("finalize wait: done=%t err=%v", done, err)
+				}
+				if updated, err := sessFront.GetWait(wait.ID); err != nil || updated.State != waitStateFailed {
+					t.Fatalf("wait state=%q, want failed: %v", updated.State, err)
+				}
+			} else if _, err := mp.Read(ref.ID); err != nil {
+				t.Fatal(err)
+			}
+			var out, stderr bytes.Buffer
+			for _, dryRun := range []bool{true, false} {
+				stderr.Reset()
+				if code := doNudgeReplay(dir, nudges, item.ID, dryRun, &out, &stderr); code == 0 || !strings.Contains(stderr.String(), recovery) {
+					t.Errorf("replay dryRun=%t must refuse and name %s: code=%d err=%s", dryRun, recovery, code, &stderr)
+				}
+			}
+			state, err = nudgequeue.LoadState(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Pending) != 0 || len(state.InFlight) != 0 {
+				t.Errorf("refused replay queued a successor: pending=%d in-flight=%d", len(state.Pending), len(state.InFlight))
+			}
+			// Run the delivery gate even on RED to expose the discarded successor.
+			deliverable, blocked, err := splitQueuedNudgesForDelivery(sessFront, mp, state.Pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := terminalizeBlockedQueuedNudges(dir, blocked); err != nil {
+				t.Fatal(err)
+			}
+			state, err = nudgequeue.LoadState(dir)
+			if err != nil || len(state.Dead) != 1 {
+				t.Fatalf("after delivery: dead=%d err=%v", len(state.Dead), err)
+			}
+			dead := state.Dead[0]
+			diagnostic := doctor.NewNudgeDeadLettersCheck().Run(&doctor.CheckContext{CityPath: dir})
+			for reason, items := range blocked {
+				t.Logf("delivery withdrew %d successor(s): %s", len(items), reason)
+			}
+			t.Logf("source=%s delivered=%d replay_id=%q unresolved=%t doctor=%q", source, len(deliverable), dead.ReplayID, dead.UnresolvedDeadLetter(), diagnostic.Message)
+			if len(deliverable) != 0 || dead.ReplayID != "" || !dead.ReplayedAt.IsZero() || !dead.UnresolvedDeadLetter() || dead.Message != item.Message {
+				t.Error("refused replay lost the unresolved input")
+			}
+			if diagnostic.Status != doctor.StatusWarning || len(diagnostic.Details) != 1 {
+				t.Errorf("dead letter disappeared from doctor: %s", diagnostic.Message)
+			}
+			if code := doNudgeDismiss(dir, item.ID, false, &out, &stderr); code != 0 {
+				t.Errorf("dismiss must remain available: %s", &stderr)
+			}
+		})
 	}
 }
 
