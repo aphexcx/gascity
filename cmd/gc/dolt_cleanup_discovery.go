@@ -395,8 +395,7 @@ func discoverActiveTestRootsFromPS(homeDir, tempDir string) []string {
 func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	if root, ok := pytestTestRoot(clean, tempDir); ok {
-		// A leaked watchdog can keep an older basetemp in its argv forever.
-		// Pytest's own live owner still protects an overlapping older run.
+		// Helper argv can outlive pytest; use pytest's own ownership evidence.
 		return root, pytestRootMayBeLive(root)
 	}
 	for _, root := range []string{"/tmp", tempDir} {
@@ -529,11 +528,12 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 
 // pytestOwnerMayBeLive reads pytest's cleanup lock, which contains the owning
 // runner PID and is removed on normal exit. A stale file alone is not liveness:
-// the process table is authoritative. Invalid or unreadable locks protect.
+// the process table is authoritative. Missing, invalid, or unreadable locks
+// protect: pytest can disable retention and run without creating a lock.
 func pytestOwnerMayBeLive(root string, alive func(int) bool) bool {
 	f, err := os.Open(filepath.Join(root, ".lock"))
 	if err != nil {
-		return !os.IsNotExist(err)
+		return true
 	}
 	defer f.Close() //nolint:errcheck // Read-only ownership evidence.
 	data, err := io.ReadAll(io.LimitReader(f, 32))

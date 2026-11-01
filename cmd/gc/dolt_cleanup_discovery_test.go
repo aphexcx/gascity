@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -30,6 +31,7 @@ func TestActiveTestRootFromPath_Pytest(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		writeExitedPytestOwner(t, filepath.Join(userRoot, name))
 	}
 	// A current link can lag directory creation by a concurrent pytest run.
 	if err := os.Symlink("pytest-9", filepath.Join(userRoot, "pytest-current")); err != nil {
@@ -92,6 +94,10 @@ func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("lockless overlapping run: action = %q, want protect", got.Action)
+	}
+	writeExitedPytestOwner(t, older)
 	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "reap" {
 		t.Errorf("completed older run: action = %q, want reap", got.Action)
 	}
@@ -100,6 +106,9 @@ func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
 func TestPytestOwnerMayBeLive(t *testing.T) {
 	root := t.TempDir()
 	lock := filepath.Join(root, ".lock")
+	if !pytestOwnerMayBeLive(root, func(int) bool { return false }) {
+		t.Error("pytest can omit its lock when retention is disabled; absence must protect")
+	}
 	for _, tc := range []struct {
 		name string
 		data string
@@ -142,6 +151,7 @@ func TestPytestTempRootDarwinAlias(t *testing.T) {
 	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	writeExitedPytestOwner(t, oldRoot)
 	if err := os.Mkdir(filepath.Join(filepath.Dir(oldRoot), "pytest-10"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +173,7 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	writeExitedPytestOwner(t, root)
 	if err := os.Mkdir(filepath.Join(parent, "pytest-2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +183,9 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	}
 	if !pytestRootMayBeLive(root) {
 		t.Error("an unreadable current link must protect the older root")
+	}
+	if err := os.Remove(filepath.Join(root, ".lock")); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Remove(root); err != nil {
 		t.Fatal(err)
@@ -184,6 +198,18 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	}
 	if !pytestRootMayBeLive(root) {
 		t.Error("a replaced basetemp must stay protected")
+	}
+}
+
+func writeExitedPytestOwner(t *testing.T, root string) {
+	t.Helper()
+	// Above the Linux/macOS PID ranges; verify absence without starting a child.
+	const exitedPID = 1<<31 - 1
+	if err := syscall.Kill(exitedPID, 0); err != syscall.ESRCH {
+		t.Fatalf("checking absent fixture PID: %v, want ESRCH", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".lock"), []byte(strconv.Itoa(exitedPID)), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

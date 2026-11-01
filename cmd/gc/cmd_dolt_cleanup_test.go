@@ -708,12 +708,13 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 	tempDir := t.TempDir()
 	userRoot := filepath.Join(tempDir, "pytest-of-user")
-	for _, name := range []string{"pytest-9", "pytest-10"} {
+	for _, name := range []string{"pytest-7", "pytest-9", "pytest-10"} {
 		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	oldConfig := filepath.Join(userRoot, "pytest-9", "test_city", "config.yaml")
+	writeExitedPytestOwner(t, filepath.Join(userRoot, "pytest-9"))
 	currentConfig := filepath.Join(userRoot, "pytest-10", "test_city", "config.yaml")
 	procs := []DoltProcInfo{
 		{PID: 101, Argv: []string{"dolt", "sql-server", "--config", oldConfig}, CWDState: procPathStateLive},
@@ -721,6 +722,7 @@ func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 		{PID: 103, Argv: []string{"dolt", "sql-server", "--config", "/srv/pytest-of-user/pytest-9/config.yaml"}, CWDState: procPathStateLive},
 		{PID: 104, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-8", "config.yaml")}, CWDState: procPathStateDeleted},
 		{PID: 105, Argv: []string{"dolt", "sql-server", "--data-dir", filepath.Dir(currentConfig)}, CWDState: procPathStateLive},
+		{PID: 106, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-7", "config.yaml")}, CWDState: procPathStateLive},
 	}
 	var stdout, stderr bytes.Buffer
 	code := runDoltCleanup(cleanupOptions{
@@ -746,8 +748,8 @@ func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
 	if !equalIntSlice(targets, []int{101, 104}) {
 		t.Errorf("reap targets = %v, want older and deleted basetemps [101 104]", targets)
 	}
-	if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{102, 103, 105}) {
-		t.Errorf("protected = %v, want current basetemp and non-temp path [102 103 105]", report.Reaped.ProtectedPIDs)
+	if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{102, 103, 105, 106}) {
+		t.Errorf("protected = %v, want current/lockless basetemps and non-temp path [102 103 105 106]", report.Reaped.ProtectedPIDs)
 	}
 }
 

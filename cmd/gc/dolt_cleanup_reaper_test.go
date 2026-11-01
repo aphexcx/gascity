@@ -169,6 +169,17 @@ func TestIsTestConfigPath_Pytest(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_PytestContainerNamespace(t *testing.T) {
+	p := DoltProcInfo{
+		PID: 123, ContainerRuntime: "docker", CWDState: procPathStateLive,
+		Argv: []string{"dolt", "sql-server", "--config", "/var/tmp/python/pytest-of-root/pytest-9/config.yaml"},
+	}
+	got := classifyDoltProcess(p, nil, "", "/var/tmp/python", nil)
+	if got.Action != "protect" || !strings.Contains(got.Reason, "container") {
+		t.Errorf("configured container = %+v, want protection without consulting host pytest paths", got)
+	}
+}
+
 func TestClassifyDoltProcess_ProtectedByRigPort(t *testing.T) {
 	p := DoltProcInfo{
 		PID:   1234,

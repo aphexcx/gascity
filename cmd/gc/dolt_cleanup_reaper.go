@@ -328,7 +328,18 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		}
 	}
 	for _, path := range []string{cfgPath, extractDataDirPath(p.Argv)} {
-		if root, ok := pytestTestRoot(path, tempDir); ok && pytestRootMayBeLive(root) {
+		root, ok := pytestTestRoot(path, tempDir)
+		if !ok {
+			continue
+		}
+		if p.ContainerRuntime != "" {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("container-managed dolt server (%s); pytest ownership cannot be verified on the host", p.ContainerRuntime),
+				ConfigPath: cfgPath,
+			}
+		}
+		if pytestRootMayBeLive(root) {
 			return reapClassification{
 				Action:     "protect",
 				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),
