@@ -151,15 +151,19 @@ func extractDataDirPath(argv []string) string {
 	return v
 }
 
-// reapDataDir returns argv's --data-dir value when — and only when — that
-// value independently passes the same test-config-path allowlist used for
-// --config (isTestConfigPath). It never consults ConfigPath: a --data-dir
-// value is trusted for removal solely on its own merits, so a reap triggered
-// by a --config allowlist match does not implicitly vouch for an unrelated
-// --data-dir value. Returns "" when --data-dir is absent or not test-owned,
-// which callers treat as "reap the process, but do not remove a directory."
+// reapDataDir returns a test-owned --data-dir eligible for directory removal.
+// The data path must independently pass the test-config-path allowlist; a
+// config match alone does not establish ownership of an unrelated data path.
+// Pytest retains ownership of its reusable basetemp directories; cleanup only
+// reaps its servers and must not remove a directory a later run can reuse.
+// An empty result means reap the process without removing a directory.
 func reapDataDir(argv []string, homeDir, tempDir string) string {
 	dataDirPath := extractDataDirPath(argv)
+	for _, path := range []string{extractConfigPath(argv), dataDirPath} {
+		if _, ok := pytestTestRoot(path, tempDir); ok {
+			return ""
+		}
+	}
 	if dataDirPath != "" && isTestConfigPath(dataDirPath, homeDir, tempDir) {
 		return dataDirPath
 	}
@@ -390,7 +394,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			// (step 7 below) is an ownership signal in its own right: a bare
 			// server with no --config but a test-owned --data-dir is a known
 			// regression-test shape and is reaped rather than protected.
-			return reapClassification{Action: "reap", DataDir: dataDirPath}
+			return reapClassification{Action: "reap", DataDir: reapDataDir(p.Argv, homeDir, tempDir)}
 		}
 		return reapClassification{
 			Action: "protect",

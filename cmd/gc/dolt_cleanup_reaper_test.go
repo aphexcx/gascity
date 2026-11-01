@@ -147,6 +147,20 @@ func TestIsTestConfigPath_NotTest(t *testing.T) {
 	}
 }
 
+func TestReapDataDir_PytestKeepsDirectoryOwnership(t *testing.T) {
+	pytestPath := "/tmp/pytest-of-user/pytest-0/db"
+	goPath := "/tmp/TestDataDir1/db"
+	for _, argv := range [][]string{
+		{"dolt", "sql-server", "--data-dir", pytestPath},
+		{"dolt", "sql-server", "--config", pytestPath, "--data-dir", goPath},
+		{"dolt", "sql-server", "--config", goPath, "--data-dir", pytestPath},
+	} {
+		if got := reapDataDir(argv, "", "/tmp"); got != "" {
+			t.Errorf("reapDataDir(%q) = %q, want no directory removal for pytest-owned servers", argv, got)
+		}
+	}
+}
+
 func TestIsTestConfigPath_Pytest(t *testing.T) {
 	for _, tc := range []struct {
 		path string

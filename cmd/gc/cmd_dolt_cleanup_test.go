@@ -889,6 +889,48 @@ func TestRunDoltCleanup_ForceProtectsPytestSymlink(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForcePreservesReusedPytestDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	dataDir := filepath.Join(tempDir, "pytest-of-user", "pytest-0", "db")
+	marker := filepath.Join(dataDir, "new-run-data")
+	proc := DoltProcInfo{
+		PID: 12345, HostNamespace: true, CWDState: procPathStateLive, StartTimeTicks: 10,
+		Argv: []string{"dolt", "sql-server", "--data-dir", dataDir},
+	}
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(marker, []byte("new run"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return os.RemoveAll(path)
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if !equalIntSlice(signals, []int{12345}) || len(removed) != 0 {
+		t.Errorf("signals=%v, removed=%v; want old server reaped with no directory removal", signals, removed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("new run data must remain intact: %v", err)
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
 
