@@ -634,10 +634,25 @@ func pytestConfigDataOwnedOnDisk(configPath, root string) bool {
 	if strings.ContainsRune(string(data), '$') {
 		return false
 	}
+	var document yaml.Node
+	if yaml.Unmarshal(data, &document) != nil {
+		return false
+	}
+	// Dolt's YAML parser can resolve merges differently. Only literal
+	// documents establish ownership across parser versions.
+	pending := []*yaml.Node{&document}
+	for len(pending) > 0 {
+		node := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if node.Kind == yaml.AliasNode || node.Tag == "!!merge" {
+			return false
+		}
+		pending = append(pending, node.Content...)
+	}
 	var cfg struct {
 		DataDir string `yaml:"data_dir"`
 	}
-	if yaml.Unmarshal(data, &cfg) != nil || !filepath.IsAbs(cfg.DataDir) {
+	if document.Decode(&cfg) != nil || !filepath.IsAbs(cfg.DataDir) {
 		return false
 	}
 	return pathUnderActiveTestRoot(cleanPytestPath(cfg.DataDir), []string{root}) && !pytestPathUnverified(cfg.DataDir, root)

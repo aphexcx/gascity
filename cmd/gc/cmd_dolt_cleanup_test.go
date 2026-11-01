@@ -987,7 +987,7 @@ func TestRunDoltCleanup_ForceProtectsNativePSDataDir(t *testing.T) {
 }
 
 func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
-	for _, kind := range []string{"owned", "current", "external", "relative", "default", "malformed", "missing", "oversize", "current-with-argv", "linked", "interpolated"} {
+	for _, kind := range []string{"owned", "current", "external", "relative", "default", "malformed", "missing", "oversize", "current-with-argv", "linked", "interpolated", "merged", "padded-config", "padded-config-equals", "padded-data"} {
 		t.Run(kind, func(t *testing.T) {
 			tempDir := t.TempDir()
 			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
@@ -1024,6 +1024,9 @@ func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
 				content = "data_dir: [\n"
 			case "oversize":
 				content += strings.Repeat(" ", 64*1024)
+			case "merged":
+				// Dolt's YAML parser lets the trailing merge override data_dir.
+				content += "<<: {data_dir: /srv/live}\n"
 			}
 			configPath := filepath.Join(older, "config.yaml")
 			if kind != "missing" {
@@ -1037,6 +1040,21 @@ func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
 			}
 			if kind == "current-with-argv" {
 				proc.Argv = append(proc.Argv, "--data-dir", older)
+			}
+			switch kind {
+			case "padded-config", "padded-config-equals":
+				// Both filenames exist; trimming validates a different config.
+				if err := os.WriteFile(configPath+" ", []byte("data_dir: /srv/live\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				proc.Argv = []string{"dolt", "sql-server", "--config", configPath + " "}
+				if kind == "padded-config-equals" {
+					proc.Argv = []string{"dolt", "sql-server", "--config=" + configPath + " "}
+				}
+			case "padded-data":
+				// A leading space makes this a relative path, outside the
+				// absolute basetemp that the trimmed value would appear to name.
+				proc.Argv = append(proc.Argv, "--data-dir", " "+older)
 			}
 			var signals []int
 			var stdout, stderr bytes.Buffer

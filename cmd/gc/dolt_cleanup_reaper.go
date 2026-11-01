@@ -362,6 +362,17 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 		if !ok {
 			continue
 		}
+		// Path helpers trim argv for legacy ownership comparisons. For
+		// pytest eligibility, a padded argument can name a different file.
+		for _, arg := range p.Argv {
+			if arg != strings.TrimSpace(arg) {
+				return reapClassification{
+					Action:     "protect",
+					Reason:     "pytest process has whitespace-padded arguments; exact ownership is unverified",
+					ConfigPath: cfgPath,
+				}
+			}
+		}
 		if p.ContainerRuntime != "" {
 			return reapClassification{
 				Action:     "protect",
