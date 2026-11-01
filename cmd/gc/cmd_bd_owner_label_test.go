@@ -159,14 +159,16 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 # bd's leading globals sit before the verb (a cluster like -vv, an attached value like -C/path).
 while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
 case "$1" in
-  info)
-    # The installed bd's info reports the effective database, including -C's
+  info|where)
+    # The installed bd reports the effective project and data path, including -C's
     # precedence over BEADS_DIR. The directory table supplies its measured
     # nested-store result; other selectors resolve to the projected store.
     if [ -n "${INFO_EXPECT_BEADS_DIR:-}" ] && [ "$BEADS_DIR" != "$INFO_EXPECT_BEADS_DIR" ]; then exit 1; fi
     database="${BEADS_DIR}/dolt"
     if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
-    printf '{"database_path":"%s"}\n' "$database" ;;
+    printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database" ;;
+  dolt)
+    if [ "$2" = "show" ]; then printf '{"database":"demo"}\n'; fi ;;
   create|new)
     # bd 1.3.1 applies --labels to the bead(s) it creates (and dedups them
     # against a parent's copied labels); the created bead's show reports them
@@ -327,7 +329,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 			calls := fakeBdCalls(t, capture)
 			// Store probes are asserted by the directory-resolution table;
 			// this table checks parent reads and create/stamp ordering.
-			calls = slices.DeleteFunc(calls, func(c string) bool { return strings.HasPrefix(c, "info ") })
+			calls = slices.DeleteFunc(calls, func(c string) bool {
+				return strings.HasPrefix(c, "where ") || strings.HasPrefix(c, "dolt show ")
+			})
 			// The create is the first call that is not a read: a child's
 			// parent is read before it, for the owner it carries.
 			createAt := slices.IndexFunc(calls, func(c string) bool { return !strings.HasPrefix(c, "show ") })
@@ -786,9 +790,9 @@ printf '✓ Created issue: demo-1 — t\n'
 			calls := fakeBdCalls(t, capture)
 			wantCalls := []string{tt.wantArgv}
 			if extractBdDirectoryFlag(tt.args) != "" {
-				// This fake has no info response: a failed probe must take the
+				// This fake has no location response: a failed probe must take the
 				// conservative path without any parent read or follow-up stamp.
-				wantCalls = append([]string{"info --json"}, wantCalls...)
+				wantCalls = append([]string{"where --json"}, wantCalls...)
 			}
 			if !slices.Equal(calls, wantCalls) {
 				t.Fatalf("bd calls = %q, want %q", calls, wantCalls)
@@ -881,12 +885,14 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 				t.Errorf("bd calls = %q, want create %q", calls, want)
 			}
 			if tt.dir != "" {
-				if !slices.Contains(calls, "info --json") || !slices.Contains(calls, "info --json --directory "+filepath.Join(rigDir, tt.dir)) {
-					t.Errorf("missing configured/selected store probes: %q", calls)
+				for _, command := range []string{"where --json", "dolt show --json"} {
+					if !slices.Contains(calls, command) || !slices.Contains(calls, command+" --directory "+filepath.Join(rigDir, tt.dir)) {
+						t.Errorf("missing configured/selected store probes: %q", calls)
+					}
 				}
 			}
-			if tt.override && len(calls) != 3 {
-				t.Errorf("database override should only probe twice and create, calls=%q", calls)
+			if tt.override && len(calls) != 5 {
+				t.Errorf("database override should only probe both identities and create, calls=%q", calls)
 			}
 			notice := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database")
 			if notice != tt.override {
