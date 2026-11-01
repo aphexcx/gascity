@@ -84,6 +84,7 @@ func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := filepath.Join(older, "test_city", "config.yaml")
+	writePytestDoltConfig(t, config, older)
 	if _, active := activeTestRootFromPath(config, "", tempDir); !active {
 		t.Error("a newer basetemp must not discard the older run's live owner")
 	}
@@ -116,6 +117,7 @@ func TestClassifyDoltProcess_PytestCurrentAlias(t *testing.T) {
 	}
 	writeExitedPytestOwner(t, older)
 	alias := filepath.Join(userRoot, "pytest-current")
+	writePytestDoltConfig(t, filepath.Join(older, "config.yaml"), older)
 	if err := os.Symlink(current, alias); err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +144,7 @@ func TestClassifyDoltProcess_PytestConfigCannotOwnExternalData(t *testing.T) {
 	}
 	writeExitedPytestOwner(t, older)
 	for _, dataDir := range []string{"/srv/active-data", "relative-data"} {
+		writePytestDoltConfig(t, filepath.Join(older, "config.yaml"), older)
 		t.Run(dataDir, func(t *testing.T) {
 			proc := DoltProcInfo{
 				PID: 101, HostNamespace: true, CWDState: procPathStateLive,
@@ -241,8 +244,8 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	if err := os.Remove(root); err != nil {
 		t.Fatal(err)
 	}
-	if pytestPathMayBeLive(root, root) {
-		t.Error("a missing basetemp must retain deleted-scope cleanup")
+	if !pytestPathMayBeLive(root, root) {
+		t.Error("a missing basetemp alone does not establish owner exit")
 	}
 	if err := os.Symlink(parent, root); err != nil {
 		t.Fatal(err)
@@ -293,6 +296,16 @@ func TestDoltProcHostNamespaceAt(t *testing.T) {
 				t.Errorf("host namespace = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func writePytestDoltConfig(t *testing.T, path, dataDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("data_dir: "+strconv.Quote(dataDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -484,6 +497,7 @@ func TestClassifyDoltProcess_PytestDataDirProtectsCurrentRun(t *testing.T) {
 	}
 	writeExitedPytestOwner(t, older)
 	config := filepath.Join(older, "test city", "config.yaml")
+	writePytestDoltConfig(t, config, older)
 	dataDir := filepath.Join(current, "test city", "data")
 	for _, sep := range []string{" ", "="} {
 		t.Run("separator="+sep, func(t *testing.T) {

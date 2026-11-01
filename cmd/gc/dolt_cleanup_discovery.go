@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"gopkg.in/yaml.v3"
 )
 
 // recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
@@ -437,6 +438,9 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	if root, ok := pytestTestRoot(clean, tempDir); ok {
 		// Helper argv can outlive pytest; use pytest's own ownership evidence.
+		if statConfigPathState(root) == procPathStateDeleted {
+			return "", false
+		}
 		return root, pytestPathMayBeLive(path, root)
 	}
 	for _, root := range []string{"/tmp", tempDir} {
@@ -511,8 +515,8 @@ func pytestRunNumber(name string) (uint64, bool) {
 
 // pytestPathMayBeLive protects pytest-current's target and the highest numbered
 // directory, including the window before pytest updates the symlink, and older
-// roots with a live pytest owner. Redirected or unreadable paths fail closed. Missing
-// basetemps retain the existing deleted-scope rule.
+// roots with a live pytest owner. Redirected, unreadable, or missing basetemps
+// fail closed because an absent path does not establish owner exit.
 func pytestPathMayBeLive(path, root string) bool {
 	if filepath.Base(root) == "pytest-current" {
 		return true
@@ -560,7 +564,7 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 	parent := filepath.Dir(root)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return !os.IsNotExist(err)
+		return true
 	}
 	var highest uint64
 	found := false
@@ -576,7 +580,7 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 		}
 	}
 	if !found {
-		return false
+		return true
 	}
 	if pytestOwnerMayBeLive(root, func(pid int) bool {
 		// Only ESRCH proves absence; permission and other errors protect.
@@ -595,6 +599,41 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 		current = filepath.Join(parent, current)
 	}
 	return cleanPytestPath(current) == cleanPytestPath(root)
+}
+
+// pytestConfigDataOwned requires an explicit absolute YAML data_dir in the
+// verified basetemp. Defaults, relative paths, and unreadable configs protect.
+func pytestConfigDataOwned(configPath, root string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() { ch <- pytestConfigDataOwnedOnDisk(configPath, root) }()
+	select {
+	case owned := <-ch:
+		return owned
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func pytestConfigDataOwnedOnDisk(configPath, root string) bool {
+	f, err := os.Open(configPath)
+	if err != nil {
+		return false
+	}
+	const maxConfigBytes = 64 * 1024
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || len(data) > maxConfigBytes {
+		return false
+	}
+	var cfg struct {
+		DataDir string `yaml:"data_dir"`
+	}
+	if yaml.Unmarshal(data, &cfg) != nil || !filepath.IsAbs(cfg.DataDir) {
+		return false
+	}
+	return pathUnderActiveTestRoot(cleanPytestPath(cfg.DataDir), []string{root}) && !pytestPathUnverified(cfg.DataDir, root)
 }
 
 // pytestOwnerMayBeLive reads pytest's cleanup lock, which contains the owning

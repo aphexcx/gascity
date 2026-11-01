@@ -376,10 +376,21 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 				ConfigPath: cfgPath,
 			}
 		}
-		if pytestPathMayBeLive(path, root) {
+		rootState := statConfigPathState(root)
+		if rootState == procPathStateDeleted && p.CWDState == procPathStateDeleted && filepath.Base(root) != "pytest-current" {
+			continue
+		}
+		if rootState != procPathStateLive || pytestPathMayBeLive(path, root) {
 			return reapClassification{
 				Action:     "protect",
 				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),
+				ConfigPath: cfgPath,
+			}
+		}
+		if path == cfgPath && !pytestConfigDataOwned(cfgPath, root) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "pytest config data directory is unverified; require an explicit absolute data_dir within its basetemp",
 				ConfigPath: cfgPath,
 			}
 		}
