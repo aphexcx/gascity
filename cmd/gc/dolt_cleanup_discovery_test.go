@@ -131,6 +131,29 @@ func TestClassifyDoltProcess_PytestCurrentAlias(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_PytestConfigCannotOwnExternalData(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	newer := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, newer} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	for _, dataDir := range []string{"/srv/active-data", "relative-data"} {
+		t.Run(dataDir, func(t *testing.T) {
+			proc := DoltProcInfo{
+				PID: 101, HostNamespace: true, CWDState: procPathStateLive,
+				Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", dataDir},
+			}
+			if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+				t.Errorf("external data directory: action=%q, want protect", got.Action)
+			}
+		})
+	}
+}
+
 func TestPytestOwnerMayBeLive(t *testing.T) {
 	root := t.TempDir()
 	lock := filepath.Join(root, ".lock")

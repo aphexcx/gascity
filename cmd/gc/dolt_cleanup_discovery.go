@@ -766,11 +766,12 @@ func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
 		return DoltProcInfo{}, false
 	}
 	return DoltProcInfo{
-		PID:            pid,
-		Argv:           argv,
-		ArgvUnverified: true,
-		Ports:          pidPorts[pid],
-		StartIdentity:  strings.Join(fields[1:6], " "),
+		PID:               pid,
+		Argv:              argv,
+		ArgvUnverified:    true,
+		ConfigOnlyCleanup: true,
+		Ports:             pidPorts[pid],
+		StartIdentity:     strings.Join(fields[1:6], " "),
 	}, true
 }
 

@@ -931,6 +931,59 @@ func TestRunDoltCleanup_ForcePreservesReusedPytestDirectory(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceProtectsNativePSDataDir(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "TestOld")
+	live := filepath.Join(tempDir, "TestLive")
+	for _, dir := range []string{older, filepath.Join(live, "db")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(live, "db", "active-data")
+	if err := os.WriteFile(marker, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(older, "link")
+	if err := os.Symlink(live, link); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(link, "db")
+	proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 dolt sql-server --data-dir "+dataDir, nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	// Native verification reveals the complete argv of the PS-discovered server.
+	proc.Argv = []string{"dolt", "sql-server", "--data-dir", dataDir}
+	proc.ArgvUnverified = false
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{live},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return os.RemoveAll(path)
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if len(signals) != 0 || len(removed) != 0 {
+		t.Errorf("native PS data-dir: signals=%v, removed=%v; want no cleanup authorization", signals, removed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("live test data must remain intact: %v", err)
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
 

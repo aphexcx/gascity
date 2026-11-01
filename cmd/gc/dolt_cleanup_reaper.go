@@ -63,6 +63,9 @@ type DoltProcInfo struct {
 	// ArgvUnverified marks flattened ps arguments whose boundaries have not
 	// been verified through a native process record. They cannot authorize cleanup.
 	ArgvUnverified bool
+	// ConfigOnlyCleanup requires --config eligibility and preserves directories.
+	// PS discovery uses native data arguments for protection only.
+	ConfigOnlyCleanup bool
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -157,9 +160,12 @@ func extractDataDirPath(argv []string) string {
 // Pytest retains ownership of its reusable basetemp directories; cleanup only
 // reaps its servers and must not remove a directory a later run can reuse.
 // An empty result means reap the process without removing a directory.
-func reapDataDir(argv []string, homeDir, tempDir string) string {
-	dataDirPath := extractDataDirPath(argv)
-	for _, path := range []string{extractConfigPath(argv), dataDirPath} {
+func reapDataDir(p DoltProcInfo, homeDir, tempDir string) string {
+	if p.ConfigOnlyCleanup {
+		return ""
+	}
+	dataDirPath := extractDataDirPath(p.Argv)
+	for _, path := range []string{extractConfigPath(p.Argv), dataDirPath} {
 		if _, ok := pytestTestRoot(path, tempDir); ok {
 			return ""
 		}
@@ -316,6 +322,9 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 
 	cfgPath := extractConfigPath(p.Argv)
+	if p.ConfigOnlyCleanup && cfgPath == "" {
+		return reapClassification{Action: "protect", Reason: "ps process discovery requires --config ownership for cleanup"}
+	}
 	// The standing guard for the supervisor process itself. Process discovery
 	// only enumerates `dolt sql-server` today, so nothing reaches here with a
 	// supervisor's argv — but if discovery ever widens, bd's own proxy must not
@@ -333,7 +342,15 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			ConfigPath: cfgPath,
 		}
 	}
-	for _, path := range []string{cfgPath, extractDataDirPath(p.Argv)} {
+	dataPath := extractDataDirPath(p.Argv)
+	if root, ok := pytestTestRoot(cfgPath, tempDir); ok && dataPath != "" && !pathUnderActiveTestRoot(cleanPytestPath(dataPath), []string{root}) {
+		return reapClassification{
+			Action:     "protect",
+			Reason:     fmt.Sprintf("data-dir %q is outside pytest config basetemp %q; ownership unverified", dataPath, root),
+			ConfigPath: cfgPath,
+		}
+	}
+	for _, path := range []string{cfgPath, dataPath} {
 		if pathUnderActiveTestRoot(path, activeTestRoots) {
 			return reapClassification{
 				Action:     "protect",
@@ -372,7 +389,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			Action:     "reap",
 			Reason:     "working directory deleted (scope removed)",
 			ConfigPath: cfgPath,
-			DataDir:    reapDataDir(p.Argv, homeDir, tempDir),
+			DataDir:    reapDataDir(p, homeDir, tempDir),
 		}
 	}
 	if cfgPath == "" {
@@ -394,7 +411,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			// (step 7 below) is an ownership signal in its own right: a bare
 			// server with no --config but a test-owned --data-dir is a known
 			// regression-test shape and is reaped rather than protected.
-			return reapClassification{Action: "reap", DataDir: reapDataDir(p.Argv, homeDir, tempDir)}
+			return reapClassification{Action: "reap", DataDir: reapDataDir(p, homeDir, tempDir)}
 		}
 		return reapClassification{
 			Action: "protect",
@@ -404,7 +421,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
 		// A test-config-path match is itself an ownership signal, so an owned
 		// test scope is reaped even when its --config file was already removed.
-		return reapClassification{Action: "reap", ConfigPath: cfgPath, DataDir: reapDataDir(p.Argv, homeDir, tempDir)}
+		return reapClassification{Action: "reap", ConfigPath: cfgPath, DataDir: reapDataDir(p, homeDir, tempDir)}
 	}
 	if p.ConfigPathState == procPathStateDeleted {
 		// A non-allowlist --config has vanished while the working directory

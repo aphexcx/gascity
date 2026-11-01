@@ -147,6 +147,19 @@ func TestIsTestConfigPath_NotTest(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_PSConfigPreservesDataDir(t *testing.T) {
+	proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/TestOld/config.yaml --data-dir /tmp/TestOld/db", nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	proc.Argv = []string{"dolt", "sql-server", "--config", "/tmp/TestOld/config.yaml", "--data-dir", "/tmp/TestOld/db"}
+	proc.ArgvUnverified = false
+	got := classifyDoltProcess(proc, nil, "", "/tmp", nil)
+	if got.Action != "reap" || got.DataDir != "" {
+		t.Errorf("PS config eligibility: action=%q, data-dir=%q; want process reaping only", got.Action, got.DataDir)
+	}
+}
+
 func TestReapDataDir_PytestKeepsDirectoryOwnership(t *testing.T) {
 	pytestPath := "/tmp/pytest-of-user/pytest-0/db"
 	goPath := "/tmp/TestDataDir1/db"
@@ -155,7 +168,7 @@ func TestReapDataDir_PytestKeepsDirectoryOwnership(t *testing.T) {
 		{"dolt", "sql-server", "--config", pytestPath, "--data-dir", goPath},
 		{"dolt", "sql-server", "--config", goPath, "--data-dir", pytestPath},
 	} {
-		if got := reapDataDir(argv, "", "/tmp"); got != "" {
+		if got := reapDataDir(DoltProcInfo{Argv: argv}, "", "/tmp"); got != "" {
 			t.Errorf("reapDataDir(%q) = %q, want no directory removal for pytest-owned servers", argv, got)
 		}
 	}
