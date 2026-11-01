@@ -50,8 +50,9 @@ nor any Dolt internals (`information_schema`, `mysql`,
 to processes whose `--config` path lives under the test-config
 allowlist (`/tmp/Test*`, `os.TempDir()/Test*`, `~/.gotmp/Test*`, and
 `pytest-of-<user>/pytest-<N>` under `/tmp` or `os.TempDir()`). The
-`pytest-current` target and highest numbered basetemp stay protected;
-older pytest basetemps are eligible for cleanup.
+`pytest-current` target, highest numbered basetemp, and older basetemps
+with a live pytest owner stay protected. Other older pytest basetemps
+are eligible for cleanup.
 Database identifiers used for destructive DROP and purge calls must
 contain only ASCII letters, digits, underscores, and non-leading
 hyphens; rigs with other `dolt_database` names should be renamed or
