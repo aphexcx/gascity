@@ -161,6 +161,8 @@ go_test(
         "//internal/orders",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/runtime/auto",
+        "//internal/runtime/hybrid",
         "//internal/shellquote",
         "//internal/supervisor",
         "//internal/suspensionstate",

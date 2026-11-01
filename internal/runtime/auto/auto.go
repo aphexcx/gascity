@@ -437,12 +437,14 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	defaultList, dErr := p.defaultSP.ListRunning(prefix)
-	acpList, aErr := p.acpSP.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
-		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
-	)
+	return runtime.MergeBackendListResults(p.ListRunningBackends(prefix)...)
+}
+
+// ListRunningBackends retains each session's owning backend, including
+// sessions whose routes are missing or stale.
+func (p *Provider) ListRunningBackends(prefix string) []runtime.BackendListResult {
+	return append(runtime.ListBackendSessions("default", p.defaultSP, prefix),
+		runtime.ListBackendSessions("acp", p.acpSP, prefix)...)
 }
 
 // GetLastActivity delegates to the routed backend.

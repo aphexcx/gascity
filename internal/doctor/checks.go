@@ -588,7 +588,7 @@ func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 // Run finds sessions with the city prefix that don't match any configured agent.
 func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	orphans, err := c.orphanSessions(ctx)
+	scan, err := c.orphanSessions(ctx)
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		r.Status = StatusError
@@ -596,7 +596,10 @@ func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 		return r
 	}
 
-	if len(orphans) == 0 {
+	for _, readErr := range scan.unreadable {
+		r.Details = append(r.Details, readErr.Error()+"; excluded from cleanup candidates")
+	}
+	if len(scan.orphans) == 0 && len(scan.unreadable) == 0 {
 		if partialList {
 			r.Status = StatusWarning
 			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
@@ -608,14 +611,18 @@ func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	r.Status = StatusWarning
 	if partialList {
-		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(orphans))
+		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(scan.orphans))
 	} else {
-		r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
+		r.Message = fmt.Sprintf("%d orphaned session(s)", len(scan.orphans))
 	}
-	for _, orphan := range orphans {
+	for _, orphan := range scan.orphans {
 		r.Details = append(r.Details, orphan.name+": "+orphan.reason+"; agent not configured")
 	}
 	r.FixHint = "inspect the candidates, then use gc doctor --fix --fix-orphans while the controller is stopped"
+	if len(scan.unreadable) > 0 {
+		r.Message += fmt.Sprintf("; %d unreadable session(s)", len(scan.unreadable))
+		r.FixHint = "resolve ownership-read failures before requesting orphan cleanup"
+	}
 	return r
 }
 
@@ -642,15 +649,18 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if !ok || !scoped.IsCityScoped(c.cityName) {
 		return fmt.Errorf("refusing orphan cleanup: runtime cannot confirm a city-scoped socket for %q (default, shared, or unknown socket)", c.cityName)
 	}
-	orphans, err := c.orphanSessions(ctx)
+	scan, err := c.orphanSessions(ctx)
 	if runtime.IsPartialListError(err) {
 		return fmt.Errorf("listing sessions partially failed: %w", err)
 	}
 	if err != nil {
 		return err
 	}
-	for _, orphan := range orphans {
-		if err := c.sp.Stop(orphan.name); err != nil {
+	if len(scan.unreadable) > 0 {
+		return fmt.Errorf("refusing orphan cleanup: incomplete ownership metadata: %w", errors.Join(scan.unreadable...))
+	}
+	for _, orphan := range scan.orphans {
+		if err := orphan.provider.Stop(orphan.name); err != nil {
 			return fmt.Errorf("killing orphan session %q: %w", orphan.name, err)
 		}
 	}

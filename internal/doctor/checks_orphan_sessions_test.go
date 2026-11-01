@@ -9,6 +9,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 type scopedOrphanProvider struct {
@@ -23,7 +25,79 @@ func (p scopedOrphanProvider) GetMeta(name, key string) (string, error) {
 	if p.metaErr != nil {
 		return "", p.metaErr
 	}
+	if !p.IsRunning(name) {
+		return "", runtime.ErrSessionNotFound
+	}
 	return p.Provider.GetMeta(name, key)
+}
+
+type scopedAutoOrphanProvider struct{ *auto.Provider }
+
+func (scopedAutoOrphanProvider) IsCityScoped(string) bool { return true }
+
+func TestOrphanSessionsCheckMixedBackends(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		err    error
+		nested bool
+		batch  bool
+	}{
+		{name: "unrouted ACP"},
+		{name: "unreadable ACP", err: context.DeadlineExceeded},
+		{name: "vanished ACP", err: runtime.ErrSessionNotFound},
+		{name: "nested hybrid", nested: true},
+		{name: "unreadable ACP batch", err: context.DeadlineExceeded, batch: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			local, acp := runtime.NewFake(), runtime.NewFake()
+			for name, sp := range map[string]*runtime.Fake{"test-local-stale": local, "test-acp-stale": acp} {
+				if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var acpBackend runtime.Provider = scopedOrphanProvider{Provider: acp, metaErr: tt.err}
+			if tt.batch {
+				acpBackend = failedBatchOrphanProvider{scopedOrphanProvider{Provider: acp}}
+			}
+			if tt.nested {
+				acpBackend = hybrid.New(runtime.NewFake(), acpBackend, func(string) bool { return false })
+			}
+			// The ACP session is deliberately absent from both routing tables.
+			sp := scopedAutoOrphanProvider{auto.New(scopedOrphanProvider{Provider: local}, acpBackend)}
+			c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
+			c.AllowFix = true
+			ctx := &CheckContext{}
+			r := c.Run(ctx)
+			details := strings.Join(r.Details, "\n")
+			if r.Status != StatusWarning || len(r.Details) != 2 || !strings.Contains(details, "test-local-stale:") || !strings.Contains(details, "test-acp-stale") {
+				t.Fatalf("Run() = %+v, want both sessions reported without aborting", r)
+			}
+			if tt.err != nil {
+				if !strings.Contains(details, tt.err.Error()) || !strings.Contains(details, "excluded from cleanup candidates") {
+					t.Errorf("Details = %q, want the ownership error and cleanup exclusion", details)
+				}
+				var d Doctor
+				d.Register(c)
+				report := d.Run(ctx, io.Discard, false)
+				if report.Failed != 0 || report.BlockingFailed != 0 || report.Warned != 1 {
+					t.Errorf("plain doctor report = %+v, want one warning and no failures", report)
+				}
+				if err := c.Fix(ctx); !errors.Is(err, tt.err) {
+					t.Errorf("Fix() = %v, want unreadable ownership refusal: %v", err, tt.err)
+				}
+				if local.CountCalls("Stop", "test-local-stale") != 0 || acp.CountCalls("Stop", "test-acp-stale") != 0 {
+					t.Fatal("partial metadata view stopped a session")
+				}
+				return
+			}
+			if err := c.Fix(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if local.IsRunning("test-local-stale") || acp.IsRunning("test-acp-stale") {
+				t.Fatal("cleanup did not reach the backend that listed each orphan")
+			}
+		})
+	}
 }
 
 type failedBatchOrphanProvider struct{ scopedOrphanProvider }
@@ -40,11 +114,41 @@ func TestOrphanSessionsCheckBatchOwnershipErrors(t *testing.T) {
 	p := failedBatchOrphanProvider{scopedOrphanProvider{Provider: sp, scoped: true}}
 	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", p)
 	c.AllowFix = true
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning || len(r.Details) != 1 || !strings.Contains(r.Details[0], "excluded from cleanup candidates") {
+		t.Fatalf("Run() = %+v, want a warning when the only session is unreadable", r)
+	}
 	if err := c.Fix(&CheckContext{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Fix() = %v, want ownership-read timeout", err)
 	}
 	if !sp.IsRunning("test-stale") {
 		t.Fatal("cleanup used the name after an ownership-read failure")
+	}
+}
+
+func TestOrphanSessionsCheckSameNameAcrossBackends(t *testing.T) {
+	local, acp := runtime.NewFake(), runtime.NewFake()
+	for sp, city := range map[*runtime.Fake]string{local: "/cities/other", acp: "/cities/test"} {
+		if err := sp.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sp.SetMeta("test-stale", "GC_CITY_PATH", city); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := scopedAutoOrphanProvider{auto.New(local, acp)}
+	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
+	c.AllowFix = true
+	ctx := &CheckContext{CityPath: "/cities/test"}
+	r := c.Run(ctx)
+	if r.Status != StatusWarning || len(r.Details) != 1 {
+		t.Fatalf("Run() = %+v, want only the owned backend's session", r)
+	}
+	if err := c.Fix(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !local.IsRunning("test-stale") || acp.IsRunning("test-stale") {
+		t.Fatal("cleanup stopped the foreign backend's session or retained the owned orphan")
 	}
 }
 

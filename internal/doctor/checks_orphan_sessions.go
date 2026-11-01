@@ -15,8 +15,14 @@ import (
 var orphanSessionID = regexp.MustCompile(`^[a-zA-Z0-9]+-(wisp-)?[a-zA-Z0-9]+$`)
 
 type orphanSession struct {
-	name   string
-	reason string
+	name     string
+	reason   string
+	provider runtime.Provider
+}
+
+type orphanSessionScan struct {
+	orphans    []orphanSession
+	unreadable []error
 }
 
 func (c *OrphanSessionsCheck) expectedSessionNames() (map[string]bool, error) {
@@ -95,51 +101,55 @@ func (c *OrphanSessionsCheck) citySessionShape() (prefix, suffix string) {
 // orphanSessions collects every candidate before Fix performs any Stop. An
 // incomplete listing or failed ownership read therefore cannot partially kill
 // the visible subset. Both reporting and cleanup use this classification.
-func (c *OrphanSessionsCheck) orphanSessions(ctx *CheckContext) ([]orphanSession, error) {
+func (c *OrphanSessionsCheck) orphanSessions(ctx *CheckContext) (orphanSessionScan, error) {
+	var scan orphanSessionScan
 	expected, err := c.expectedSessionNames()
 	if err != nil {
-		return nil, err
+		return scan, err
 	}
-	running, listErr := c.sp.ListRunning("")
+	backends := runtime.ListBackendSessions("runtime", c.sp, "")
+	_, listErr := runtime.MergeBackendListResults(backends...)
 	if listErr != nil && !runtime.IsPartialListError(listErr) {
-		return nil, listErr
+		return scan, listErr
 	}
 	prefix, suffix := c.citySessionShape()
-	var orphans []orphanSession
-	for _, name := range running {
-		env, err := c.sessionEnvironment(name)
-		if err != nil {
-			return nil, fmt.Errorf("reading ownership for session %q: %w", name, err)
-		}
-		if c.expectedSession(name, expected, env["GC_TEMPLATE"]) {
-			continue
-		}
-		cityPath := env["GC_CITY_PATH"]
-		if cityPath != "" {
-			// Explicit foreign ownership wins even if a name has our prefix.
-			if ctx == nil || ctx.CityPath == "" || filepath.Clean(cityPath) != filepath.Clean(ctx.CityPath) {
+	for _, backend := range backends {
+		for _, name := range backend.Names {
+			env, err := sessionEnvironment(backend.Provider, name)
+			if err != nil {
+				scan.unreadable = append(scan.unreadable, fmt.Errorf("reading ownership for session %q (%s): %w", name, backend.Label, err))
 				continue
 			}
-		}
-		if prefix != "" && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) && len(name) > len(prefix)+len(suffix) {
-			orphans = append(orphans, orphanSession{name, fmt.Sprintf("matches city session shape %q + agent + %q", prefix, suffix)})
-		} else if cityPath != "" && c.matchesRuntimeIdentity(name, env) {
-			orphans = append(orphans, orphanSession{name, "GC_CITY_PATH matches this city and name matches runtime agent identity"})
+			if c.expectedSession(name, expected, env["GC_TEMPLATE"]) {
+				continue
+			}
+			cityPath := env["GC_CITY_PATH"]
+			if cityPath != "" {
+				// Explicit foreign ownership wins even if a name has our prefix.
+				if ctx == nil || ctx.CityPath == "" || filepath.Clean(cityPath) != filepath.Clean(ctx.CityPath) {
+					continue
+				}
+			}
+			if prefix != "" && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) && len(name) > len(prefix)+len(suffix) {
+				scan.orphans = append(scan.orphans, orphanSession{name, fmt.Sprintf("matches city session shape %q + agent + %q", prefix, suffix), backend.Provider})
+			} else if cityPath != "" && c.matchesRuntimeIdentity(name, env) {
+				scan.orphans = append(scan.orphans, orphanSession{name, "GC_CITY_PATH matches this city and name matches runtime agent identity", backend.Provider})
+			}
 		}
 	}
-	return orphans, listErr
+	return scan, listErr
 }
 
-func (c *OrphanSessionsCheck) sessionEnvironment(name string) (map[string]string, error) {
+func sessionEnvironment(sp runtime.Provider, name string) (map[string]string, error) {
 	// tmux's single-key GetMeta cannot distinguish every transport failure
 	// from an absent variable. Its batch read preserves those errors and
 	// supplies one consistent ownership snapshot before any Stop.
-	if p, ok := c.sp.(runtime.EnvironmentBatchProvider); ok {
+	if p, ok := sp.(runtime.EnvironmentBatchProvider); ok {
 		return p.GetAllEnvironment(name)
 	}
 	env := make(map[string]string)
 	for _, key := range []string{"GC_CITY_PATH", "GC_AGENT", "GC_TEMPLATE", "GC_SESSION_ID"} {
-		value, err := c.sp.GetMeta(name, key)
+		value, err := sp.GetMeta(name, key)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", key, err)
 		}
