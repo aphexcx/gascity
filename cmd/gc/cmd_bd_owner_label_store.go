@@ -13,7 +13,8 @@ import (
 )
 
 // bdOwnerLabelDirectoryMatchesScope compares the configured store with the
-// directory-selected store using bd's project, data path, and SQL database name.
+// directory-selected store using bd's project, data path, backend, and (for Dolt)
+// SQL database name.
 // A data path alone can contain several Dolt server databases. The runner must
 // use the create's binary, projected environment, and configured scope cwd.
 // Explicit database overrides are handled before this probe. An unavailable or
@@ -32,7 +33,7 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 		return nil
 	}
 	type identity struct {
-		project, dataPath, database string
+		project, dataPath, backend, database string
 	}
 	probe := func(selector []string) (identity, error) {
 		var location struct {
@@ -46,15 +47,26 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 			return identity{}, fmt.Errorf("bd where returned no absolute path/database_path: %q / %q", location.Path, location.DatabasePath)
 		}
 		var config struct {
+			Backend  string `json:"backend"`
 			Database string `json:"database"`
 		}
 		if err := query(append([]string{"dolt", "show", "--json"}, selector...), &config); err != nil {
 			return identity{}, err
 		}
-		if strings.TrimSpace(config.Database) == "" {
+		if strings.TrimSpace(config.Backend) == "" {
+			return identity{}, fmt.Errorf("bd dolt show returned no backend")
+		}
+		// bd reports only the backend for non-Dolt storage bindings. Their
+		// identity comes from the project and data path, without a SQL name.
+		if config.Backend == "dolt" && strings.TrimSpace(config.Database) == "" {
 			return identity{}, fmt.Errorf("bd dolt show returned no database name")
 		}
-		return identity{normalizePathForCompare(location.Path), normalizePathForCompare(location.DatabasePath), config.Database}, nil
+		return identity{
+			project:  normalizePathForCompare(location.Path),
+			dataPath: normalizePathForCompare(location.DatabasePath),
+			backend:  config.Backend,
+			database: config.Database,
+		}, nil
 	}
 	configured, err := probe(nil)
 	if err != nil {
@@ -63,7 +75,7 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 	// bd's data commands preserve a configured redirect source's raw database
 	// name. Its no-store diagnostics resolve the target before reading that name.
 	// Recover this one field from the known scope, leaving discovery to bd.
-	if configured.project != normalizePathForCompare(filepath.Join(scopeRoot, ".beads")) {
+	if configured.backend == "dolt" && configured.project != normalizePathForCompare(filepath.Join(scopeRoot, ".beads")) {
 		data, err := os.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("reading configured redirect metadata: %w", err)

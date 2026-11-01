@@ -46,6 +46,7 @@ func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
 		{"missing path", response(store), "{}", 0, false, "database_path"},
 		{"relative path", response(store), response(".beads/dolt"), 0, false, "database_path"},
 		{"missing database name", response(store), response(store), 0, false, "database name"},
+		{"missing backend", response(store), response(store), 0, false, "backend"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls [][]string
@@ -65,8 +66,11 @@ func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
 					payload = tt.selected
 				}
 				if args[0] == "dolt" {
-					payload = `{"database":"probe"}`
+					payload = `{"backend":"dolt","database":"probe"}`
 					if tt.name == "missing database name" {
+						payload = `{"backend":"dolt"}`
+					}
+					if tt.name == "missing backend" {
 						payload = `{}`
 					}
 				}
@@ -123,7 +127,8 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 					Path         string `json:"path"`
 					DatabasePath string `json:"database_path"`
 					Database     string `json:"database"`
-				}{filepath.Join(root, "target", ".beads"), filepath.Join(root, "shared-data"), "target"}); err != nil {
+					Backend      string `json:"backend"`
+				}{filepath.Join(root, "target", ".beads"), filepath.Join(root, "shared-data"), "target", "dolt"}); err != nil {
 					t.Fatal(err)
 				}
 				return 0
@@ -155,7 +160,8 @@ func TestBdOwnerLabelDirectoryRejectsSharedDataPath(t *testing.T) {
 					Path         string `json:"path"`
 					DatabasePath string `json:"database_path"`
 					Database     string `json:"database"`
-				}{path, filepath.Join(root, "shared-data"), database}); err != nil {
+					Backend      string `json:"backend"`
+				}{path, filepath.Join(root, "shared-data"), database, "dolt"}); err != nil {
 					t.Fatal(err)
 				}
 				return 0

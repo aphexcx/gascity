@@ -168,7 +168,10 @@ case "$1" in
     if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
     printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database" ;;
   dolt)
-    if [ "$2" = "show" ]; then printf '{"database":"demo"}\n'; fi ;;
+    if [ "$2" = "show" ]; then
+      if [ "${INFO_BACKEND:-dolt}" = "dolt" ]; then printf '{"backend":"dolt","database":"demo"}\n';
+      else printf '{"backend":"%s"}\n' "$INFO_BACKEND"; fi
+    fi ;;
   create|new)
     # bd 1.3.1 applies --labels to the bead(s) it creates (and dedups them
     # against a parent's copied labels); the created bead's show reports them
@@ -834,16 +837,18 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 		name     string
 		dir      string
 		override bool
+		backend  string
 	}{
-		{"no selector", "", false},
-		{"rig root", ".", false},
-		{"rig beads directory", ".beads", false},
-		{"subdirectory without a store", "plain", false},
-		{"empty beads directory", "empty", false},
-		{"redirected beads directory", "redirect", false},
-		{"nested store", "nested", true},
-		{"nested beads directory", "nested/.beads", true},
-		{"below nested store", "nested/deep", true},
+		{"no selector", "", false, ""},
+		{"rig root", ".", false, ""},
+		{"rig beads directory", ".beads", false, ""},
+		{"subdirectory without a store", "plain", false, ""},
+		{"empty beads directory", "empty", false, ""},
+		{"redirected beads directory", "redirect", false, ""},
+		{"nested store", "nested", true, ""},
+		{"nested beads directory", "nested/.beads", true, ""},
+		{"below nested store", "nested/deep", true, ""},
+		{"non-Dolt configured store", ".", false, "doltlite"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rigDir := t.TempDir()
@@ -861,6 +866,7 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 			t.Setenv("GC_RIG", "work")
 			t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
 			t.Setenv("INFO_EXPECT_BEADS_DIR", filepath.Join(rigDir, ".beads"))
+			t.Setenv("INFO_BACKEND", tt.backend)
 			if tt.override {
 				t.Setenv("INFO_SELECTED_DATABASE", filepath.Join(rigDir, "nested/.beads/dolt"))
 			}
