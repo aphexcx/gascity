@@ -159,6 +159,14 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 # bd's leading globals sit before the verb (a cluster like -vv, an attached value like -C/path).
 while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
 case "$1" in
+  info)
+    # The installed bd's info reports the effective database, including -C's
+    # precedence over BEADS_DIR. The directory table supplies its measured
+    # nested-store result; other selectors resolve to the projected store.
+    if [ -n "${INFO_EXPECT_BEADS_DIR:-}" ] && [ "$BEADS_DIR" != "$INFO_EXPECT_BEADS_DIR" ]; then exit 1; fi
+    database="${BEADS_DIR}/dolt"
+    if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
+    printf '{"database_path":"%s"}\n' "$database" ;;
   create|new)
     # bd 1.3.1 applies --labels to the bead(s) it creates (and dedups them
     # against a parent's copied labels); the created bead's show reports them
@@ -317,6 +325,9 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tt.args, got, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
+			// Store probes are asserted by the directory-resolution table;
+			// this table checks parent reads and create/stamp ordering.
+			calls = slices.DeleteFunc(calls, func(c string) bool { return strings.HasPrefix(c, "info ") })
 			// The create is the first call that is not a read: a child's
 			// parent is read before it, for the owner it carries.
 			createAt := slices.IndexFunc(calls, func(c string) bool { return !strings.HasPrefix(c, "show ") })
@@ -773,8 +784,14 @@ printf '✓ Created issue: demo-1 — t\n'
 				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
-			if len(calls) != 1 || calls[0] != tt.wantArgv {
-				t.Fatalf("bd calls = %q, want only the create %q", calls, tt.wantArgv)
+			wantCalls := []string{tt.wantArgv}
+			if extractBdDirectoryFlag(tt.args) != "" {
+				// This fake has no info response: a failed probe must take the
+				// conservative path without any parent read or follow-up stamp.
+				wantCalls = append([]string{"info --json"}, wantCalls...)
+			}
+			if !slices.Equal(calls, wantCalls) {
+				t.Fatalf("bd calls = %q, want %q", calls, wantCalls)
 			}
 			if got := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database"); got != tt.wantNote {
 				t.Fatalf("stderr=%q, owner-label database-selection notice present = %v, want %v", stderr.String(), got, tt.wantNote)
@@ -818,21 +835,31 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 		{"rig root", ".", false},
 		{"rig beads directory", ".beads", false},
 		{"subdirectory without a store", "plain", false},
+		{"empty beads directory", "empty", false},
+		{"redirected beads directory", "redirect", false},
 		{"nested store", "nested", true},
 		{"nested beads directory", "nested/.beads", true},
 		{"below nested store", "nested/deep", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			rigDir := t.TempDir()
-			for _, dir := range []string{".beads", "plain", "nested/.beads", "nested/deep"} {
+			for _, dir := range []string{".beads", "plain", "empty/.beads", "redirect/.beads", "nested/.beads", "nested/deep"} {
 				if err := os.MkdirAll(filepath.Join(rigDir, dir), 0o755); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if err := os.WriteFile(filepath.Join(rigDir, "redirect/.beads/redirect"), []byte(filepath.Join(rigDir, ".beads")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
 			}
 			capture := filepath.Join(t.TempDir(), "args")
 			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
 			t.Setenv("CAPTURE_PATH", capture)
 			t.Setenv("GC_RIG", "work")
+			t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
+			t.Setenv("INFO_EXPECT_BEADS_DIR", filepath.Join(rigDir, ".beads"))
+			if tt.override {
+				t.Setenv("INFO_SELECTED_DATABASE", filepath.Join(rigDir, "nested/.beads/dolt"))
+			}
 			args := []string{"create", "child", "--parent", "demo-0"}
 			if tt.dir != "" {
 				args = append(args, "-C", filepath.Join(rigDir, tt.dir))
@@ -853,8 +880,13 @@ func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
 			if !slices.Contains(calls, want) {
 				t.Errorf("bd calls = %q, want create %q", calls, want)
 			}
-			if tt.override && len(calls) != 1 {
-				t.Errorf("database override should only create, calls=%q", calls)
+			if tt.dir != "" {
+				if !slices.Contains(calls, "info --json") || !slices.Contains(calls, "info --json --directory "+filepath.Join(rigDir, tt.dir)) {
+					t.Errorf("missing configured/selected store probes: %q", calls)
+				}
+			}
+			if tt.override && len(calls) != 3 {
+				t.Errorf("database override should only probe twice and create, calls=%q", calls)
 			}
 			notice := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database")
 			if notice != tt.override {

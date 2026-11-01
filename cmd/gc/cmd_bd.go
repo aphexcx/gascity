@@ -773,25 +773,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// that cannot be read refuses the create. Under a bd database override the
 	// configured store is not the create's store, so no parent is read there
 	// and a create naming one carries nothing (the notice below says so).
-	directoryMatchesScope := false
-	if dir := extractBdDirectoryFlag(bdArgs); dir != "" {
-		// A directory within the rig can select a nested store. Compare the
-		// nearest .beads directory, not the enclosing rig's identity.
-		for current := normalizePathForCompare(dir); ; current = filepath.Dir(current) {
-			beadsDir := filepath.Join(current, ".beads")
-			if filepath.Base(current) == ".beads" {
-				beadsDir = current
-			}
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-				directoryMatchesScope = normalizePathForCompare(beadsDir) == normalizePathForCompare(filepath.Join(target.ScopeRoot, ".beads"))
-				break
-			}
-			if current == filepath.Dir(current) {
-				break
-			}
+	// Explicit database overrides remain conservative. For -C alone, ask the
+	// same bd binary and environment as the create: bd owns store discovery,
+	// including redirects, empty .beads directories, and selector precedence.
+	override := bdOwnerLabelDatabaseOverride(bdArgs, env, true)
+	if dir := extractBdDirectoryFlag(bdArgs); !override && dir != "" {
+		runner := &bdWatchRunner{bdPath: bdPath, dir: target.ScopeRoot, env: env, cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr}
+		matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), runner.run, dir)
+		override = !matches
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: cannot verify owner-label store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
-	override := bdOwnerLabelDatabaseOverride(bdArgs, env, directoryMatchesScope)
 	var store beads.Store
 	var parentRead func(string) (beads.Bead, error)
 	if !override {
