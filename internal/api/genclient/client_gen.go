@@ -2257,6 +2257,9 @@ type InboundDelivery struct {
 	Members        *[]InboundDeliveryMember `json:"members,omitempty"`
 	ReceiptId      string                   `json:"receipt_id"`
 	Status         string                   `json:"status"`
+
+	// Terminal When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds.
+	Terminal *bool `json:"terminal,omitempty"`
 }
 
 // InboundDeliveryMember defines model for InboundDeliveryMember.
@@ -2268,6 +2271,9 @@ type InboundDeliveryMember struct {
 	Selector       *string `json:"selector,omitempty"`
 	SessionId      string  `json:"session_id"`
 	Status         string  `json:"status"`
+
+	// Terminal When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds.
+	Terminal *bool `json:"terminal,omitempty"`
 }
 
 // InboundDroppedEventPayload defines model for InboundDroppedEventPayload.

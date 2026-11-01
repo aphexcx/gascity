@@ -45,8 +45,9 @@ const (
 	//   - a member's payload landed whole but the agent was not seen taking
 	//     the turn (submit unconfirmed — the 2026-08-28 gp-2io incident,
 	//     which classified as failed and licensed a 6x duplicate storm);
-	//   - a pasted draft lost ownership before confirmation; its reason
-	//     records a terminal hold requiring attention, never automatic replay;
+	//   - a pasted draft lost ownership before confirmation; terminal=true
+	//     distinguishes this hold from an unconcluded pending: stop polling,
+	//     require operator attention, and never automatically replay;
 	//   - a mixed fan-out in which at least one member holds a whole live
 	//     copy, so a fan-out-wide re-post would duplicate it.
 	//
@@ -66,6 +67,9 @@ type InboundDeliveryMember struct {
 	// list when SessionID is an opaque id.
 	Selector string                `json:"selector,omitempty"`
 	Status   InboundDeliveryStatus `json:"status"`
+	// Terminal marks a pending hold that cannot progress automatically.
+	// Stop polling and do not redeliver; operator attention is required.
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds."`
 	// DeliveredBytes/ExpectedBytes are for THIS member's reminder, which is
 	// not the same string as any other member's — see [InboundDelivery].
 	DeliveredBytes int `json:"delivered_bytes"`
@@ -121,6 +125,10 @@ type InboundDelivery struct {
 	// are distinguishable in logs. Non-empty whenever the object is present.
 	ReceiptID string                `json:"receipt_id"`
 	Status    InboundDeliveryStatus `json:"status"`
+	// Terminal marks a pending hold with at least one terminal member.
+	// Stop polling and do not redeliver; no sibling can repair that loss.
+	// Omission preserves the status-only contract for older readers.
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds."`
 	// DeliveredBytes is summed over members; see the type doc. 0 for no_route.
 	DeliveredBytes int                     `json:"delivered_bytes"`
 	ExpectedBytes  int                     `json:"expected_bytes"`
@@ -147,6 +155,7 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 	for _, m := range members {
 		out.DeliveredBytes += m.DeliveredBytes
 		out.ExpectedBytes += m.ExpectedBytes
+		out.Terminal = out.Terminal || m.Terminal
 		switch m.Status {
 		case InboundDeliveryDelivered:
 			delivered++
