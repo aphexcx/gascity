@@ -900,6 +900,114 @@ func TestNudgeDeadLetterMissingShadowCeiling(t *testing.T) {
 	}
 }
 
+func TestNudgeDeadLetterMissingShadowCeilingPreservesWaitIntent(t *testing.T) {
+	for _, failure := range []string{"wait-write", "hold-write", "reference-read"} {
+		t.Run(failure, func(t *testing.T) {
+			dir, now, store, wait := droppedWaitNudgeFixture(t)
+			nudges := beads.NudgesStore{Store: store}
+			sessFront := cliSessionFrontDoor(store, nil, dir)
+			if err := store.SetMetadataBatch(wait.SessionID, map[string]string{
+				"state": "awake", "wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			capTime := now.Add(nudgequeue.DeadLetterRetention)
+			if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+				return pruneDeadQueuedNudges("", state, nil, capTime, noMaintenanceDeadline())
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete(store.failID); err != nil {
+				t.Fatal(err)
+			}
+			store.terminalOnly = false
+			store.failID = wait.ID
+			if failure == "hold-write" {
+				store.failID = wait.SessionID
+			}
+			referenceUnavailable := failure == "reference-read"
+			oldOpen := openNudgeWorkStore
+			openNudgeWorkStore = func(string, string) (beads.Store, error) {
+				if referenceUnavailable {
+					return nil, errors.New("reference store unavailable")
+				}
+				return store, nil
+			}
+			t.Cleanup(func() { openNudgeWorkStore = oldOpen })
+			maintain := func(at time.Time) nudgeQueueState {
+				t.Helper()
+				if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+					return pruneDeadQueuedNudges(dir, state, nudgeFrontDoor(nudges), at, noMaintenanceDeadline())
+				}); err != nil {
+					t.Fatal(err)
+				}
+				state, err := nudgequeue.LoadState(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return state
+			}
+			ceiling := capTime.Add(nudgequeue.DeadLetterRetention)
+			for _, at := range []time.Time{ceiling, ceiling.Add(nudgequeue.DispositionRetention)} {
+				state := maintain(at)
+				if tombstone, ok := state.Tombstone(waitNudgeID(wait)); !ok || !tombstone.RepairPending {
+					t.Error("lost terminal intent while its wait or hold write still fails")
+				}
+			}
+			store.failID = ""
+			referenceUnavailable = false
+			recoveredAt := ceiling.Add(2 * nudgequeue.DispositionRetention)
+			maintain(recoveredAt)
+			state := maintain(recoveredAt.Add(nudgequeue.DispositionRetention))
+			if len(state.Tombstones) != 0 {
+				t.Fatal("completed repair receipt did not expire")
+			}
+			for range 2 {
+				if _, err := prepareWaitWakeStateWithSnapshot(dir, sessFront, store, nudges, recoveredAt, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := dispatchReadyWaitNudgesWithSnapshot(dir, nil, sessFront, nudges, recoveredAt, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state, err := nudgequeue.LoadState(dir)
+			if err != nil || len(state.Pending)+len(state.InFlight) != 0 {
+				t.Errorf("dispatch count=%d, want 1 after ceiling and receipt expiry: %v", 1+len(state.Pending)+len(state.InFlight), err)
+			}
+			updated, err := sessFront.GetWait(wait.ID)
+			if err != nil || updated.State != waitStateFailed {
+				t.Errorf("terminal intent not persisted on wait: %+v err=%v", updated, err)
+			}
+			owner, err := store.Get(wait.SessionID)
+			if err != nil || owner.Metadata["wait_hold"] != "" || owner.Metadata["sleep_intent"] != "" || owner.Metadata["sleep_reason"] != "" {
+				t.Errorf("finalized wait left idle session held: %+v err=%v", owner.Metadata, err)
+			}
+		})
+	}
+}
+
+func TestNudgeDeadLetterMissingShadowCeilingPreservesExplicitRetry(t *testing.T) {
+	dir, now, store, wait := droppedWaitNudgeFixture(t)
+	if err := store.Delete(store.failID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(wait.ID, map[string]string{"delivery_attempt": "2", "nudge_id": ""}); err != nil {
+		t.Fatal(err)
+	}
+	oldOpen := openNudgeWorkStore
+	openNudgeWorkStore = func(string, string) (beads.Store, error) { return store, nil }
+	t.Cleanup(func() { openNudgeWorkStore = oldOpen })
+	state := nudgeQueueState{Tombstones: []nudgequeue.Tombstone{{
+		ID: waitNudgeID(wait), Source: "wait", SessionID: wait.SessionID,
+		Reference: &nudgeReference{Kind: "bead", ID: wait.ID}, DeletedAt: now, RepairPending: true,
+	}}}
+	pruneNudgeTombstones(dir, &state, nudgeFrontDoor(beads.NudgesStore{Store: store}), now.Add(nudgequeue.DeadLetterRetention), noMaintenanceDeadline(), clock.Real{})
+	updated, err := cliSessionFrontDoor(store, nil, dir).GetWait(wait.ID)
+	if err != nil || updated.State != waitStateReady || updated.DeliveryAttempt != "2" || state.Tombstones[0].RepairPending {
+		t.Fatalf("old tombstone changed an explicit retry or stayed pending: wait=%+v tombstones=%+v err=%v", updated, state.Tombstones, err)
+	}
+}
+
 func TestNudgeDeadLetterCorruptStateDoesNotResurrectWait(t *testing.T) {
 	dir, now, store, wait := droppedWaitNudgeFixture(t)
 	nudges := beads.NudgesStore{Store: store}

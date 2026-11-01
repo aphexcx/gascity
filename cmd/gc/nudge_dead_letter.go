@@ -78,34 +78,80 @@ func pruneNudgeTombstones(cityPath string, state *nudgeQueueState, front *nudgeq
 }
 
 func missingNudgeShadowRepairReason(cityPath string, tombstone nudgequeue.Tombstone, now time.Time) string {
-	if cityPath != "" && tombstone.Source == "wait" && tombstone.Reference != nil && tombstone.Reference.Kind == "bead" && tombstone.Reference.ID != "" {
-		wait, err := loadNudgeTombstoneWaitReference(cityPath, tombstone.Reference.ID)
-		if err == nil {
-			if wait.SessionID == tombstone.SessionID && (wait.Status == "closed" || session.IsWaitTerminalState(wait.State)) {
-				return "terminal wait reference"
+	atCeiling := !tombstone.DeletedAt.IsZero() && !tombstone.DeletedAt.Add(nudgequeue.DeadLetterRetention).After(now)
+	if tombstone.Source == "wait" && tombstone.Reference != nil && tombstone.Reference.Kind == "bead" && tombstone.Reference.ID != "" {
+		if cityPath == "" {
+			return ""
+		}
+		reason, err := repairNudgeTombstoneWaitReference(cityPath, tombstone, now, atCeiling)
+		if err != nil {
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc nudge: repairing tombstone %q wait reference %q: %v; retaining terminal intent\n", tombstone.ID, tombstone.Reference.ID, err) //nolint:errcheck
 			}
-		} else if nudgeWarningWriter != nil {
-			fmt.Fprintf(nudgeWarningWriter, "gc nudge: reading tombstone %q wait reference %q: %v\n", tombstone.ID, tombstone.Reference.ID, err) //nolint:errcheck
+			return ""
+		}
+		if reason != "" {
+			return reason
 		}
 	}
 	// Give a missing shadow a full recovery window after payload deletion,
 	// longer than the stale-shadow sweep window. A successful missing lookup
 	// is required; unavailable stores and failed writes never start this clock.
-	if !tombstone.DeletedAt.IsZero() && !tombstone.DeletedAt.Add(nudgequeue.DeadLetterRetention).After(now) {
+	if atCeiling {
 		return "seven-day missing-shadow ceiling"
 	}
 	return ""
 }
 
-func loadNudgeTombstoneWaitReference(cityPath, id string) (session.WaitInfo, error) {
+func repairNudgeTombstoneWaitReference(cityPath string, tombstone nudgequeue.Tombstone, now time.Time, atCeiling bool) (reason string, err error) {
 	// The session class may be relocated away from the nudge store. Close
 	// only the work handle opened here, never the routes' shared session store.
 	opened, err := openNudgeWorkStore(cityPath, cityPath)
 	if err != nil {
-		return session.WaitInfo{}, err
+		return "", err
 	}
-	wait, err := cliSessionFrontDoor(opened, nil, cityPath).GetWait(id)
-	return wait, errors.Join(err, closeBeadStoreHandle(opened))
+	defer func() { err = errors.Join(err, closeBeadStoreHandle(opened)) }()
+	sessFront := cliSessionFrontDoor(opened, nil, cityPath)
+	wait, err := sessFront.GetWait(tombstone.Reference.ID)
+	if errors.Is(err, beads.ErrNotFound) || errors.Is(err, session.ErrNotAWait) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if wait.SessionID != tombstone.SessionID {
+		return "", nil
+	}
+	if wait.Status == "closed" || session.IsWaitTerminalState(wait.State) {
+		// A prior pass may have persisted the wait but failed to release its
+		// idle hold. Finish that half before expiring the repair receipt.
+		if wait.NudgeID == tombstone.ID {
+			if err := clearSessionWaitHoldIfIdle(sessFront, wait.SessionID); err != nil {
+				return "", err
+			}
+		}
+		return "terminal wait reference", nil
+	}
+	if !atCeiling {
+		return "", nil
+	}
+	nudgeID := wait.NudgeID
+	if nudgeID == "" {
+		nudgeID = waitNudgeID(wait)
+	}
+	if nudgeID != tombstone.ID {
+		// An explicit retry has advanced the wait to a different attempt.
+		return "", nil
+	}
+	// The tombstone is the last durable terminal intent when the shadow is
+	// gone. Persist it on the matching wait before starting receipt expiry.
+	if err := sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, tombstone.TerminalReason, ""); err != nil {
+		return "", err
+	}
+	if err := clearSessionWaitHoldIfIdle(sessFront, wait.SessionID); err != nil {
+		return "", err
+	}
+	return "seven-day missing-shadow ceiling; wait finalized", nil
 }
 
 // Only the transaction that adds an item to Dead calls this seam. Notifications
