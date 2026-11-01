@@ -987,7 +987,7 @@ func TestRunDoltCleanup_ForceProtectsNativePSDataDir(t *testing.T) {
 }
 
 func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
-	for _, kind := range []string{"owned", "current", "external", "relative", "default", "malformed", "missing", "oversize", "current-with-argv", "linked"} {
+	for _, kind := range []string{"owned", "current", "external", "relative", "default", "malformed", "missing", "oversize", "current-with-argv", "linked", "interpolated"} {
 		t.Run(kind, func(t *testing.T) {
 			tempDir := t.TempDir()
 			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
@@ -1006,6 +1006,10 @@ func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
 				dataDir = "/srv/active-data"
 			case "relative":
 				dataDir = "relative-data"
+			case "interpolated":
+				// Dolt expands this using the server's environment, which cleanup
+				// cannot assume matches its own. DATA_SUBDIR could be ../pytest-10.
+				dataDir = filepath.Join(older, "${DATA_SUBDIR}")
 			case "linked":
 				dataDir = filepath.Join(older, "linked-data")
 				if err := os.Symlink(current, dataDir); err != nil {

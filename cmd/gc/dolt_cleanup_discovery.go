@@ -602,7 +602,8 @@ func pytestRootMayBeLiveOnDisk(root string) bool {
 }
 
 // pytestConfigDataOwned requires an explicit absolute YAML data_dir in the
-// verified basetemp. Defaults, relative paths, and unreadable configs protect.
+// verified basetemp. Defaults, interpolation, relative paths, and unreadable
+// configs protect.
 func pytestConfigDataOwned(configPath, root string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
 	defer cancel()
@@ -625,6 +626,12 @@ func pytestConfigDataOwnedOnDisk(configPath, root string) bool {
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	closeErr := f.Close()
 	if err != nil || closeErr != nil || len(data) > maxConfigBytes {
+		return false
+	}
+	// Dolt expands environment variables before parsing the YAML document.
+	// The server's environment is unknown, so raw YAML cannot prove ownership
+	// when any part of the document may be changed by that expansion.
+	if strings.ContainsRune(string(data), '$') {
 		return false
 	}
 	var cfg struct {
