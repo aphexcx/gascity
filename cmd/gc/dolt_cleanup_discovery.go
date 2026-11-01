@@ -437,7 +437,7 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	if root, ok := pytestTestRoot(clean, tempDir); ok {
 		// Helper argv can outlive pytest; use pytest's own ownership evidence.
-		return root, pytestRootMayBeLive(root)
+		return root, pytestPathMayBeLive(path, root)
 	}
 	for _, root := range []string{"/tmp", tempDir} {
 		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
@@ -509,24 +509,51 @@ func pytestRunNumber(name string) (uint64, bool) {
 	return n, err == nil
 }
 
-// pytestRootMayBeLive protects pytest-current's target and the highest numbered
+// pytestPathMayBeLive protects pytest-current's target and the highest numbered
 // directory, including the window before pytest updates the symlink, and older
-// roots with a live pytest owner. Unreadable state fails closed. Missing
+// roots with a live pytest owner. Redirected or unreadable paths fail closed. Missing
 // basetemps retain the existing deleted-scope rule.
-func pytestRootMayBeLive(root string) bool {
+func pytestPathMayBeLive(path, root string) bool {
 	if filepath.Base(root) == "pytest-current" {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
 	defer cancel()
 	ch := make(chan bool, 1)
-	go func() { ch <- pytestRootMayBeLiveOnDisk(root) }()
+	go func() { ch <- pytestPathUnverified(path, root) || pytestRootMayBeLiveOnDisk(root) }()
 	select {
 	case live := <-ch:
 		return live
 	case <-ctx.Done():
 		return true
 	}
+}
+
+// pytestPathUnverified rejects symlinks from the per-user pytest directory
+// through the requested path, including intermediate symlinks RemoveAll follows.
+func pytestPathUnverified(path, root string) bool {
+	// Cleaning parent traversal can hide a symlink that the kernel follows.
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	current := filepath.Dir(cleanPytestPath(root))
+	rel, err := filepath.Rel(current, cleanPytestPath(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	for _, part := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return !os.IsNotExist(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func pytestRootMayBeLiveOnDisk(root string) bool {

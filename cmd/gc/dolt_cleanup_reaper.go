@@ -355,7 +355,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 				ConfigPath: cfgPath,
 			}
 		}
-		if pytestRootMayBeLive(root) {
+		if pytestPathMayBeLive(path, root) {
 			return reapClassification{
 				Action:     "protect",
 				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),

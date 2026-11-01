@@ -190,7 +190,7 @@ func TestPytestTempRootDarwinAlias(t *testing.T) {
 	if err := os.Symlink(resolved, filepath.Join(filepath.Dir(oldRoot), "pytest-current")); err != nil {
 		t.Fatal(err)
 	}
-	if !pytestRootMayBeLive(oldRoot) {
+	if !pytestPathMayBeLive(oldRoot, oldRoot) {
 		t.Error("the absolute current symlink must protect the same root through its macOS alias")
 	}
 }
@@ -209,7 +209,7 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	if err := os.WriteFile(current, []byte("not a symlink"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !pytestRootMayBeLive(root) {
+	if !pytestPathMayBeLive(root, root) {
 		t.Error("an unreadable current link must protect the older root")
 	}
 	if err := os.Remove(filepath.Join(root, ".lock")); err != nil {
@@ -218,13 +218,13 @@ func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
 	if err := os.Remove(root); err != nil {
 		t.Fatal(err)
 	}
-	if pytestRootMayBeLive(root) {
+	if pytestPathMayBeLive(root, root) {
 		t.Error("a missing basetemp must retain deleted-scope cleanup")
 	}
 	if err := os.Symlink(parent, root); err != nil {
 		t.Fatal(err)
 	}
-	if !pytestRootMayBeLive(root) {
+	if !pytestPathMayBeLive(root, root) {
 		t.Error("a replaced basetemp must stay protected")
 	}
 }

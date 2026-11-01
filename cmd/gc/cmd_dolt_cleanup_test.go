@@ -831,6 +831,64 @@ func TestRunDoltCleanup_ForceProtectsAmbiguousPSPath(t *testing.T) {
 	}
 }
 
+func TestRunDoltCleanup_ForceProtectsPytestSymlink(t *testing.T) {
+	for _, traversal := range []string{"direct", "parent"} {
+		t.Run(traversal, func(t *testing.T) {
+			tempDir := t.TempDir()
+			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+			current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+			for _, root := range []string{older, filepath.Join(current, "db")} {
+				if err := os.MkdirAll(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeExitedPytestOwner(t, older)
+			marker := filepath.Join(current, "db", "active-data")
+			if err := os.WriteFile(marker, []byte("active"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(older, "link")
+			if err := os.Symlink(current, link); err != nil {
+				t.Fatal(err)
+			}
+			dataDir := filepath.Join(link, "db")
+			if traversal == "parent" {
+				dataDir = link + "/../pytest-10/db"
+			}
+			proc := DoltProcInfo{
+				PID: 12345, HostNamespace: true, CWDState: procPathStateLive, StartTimeTicks: 10,
+				Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", dataDir},
+			}
+			var signals []int
+			var removed []string
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				RemoveDataDir: func(path string) error {
+					removed = append(removed, path)
+					return os.RemoveAll(path)
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			if len(signals) != 0 || len(removed) != 0 {
+				t.Errorf("redirected pytest path: signals=%v, removed=%v; want no mutations", signals, removed)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Errorf("current run data must remain intact: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
 
