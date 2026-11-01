@@ -82,16 +82,48 @@ jobs:
           dirname "$lint_bin" >> "$GITHUB_PATH"
           "$lint_bin" version | tee "$RUNNER_TEMP/twin-evidence/linter.txt"
 
+      - name: Reserve runner resources for the hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpus=$(nproc)
+          memory_mib=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+          local_cpus=$((cpus > 1 ? cpus - 1 : 1))
+          local_memory_mib=$((memory_mib / 2))
+          # Bazel 9 uses --local_resources for CPU and memory scheduling.
+          # Leave room for the JVM, Go generators, and the Actions runner.
+          {
+            echo 'startup --host_jvm_args=-Xmx2048m'
+            printf 'build --local_resources=cpu=%s\n' "$local_cpus"
+            printf 'build --local_resources=memory=%s\n' "$local_memory_mib"
+            echo 'build --jobs=2'
+            # Keep the twin's disk action cache disabled: no extra disk growth.
+            # Its verified repository cache already lives under RUNNER_TEMP.
+            echo 'build --disk_cache='
+          } | tee "$RUNNER_TEMP/twin-resources.bazelrc"
+          mkdir -p "$RUNNER_TEMP/twin-bin"
+          # The upstream wrapper supplies its own rc first; ours is read last.
+          # Expand the runner path and arguments when the launcher executes.
+          # shellcheck disable=SC2016
+          printf '%s\n' '#!/usr/bin/env bash' \
+            'exec /usr/local/bin/bazel --bazelrc="$RUNNER_TEMP/twin-resources.bazelrc" "$@"' \
+            > "$RUNNER_TEMP/twin-bin/bazel"
+          chmod +x "$RUNNER_TEMP/twin-bin/bazel"
+          echo "$RUNNER_TEMP/twin-bin" >> "$GITHUB_PATH"
+
       - name: Preserve frozen inputs before the hook
         run: |
           mkdir -p "$RUNNER_TEMP/twin-evidence/inputs"
           cp -f "$RUNNER_TEMP/twin-evidence/"{linter.txt,input-tree.txt,delta.txt,pre-commit} "$RUNNER_TEMP/twin-evidence/inputs/"
           cp -Rf "$RUNNER_TEMP/twin-recipe" "$RUNNER_TEMP/twin-evidence/inputs/recipe"
+          cp -f "$RUNNER_TEMP/twin-resources.bazelrc" "$RUNNER_TEMP/twin-evidence/inputs/"
           printf 'head=%s\nbase=%s\nrecipe=%s\n' "$TWIN_HEAD" "$TWIN_BASE" "$GITHUB_SHA" |
             tee "$RUNNER_TEMP/twin-evidence/inputs/revisions.txt"
-          nproc
-          free -m
-          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          {
+            nproc
+            free -m
+            df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          } | tee "$RUNNER_TEMP/twin-evidence/inputs/runner-before-hook.txt"
 
       - name: Upload frozen inputs before the hook
         if: always()
@@ -109,8 +141,17 @@ jobs:
           bash "$RUNNER_TEMP/twin-recipe/upstream-twin-resources.sh" > >(tee "$RUNNER_TEMP/twin-evidence/resources.log") 2>&1 &
           sampler_pid=$!
           stop_sampler() {
-            kill "$sampler_pid" 2>/dev/null || true
-            wait "$sampler_pid" || true
+            result=$?
+            trap - EXIT
+            if kill -0 "$sampler_pid" 2>/dev/null; then
+              kill "$sampler_pid" || result=1
+            fi
+            if ! wait "$sampler_pid"; then
+              echo '::error::Runner resource sampler failed.'
+              result=1
+            fi
+            printf 'TWIN_HOOK_EXIT code=%s time=%s\n' "$result" "$(date -u +%FT%TZ)"
+            exit "$result"
           }
           trap stop_sampler EXIT
           {
@@ -118,6 +159,7 @@ jobs:
             git config --local user.name 'Upstream twin gate'
             git config --local user.email 'upstream-twin-gate@users.noreply.github.com'
             make check-hooks
+            bazel info max-heap-size
             sha256sum .githooks/pre-commit
             git show -s --format=%B "$TWIN_HEAD" |
               git interpret-trailers --trim-empty --if-exists replace \

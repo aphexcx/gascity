@@ -52,8 +52,14 @@ The job copies the helper outside its disposable checkout, checks out the
 exact twin, stages the complete base-to-head delta, and invokes `git commit`
 with upstream's unchanged `.githooks/pre-commit`. That hook owns staged
 formatting, `make lint-changed` / Bazel nogo, and generation. No step is
-substituted by a success flag. `NOGO_BUILD_FLAGS` only limits concurrency
-while retaining the hook's normal output group and failure behavior.
+substituted by a success flag. `NOGO_BUILD_FLAGS` retains the hook's normal
+output group and failure behavior with two concurrent jobs. An external rc
+caps the Bazel JVM at 2 GiB and reserves one CPU and half the runner's RAM
+from action scheduling (`--local_resources` on Bazel 9). These scheduling
+limits do not impose a hard memory limit on an individual compiler process.
+The disk action cache stays disabled; the twin's verified repository download
+cache remains under `RUNNER_TEMP`. The probe and effective limits are included
+in the frozen input artifact.
 
 A successful job also proves that the committed tree exactly equals the
 submitted tree and that the checkout is clean. A formatter or generator
@@ -62,9 +68,16 @@ job preserves the original author and replaces any obsolete `Hook-Skipped`
 trailer with its run URL. This creates a new commit; it does not modify the
 published twin branch.
 
+Before the hook starts, `upstream-twin-inputs` preserves the frozen revisions,
+input tree, linter version, hook, and recipe. During the hook, `TWIN_RESOURCE`
+samples stream memory, disk, and Bazel server RSS to the Actions job log every
+15 seconds. These server-side records remain available if the runner stops
+before the final upload.
+
 Download the `upstream-twin-gate` artifact into the work item's external
 evidence directory. It contains the hook source, linter version, hook log,
-input/output tree IDs, accepted commit SHA, and a Git bundle. Failure logs
+resource samples, input/output tree IDs, accepted commit SHA, and a Git bundle.
+Failure logs
 are uploaded too, so an artifact's existence alone does not establish a pass.
 
 ```sh
@@ -84,6 +97,37 @@ someone else's checkout or force-push over a changed remote. The publisher
 opens a draft upstream PR and includes the run URL and external evidence
 path. Full upstream tests and PR checks remain separate gates; a green
 commit-hook job establishes only the hook and exact-tree contract.
+
+## Recover a runner shutdown
+
+Exit 143 with a runner shutdown notification does not establish an out-of-memory
+failure. Check the last action, resource samples, and source diagnostics. Keep
+the failed attempt's server-retained job log in the twin's external evidence
+directory before rerunning; the final artifact upload may have been skipped.
+
+```sh
+export GH_CONFIG_DIR=/Users/tailor512/.config/gh-aphexcx
+JOB_ID=$(gh api "repos/aphexcx/gascity/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" \
+  --jq '.jobs[] | select(.name == "upstream-twin / commit-hook") | .id')
+gh api --allow-escape-sequences "repos/aphexcx/gascity/actions/jobs/$JOB_ID/logs" \
+  > "$EVIDENCE_DIR/attempt-$ATTEMPT-job.log"
+gh run download "$RUN_ID" --repo aphexcx/gascity \
+  -n upstream-twin-inputs -D "$EVIDENCE_DIR/attempt-$ATTEMPT-inputs"
+```
+
+For a shutdown with no source error, rerun the failed job **once** on the same
+frozen input and recipe:
+
+```sh
+GH_CONFIG_DIR=/Users/tailor512/.config/gh-aphexcx \
+  gh run rerun "$RUN_ID" --failed --repo aphexcx/gascity
+```
+
+A second shutdown on that input needs a bead with both attempts' logs and
+resource measurements; do not dispatch a third run. Source or generated-tree
+failures need a corrected, reviewed input. A larger paid runner requires
+Afik's approval. Only a successful hook, exact-tree check, and verified bundle
+establish acceptance.
 
 ## Citadel's known host failures
 
