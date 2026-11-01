@@ -3043,6 +3043,14 @@ func (s *failingTerminalNudgeStore) Close(id string) error {
 	return s.MemStore.Close(id)
 }
 
+func (s *failingTerminalNudgeStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if id != "" && id == s.failID && !s.failClose && (!s.terminalOnly || opts.Metadata["state"] == "failed") {
+		s.terminalFailures++
+		return fmt.Errorf("updating %q: dolt connection refused", id)
+	}
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
 func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

@@ -45,6 +45,103 @@ func recordingWaitStore(t *testing.T, seed ...beads.Bead) (*Store, *beadstest.Re
 
 var waitStoreNow = time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
 
+func TestClearIdleWaitHoldPreservesOtherIntents(t *testing.T) {
+	for _, tc := range []struct {
+		name, intent string
+		outstanding  bool
+	}{
+		{name: "completed wait", intent: "wait-hold"},
+		{name: "operator suspension", intent: "user-hold"},
+		{name: "another wait", intent: "wait-hold", outstanding: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+				"wait_hold": "true", "sleep_intent": tc.intent, "sleep_reason": "wait-hold", "held_until": "future",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.outstanding {
+				if _, err := mem.Create(waitBeadFixture("", "open", b.ID, map[string]string{"state": waitStatePending})); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := waitStoreOver(mem).ClearIdleWaitHold(b.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantIntent, wantWait := tc.intent, ""
+			if tc.outstanding {
+				wantWait = "true"
+			} else if tc.intent == "wait-hold" {
+				wantIntent = ""
+			}
+			if got.Metadata["sleep_intent"] != wantIntent || got.Metadata["wait_hold"] != wantWait || got.Metadata["held_until"] != "future" {
+				t.Fatalf("cleanup changed another hold: %+v", got.Metadata)
+			}
+		})
+	}
+}
+
+type waitHoldConcurrentSuspendStore struct {
+	*beads.MemStore
+	sessionID string
+	suspend   bool
+}
+
+func (s *waitHoldConcurrentSuspendStore) Get(id string) (beads.Bead, error) {
+	b, err := s.MemStore.Get(id)
+	if err == nil && id == s.sessionID && s.suspend {
+		s.suspend = false
+		err = s.SetMetadataBatch(id, map[string]string{"sleep_intent": "user-hold", "held_until": "future"})
+	}
+	return b, err
+}
+
+func TestClearIdleWaitHoldRejectsConcurrentSuspension(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
+		"wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &waitHoldConcurrentSuspendStore{MemStore: mem, sessionID: b.ID, suspend: true}
+	front := waitStoreOver(store)
+	var conflict *beads.PreconditionFailedError
+	if err := front.ClearIdleWaitHold(b.ID); !errors.As(err, &conflict) {
+		t.Fatalf("want revision conflict, got %v", err)
+	}
+	if err := front.ClearIdleWaitHold(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil || got.Metadata["sleep_intent"] != "user-hold" || got.Metadata["held_until"] != "future" {
+		t.Fatalf("retry erased concurrent suspension: %+v err=%v", got.Metadata, err)
+	}
+}
+
+type waitHoldUnconditionalStore struct{ beads.Store }
+
+func TestClearIdleWaitHoldRequiresConditionalWrite(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Metadata: map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitStoreOver(waitHoldUnconditionalStore{Store: mem}).ClearIdleWaitHold(b.ID); !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Fatalf("want unsupported conditional write, got %v", err)
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil || got.Metadata["sleep_intent"] != "wait-hold" || got.Metadata["wait_hold"] != "true" {
+		t.Fatalf("unsafe fallback cleared hold: %+v err=%v", got.Metadata, err)
+	}
+}
+
 // --- terminal-write intents: byte-identical SetMetadataBatch+Close pairs ---
 
 func TestCancelWait_EmitsCanceledBatchThenClose(t *testing.T) {

@@ -126,7 +126,7 @@ func repairNudgeTombstoneWaitReference(cityPath string, tombstone nudgequeue.Tom
 		// A prior pass may have persisted the wait but failed to release its
 		// idle hold. Finish that half before expiring the repair receipt.
 		if wait.NudgeID == tombstone.ID {
-			if err := clearSessionWaitHoldIfIdle(sessFront, wait.SessionID); err != nil {
+			if err := sessFront.ClearIdleWaitHold(wait.SessionID); err != nil {
 				return "", err
 			}
 		}
@@ -148,7 +148,7 @@ func repairNudgeTombstoneWaitReference(cityPath string, tombstone nudgequeue.Tom
 	if err := sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, tombstone.TerminalReason, ""); err != nil {
 		return "", err
 	}
-	if err := clearSessionWaitHoldIfIdle(sessFront, wait.SessionID); err != nil {
+	if err := sessFront.ClearIdleWaitHold(wait.SessionID); err != nil {
 		return "", err
 	}
 	return "seven-day missing-shadow ceiling; wait finalized", nil

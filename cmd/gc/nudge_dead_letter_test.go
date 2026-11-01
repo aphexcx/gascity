@@ -901,7 +901,7 @@ func TestNudgeDeadLetterMissingShadowCeiling(t *testing.T) {
 }
 
 func TestNudgeDeadLetterMissingShadowCeilingPreservesWaitIntent(t *testing.T) {
-	for _, failure := range []string{"wait-write", "hold-write", "reference-read"} {
+	for _, failure := range []string{"wait-write", "hold-write", "reference-read", "operator-suspend"} {
 		t.Run(failure, func(t *testing.T) {
 			dir, now, store, wait := droppedWaitNudgeFixture(t)
 			nudges := beads.NudgesStore{Store: store}
@@ -922,7 +922,7 @@ func TestNudgeDeadLetterMissingShadowCeilingPreservesWaitIntent(t *testing.T) {
 			}
 			store.terminalOnly = false
 			store.failID = wait.ID
-			if failure == "hold-write" {
+			if failure == "hold-write" || failure == "operator-suspend" {
 				store.failID = wait.SessionID
 			}
 			referenceUnavailable := failure == "reference-read"
@@ -957,6 +957,12 @@ func TestNudgeDeadLetterMissingShadowCeilingPreservesWaitIntent(t *testing.T) {
 			store.failID = ""
 			referenceUnavailable = false
 			recoveredAt := ceiling.Add(2 * nudgequeue.DispositionRetention)
+			heldUntil := recoveredAt.Add(24 * time.Hour).Format(time.RFC3339)
+			if failure == "operator-suspend" {
+				if err := store.SetMetadataBatch(wait.SessionID, map[string]string{"sleep_intent": "user-hold", "held_until": heldUntil}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			maintain(recoveredAt)
 			state := maintain(recoveredAt.Add(nudgequeue.DispositionRetention))
 			if len(state.Tombstones) != 0 {
@@ -979,7 +985,11 @@ func TestNudgeDeadLetterMissingShadowCeilingPreservesWaitIntent(t *testing.T) {
 				t.Errorf("terminal intent not persisted on wait: %+v err=%v", updated, err)
 			}
 			owner, err := store.Get(wait.SessionID)
-			if err != nil || owner.Metadata["wait_hold"] != "" || owner.Metadata["sleep_intent"] != "" || owner.Metadata["sleep_reason"] != "" {
+			if failure == "operator-suspend" {
+				if err != nil || owner.Metadata["sleep_intent"] != "user-hold" || owner.Metadata["held_until"] != heldUntil {
+					t.Errorf("repair erased a newer operator suspension: %+v err=%v", owner.Metadata, err)
+				}
+			} else if err != nil || owner.Metadata["wait_hold"] != "" || owner.Metadata["sleep_intent"] != "" || owner.Metadata["sleep_reason"] != "" {
 				t.Errorf("finalized wait left idle session held: %+v err=%v", owner.Metadata, err)
 			}
 		})
