@@ -181,6 +181,42 @@ if [[ -s "$WORK/command-pid" ]]; then
     assert_false "wrapper.signal_drains_command" kill -0 "$(cat "$WORK/command-pid")"
 fi
 
+# A command can itself supervise an isolated test group. Its drain must finish
+# before the wrapper escalates against the supervisor. Six seconds here models
+# a five-second shard drain plus scheduling overhead, with a TERM-ignoring test.
+cat >"$WORK/nested-supervisor" <<'SH'
+#!/usr/bin/env bash
+source "$1"
+on_term() {
+    gc_harness_terminate_group "$gc_harness_supervised_pgid" 30
+    trap - TERM
+    kill -TERM $$
+}
+trap on_term TERM
+trap 'gc_harness_terminate_group "$gc_harness_supervised_pgid" 30' EXIT
+gc_harness_run_supervised nested "" 0 -- bash -c \
+    'trap "" TERM; printf "%s\n" "$$" >"$1/nested-pid"; read -r line <"$1/command-block"' _ "$2"
+SH
+GC_CITY_PATH="$WRAP_CITY" bash "$WRAPPER" -- bash "$WORK/nested-supervisor" \
+    "$TEST_DIR/lib/harness-reap.sh" "$WORK" >"$WORK/wrapper-nested.log" 2>&1 &
+NESTED_WRAPPER=$!
+assert_true "wrapper.nested_group_started" wait_for_match "$WORK/nested-pid" '^[0-9]'
+kill -TERM "$NESTED_WRAPPER"
+wait "$NESTED_WRAPPER" 2>/dev/null
+assert_eq "wrapper.nested_signal_status" "$?" "143"
+if [[ -s "$WORK/nested-pid" ]]; then
+    NESTED_PID="$(cat "$WORK/nested-pid")"
+    NESTED_STATE="$(ps -o stat= -p "$NESTED_PID" 2>/dev/null || true)"
+    if [[ -z "$NESTED_STATE" || "$NESTED_STATE" == *Z* ]]; then
+        record_pass "wrapper.nested_group_drained_before_release"
+    else
+        record_fail "wrapper.nested_group_drained_before_release" "test process $NESTED_PID survived in state $NESTED_STATE"
+        # Only this fixture's isolated group; never leave the red repro running.
+        kill -KILL -- -"$NESTED_PID" 2>/dev/null || true
+    fi
+fi
+assert_true "wrapper.nested_signal_releases_slot" flock -n "$WRAP_SLOTS/slot-0.lock" -c 'exit 0'
+
 # ---------------- FD inheritance: a live detached descendant must not pin a slot ----------------
 # scripts/test-local-parallel closes the gate FD before the fan-out so jobs
 # never inherit it (asserted statically below). This asserts the library half
