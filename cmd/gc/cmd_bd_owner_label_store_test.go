@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -126,9 +125,7 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 				}
 			}
 			if tt.gitRoot {
-				if out, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
-					t.Fatalf("git init: %v: %s", err, out)
-				}
+				mustGitImport(t, root, "init", "--quiet")
 				target := filepath.Join(root, "target", ".beads")
 				if err := os.MkdirAll(target, 0o755); err != nil {
 					t.Fatal(err)
