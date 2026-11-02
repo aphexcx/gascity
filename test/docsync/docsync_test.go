@@ -494,13 +494,32 @@ func TestSchemaFreshness(t *testing.T) {
 				if err != nil {
 					return nil, err
 				}
+				sup, err := docgen.GenerateSupervisorSchema()
+				if err != nil {
+					return nil, err
+				}
 				var buf bytes.Buffer
-				if err := docgen.RenderMarkdown(&buf, s); err != nil {
+				if err := docgen.RenderMarkdown(&buf, s, sup); err != nil {
 					return nil, err
 				}
 				return buf.Bytes(), nil
 			},
 			path: filepath.Join(root, "docs", "reference", "config.md"),
+		},
+		{
+			name: "supervisor-schema.json",
+			generate: func() ([]byte, error) {
+				s, err := docgen.GenerateSupervisorSchema()
+				if err != nil {
+					return nil, err
+				}
+				data, err := json.MarshalIndent(s, "", "  ")
+				if err != nil {
+					return nil, err
+				}
+				return append(data, '\n'), nil
+			},
+			path: filepath.Join(root, "docs", "reference", "schema", "supervisor-schema.json"),
 		},
 	}
 

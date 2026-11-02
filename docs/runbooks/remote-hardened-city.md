@@ -17,8 +17,8 @@ repo, inits beads, composes packs) and `sling` routes an existing bead into the
 new rig — both authenticated by a fresh, request-bound grant your machine mints.
 
 > **Read [Prerequisites and threat posture](#1-prerequisites-and-threat-posture)
-> first.** A hardened city exposes a **fully unauthenticated read plane**; the
-> network front is not optional.
+> first.** A write key alone leaves reads exposed. For a public TLS front, use
+> the separate supervisor hardened listener with both read and write keys.
 
 ## 1. Prerequisites and threat posture
 
@@ -26,11 +26,13 @@ new rig — both authenticated by a fresh, request-bound grant your machine mint
   in-flight index are process-local. A second controller against the same city
   reopens the grant replay window and races double-clones. Nothing in code
   detects a second replica — this is an operator rule.
-- **The read plane is FULLY UNAUTHENTICATED.** Write-auth gates *mutations*
-  only. Anyone who can reach the port can read every bead payload, all mail,
-  session peeks and transcripts, and the entire event stream — **including the
-  202 rig-provisioning progress**. A network/TLS front (reverse proxy, private
-  network, or firewall) is **REQUIRED**, not optional. In-band read auth is later work.
+- **Protect reads as well as writes.** With only write-auth, anyone who can
+  reach the port can read beads, mail, session transcripts, and events, including
+  rig-provisioning progress. Keep that configuration behind an authenticated
+  proxy, private network, or firewall. With `read_auth_verify_key` set on
+  `[supervisor.hardened]`, city reads require signed grants and other reads are
+  refused; that port alone may sit behind a public TLS front. The primary
+  listener and standalone `[api]` read posture are unchanged.
 - **TLS.** `gc` refuses a plain-`http` non-loopback URL at context validation.
   Terminate TLS in front of the city and, if the cert is private, pass its CA to
   the context with `--ca-file`.
@@ -119,26 +121,38 @@ allowed_hosts = ["city.example.ts.net"]
 bind = "127.0.0.1"                # default; reachable only through the TLS front on this host
 port = 8447
 write_auth_verify_key = "peer:<base64 ed25519 pubkey>"   # REQUIRED; no unverified ack knob
+read_auth_verify_key = "peer:<base64 ed25519 pubkey>"
+read_auth_required = true
 ```
 
-The hardened listener serves the same mux, host/CORS/audit chain, and
-read-auth posture as the primary, with its own write gate **plus a front door
-the primary does not have**: it refuses (403) every supervisor-scope mutation
+The hardened listener uses the primary's routes and host/CORS/audit checks,
+with independent write and read verifiers. It refuses (403) every supervisor-scope mutation
 (above all `POST /v0/city` — city creation with a caller-chosen
 `start_command`, which write-auth exempts because a not-yet-created city has
 no name to bind a grant to), the whole `/svc/*` workspace-service pass-through
 (any method — a GET can be a WebSocket upgrade the proxy then tunnels), and any
-protocol upgrade on any path. Only safe reads and grant-signed
-`/v0/city/{city}/…` mutations are served. Front the hardened port with your
-TLS edge (e.g. `tailscale serve --https=8443 http://127.0.0.1:8447`,
-tailnet-only) and register that URL as the peer's context. Boot is fail-closed
+protocol upgrade on any path. With its read key set, only grant-signed
+`/v0/city/{city}/…` reads and mutations are served. Aggregate events, city lists,
+health probes, the dashboard and its `/api/*` routes, and static files are
+refused on that port: a city grant cannot authorize data across cities.
+Front the hardened port with your TLS edge and register that URL as the peer's
+context. Boot is fail-closed
 and all-or-nothing: an enabled hardened port without a key, a hardened port
 equal to the primary address, a hardened kid that also appears in the primary
-key list (each verifier keeps its own single-use replay guard), a read-only
+key list for the same audience (each verifier keeps its own single-use replay
+guard), `read_auth_required = true` without a hardened read key, a read-only
 primary bind, or a hardened bind failure refuses to start with **no** listener
-up. `GC_CITY_WRITE_PUBKEY` is *not* consulted for the hardened key — that env
-override belongs to the primary gate. The read plane on the hardened port is
-exactly the primary's (see §1), so it still needs the network front.
+up. `GC_CITY_WRITE_PUBKEY`, `GC_CITY_READ_PUBKEY`, and `GC_CITY_READ_REQUIRED`
+belong to the primary gates; they cannot supply or replace the hardened keys.
+The hardened read verifier shares the `GC_CITY_READ_EPOCH_FLOOR` revocation
+floor and uses the audience `gc-city-read`.
+
+With `read_auth_verify_key` set on the hardened listener, no unsigned read is
+served on that port. A public TLS front, such as a Funnel or a provider's public
+TLS port, is then acceptable for that port alone. Keep the primary listener
+private. Without the hardened read key, the listener inherits the primary's
+read posture exactly as before and still needs an authenticated network front;
+the primary read gate alone does not cover aggregate events or dashboard reads.
 
 ## 4. Configure the client context
 
@@ -156,6 +170,30 @@ The context is stored `0600` in `$GC_HOME/contexts.toml`. **Pin `--city` on the
 minter** — `gc-write-mint` refuses to sign a request for any other city. The
 grant command re-validates the audience and city and recomputes the request
 digest before signing; the private key never enters `gc`.
+
+For a read, mint with `--aud gc-city-read` and attach `X-GC-City-Read`.
+This example binds one grant to a query-free bead listing. Each request,
+including a retry or stream reconnect, needs a fresh grant:
+
+```bash
+export GC_GRANT_INFO="$(python3 -c '
+import hashlib, json
+path = "/v0/city/example-city/beads"
+body_hash = hashlib.sha256(b"").hexdigest()
+digest = hashlib.sha256(("GET\n" + path + "\n" + body_hash).encode()).hexdigest()
+print(json.dumps(dict(version="gascity.dev/city-write-grant/v1",
+    aud="gc-city-read", city="example-city", method="GET", path=path,
+    canonical_query="", body_sha256=body_hash, req_digest=digest)))
+')"
+read_grant="$(gc-write-mint --aud gc-city-read --kid peer \
+  --key ~/.gc/keys/city.ed25519 --city example-city)"
+curl --fail-with-body -H "X-GC-City-Read: $read_grant" \
+  https://city.example.com:8443/v0/city/example-city/beads
+unset GC_GRANT_INFO read_grant
+```
+
+The version string remains `gascity.dev/city-write-grant/v1`: read and write
+grants share the request-binding format, with distinct audiences.
 
 ## 5. The one-liner
 
@@ -200,13 +238,23 @@ cannot see your local rig config or create a local bead).
 
 Two hardened cities can mail each other with `gc` alone — no ssh, no
 `--from human`. Each city holds its own private key and configures the *peer's*
-public key (kid = peer city name) on its hardened listener:
+public key (kid = peer city name) as both hardened verify keys. On city B:
+
+```toml
+[supervisor.hardened]
+port = 8447
+write_auth_verify_key = "a:<city A public key>"
+read_auth_verify_key = "a:<city A public key>"
+read_auth_required = true
+```
+
+City A uses the same shape with city B's public key and kid `b`. Each context's
+write minter uses its own private key and pins the receiving city's name.
 
 ```bash
 # on city A (context "b" points at city B's hardened port; grant signed with A's key, kid "a")
 gc --context b mail send mayor -s "hello from A" -m "…"
 # -> stored in B with From "a/<A's identity>" (e.g. a/mayor); B's `gc mail inbox mayor` shows it.
-gc --context b mail inbox           # mail addressed to "a/<identity>" inside B — where B's plain `gc mail reply` lands
 # on city B, answering
 gc --context a mail send mayor -s "Re: hello from A" -m "…"
 ```
@@ -214,8 +262,16 @@ gc --context a mail send mayor -s "Re: hello from A" -m "…"
 The sender defaults to `<local city>/<identity>` (`--from` overrides it); `--all`
 and `--notify` are refused for a remote city. gc has no cross-city addressing
 yet, so answer with `gc --context <city> mail send`, not a bare `gc mail reply`.
-`gc --context <peer> mail inbox` pages through the peer's whole unread mailbox
-and refuses to render a partial (degraded) read.
+`gc --context <peer> mail send` makes exactly one request:
+`POST /v0/city/{peer}/mail`. It performs no city lookup, version request, session
+resolution, or follow-up read, so the existing `grant_command` works with both
+keys enabled. The context currently supplies write grants only. A plain remote
+`mail inbox` fails explicitly with `missing X-GC-City-Read grant` on a read-gated
+peer; it never reports an empty inbox. Read the local inbox on the receiving
+city, or use a freshly signed read request as above with the mail path and query
+bound into its digest. Remote workflows that read or follow events likewise
+need read grants; the write-only one-liner in §5 requires the private-network
+configuration without the hardened read key.
 
 **Naming rule.** The peer stores an unknown sender literally, but if it has a
 *session* whose alias equals the qualified sender (a rig named after the sending
@@ -297,9 +353,10 @@ operating constraints, not bugs.
   in-flight index are process-local. A second controller against the same city
   reopens grant replay (bounded by the ≤2 m TTL + 30 s skew) and races
   double-clones. Run exactly one controller per hardened city.
-- **Unauthenticated read plane.** Everything readable is readable by anyone who
-  reaches the port. The mitigation is the network/TLS front — a mandatory part
-  of the deployment, not an add-on.
+- **Read plane without a hardened read key.** Anyone who reaches a write-only
+  port can read its exposed data. An authenticated network front remains
+  mandatory for that configuration. Both hardened keys protect the separate
+  port; they do not protect the primary listener.
 - **Same-user grant trust.** Anyone who can exec as the operator user can run
   `grant_command` and mint valid grants. `0600` on `contexts.toml` and the key
   file is the boundary; treat helper-exec access as write access. (A credential

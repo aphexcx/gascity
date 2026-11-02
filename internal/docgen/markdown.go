@@ -13,7 +13,7 @@ import (
 
 // RenderMarkdown writes a markdown reference document from a JSON Schema.
 // It walks the $defs, rendering one section per type with a table of fields.
-func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
+func RenderMarkdown(w io.Writer, s *jsonschema.Schema, additional ...*jsonschema.Schema) error {
 	// Write Mintlify frontmatter (title + description, no body H1).
 	title := s.Title
 	if title == "" {
@@ -38,7 +38,21 @@ func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
 	if _, err := fmt.Fprintf(w, "> **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.\n\n"); err != nil {
 		return err
 	}
+	if err := renderMarkdownDefinitions(w, s); err != nil {
+		return err
+	}
+	for _, extra := range additional {
+		if _, err := fmt.Fprintf(w, "## %s\n\n%s\n\n", extra.Title, extra.Description); err != nil {
+			return err
+		}
+		if err := renderMarkdownDefinitions(w, extra); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func renderMarkdownDefinitions(w io.Writer, s *jsonschema.Schema) error {
 	// Determine the root type name from $ref (e.g. "#/$defs/City" → "City").
 	rootName := ""
 	if s.Ref != "" {
@@ -143,7 +157,7 @@ func cleanupTempFile(name string) {
 }
 
 // WriteMarkdown generates a markdown file from a schema using atomic write.
-func WriteMarkdown(path string, s *jsonschema.Schema) error {
+func WriteMarkdown(path string, s *jsonschema.Schema, additional ...*jsonschema.Schema) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".genschema-md-*")
 	if err != nil {
@@ -151,7 +165,7 @@ func WriteMarkdown(path string, s *jsonschema.Schema) error {
 	}
 	tmpName := tmp.Name()
 
-	if err := RenderMarkdown(tmp, s); err != nil {
+	if err := RenderMarkdown(tmp, s, additional...); err != nil {
 		_ = tmp.Close()
 		cleanupTempFile(tmpName)
 		return fmt.Errorf("rendering %s: %w", path, err)

@@ -9,6 +9,8 @@
 //	docs/reference/schema/city-schema.txt
 //	docs/reference/schema/pack-schema.json
 //	docs/reference/schema/pack-schema.txt
+//	docs/reference/schema/supervisor-schema.json
+//	docs/reference/schema/supervisor-schema.txt
 //	docs/reference/config.md
 //	docs/reference/cli.md
 package main
@@ -67,8 +69,17 @@ func run() error {
 		return err
 	}
 
+	supervisorSchema, err := docgen.GenerateSupervisorSchema()
+	if err != nil {
+		return fmt.Errorf("generating supervisor schema: %w", err)
+	}
+	for _, path := range []string{"docs/reference/schema/supervisor-schema.json", "docs/reference/schema/supervisor-schema.txt"} {
+		if err := writeSchema(path, supervisorSchema); err != nil {
+			return err
+		}
+	}
 	// Write markdown reference doc.
-	if err := docgen.WriteMarkdown("docs/reference/config.md", citySchema); err != nil {
+	if err := docgen.WriteMarkdown("docs/reference/config.md", citySchema, supervisorSchema); err != nil {
 		return fmt.Errorf("writing config.md: %w", err)
 	}
 
@@ -85,6 +96,8 @@ func run() error {
 		"docs/reference/schema/city-schema.txt",
 		"docs/reference/schema/pack-schema.json",
 		"docs/reference/schema/pack-schema.txt",
+		"docs/reference/schema/supervisor-schema.json",
+		"docs/reference/schema/supervisor-schema.txt",
 		"docs/reference/config.md",
 		"docs/reference/cli.md",
 	}

@@ -64,6 +64,24 @@ func TestGenerateCitySchema(t *testing.T) {
 	}
 }
 
+func TestGenerateSupervisorSchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
+	s, err := GenerateSupervisorSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Definitions["HardenedListener"]
+	if h == nil {
+		t.Fatal("missing hardened listener schema")
+	}
+	for _, name := range []string{"read_auth_verify_key", "read_auth_required"} {
+		p, ok := h.Properties.Get(name)
+		if !ok || p.Description == "" {
+			t.Errorf("missing documented property %s", name)
+		}
+	}
+}
+
 func TestCitySchemaDescriptions(t *testing.T) {
 	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()

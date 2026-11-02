@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/clientgrant"
 )
@@ -93,6 +94,23 @@ func TestMint_ProducesVerifiableGrant(t *testing.T) {
 	}
 	if g.Exp-g.IAT != int64(time.Minute/time.Second) {
 		t.Fatalf("ttl not honored: iat=%d exp=%d", g.IAT, g.Exp)
+	}
+}
+
+func TestMint_ReadAudience(t *testing.T) {
+	pub, priv := testKey(t)
+	info := infoFor("GET", "/v0/city/mc/mail", "recipient=worker", nil)
+	info.Aud = "gc-city-read"
+	p := baseParams(priv)
+	p.Aud = info.Aud // the --aud flag feeds this parameter
+	p.Now = time.Now
+	token := mustMint(t, p, info)
+	v, err := api.ResolveReadAuthVerifier("k1:"+base64.StdEncoding.EncodeToString(pub), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(token, citywriteauth.Expect{City: info.City, ReqDigest: info.ReqDigest}); err != nil {
+		t.Fatalf("read minter must match the API verifier: %v", err)
 	}
 }
 

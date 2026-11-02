@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/git",
+        "//internal/supervisor",
         "@com_github_invopop_jsonschema//:jsonschema",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",

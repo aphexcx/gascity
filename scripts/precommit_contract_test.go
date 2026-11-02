@@ -86,6 +86,7 @@ func TestShape(t *testing.T) {
 				"internal/api/openapi.json", "docs/reference/schema/openapi.json",
 				"docs/reference/schema/openapi.txt", "internal/api/genclient/client_gen.go",
 				"docs/reference/schema/city-schema.json", "docs/reference/schema/city-schema.txt",
+				"docs/reference/schema/supervisor-schema.json", "docs/reference/schema/supervisor-schema.txt",
 				"docs/reference/config.md", "docs/reference/cli.md",
 			} {
 				writeTestFile(t, filepath.Join(repo, path), "baseline\n")
@@ -648,6 +649,8 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		filepath.Join(tmpRepo, "internal", "api", "genclient", "client_gen.go"),
 		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.json"),
 		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.txt"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "supervisor-schema.json"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "supervisor-schema.txt"),
 		filepath.Join(tmpRepo, "docs", "reference", "config.md"),
 		filepath.Join(tmpRepo, "docs", "reference", "cli.md"),
 	}

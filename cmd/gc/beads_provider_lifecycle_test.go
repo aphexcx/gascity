@@ -4478,6 +4478,7 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	cmd := exec.Command(scriptPath, "init", cityDir, "gc", "hq")
 	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(cityDir, "gitconfig"),
 		"GC_CITY_PATH="+cityDir,
 		"GC_BIN="+gcPath,
 		"BD_BIN="+bdPath,

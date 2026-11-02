@@ -137,8 +137,10 @@ func TestCmdMailSendRemote_PostsAndRenders(t *testing.T) {
 	seedLocalCity(t)
 
 	var gotPath, gotReq, gotMethod string
+	var requests []string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
 		gotPath, gotReq, gotMethod = r.URL.Path, r.Header.Get("X-GC-Request"), r.Method
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &gotBody)
@@ -149,13 +151,22 @@ func TestCmdMailSendRemote_PostsAndRenders(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	code := cmdMailSendRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "round trip"}, false, false, "", "", "", "", false, &out, &errb)
+	if code := doContextAdd(clientcontext.Context{Name: "peer", URL: srv.URL, City: "mc"}, &out, &errb); code != 0 {
+		t.Fatalf("seed peer context: %s", &errb)
+	}
+	out.Reset()
+	errb.Reset()
+	code := run([]string{"--context", "peer", "mail", "send", "mayor", "round trip"}, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d; stderr=%q", code, errb.String())
 	}
 	if gotMethod != http.MethodPost || gotPath != "/v0/city/mc/mail" || gotReq == "" {
 		t.Errorf("method=%q path=%q req=%q", gotMethod, gotPath, gotReq)
 	}
+	if len(requests) != 1 || requests[0] != "POST /v0/city/mc/mail" {
+		t.Fatalf("remote mail send requests = %v, want exactly one POST", requests)
+	}
+	t.Logf("gc --context peer mail send requests: %v", requests)
 	if gotBody["to"] != "mayor" || gotBody["from"] != "alpha/mayor" || gotBody["subject"] != "round trip" || gotBody["body"] != "round trip" {
 		t.Errorf("body=%v", gotBody)
 	}

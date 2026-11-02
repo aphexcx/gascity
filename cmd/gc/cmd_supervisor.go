@@ -1542,6 +1542,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc supervisor: hardened listener: %v\n", err) //nolint:errcheck
 			return 1
 		}
+		if err := api.InstallHardenedReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, hardenedCfg.ReadAuthVerifyKey, hardenedCfg.ReadAuthRequired); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: hardened listener: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		hardenedVerifier = v
 	}
 	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
@@ -1650,8 +1654,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		}()
 		fmt.Fprintf(stdout, "Supervisor hardened API listening on http://%s (every city mutation requires a signed X-GC-City-Write grant)\n", hardenedAddr) //nolint:errcheck
 		if hardenedBind != "127.0.0.1" && hardenedBind != "localhost" && hardenedBind != "::1" {
-			// gc has no TLS of its own and the read plane on this listener is the
-			// primary's: name the exposure exactly as the G23 warning does.
+			// Only the hardened read gate closes every read surface on this port.
 			warnUnauthenticatedReadPlane(stderr, hardenedBind, true, hardenedReadAuthInstalled(supCfg))
 		}
 	}
@@ -3015,10 +3018,8 @@ type cityInitProgress struct {
 // Compile-time check that *cityRegistry satisfies api.CityResolver.
 var _ api.CityResolver = (*cityRegistry)(nil)
 
-// hardenedReadAuthInstalled reports whether the primary listener's read-auth
-// verifier is installed (the hardened listener shares it), for the hardened
-// listener's non-loopback read-plane warning.
+// hardenedReadAuthInstalled reports whether the validated hardened config gates
+// its entire read surface, for the listener's non-loopback read-plane warning.
 func hardenedReadAuthInstalled(supCfg supervisor.Config) bool {
-	v, err := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired)
-	return err == nil && v != nil
+	return strings.TrimSpace(supCfg.Supervisor.Hardened.ReadAuthVerifyKey) != ""
 }
