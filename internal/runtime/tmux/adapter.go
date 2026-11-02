@@ -951,7 +951,7 @@ func (p *Provider) Attach(name string) error {
 	if p.cfg.SocketName != "" {
 		args = append(args, "-L", p.cfg.SocketName)
 	}
-	args = append(args, "attach-session", "-t", name)
+	args = append(args, "attach-session", "-t", exactTarget(name))
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1298,8 +1298,8 @@ func (o *tmuxStartOps) setRemainOnExit(name string) error {
 }
 
 func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
-	o.tm.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
-	o.tm.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	o.tm.run("set-option", "-t", exactTarget(name), "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", exactTarget(name), "monitor-activity", "off") //nolint:errcheck
 	return nil
 }
 
