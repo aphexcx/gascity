@@ -1115,14 +1115,7 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 }
 
 func prepareWaitWakeStateWithSnapshot(cityPath string, sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
-	var nudgeState nudgeQueueState
-	if cityPath != "" {
-		var err error
-		nudgeState, err = nudgequeue.LoadState(cityPath)
-		if err != nil {
-			return nil, err
-		}
-	}
+	nudgeState := loadWaitNudgeState(cityPath)
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1273,10 +1266,7 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
-	nudgeState, err := nudgequeue.LoadState(cityPath)
-	if err != nil {
-		return err
-	}
+	nudgeState := loadWaitNudgeState(cityPath)
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1354,6 +1344,19 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		}
 	}
 	return nil
+}
+
+func loadWaitNudgeState(cityPath string) nudgeQueueState {
+	if cityPath == "" {
+		return nudgeQueueState{}
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil && nudgeWarningWriter != nil {
+		// The shadow can still finalize a wait or suppress redelivery. Enqueue
+		// re-reads the authority under its lock and fails closed on corruption.
+		fmt.Fprintf(nudgeWarningWriter, "gc wait: reading %s: %v; continuing without tombstones\n", nudgequeue.StatePath(cityPath), err) //nolint:errcheck
+	}
+	return state
 }
 
 func waitNudgeProviderNeedsPoller(info sessionpkg.Info) bool {

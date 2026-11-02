@@ -179,7 +179,7 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 	}
 	for range 2 {
 		if err := withNudgeQueueState(dir, func(s *nudgeQueueState) error {
-			return pruneDeadQueuedNudges(s, nudgeFrontDoor(beads.NudgesStore{Store: store}), time.Now(), noMaintenanceDeadline())
+			return pruneDeadQueuedNudges("", s, nudgeFrontDoor(beads.NudgesStore{Store: store}), time.Now(), noMaintenanceDeadline())
 		}); err != nil {
 			t.Fatal(err)
 		}

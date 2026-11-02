@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func terminalReasonForDeadQueuedNudge(item queuedNudge) string {
@@ -39,7 +41,7 @@ func repairDeadQueuedNudge(front *nudgequeue.Store, item queuedNudge) bool {
 	return front.Terminalize(item, terminalStateForDeadQueuedNudge(item), terminalReasonForDeadQueuedNudge(item), "", item.DeadAt) == nil
 }
 
-func pruneNudgeTombstones(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) {
+func pruneNudgeTombstones(cityPath string, state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) {
 	retained := state.Tombstones[:0]
 	for i, tombstone := range state.Tombstones {
 		if clk.Now().After(deadline) {
@@ -51,13 +53,19 @@ func pruneNudgeTombstones(state *nudgeQueueState, front *nudgequeue.Store, now, 
 			return
 		}
 		if tombstone.RepairPending && front != nil {
-			// Missing shadows cannot prove repair: retain the intent so wait
-			// finalization can still consume it and dispatch cannot resurrect it.
 			if _, found, err := front.FindIncludingTerminal(tombstone.ID); err == nil && found {
 				item := queuedNudge{ID: tombstone.ID, BeadID: tombstone.BeadID, LastError: tombstone.TerminalReason}
 				if err := front.Terminalize(item, tombstone.TerminalState, tombstone.TerminalReason, "", tombstone.TerminalAt); err == nil {
 					tombstone.RepairPending = false
 					tombstone.RepairedAt = now.UTC()
+				}
+			} else if err == nil && !found {
+				if reason := missingNudgeShadowRepairReason(cityPath, tombstone, now); reason != "" {
+					tombstone.RepairPending = false
+					tombstone.RepairedAt = now.UTC()
+					if nudgeWarningWriter != nil {
+						fmt.Fprintf(nudgeWarningWriter, "gc nudge: tombstone %q repaired: %s\n", tombstone.ID, reason) //nolint:errcheck
+					}
 				}
 			}
 		}
@@ -67,6 +75,83 @@ func pruneNudgeTombstones(state *nudgeQueueState, front *nudgequeue.Store, now, 
 		retained = append(retained, tombstone)
 	}
 	state.Tombstones = retained
+}
+
+func missingNudgeShadowRepairReason(cityPath string, tombstone nudgequeue.Tombstone, now time.Time) string {
+	atCeiling := !tombstone.DeletedAt.IsZero() && !tombstone.DeletedAt.Add(nudgequeue.DeadLetterRetention).After(now)
+	if tombstone.Source == "wait" && tombstone.Reference != nil && tombstone.Reference.Kind == "bead" && tombstone.Reference.ID != "" {
+		if cityPath == "" {
+			return ""
+		}
+		reason, err := repairNudgeTombstoneWaitReference(cityPath, tombstone, now, atCeiling)
+		if err != nil {
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc nudge: repairing tombstone %q wait reference %q: %v; retaining terminal intent\n", tombstone.ID, tombstone.Reference.ID, err) //nolint:errcheck
+			}
+			return ""
+		}
+		if reason != "" {
+			return reason
+		}
+	}
+	// Give a missing shadow a full recovery window after payload deletion,
+	// longer than the stale-shadow sweep window. A successful missing lookup
+	// is required; unavailable stores and failed writes never start this clock.
+	if atCeiling {
+		return "seven-day missing-shadow ceiling"
+	}
+	return ""
+}
+
+func repairNudgeTombstoneWaitReference(cityPath string, tombstone nudgequeue.Tombstone, now time.Time, atCeiling bool) (reason string, err error) {
+	// The session class may be relocated away from the nudge store. Close
+	// only the work handle opened here, never the routes' shared session store.
+	opened, err := openNudgeWorkStore(cityPath, cityPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, closeBeadStoreHandle(opened)) }()
+	sessFront := cliSessionFrontDoor(opened, nil, cityPath)
+	wait, err := sessFront.GetWait(tombstone.Reference.ID)
+	if errors.Is(err, beads.ErrNotFound) || errors.Is(err, session.ErrNotAWait) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if wait.SessionID != tombstone.SessionID {
+		return "", nil
+	}
+	if wait.Status == "closed" || session.IsWaitTerminalState(wait.State) {
+		// A prior pass may have persisted the wait but failed to release its
+		// idle hold. Finish that half before expiring the repair receipt.
+		if wait.NudgeID == tombstone.ID {
+			if err := sessFront.ClearIdleWaitHold(wait.SessionID); err != nil {
+				return "", err
+			}
+		}
+		return "terminal wait reference", nil
+	}
+	if !atCeiling {
+		return "", nil
+	}
+	nudgeID := wait.NudgeID
+	if nudgeID == "" {
+		nudgeID = waitNudgeID(wait)
+	}
+	if nudgeID != tombstone.ID {
+		// An explicit retry has advanced the wait to a different attempt.
+		return "", nil
+	}
+	// The tombstone is the last durable terminal intent when the shadow is
+	// gone. Persist it on the matching wait before starting receipt expiry.
+	if err := sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, tombstone.TerminalReason, ""); err != nil {
+		return "", err
+	}
+	if err := sessFront.ClearIdleWaitHold(wait.SessionID); err != nil {
+		return "", err
+	}
+	return "seven-day missing-shadow ceiling; wait finalized", nil
 }
 
 // Only the transaction that adds an item to Dead calls this seam. Notifications
