@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "city_scope.go",
         "cutover.go",
         "interaction.go",
         "nudge_draft.go",

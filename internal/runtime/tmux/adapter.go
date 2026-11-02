@@ -71,7 +71,7 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // socket. An omitted -L, -L default, or a different/custom socket cannot prove
 // city isolation and must not authorize destructive orphan cleanup.
 func (p *Provider) IsCityScoped(cityName string) bool {
-	return cityName != "" && cityName != "default" && p.cfg.SocketName == cityName
+	return p.cfg.IsCityScoped(cityName)
 }
 
 // Start creates a new detached tmux session and performs a multi-step

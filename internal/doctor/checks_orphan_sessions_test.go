@@ -14,10 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
-type orphanSocketScope interface {
-	IsCityScoped(string) bool
-}
-
 type orphanMetadataProvider struct {
 	runtime.Provider
 	metaErr error
@@ -25,12 +21,12 @@ type orphanMetadataProvider struct {
 
 type orphanScopedProvider struct {
 	orphanMetadataProvider
-	orphanSocketScope
+	tmux.Config
 }
 
-// Use tmux's production scope check while keeping session operations in memory.
+// Keep sessions in memory and use tmux's pure configuration scope check.
 func orphanProvider(sp runtime.Provider, socket string, metaErr error) orphanScopedProvider {
-	return orphanScopedProvider{orphanMetadataProvider{sp, metaErr}, tmux.NewProviderWithConfig(tmux.Config{SocketName: socket})}
+	return orphanScopedProvider{orphanMetadataProvider{sp, metaErr}, tmux.Config{SocketName: socket}}
 }
 
 func (p orphanMetadataProvider) GetMeta(name, key string) (string, error) {
