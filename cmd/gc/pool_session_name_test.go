@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -492,32 +493,36 @@ func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadReleasesAndClears(t *te
 	work := createDetachedOrphanedPoolWork(t, store)
 	installFakeTmux(t, "exit 1")
 
-	released := releaseOrphanedPoolAssignmentsFromBeads(
-		store,
-		testPoolReleaseConfig(),
-		"",
-		nil,
-		[]beads.Bead{work},
-		nil,
-		nil,
-		nil,
-	)
-	if len(released) != 1 || released[0].ID != work.ID {
-		t.Fatalf("released = %v, want [%s]", released, work.ID)
-	}
-	got, err := store.Get(work.ID)
-	if err != nil {
-		t.Fatalf("Get work bead: %v", err)
-	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Assignee != "" {
-		t.Fatalf("assignee = %q, want empty", got.Assignee)
-	}
-	if got.Metadata[detachedProbeMetadataKey] != "" {
-		t.Fatalf("gc.detached = %q, want cleared", got.Metadata[detachedProbeMetadataKey])
-	}
+	// The process exit determines dead/alive; scheduler delay must not turn
+	// the exit-1 fixture into a probe timeout that defers release to a later tick.
+	synctest.Test(t, func(t *testing.T) {
+		released := releaseOrphanedPoolAssignmentsFromBeads(
+			store,
+			testPoolReleaseConfig(),
+			"",
+			nil,
+			[]beads.Bead{work},
+			nil,
+			nil,
+			nil,
+		)
+		if len(released) != 1 || released[0].ID != work.ID {
+			t.Fatalf("released = %v, want [%s]", released, work.ID)
+		}
+		got, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get work bead: %v", err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("status = %q, want open", got.Status)
+		}
+		if got.Assignee != "" {
+			t.Fatalf("assignee = %q, want empty", got.Assignee)
+		}
+		if got.Metadata[detachedProbeMetadataKey] != "" {
+			t.Fatalf("gc.detached = %q, want cleared", got.Metadata[detachedProbeMetadataKey])
+		}
+	})
 }
 
 func TestReleaseOrphanedPoolAssignments_DetachedProbeDeadPreservesGuardWhenReleaseFails(t *testing.T) {
