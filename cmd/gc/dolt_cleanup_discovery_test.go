@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -18,6 +21,303 @@ func TestDoltProcRigOwner_MatchesDataDirUnderRigRoot(t *testing.T) {
 	owner, ok := doltProcRigOwner(proc, rigs)
 	if !ok || owner != "alpha" {
 		t.Errorf("doltProcRigOwner = (%q, %v), want (alpha, true)", owner, ok)
+	}
+}
+
+func TestActiveTestRootFromPath_Pytest(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	for _, name := range []string{"pytest-8", "pytest-9", "pytest-10"} {
+		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeExitedPytestOwner(t, filepath.Join(userRoot, name))
+	}
+	// A current link can lag directory creation by a concurrent pytest run.
+	if err := os.Symlink("pytest-9", filepath.Join(userRoot, "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"pytest-8", false},
+		{"pytest-9", true},
+		{"pytest-10", true},
+		{"pytest-7", false},
+	} {
+		root := filepath.Join(userRoot, tc.name)
+		got, ok := activeTestRootFromPath(filepath.Join(root, "test_city", "config.yaml"), "", tempDir)
+		if ok != tc.want || (ok && got != root) {
+			t.Errorf("active root for %s = (%q, %v), want (%q, %v)", tc.name, got, ok, root, tc.want)
+		}
+	}
+	if err := os.Remove(filepath.Join(userRoot, "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"pytest-9", false}, {"pytest-10", true}} {
+		_, ok := activeTestRootFromPath(filepath.Join(userRoot, tc.name, "config.yaml"), "", tempDir)
+		if ok != tc.want {
+			t.Errorf("without current link, %s active = %v, want %v", tc.name, ok, tc.want)
+		}
+	}
+}
+
+func TestPytestOverlappingRunsProtectLiveOwner(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	newer := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, newer} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(newer, filepath.Join(filepath.Dir(older), "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	// Pytest writes its owner PID into this lock until the run finishes.
+	lock := filepath.Join(older, ".lock")
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(older, "test_city", "config.yaml")
+	writePytestDoltConfig(t, config, older)
+	if _, active := activeTestRootFromPath(config, "", tempDir); !active {
+		t.Error("a newer basetemp must not discard the older run's live owner")
+	}
+	proc := DoltProcInfo{PID: 101, Argv: []string{"dolt", "sql-server", "--config", config}, CWDState: procPathStateLive}
+	proc.HostNamespace = true
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("concurrent older run: action = %q, want protect", got.Action)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("lockless overlapping run: action = %q, want protect", got.Action)
+	}
+	writeExitedPytestOwner(t, older)
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "reap" {
+		t.Errorf("completed older run: action = %q, want reap", got.Action)
+	}
+}
+
+func TestClassifyDoltProcess_PytestCurrentAlias(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	older := filepath.Join(userRoot, "pytest-9")
+	current := filepath.Join(userRoot, "pytest-10")
+	for _, root := range []string{older, current} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	alias := filepath.Join(userRoot, "pytest-current")
+	writePytestDoltConfig(t, filepath.Join(older, "config.yaml"), older)
+	if err := os.Symlink(current, alias); err != nil {
+		t.Fatal(err)
+	}
+	proc := DoltProcInfo{
+		PID: 101, HostNamespace: true, CWDState: procPathStateLive,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", filepath.Join(alias, "test_city", "data")},
+	}
+	if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+		t.Errorf("pytest-current data directory: action = %q, want protect", got.Action)
+	}
+	if isTestConfigPath(filepath.Join(alias, "config.yaml"), "", tempDir) {
+		t.Error("pytest-current must not authorize cleanup")
+	}
+}
+
+func TestClassifyDoltProcess_PytestConfigCannotOwnExternalData(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	newer := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, newer} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	for _, dataDir := range []string{"/srv/active-data", "relative-data"} {
+		writePytestDoltConfig(t, filepath.Join(older, "config.yaml"), older)
+		t.Run(dataDir, func(t *testing.T) {
+			proc := DoltProcInfo{
+				PID: 101, HostNamespace: true, CWDState: procPathStateLive,
+				Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", dataDir},
+			}
+			if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+				t.Errorf("external data directory: action=%q, want protect", got.Action)
+			}
+		})
+	}
+}
+
+func TestPytestOwnerMayBeLive(t *testing.T) {
+	root := t.TempDir()
+	lock := filepath.Join(root, ".lock")
+	if !pytestOwnerMayBeLive(root, func(int) bool { return false }) {
+		t.Error("pytest can omit its lock when retention is disabled; absence must protect")
+	}
+	for _, tc := range []struct {
+		name string
+		data string
+		live bool
+		want bool
+	}{
+		{"live owner", "1234\n", true, true},
+		{"exited owner", "1234", false, false},
+		{"empty lock", "", false, true},
+		{"invalid owner", "-1", false, true},
+		{"overflow", "2147483648", false, true},
+		{"oversize", strings.Repeat("1", 33), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(lock, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := pytestOwnerMayBeLive(root, func(pid int) bool {
+				if pid != 1234 {
+					t.Errorf("queried PID %d, want 1234", pid)
+				}
+				return tc.live
+			}); got != tc.want {
+				t.Errorf("owner live = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPytestTempRootDarwinAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS temp directory aliases")
+	}
+	path := "/private/var/folders/example/T/pytest-of-user/pytest-10/config.yaml"
+	if !isTestConfigPath(path, "", "/var/folders/example/T") {
+		t.Error("pytest resolves the macOS temp directory before creating its basetemp")
+	}
+	parent := t.TempDir()
+	oldRoot := filepath.Join(parent, "pytest-of-user", "pytest-9")
+	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExitedPytestOwner(t, oldRoot)
+	if err := os.Mkdir(filepath.Join(filepath.Dir(oldRoot), "pytest-10"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(resolved, filepath.Join(filepath.Dir(oldRoot), "pytest-current")); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestPathMayBeLive(oldRoot, oldRoot) {
+		t.Error("the absolute current symlink must protect the same root through its macOS alias")
+	}
+}
+
+func TestPytestRootMayBeLive_UncertainState(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "pytest-1")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExitedPytestOwner(t, root)
+	if err := os.Mkdir(filepath.Join(parent, "pytest-2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(parent, "pytest-current")
+	if err := os.WriteFile(current, []byte("not a symlink"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestPathMayBeLive(root, root) {
+		t.Error("an unreadable current link must protect the older root")
+	}
+	if err := os.Remove(filepath.Join(root, ".lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestPathMayBeLive(root, root) {
+		t.Error("a missing basetemp alone does not establish owner exit")
+	}
+	if err := os.Symlink(parent, root); err != nil {
+		t.Fatal(err)
+	}
+	if !pytestPathMayBeLive(root, root) {
+		t.Error("a replaced basetemp must stay protected")
+	}
+}
+
+func TestDoltProcHostNamespaceAt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mnt       string
+		pid       string
+		otherRoot bool
+		want      bool
+	}{
+		{"host", "mnt:[1]", "pid:[1]", false, true},
+		{"foreign mount namespace", "mnt:[2]", "pid:[1]", false, false},
+		{"foreign PID namespace", "mnt:[1]", "pid:[2]", false, false},
+		{"unreadable namespace", "", "pid:[1]", false, false},
+		{"chroot", "mnt:[1]", "pid:[1]", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			for _, dir := range []string{"self/ns", "123/ns", "rootfs", "other-rootfs"} {
+				if err := os.MkdirAll(filepath.Join(procRoot, dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			links := map[string]string{
+				"self/ns/mnt": "mnt:[1]", "self/ns/pid": "pid:[1]",
+				"123/ns/mnt": tc.mnt, "123/ns/pid": tc.pid,
+				"self/root": filepath.Join(procRoot, "rootfs"),
+				"123/root":  filepath.Join(procRoot, "rootfs"),
+			}
+			if tc.otherRoot {
+				links["123/root"] = filepath.Join(procRoot, "other-rootfs")
+			}
+			for name, target := range links {
+				if target != "" {
+					if err := os.Symlink(target, filepath.Join(procRoot, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if got := doltProcHostNamespaceAt(procRoot, 123); got != tc.want {
+				t.Errorf("host namespace = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func writePytestDoltConfig(t *testing.T, path, dataDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("data_dir: "+strconv.Quote(dataDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeExitedPytestOwner(t *testing.T, root string) {
+	t.Helper()
+	// Above the Linux/macOS PID ranges; verify absence without starting a child.
+	const exitedPID = 1<<31 - 1
+	if err := syscall.Kill(exitedPID, 0); err != syscall.ESRCH {
+		t.Fatalf("checking absent fixture PID: %v, want ESRCH", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".lock"), []byte(strconv.Itoa(exitedPID)), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -183,6 +483,33 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 	}
 	if cfg := extractConfigPath(got.Argv); cfg != "/tmp/Test With Space/config.yaml" {
 		t.Fatalf("config = %q", cfg)
+	}
+}
+
+func TestClassifyDoltProcess_PytestDataDirProtectsCurrentRun(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+	current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+	for _, root := range []string{older, current} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExitedPytestOwner(t, older)
+	config := filepath.Join(older, "test city", "config.yaml")
+	writePytestDoltConfig(t, config, older)
+	dataDir := filepath.Join(current, "test city", "data")
+	for _, sep := range []string{" ", "="} {
+		t.Run("separator="+sep, func(t *testing.T) {
+			argv := []string{"dolt", "sql-server", "--config", config, "--data-dir", dataDir}
+			if sep == "=" {
+				argv = []string{"dolt", "sql-server", "--config=" + config, "--data-dir=" + dataDir}
+			}
+			proc := DoltProcInfo{PID: 12345, Argv: argv, HostNamespace: true, CWDState: procPathStateLive}
+			if got := classifyDoltProcess(proc, nil, "", tempDir, nil); got.Action != "protect" {
+				t.Errorf("current data directory with older config: action = %q, want protect", got.Action)
+			}
+		})
 	}
 }
 

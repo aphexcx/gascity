@@ -1531,7 +1531,11 @@ protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
-/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*, and pytest-of-&lt;user&gt;/pytest-&lt;N&gt;
+under /tmp or os.TempDir()). The pytest-current target and highest numbered
+pytest basetemp are protected. Older retained basetemps are eligible only when
+their recorded pytest owner PID is confirmed gone. Missing or unreadable owner
+locks and container-managed pytest servers remain protected. A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the

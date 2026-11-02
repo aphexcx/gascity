@@ -147,6 +147,72 @@ func TestIsTestConfigPath_NotTest(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_PSConfigPreservesDataDir(t *testing.T) {
+	proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/TestOld/config.yaml --data-dir /tmp/TestOld/db", nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	proc.Argv = []string{"dolt", "sql-server", "--config", "/tmp/TestOld/config.yaml", "--data-dir", "/tmp/TestOld/db"}
+	proc.ArgvUnverified = false
+	got := classifyDoltProcess(proc, nil, "", "/tmp", nil)
+	if got.Action != "reap" || got.DataDir != "" {
+		t.Errorf("PS config eligibility: action=%q, data-dir=%q; want process reaping only", got.Action, got.DataDir)
+	}
+}
+
+func TestReapDataDir_PytestKeepsDirectoryOwnership(t *testing.T) {
+	pytestPath := "/tmp/pytest-of-user/pytest-0/db"
+	goPath := "/tmp/TestDataDir1/db"
+	for _, argv := range [][]string{
+		{"dolt", "sql-server", "--data-dir", pytestPath},
+		{"dolt", "sql-server", "--config", pytestPath, "--data-dir", goPath},
+		{"dolt", "sql-server", "--config", goPath, "--data-dir", pytestPath},
+	} {
+		if got := reapDataDir(DoltProcInfo{Argv: argv}, "", "/tmp"); got != "" {
+			t.Errorf("reapDataDir(%q) = %q, want no directory removal for pytest-owned servers", argv, got)
+		}
+	}
+}
+
+func TestIsTestConfigPath_Pytest(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/tmp/pytest-of-user/pytest-12/test_city/config.yaml", true},
+		{"/var/tmp/python/pytest-of-user/pytest-0/config.yaml", true},
+		{"/srv/pytest-of-user/pytest-12/config.yaml", false},
+		{"/tmp/other/pytest-of-user/pytest-12/config.yaml", false},
+		{"/tmp/pytest-of-/pytest-12/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-current/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-12suffix/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest--1/config.yaml", false},
+		{"/tmp/pytest-of-user/pytest-12/../../production/config.yaml", false},
+	} {
+		if got := isTestConfigPath(tc.path, "", "/var/tmp/python"); got != tc.want {
+			t.Errorf("isTestConfigPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyDoltProcess_PytestContainerNamespace(t *testing.T) {
+	for _, cgroup := range []string{
+		"0::/system.slice/docker-123.scope\n",
+		"0::/kubepods.slice/cri-containerd-123.scope\n",
+		"0::/unrecognized-sandbox\n",
+	} {
+		p := DoltProcInfo{
+			PID: 123, ContainerRuntime: containerRuntimeFromCgroup([]byte(cgroup)), CWDState: procPathStateLive,
+			Argv: []string{"dolt", "sql-server", "--config", "/var/tmp/python/pytest-of-root/pytest-9/config.yaml"},
+		}
+		got := classifyDoltProcess(p, nil, "", "/var/tmp/python", nil)
+		if got.Action != "protect" {
+			t.Errorf("cgroup %q: %+v, want protection without consulting host pytest paths", cgroup, got)
+		}
+	}
+}
+
 func TestClassifyDoltProcess_ProtectedByRigPort(t *testing.T) {
 	p := DoltProcInfo{
 		PID:   1234,
@@ -749,6 +815,16 @@ func TestContainerRuntimeFromCgroup(t *testing.T) {
 			name:   "plain host process",
 			cgroup: "0::/user.slice/user-1000.slice/session-3.scope\n",
 			want:   "",
+		},
+		{
+			name:   "containerd scope",
+			cgroup: "0::/kubepods.slice/cri-containerd-123.scope\n",
+			want:   "containerd",
+		},
+		{
+			name:   "CRI-O scope",
+			cgroup: "0::/kubepods.slice/crio-123.scope\n",
+			want:   "cri-o",
 		},
 		{
 			name:   "empty cgroup file",

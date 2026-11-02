@@ -42,13 +42,11 @@ const (
 // on disk, live when it does, unknown for absent or relative configs and for
 // stat errors. ConfigPathState is not a standalone reap trigger: a deleted
 // config protects (with a confirm-manually reason) unless the deleted-cwd
-// signal corroborates that the scope is truly gone. ContainerRuntime is the
-// runtime name ("docker" or "podman") when /proc/<pid>/cgroup's first line
-// carries that runtime's cgroup marker, or "" for a normal host process or a
-// host with no /proc (ga-sm1cvj). classifyDoltProcess treats a non-empty
-// value as an unconditional protect signal for a bare (no --config) server:
-// gc does not own container lifecycle, and killing the in-container PID
-// would leave a broken container rather than free anything.
+// signal corroborates that the scope is truly gone. ContainerRuntime is a
+// recognized runtime name from /proc/<pid>/cgroup, or "" when unidentified.
+// Recognized containers are protected for bare servers and pytest paths.
+// Pytest eligibility also requires HostNamespace proof, so an unidentified
+// runtime does not establish that the process uses the host's paths and PIDs.
 type DoltProcInfo struct {
 	PID              int
 	Argv             []string
@@ -59,6 +57,15 @@ type DoltProcInfo struct {
 	CWDState         string
 	ConfigPathState  string
 	ContainerRuntime string
+	// HostNamespace verifies that host paths and PIDs are meaningful for this
+	// process. Linux discovery compares mount/PID namespaces and filesystem roots.
+	HostNamespace bool
+	// ArgvUnverified marks flattened ps arguments whose boundaries have not
+	// been verified through a native process record. They cannot authorize cleanup.
+	ArgvUnverified bool
+	// ConfigOnlyCleanup requires --config eligibility and preserves directories.
+	// PS discovery uses native data arguments for protection only.
+	ConfigOnlyCleanup bool
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -147,15 +154,37 @@ func extractDataDirPath(argv []string) string {
 	return v
 }
 
-// reapDataDir returns argv's --data-dir value when — and only when — that
-// value independently passes the same test-config-path allowlist used for
-// --config (isTestConfigPath). It never consults ConfigPath: a --data-dir
-// value is trusted for removal solely on its own merits, so a reap triggered
-// by a --config allowlist match does not implicitly vouch for an unrelated
-// --data-dir value. Returns "" when --data-dir is absent or not test-owned,
-// which callers treat as "reap the process, but do not remove a directory."
-func reapDataDir(argv []string, homeDir, tempDir string) string {
-	dataDirPath := extractDataDirPath(argv)
+// pytestInvocationPathVerified limits pytest eligibility to a single literal
+// path option. With additional options, a flat argv scan cannot distinguish
+// another option's value from a config flag or reproduce Dolt's parsing.
+func pytestInvocationPathVerified(argv []string, configPath, dataPath string) bool {
+	flag, path := "--config", configPath
+	if path == "" {
+		flag, path = "--data-dir", dataPath
+	}
+	if path == "" || len(argv) < 3 || argv[1] != "sql-server" {
+		return false
+	}
+	return (len(argv) == 4 && argv[2] == flag && argv[3] == path) ||
+		(len(argv) == 3 && argv[2] == flag+"="+path)
+}
+
+// reapDataDir returns a test-owned --data-dir eligible for directory removal.
+// The data path must independently pass the test-config-path allowlist; a
+// config match alone does not establish ownership of an unrelated data path.
+// Pytest retains ownership of its reusable basetemp directories; cleanup only
+// reaps its servers and must not remove a directory a later run can reuse.
+// An empty result means reap the process without removing a directory.
+func reapDataDir(p DoltProcInfo, homeDir, tempDir string) string {
+	if p.ConfigOnlyCleanup {
+		return ""
+	}
+	dataDirPath := extractDataDirPath(p.Argv)
+	for _, path := range []string{extractConfigPath(p.Argv), dataDirPath} {
+		if _, ok := pytestTestRoot(path, tempDir); ok {
+			return ""
+		}
+	}
 	if dataDirPath != "" && isTestConfigPath(dataDirPath, homeDir, tempDir) {
 		return dataDirPath
 	}
@@ -163,7 +192,8 @@ func reapDataDir(argv []string, homeDir, tempDir string) string {
 }
 
 // isTestConfigPath reports whether p matches the cleanup allowlist for test
-// Dolt configs: Go test temp roots, plus known Gas City unit-test prefixes
+// Dolt configs: Go test temp roots, pytest-of-<user>/pytest-<N> under /tmp
+// or os.TempDir(), plus known Gas City unit-test prefixes
 // that use short socket-safe directories under os.TempDir(). Also allowlists
 // the fleet GOTMPDIR root (AGENTS.md pins /var/tmp/gotmp; the GOTMPDIR env var
 // is checked too when set, in case it differs on a given host) — ga-sm1cvj.
@@ -172,6 +202,9 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 		return false
 	}
 	clean := filepath.Clean(p)
+	if root, ok := pytestTestRoot(clean, tempDir); ok {
+		return filepath.Base(root) != "pytest-current"
+	}
 	if hasTestChildPrefix(clean, "/tmp", testConfigPathPrefixes()) {
 		return true
 	}
@@ -229,17 +262,17 @@ func hasTestChildPrefix(cleanPath, root string, prefixes []string) bool {
 	return false
 }
 
-func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool {
-	if configPath == "" {
+func pathUnderActiveTestRoot(path string, activeTestRoots []string) bool {
+	if path == "" {
 		return false
 	}
-	cleanConfig := filepath.Clean(configPath)
+	cleanPath := filepath.Clean(path)
 	for _, root := range activeTestRoots {
 		cleanRoot := filepath.Clean(root)
 		if cleanRoot == "." || cleanRoot == string(filepath.Separator) {
 			continue
 		}
-		if cleanConfig == cleanRoot || strings.HasPrefix(cleanConfig, cleanRoot+string(filepath.Separator)) {
+		if cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
 			return true
 		}
 	}
@@ -247,7 +280,8 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 }
 
 // classifyDoltProcess applies the architect's reaper decision rules (§4.3) to a
-// single dolt sql-server process. Order matters:
+// single dolt sql-server process. Unverified argv always protects; otherwise,
+// order matters:
 //
 //  1. Any port match against rigPortByPort → protected (active rig server),
 //     even if the cmdline says it's a test path or its scope looks deleted
@@ -257,9 +291,10 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //     proxy.pid record beside it. Checked before every reap rule below,
 //     including the test-config-path allowlist, because a real-bd lifecycle
 //     test in t.TempDir() produces exactly that shape.
-//  3. Else protect if the --config sits under an active test root, even when
+//  3. Else protect if --config or --data-dir sits under an active test root, even when
 //     the config file itself is momentarily gone (mid-teardown of a test
-//     that is still running).
+//     that is still running). Pytest roots also require verified host namespaces
+//     and exited owner evidence; current or unverified basetemps stay protected.
 //  4. Else reap when the working directory is an unlinked inode (ga-10wmzh):
 //     a cwd readlink ending in " (deleted)" can never revert, so it proves the
 //     scope is gone — this also covers bare servers started without --config.
@@ -289,6 +324,9 @@ func configUnderActiveTestRoot(configPath string, activeTestRoots []string) bool
 //     operators can decide whether to kill it manually (architect Open Q 0).
 //     Unknown state is never a reap signal.
 func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, tempDir string, activeTestRoots []string) reapClassification {
+	if p.ArgvUnverified {
+		return reapClassification{Action: "protect", Reason: "process argument boundaries are unverified"}
+	}
 	for _, port := range p.Ports {
 		if name, ok := rigPortByPort[port]; ok {
 			return reapClassification{
@@ -299,6 +337,9 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 
 	cfgPath := extractConfigPath(p.Argv)
+	if p.ConfigOnlyCleanup && cfgPath == "" {
+		return reapClassification{Action: "protect", Reason: "ps process discovery requires --config ownership for cleanup"}
+	}
 	// The standing guard for the supervisor process itself. Process discovery
 	// only enumerates `dolt sql-server` today, so nothing reaches here with a
 	// supervisor's argv — but if discovery ever widens, bd's own proxy must not
@@ -316,11 +357,64 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			ConfigPath: cfgPath,
 		}
 	}
-	if configUnderActiveTestRoot(cfgPath, activeTestRoots) {
+	dataPath := extractDataDirPath(p.Argv)
+	if root, ok := pytestTestRoot(cfgPath, tempDir); ok && dataPath != "" && !pathUnderActiveTestRoot(cleanPytestPath(dataPath), []string{root}) {
 		return reapClassification{
 			Action:     "protect",
-			Reason:     fmt.Sprintf("config %q is under an active test root", cfgPath),
+			Reason:     fmt.Sprintf("data-dir %q is outside pytest config basetemp %q; ownership unverified", dataPath, root),
 			ConfigPath: cfgPath,
+		}
+	}
+	for _, path := range []string{cfgPath, dataPath} {
+		if pathUnderActiveTestRoot(path, activeTestRoots) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("path %q is under an active test root", path),
+				ConfigPath: cfgPath,
+			}
+		}
+		root, ok := pytestTestRoot(path, tempDir)
+		if !ok {
+			continue
+		}
+		if p.ContainerRuntime != "" {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("container-managed dolt server (%s); pytest ownership cannot be verified on the host", p.ContainerRuntime),
+				ConfigPath: cfgPath,
+			}
+		}
+		if !p.HostNamespace {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "process namespaces are not verified; refusing to use host pytest paths or owner PIDs",
+				ConfigPath: cfgPath,
+			}
+		}
+		rootState := statConfigPathState(root)
+		if rootState == procPathStateDeleted && p.CWDState == procPathStateDeleted && filepath.Base(root) != "pytest-current" {
+			continue
+		}
+		if rootState != procPathStateLive || pytestPathMayBeLive(path, root) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     fmt.Sprintf("path %q is under an active or unverified pytest basetemp", path),
+				ConfigPath: cfgPath,
+			}
+		}
+		if !pytestInvocationPathVerified(p.Argv, cfgPath, dataPath) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "pytest cleanup requires a single literal --config or --data-dir path; invocation is unverified",
+				ConfigPath: cfgPath,
+			}
+		}
+		if path == cfgPath && !pytestConfigDataOwned(cfgPath, root) {
+			return reapClassification{
+				Action:     "protect",
+				Reason:     "pytest config data directory is unverified; require an explicit absolute data_dir within its basetemp",
+				ConfigPath: cfgPath,
+			}
 		}
 	}
 	if p.CWDState == procPathStateDeleted {
@@ -328,7 +422,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			Action:     "reap",
 			Reason:     "working directory deleted (scope removed)",
 			ConfigPath: cfgPath,
-			DataDir:    reapDataDir(p.Argv, homeDir, tempDir),
+			DataDir:    reapDataDir(p, homeDir, tempDir),
 		}
 	}
 	if cfgPath == "" {
@@ -350,7 +444,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 			// (step 7 below) is an ownership signal in its own right: a bare
 			// server with no --config but a test-owned --data-dir is a known
 			// regression-test shape and is reaped rather than protected.
-			return reapClassification{Action: "reap", DataDir: dataDirPath}
+			return reapClassification{Action: "reap", DataDir: reapDataDir(p, homeDir, tempDir)}
 		}
 		return reapClassification{
 			Action: "protect",
@@ -360,7 +454,7 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	if isTestConfigPath(cfgPath, homeDir, tempDir) {
 		// A test-config-path match is itself an ownership signal, so an owned
 		// test scope is reaped even when its --config file was already removed.
-		return reapClassification{Action: "reap", ConfigPath: cfgPath, DataDir: reapDataDir(p.Argv, homeDir, tempDir)}
+		return reapClassification{Action: "reap", ConfigPath: cfgPath, DataDir: reapDataDir(p, homeDir, tempDir)}
 	}
 	if p.ConfigPathState == procPathStateDeleted {
 		// A non-allowlist --config has vanished while the working directory

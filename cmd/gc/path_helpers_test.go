@@ -436,7 +436,7 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 	if configPath == "" || tempParent == "" {
 		return false
 	}
-	if configUnderActiveTestRoot(configPath, activeRoots) {
+	if pathUnderActiveTestRoot(configPath, activeRoots) {
 		return false
 	}
 	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
