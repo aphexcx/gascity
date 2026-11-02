@@ -45,9 +45,30 @@ type BackendError struct {
 
 // BackendListResult captures one backend's ListRunning result.
 type BackendListResult struct {
-	Label string
-	Names []string
-	Err   error
+	Label    string
+	Provider Provider
+	Names    []string
+	Err      error
+}
+
+// BackendListProvider preserves the owning provider for each ListRunning
+// result. Routing tables need not contain sessions discovered on a backend.
+type BackendListProvider interface {
+	ListRunningBackends(prefix string) []BackendListResult
+}
+
+// ListBackendSessions lists sessions with their owning providers, flattening
+// composite providers while retaining backend labels and observation errors.
+func ListBackendSessions(label string, sp Provider, prefix string) []BackendListResult {
+	if p, ok := sp.(BackendListProvider); ok {
+		results := p.ListRunningBackends(prefix)
+		for i := range results {
+			results[i].Label = label + "/" + results[i].Label
+		}
+		return results
+	}
+	names, err := sp.ListRunning(prefix)
+	return []BackendListResult{{Label: label, Provider: sp, Names: names, Err: err}}
 }
 
 // IsRuntimeServerAbsent reports whether err is a [PartialListError] whose

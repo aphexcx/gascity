@@ -46,6 +46,8 @@ the host's [daemon] formula_v2 setting cannot satisfy), v2 config
 deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
+Stopping orphan sessions additionally requires --fix-orphans and a confirmed
+city-scoped runtime socket; inspect the reported candidates before opting in.
 
 --check runs only the checks you name, so a caller after one verdict does
 not pay for the whole sweep. It is repeatable and also accepts a comma
@@ -65,6 +67,9 @@ listed.`,
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if opts.FixOrphans && !opts.Fix {
+				return fmt.Errorf("--fix-orphans requires --fix")
+			}
 			opts.UseCheckTimeouts = !cmd.Flags().Changed("check-timeout")
 			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
@@ -73,6 +78,7 @@ listed.`,
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
+	cmd.Flags().BoolVar(&opts.FixOrphans, "fix-orphans", false, "allow stopping this city's orphan sessions (requires --fix and a city-scoped runtime socket)")
 	cmd.Flags().BoolVarP(&opts.Verbose, "verbose", "v", false, "show extra diagnostic details")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "emit structured JSON instead of human-readable output")
 	cmd.Flags().DurationVar(&opts.CheckTimeout, "check-timeout", 60*time.Second,
@@ -87,6 +93,7 @@ listed.`,
 // the call sites unreadable.
 type doctorOpts struct {
 	Fix              bool
+	FixOrphans       bool
 	Verbose          bool
 	JSON             bool
 	CheckTimeout     time.Duration
@@ -181,6 +188,7 @@ func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
 	Stderr                  io.Writer
+	FixOrphans              bool
 	ControllerRunning       bool
 	SupervisorRunning       bool
 	SupervisorPID           int
@@ -396,7 +404,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			} else {
 				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				orphans := doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp)
+				orphans.AllowFix = opts.FixOrphans
+				register(orphans)
 			}
 		}
 	}
@@ -693,6 +703,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	}
 	registered := buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
 		Stderr:                  stderr,
+		FixOrphans:              opts.FixOrphans,
 		ControllerRunning:       controllerRunning,
 		SupervisorRunning:       supervisorRunning,
 		SupervisorPID:           supervisorPID,

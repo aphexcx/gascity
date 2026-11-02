@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "city_scope.go",
         "cutover.go",
         "interaction.go",
         "nudge_draft.go",
@@ -59,6 +60,7 @@ go_test(
         "activity_poke_test.go",
         "adapter_unit_test.go",
         "agent_slice_test.go",
+        "city_scope_test.go",
         "codex_submit_test.go",
         "copymode_cancel_test.go",
         "dialog_feedback_survey_test.go",

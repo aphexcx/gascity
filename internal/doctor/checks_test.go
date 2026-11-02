@@ -1061,12 +1061,18 @@ func TestOrphanSessionsCheck_Found(t *testing.T) {
 	if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := sp.SetMeta("stale-worker", "GC_CITY_PATH", "/cities/test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("stale-worker", "GC_AGENT", "stale-worker"); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
 	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
-	r := c.Run(&CheckContext{})
+	r := c.Run(&CheckContext{CityPath: "/cities/test"})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
 	}
@@ -1080,12 +1086,19 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := sp.SetMeta("stale-worker", "GC_CITY_PATH", "/cities/test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("stale-worker", "GC_AGENT", "stale-worker"); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
-	if err := c.Fix(&CheckContext{}); err != nil {
+	c := NewOrphanSessionsCheck(cfg, "test", "", orphanProvider(sp, "test", nil))
+	c.AllowFix = true
+	if err := c.Fix(&CheckContext{CityPath: "/cities/test"}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
 	if sp.IsRunning("stale-worker") {
@@ -1162,10 +1175,14 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
-	if err := c.Fix(&CheckContext{}); err == nil {
-		t.Fatal("Fix() error = nil, want partial list failure")
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", orphanProvider(sp, "test", nil))
+	c.AllowFix = true
+	if err := c.Fix(&CheckContext{}); err == nil || !strings.Contains(err.Error(), "partially failed") {
+		t.Fatalf("Fix() = %v, want partial list failure", err)
+	}
+	if !sp.IsRunning("stale-worker") {
+		t.Fatal("partial listing stopped a session")
 	}
 }
 
