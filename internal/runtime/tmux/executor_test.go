@@ -436,7 +436,7 @@ func TestProviderIsDeadRuntimeSessionRequiresEveryPaneDead(t *testing.T) {
 	if len(fe.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(fe.calls))
 	}
-	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner", "-F", "#{pane_dead}"}
+	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner:", "-F", "#{pane_dead}"}
 	if len(fe.calls[0]) != len(want) {
 		t.Fatalf("call = %v, want %v", fe.calls[0], want)
 	}

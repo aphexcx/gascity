@@ -92,16 +92,16 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 
 		t.Run("missing session owner corroborates absence", func(t *testing.T) {
 			executor := &fakeExecutor{
-				outs: []string{"\t\n", ""},
-				errs: []error{nil, ErrSessionNotFound},
+				outs: []string{"\t\n", "", ""},
+				errs: []error{nil, ErrSessionNotFound, ErrSessionNotFound},
 			}
 			tmux := NewTmux()
 			tmux.exec = executor
 			if err := tmux.KillSessionWithProcesses("session"); err != nil {
 				t.Fatalf("KillSessionWithProcesses repeated stop = %v, want corroborated absence", err)
 			}
-			if len(executor.calls) != 2 {
-				t.Fatalf("tmux calls = %d, want observation then owner kill", len(executor.calls))
+			if len(executor.calls) != 3 {
+				t.Fatalf("tmux calls = %d, want observation, exact session probe, then owner kill", len(executor.calls))
 			}
 		})
 

@@ -108,6 +108,7 @@ go_test(
         "//internal/testenv",
         "//internal/worker/workertest",
         "//test/tmuxtest",
+        "@com_github_stretchr_testify//require",
     ],
 )
 

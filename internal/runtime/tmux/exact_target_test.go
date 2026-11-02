@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExactSessionTargetCommands(t *testing.T) {
@@ -84,6 +85,63 @@ func TestExactSessionTargetCommands(t *testing.T) {
 					t.Errorf("%s%s error = %v, want %s absence only", wording, kind, err, kind)
 				}
 			}
+		}
+	})
+	t.Run("ambiguous absence requires an exact session probe", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			args   []string
+			result error
+		}{
+			{"window option", []string{"set-option", "-wt", "=abc:99", "remain-on-exit", "on"}, ErrWindowNotFound},
+			{"pane option", []string{"set-option", "-p", "-t", "=abc:^.99", "@test", "value"}, ErrPaneNotFound},
+			{"if-shell", []string{"if-shell", "-F", "-t", "=abc:", "1", "display-message ok"}, ErrPaneNotFound},
+			{"quiet if-shell", []string{"if-shell", "-F", "-t", "=abc:", "0", "display-message ok"}, nil},
+			{"display", []string{"display-message", "-p", "-t", "=abc:", "#{pane_id}"}, nil},
+			{"quiet option", []string{"show-options", "-p", "-qv", "-t", "=abc:", "@unset"}, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for _, probeErr := range []error{nil, ErrSessionNotFound, ErrNoServer, ErrPaneNotFound, errors.New("probe failed")} {
+					executor := &fakeExecutor{errs: []error{tc.result, probeErr}}
+					tm := NewTmux()
+					tm.exec = executor
+					_, err := tm.run(tc.args...)
+					require.Len(t, executor.calls, 2)
+					require.Equal(t, []string{"-u", "has-session", "-t", "=abc"}, executor.calls[1])
+					if probeErr == nil {
+						require.Equal(t, tc.result, err)
+					} else {
+						require.ErrorIs(t, err, probeErr)
+					}
+					if tc.result != nil {
+						require.ErrorIs(t, err, tc.result)
+					}
+					require.Equal(t, errors.Is(probeErr, ErrSessionNotFound), errors.Is(err, ErrSessionNotFound))
+				}
+			})
+		}
+	})
+	t.Run("unambiguous results and opaque IDs need no probe", func(t *testing.T) {
+		for _, tc := range []struct {
+			args []string
+			out  string
+			err  error
+		}{
+			{[]string{"display-message", "-p", "-t", "=abc:", "#{pane_dead}"}, "0", nil},
+			{[]string{"display-message", "-p", "-t", "%42", "#{pane_id}"}, "", nil},
+			{[]string{"set-option", "-p", "-t", "%42", "@test", "value"}, "", ErrPaneNotFound},
+			{[]string{"set-option", "-wt", "@42", "remain-on-exit", "on"}, "", ErrWindowNotFound},
+			{[]string{"send-keys", "-t", "=abc:", "x"}, "", ErrSessionNotFound},
+			{[]string{"send-keys", "-t", "=abc:", "x"}, "", errors.New("invalid key")},
+			{[]string{"show-options", "-gqv", "@unset"}, "", nil},
+		} {
+			executor := &fakeExecutor{out: tc.out, err: tc.err}
+			tm := NewTmux()
+			tm.exec = executor
+			out, err := tm.run(tc.args...)
+			require.Equal(t, tc.out, out)
+			require.Equal(t, tc.err, err)
+			require.Len(t, executor.calls, 1)
 		}
 	})
 }

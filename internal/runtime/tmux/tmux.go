@@ -454,7 +454,41 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
 	}
 	allArgs = append(allArgs, args...)
-	return t.exec.executeCtx(ctx, allArgs)
+	out, err := t.exec.executeCtx(ctx, allArgs)
+	return out, t.checkSessionAbsence(ctx, args, out, err)
+}
+
+// checkSessionAbsence disambiguates tmux's scope-based errors and quiet reads.
+// Options report a missing window/pane even when its session is gone, while
+// display-message and quiet show-options may succeed with empty output, and
+// if-shell may quietly execute its fallback branch without a target. Only
+// an exact session probe can distinguish absence from an unset option or a
+// missing component inside a live session. Opaque pane/window IDs carry no
+// session identity, so their original result is retained.
+func (t *Tmux) checkSessionAbsence(ctx context.Context, args []string, out string, err error) error {
+	if len(args) == 0 || args[0] == "has-session" {
+		return err
+	}
+	ambiguousRead := err == nil && (args[0] == "if-shell" ||
+		(strings.TrimSpace(out) == "" && (args[0] == "display-message" || args[0] == "show-options")))
+	if !ambiguousRead && !errors.Is(err, ErrWindowNotFound) && !errors.Is(err, ErrPaneNotFound) {
+		return err
+	}
+	for i := 1; i+1 < len(args); i++ {
+		if args[i] != "-t" && args[i] != "-wt" {
+			continue
+		}
+		session, _, _ := strings.Cut(args[i+1], ":")
+		if (!strings.HasPrefix(session, "=") && !strings.HasPrefix(session, "$")) || len(session) <= 1 {
+			return err
+		}
+		_, probeErr := t.runCtx(ctx, "has-session", "-t", session)
+		if probeErr != nil {
+			return errors.Join(err, fmt.Errorf("checking tmux session %s: %w", session, probeErr))
+		}
+		return err
+	}
+	return err
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
@@ -3468,7 +3502,7 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	// List all panes across all windows (-s) with ID, command, and PID.
 	// Without -s, list-panes only shows the active window's panes, missing
 	// agent panes in other windows.
-	out, err := t.run("list-panes", "-s", "-t", exactTarget(session), "-F", "#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
+	out, err := t.run("list-panes", "-s", "-t", exactPaneTarget(session), "-F", "#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
 		return "", err
 	}
@@ -3654,7 +3688,7 @@ func (t *Tmux) PaneDeadInfo(session string) (status, signal string) {
 }
 
 func (t *Tmux) sessionPanesDead(session string) (bool, error) {
-	out, err := t.run("list-panes", "-s", "-t", "="+session, "-F", "#{pane_dead}")
+	out, err := t.run("list-panes", "-s", "-t", exactPaneTarget(session), "-F", "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
