@@ -14,8 +14,81 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
+
+// The peer-to-peer mail contract runs through the real generated clients,
+// grant editor, supervisor handlers, and mail stores. Only HTTP transport is
+// in memory; no listener or subprocess is needed to prove request admission.
+func TestHardenedReadAuthCrossCityMail(t *testing.T) {
+	var handlers [2]http.Handler
+	var primary [2]http.Handler
+	var keys [2]ed25519.PrivateKey
+	names := [2]string{"alpha", "beta"}
+	for i := range keys {
+		keys[i] = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{byte(i + 1)}, ed25519.SeedSize))
+	}
+	for i, name := range names {
+		state := newFakeState(t)
+		state.cityName = name
+		state.cfg.Workspace.Name = name
+		sm := newTestSupervisorMux(t, map[string]*fakeState{name: state}).WithAnyHostAllowed()
+		key := "k1:" + base64.StdEncoding.EncodeToString(keys[1-i].Public().(ed25519.PublicKey))
+		if err := InstallHardenedReadAuth(sm, "", key, true); err != nil {
+			t.Fatal(err)
+		}
+		v, err := ResolveHardenedWriteAuthVerifier(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handlers[i], primary[i] = sm.HardenedHandler(v), sm.Handler()
+	}
+	for i, name := range names {
+		var requests []string
+		c, err := NewRemoteCityScopedClient("http://peer.test", name, RemoteOptions{Grant: signingGrantSource(keys[1-i], name)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.cw.ClientInterface.(*genclient.Client).Client = &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			requests = append(requests, r.Method+" "+r.URL.RequestURI())
+			w := httptest.NewRecorder()
+			handlers[i].ServeHTTP(w, r)
+			return w.Result(), nil
+		})}
+		from := names[1-i] + "/worker"
+		message, err := c.SendMail(MailSendRequest{From: from, To: "human", Subject: "hello", Body: "cross-city"})
+		if err != nil || message.From != from {
+			t.Fatalf("send to %s: %+v %v", name, message, err)
+		}
+		want := "POST /v0/city/" + name + "/mail"
+		if len(requests) != 1 || requests[0] != want {
+			t.Fatalf("send requests = %v, want [%s]", requests, want)
+		}
+		t.Logf("%s send requests: %v", name, requests)
+		if _, err := c.ListMailInbox("human", ""); err == nil || !strings.Contains(err.Error(), readAuthHeader) || ShouldFallback(c, err) {
+			t.Fatalf("unsigned remote inbox must fail explicitly without fallback: %v", err)
+		}
+		path := "/v0/city/" + name + "/mail"
+		r := httptest.NewRequest("GET", path+"?agent=human", nil)
+		w := httptest.NewRecorder()
+		primary[i].ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), from) {
+			t.Fatalf("primary inbox: %d %s", w.Code, w.Body)
+		}
+		r.Header.Set(readAuthHeader, mintToken(t, keys[1-i], readGrant(time.Now(), name, "GET", path, "agent=human", "inbox")))
+		w = httptest.NewRecorder()
+		handlers[i].ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), from) {
+			t.Fatalf("signed hardened inbox: %d %s", w.Code, w.Body)
+		}
+		w = httptest.NewRecorder()
+		handlers[i].ServeHTTP(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("replayed inbox grant: %d", w.Code)
+		}
+	}
+}
 
 // realClockVerifier trusts pub under the real wall clock, matching a grant the
 // client mints with time.Now.

@@ -1066,3 +1066,91 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `default_rig_includes` | []string |  |  | DefaultRigIncludes is the legacy city.toml default-rig pack list.  Deprecated: use city.toml [defaults.rig.imports.&lt;binding&gt;] instead. Run gc doctor to inspect; gc doctor --fix handles the safe mechanical rewrites available in this release wave. |
 | `env` | map[string]string |  |  | Env defines workspace-wide environment variables applied to every managed session. Lowest config-precedence — overridden by provider, agent, and patch env. Use for cross-cutting variables like GC_TARGET_BRANCH that every agent should inherit. |
 
+## Gas City Supervisor Configuration
+
+Schema for supervisor.toml — machine-wide listener, publication, and event settings.
+
+## Config
+
+Config holds machine-wide supervisor configuration loaded from ~/.gc/supervisor.toml (or $GC_HOME/supervisor.toml).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `supervisor` | Section |  |  |  |
+| `publication` | PublicationConfig |  |  |  |
+| `events` | EventsSection |  |  |  |
+
+## EventsSection
+
+EventsSection holds the events table of supervisor.toml.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `export` | ExportConfig |  |  |  |
+
+## ExportConfig
+
+ExportConfig configures the redacted event export ([events.export]).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `endpoint` | string |  |  | Endpoint is the HTTP URL that receives batched, envelope-only events. |
+| `cities` | []string |  |  | Cities optionally restricts export to exact registered city names. A nil slice preserves the all-city default; an explicitly empty slice exports no city events. |
+| `token` | string |  |  | Token, when set, is sent as an Authorization: Bearer header. |
+| `token_file` | string |  |  | TokenFile, when set, is a path to a file holding the bearer token. It is re-read on each POST so the token can be rotated out of band, and takes precedence over Token. |
+| `actor_salt` | string |  |  | ActorSalt salts the actor hash so it is stable yet non-reversible. It must be at least 16 bytes: a shorter salt makes the hash brute-forceable, so the projection fails closed and drops every event (the supervisor warns at startup). Leave empty to use a random per-install salt. |
+| `batch_max_events` | integer |  |  | BatchMaxEvents caps events per POST (default 1000). |
+| `batch_interval` | string |  |  | BatchInterval caps the time between POSTs (default 5s). |
+| `export_ref` | boolean |  |  | ExportRef toggles the id-gated ref field (default true). |
+
+## HardenedListener
+
+HardenedListener holds the [supervisor.hardened] table: an additional grant-gated listener.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `bind` | string |  |  |  |
+| `port` | integer |  |  |  |
+| `write_auth_verify_key` | string |  |  |  |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list. It is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids must be disjoint from the primary read keys; it may use the hardened write key's kid because read grants have the separate gc-city-read audience. |
+| `read_auth_required` | boolean |  |  | ReadAuthRequired refuses startup before either listener binds when the hardened read key is empty. A configured key always gates reads. |
+
+## PublicationConfig
+
+PublicationConfig holds machine-wide publication policy for workspace services.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string |  |  |  |
+| `tenant_slug` | string |  |  |  |
+| `public_base_domain` | string |  |  |  |
+| `tenant_base_domain` | string |  |  |  |
+| `tenant_auth` | PublicationTenantAuthConfig |  |  |  |
+
+## PublicationTenantAuthConfig
+
+PublicationTenantAuthConfig configures tenant-route auth policy.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `policy_ref` | string |  |  |  |
+
+## Section
+
+Section holds the supervisor table fields.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `port` | integer |  |  |  |
+| `bind` | string |  |  |  |
+| `patrol_interval` | string |  |  |  |
+| `allow_mutations` | boolean |  |  |  |
+| `allowed_origins` | []string |  |  |  |
+| `allowed_hosts` | []string |  |  |  |
+| `write_auth_verify_key` | string |  |  | WriteAuthVerifyKey / WriteAuthRequired require a signed write grant on every mutating request to an already-registered city (the per-city routes under /v0/city/&#123;cityName&#125;); city registry creation (POST /v0/city) stays on the supervisor-registry guards. See config.APIConfig for the key format and full semantics. |
+| `write_auth_required` | boolean |  |  |  |
+| `write_auth_allow_unverified` | boolean |  |  | WriteAuthAllowUnverified acknowledges a non-loopback bind with allow_mutations and no verify key (an unauthenticated write plane behind a network front); without it that combination is a fail-closed boot error (gate G10). See config.APIConfig for the full semantics. |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every read (GET/HEAD) of an already-registered city (the per-city routes under /v0/city/&#123;cityName&#125;); supervisor-scope reads (/v0/cities, /health) stay open. See config.APIConfig for the key format and full semantics. |
+| `read_auth_required` | boolean |  |  |  |
+| `hardened` | HardenedListener |  |  | Hardened is an OPTIONAL second listener ([supervisor.hardened]) that serves the same mux as the primary listener but with a write-auth verify key of its own, so every per-city mutation arriving on it must carry a signed write grant while the primary (loopback) listener keeps serving first-party callers — the dashboard SPA, workspace-service adapters, the local gc client — that mint no grant. It exists for the deployment where one supervisor must be BOTH the trusted local control plane and a grant-gated remote city (front the hardened port with a TLS / private-network edge; gc has no TLS of its own). See HardenedListener. |
+

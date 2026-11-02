@@ -127,6 +127,8 @@ type SupervisorMux struct {
 	runCensusSource RunCensusSource
 	server          *http.Server
 
+	hardenedReadAuth *citywriteauth.Verifier
+
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
 	// operation: supervisor-scope (/v0/cities, /health, /v0/readiness,
 	// /v0/provider-readiness, POST /v0/city, /v0/events,
@@ -243,17 +245,24 @@ func (sm *SupervisorMux) Handler() http.Handler {
 }
 
 // HardenedHandler returns the handler for the OPTIONAL hardened listener
-// ([supervisor.hardened]): the same mux, host/CORS/audit chain, and read-auth
-// posture as Handler(), but with city-scoped mutations gated on the given
+// ([supervisor.hardened]): the same mux and host/CORS/audit chain as Handler(),
+// but with city-scoped mutations gated on the given
 // write-auth verifier regardless of whether the primary listener gates them.
 // This is what lets one supervisor serve first-party loopback callers (which
 // mint no grant) on the primary listener while a TLS-fronted remote port
 // requires a signed X-GC-City-Write grant on every mutation. A nil verifier is
 // a programming error — the caller resolves the key fail-closed first — and is
 // refused here as well so a hardened listener can never come up ungated.
+// InstallHardenedReadAuth optionally replaces the inherited primary read gate
+// with an independent verifier and refuses reads outside the per-city API.
 func (sm *SupervisorMux) HardenedHandler(writeAuth *citywriteauth.Verifier) http.Handler {
 	if writeAuth == nil {
 		panic("api: HardenedHandler requires a write-auth verifier")
+	}
+	if sm.hardenedReadAuth != nil {
+		return sm.handlerWithAuth(writeAuth, sm.hardenedReadAuth, func(next http.Handler) http.Handler {
+			return hardenedListenerGuard(hardenedReadScopeGuard(next))
+		})
 	}
 	return sm.handlerWithAuth(writeAuth, sm.readAuth, hardenedListenerGuard)
 }

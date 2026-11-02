@@ -7816,20 +7816,26 @@ func TestRunSupervisorHardenedListenerBoots(t *testing.T) {
 	}
 }
 
-// A hardened port WITHOUT a verify key is a fail-closed boot error: no listener
-// (primary included) comes up, so a hardened plane can never start ungated.
+// Invalid hardened keys fail before either listener starts.
 func TestRunSupervisorHardenedListenerRequiresKey(t *testing.T) {
-	port := freeLowLoopbackPort(t)
-	writeSupervisorBootFixture(t, "[supervisor]\nport = "+strconv.Itoa(port)+"\n\n[supervisor.hardened]\nport = "+strconv.Itoa(freeAnyLoopbackPort(t))+"\n")
-	var stdout, stderr bytes.Buffer
-	if code := runSupervisor(&stdout, &stderr); code == 0 {
-		t.Errorf("exit = 0, want non-zero for a hardened listener without a key")
-	}
-	if !strings.Contains(stderr.String(), "hardened listener") || !strings.Contains(stderr.String(), "write_auth_verify_key") {
-		t.Errorf("stderr = %q, want hardened key error", stderr.String())
-	}
-	if strings.Contains(stdout.String(), "listening") {
-		t.Errorf("stdout = %q, no listener may come up when the hardened config is invalid", stdout.String())
+	const key = "\"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\""
+	const writeKey = "write_auth_verify_key = " + key + "\n"
+	for _, tc := range []struct{ name, primary, hardened, want string }{
+		{"write-required", "", "", "write_auth_verify_key"},
+		{"read-required", "", writeKey + "read_auth_required = true\n", "read_auth_verify_key"},
+		{"shared-read-kid", "read_auth_verify_key = " + key + "\n", writeKey + "read_auth_verify_key = " + key + "\n", "kids must be disjoint"},
+		{"malformed-read-key", "", writeKey + "read_auth_verify_key = \"bad-key\"\n", "read-auth"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeSupervisorBootFixture(t, "[supervisor]\nport = 8372\n"+tc.primary+"[supervisor.hardened]\nport = 8447\n"+tc.hardened)
+			var stdout, stderr bytes.Buffer
+			if code := runSupervisor(&stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "hardened listener") || !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("exit=%d stderr=%q, want %q", code, stderr.String(), tc.want)
+			}
+			if strings.Contains(stdout.String(), "listening") {
+				t.Fatalf("invalid hardened config started a listener: %s", &stdout)
+			}
+		})
 	}
 }
 

@@ -422,6 +422,8 @@ allowed_hosts = ["city.example.ts.net"]
 [supervisor.hardened]
 port = 8447
 write_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
+read_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
+read_auth_required = true
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -438,6 +440,9 @@ write_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
 	}
 	if h.WriteAuthVerifyKey != "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=" {
 		t.Errorf("Hardened.WriteAuthVerifyKey = %q", h.WriteAuthVerifyKey)
+	}
+	if h.ReadAuthVerifyKey != h.WriteAuthVerifyKey || !h.ReadAuthRequired {
+		t.Errorf("Hardened read-auth fields did not round-trip: %#v", h)
 	}
 	// Absent table => disabled.
 	if err := os.WriteFile(path, []byte("[supervisor]\nport = 8372\n"), 0o644); err != nil {

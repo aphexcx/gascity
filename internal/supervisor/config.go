@@ -79,12 +79,22 @@ type Section struct {
 // grant-gated listener. Enabled when Port > 0. WriteAuthVerifyKey is REQUIRED
 // when enabled — there is no unverified acknowledgement knob for this listener
 // because its whole purpose is to require grants; a hardened port without a key
-// is a boot error (fail closed). The read plane on it is exactly the primary
-// listener's (city-scoped read-auth applies to both when configured).
+// is a boot error (fail closed). ReadAuthVerifyKey optionally gives this listener
+// its own read gate: city GET/HEAD requests require a signed city read grant,
+// and reads outside the per-city API are refused. Without it, the primary's read
+// posture is inherited. The primary listener is never changed by these fields.
 type HardenedListener struct {
 	Bind               string `toml:"bind,omitempty"`
 	Port               int    `toml:"port,omitempty"`
 	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+	// ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list.
+	// It is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids
+	// must be disjoint from the primary read keys; it may use the hardened write
+	// key's kid because read grants have the separate gc-city-read audience.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	// ReadAuthRequired refuses startup before either listener binds when the
+	// hardened read key is empty. A configured key always gates reads.
+	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
 }
 
 // Enabled reports whether the hardened listener is configured (Port > 0).

@@ -4,7 +4,31 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
+
+func TestWarnHardenedReadPlane(t *testing.T) {
+	for _, readKey := range []string{"", "   ", "read:validated-key"} {
+		t.Run(readKey, func(t *testing.T) {
+			var cfg supervisor.Config
+			cfg.Supervisor.Hardened = supervisor.HardenedListener{
+				Bind:               "0.0.0.0",
+				Port:               9443,
+				WriteAuthVerifyKey: "write:validated-key",
+				ReadAuthVerifyKey:  readKey,
+			}
+			var got, want bytes.Buffer
+			warnHardenedReadPlane(&got, cfg.Supervisor.Hardened.Bind, cfg)
+			if strings.TrimSpace(readKey) == "" {
+				warnUnauthenticatedReadPlane(&want, cfg.Supervisor.Hardened.Bind, true, false)
+			}
+			if got.String() != want.String() {
+				t.Errorf("hardened read warning = %q, want %q", got.String(), want.String())
+			}
+		})
+	}
+}
 
 // TestWarnUnauthenticatedReadPlaneGrantGated pins the G23 boot warning string for
 // a hardened, grant-gated bind: it names the bind, enumerates the unauthenticated

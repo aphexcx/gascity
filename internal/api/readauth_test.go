@@ -7,11 +7,138 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
+
+func TestHardenedReadAuth(t *testing.T) {
+	now := time.Now()
+	pub, priv := mustKeypair(t)
+	key := "k1:" + base64.StdEncoding.EncodeToString(pub)
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"acme": newFakeState(t)}).WithAnyHostAllowed()
+	if err := InstallHardenedReadAuth(sm, "", key, true); err != nil {
+		t.Fatal(err)
+	}
+	hardened := sm.HardenedHandler(newTestWriteVerifier(t, pub, now))
+	request := func(h http.Handler, method, path, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		r.Header.Set(readAuthHeader, token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	path := "/v0/city/acme/beads"
+	primary := request(sm.Handler(), "GET", path, "")
+	if primary.Code != http.StatusOK {
+		t.Fatalf("primary read unexpectedly gated: %d %s", primary.Code, primary.Body)
+	}
+	for _, method := range []string{"GET", "HEAD"} {
+		primary := request(sm.Handler(), method, path, "")
+		if w := request(hardened, method, path, ""); w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), readAuthHeader) {
+			t.Fatalf("unsigned %s: %d %s", method, w.Code, w.Body)
+		}
+		token := mintToken(t, priv, readGrant(now, "acme", method, path, "", "hardened-"+method))
+		if w := request(hardened, method, path, token); w.Code != primary.Code {
+			t.Fatalf("signed %s: %d %s", method, w.Code, w.Body)
+		}
+		if w := request(hardened, method, path, token); w.Code != http.StatusForbidden {
+			t.Fatalf("replayed %s: %d %s", method, w.Code, w.Body)
+		}
+	}
+	// A city grant cannot authorize cross-city aggregates or the dashboard.
+	for _, path := range []string{"/", "/health", "/v0/cities", "/v0/events", "/v0/events/stream", "/api/city/acme/config", "/openapi.json"} {
+		for _, method := range []string{"GET", "HEAD"} {
+			if w := request(hardened, method, path, ""); w.Code != http.StatusForbidden {
+				t.Errorf("unguarded %s %s: %d", method, path, w.Code)
+			}
+		}
+	}
+	if w := request(sm.Handler(), "GET", "/health", ""); w.Code != http.StatusOK {
+		t.Fatalf("primary health changed: %d", w.Code)
+	}
+}
+
+func TestHardenedReadAuthPrimaryIsolation(t *testing.T) {
+	now := time.Now()
+	pub, priv := mustKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"acme": newFakeState(t)}).WithAnyHostAllowed()
+	if err := InstallReadAuth(sm, "local:"+b64, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHardenedReadAuth(sm, "local:"+b64, "", false); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v0/city/acme/beads"
+	request := func(h http.Handler, token string) int {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set(readAuthHeader, token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	grant := readGrant(now, "acme", "GET", path, "", "inherited")
+	grant.Kid = "local"
+	token := mintToken(t, priv, grant)
+	if got := request(sm.HardenedHandler(newTestWriteVerifier(t, pub, now)), token); got != http.StatusOK {
+		t.Fatalf("unconfigured hardened key must inherit primary read gate: %d", got)
+	}
+	if got := request(sm.Handler(), token); got != http.StatusForbidden {
+		t.Fatalf("inherited gate must share primary replay guard: %d", got)
+	}
+	if err := InstallHardenedReadAuth(sm, "local:"+b64, "k1:"+b64, true); err != nil {
+		t.Fatal(err)
+	}
+	hardened := sm.HardenedHandler(newTestWriteVerifier(t, pub, now))
+	for _, tc := range []struct {
+		kid        string
+		own, other http.Handler
+	}{
+		{"local", sm.Handler(), hardened}, {"k1", hardened, sm.Handler()},
+	} {
+		grant.Kid, grant.JTI = tc.kid, "separate-"+tc.kid
+		token := mintToken(t, priv, grant)
+		if got := request(tc.other, token); got != http.StatusForbidden {
+			t.Fatalf("%s grant crossed listeners: %d", tc.kid, got)
+		}
+		if got := request(tc.own, token); got != http.StatusOK {
+			t.Fatalf("%s grant refused on its own listener: %d", tc.kid, got)
+		}
+	}
+}
+
+func TestInstallHardenedReadAuthValidation(t *testing.T) {
+	pub, _ := mustKeypair(t)
+	key := "k1:" + base64.StdEncoding.EncodeToString(pub)
+	for _, tc := range []struct {
+		name, primary, hardened, want string
+		required                      bool
+	}{
+		{"optional", "", "", "", false},
+		{"required", "", "", "read_auth_verify_key", true},
+		{"malformed", "", "bad-key", "", false},
+		{"shared-kid", key, key, "kids must be disjoint", false},
+		{"disjoint", "local:" + base64.StdEncoding.EncodeToString(pub), key, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+			err := InstallHardenedReadAuth(sm, tc.primary, tc.hardened, tc.required)
+			if tc.want != "" || tc.name == "malformed" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("error = %v, want %q", err, tc.want)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if sm.readAuth != nil {
+				t.Fatal("modified primary read verifier")
+			}
+		})
+	}
+}
 
 func newTestReadVerifier(t *testing.T, pub ed25519.PublicKey, now time.Time) *citywriteauth.Verifier {
 	t.Helper()
@@ -346,6 +473,13 @@ func TestResolveReadAuthVerifier(t *testing.T) {
 		if err != nil || v == nil {
 			t.Fatalf("env key should enable: (%v,%v)", v, err)
 		}
+		sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+		if err := InstallHardenedReadAuth(sm, "", "", true); err == nil {
+			t.Fatal("primary env key satisfied required hardened key")
+		}
+		if err := InstallHardenedReadAuth(sm, "other:"+b64, "k1:"+b64, true); err == nil {
+			t.Fatal("overlapping primary env kid accepted")
+		}
 	})
 	t.Run("config fallback when env empty", func(t *testing.T) {
 		t.Setenv("GC_CITY_READ_PUBKEY", "")
@@ -360,6 +494,10 @@ func TestResolveReadAuthVerifier(t *testing.T) {
 		t.Setenv("GC_CITY_READ_REQUIRED", "1")
 		if _, err := ResolveReadAuthVerifier("", false); err == nil {
 			t.Fatal("env-required + missing key must error")
+		}
+		sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now())
+		if err := InstallHardenedReadAuth(sm, "", "", false); err != nil {
+			t.Fatalf("primary required env changed optional hardened gate: %v", err)
 		}
 	})
 	t.Run("config required but missing errors (fail-closed boot)", func(t *testing.T) {

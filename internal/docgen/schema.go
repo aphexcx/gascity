@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/invopop/jsonschema"
 )
 
@@ -162,6 +163,19 @@ func GeneratePackSchema() (*jsonschema.Schema, error) {
 		"Current agent authoring uses agents/<name>/agent.toml; inline [[agent]] " +
 		"tables remain schema-visible for migration compatibility. Cities and rigs " +
 		"compose packs via [imports.*]."
+	return s, nil
+}
+
+// GenerateSupervisorSchema produces the machine-wide supervisor.toml schema.
+func GenerateSupervisorSchema() (*jsonschema.Schema, error) {
+	r, err := newReflector()
+	if err != nil {
+		return nil, err
+	}
+	s := r.Reflect(&supervisor.Config{})
+	removeRequiredField(s, "Config", "supervisor")
+	s.Title = "Gas City Supervisor Configuration"
+	s.Description = "Schema for supervisor.toml — machine-wide listener, publication, and event settings."
 	return s, nil
 }
 

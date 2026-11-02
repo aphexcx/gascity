@@ -25,6 +25,7 @@ go_test(
     ],
     embed = [":gc-write-mint_lib"],
     deps = [
+        "//internal/api",
         "//internal/citywriteauth",
         "//internal/clientgrant",
         "//internal/testenv",

@@ -143,6 +143,10 @@ func ResolveReadAuthVerifier(configKey string, configRequired bool) (*citywritea
 		}
 		return nil, nil // not enabled
 	}
+	return newReadAuthVerifier(raw)
+}
+
+func newReadAuthVerifier(raw string) (*citywriteauth.Verifier, error) {
 	keys, err := parseVerifyKeys(raw)
 	if err != nil {
 		return nil, err
@@ -177,4 +181,64 @@ func InstallReadAuth(sm *SupervisorMux, configKey string, configRequired bool) e
 		sm.WithReadAuth(v)
 	}
 	return nil
+}
+
+// InstallHardenedReadAuth installs an independent read verifier on the hardened
+// handler only, before either listener serves. The key and required flag are
+// config-only: GC_CITY_READ_PUBKEY and GC_CITY_READ_REQUIRED belong to the
+// primary listener. GC_CITY_READ_EPOCH_FLOOR remains the shared revocation floor.
+// With no hardened key, the handler retains its inherited primary read posture.
+func InstallHardenedReadAuth(sm *SupervisorMux, primaryKey, configKey string, required bool) error {
+	raw := strings.TrimSpace(configKey)
+	if raw == "" {
+		if required {
+			return errors.New("hardened read-auth required but no read_auth_verify_key configured")
+		}
+		return nil
+	}
+	v, err := newReadAuthVerifier(raw)
+	if err != nil {
+		return fmt.Errorf("hardened read-auth: %w", err)
+	}
+	primary := strings.TrimSpace(primaryKey)
+	if env := strings.TrimSpace(os.Getenv("GC_CITY_READ_PUBKEY")); env != "" {
+		primary = env
+	}
+	if primary != "" {
+		pk, err := parseVerifyKeys(primary)
+		if err != nil {
+			return fmt.Errorf("primary read_auth_verify_key: %w", err)
+		}
+		hk, err := parseVerifyKeys(raw)
+		if err != nil {
+			return fmt.Errorf("hardened read_auth_verify_key: %w", err)
+		}
+		for kid := range hk {
+			if _, dup := pk[kid]; dup {
+				return fmt.Errorf("hardened read_auth_verify_key kid %q is also a primary read-auth kid; kids must be disjoint (each listener keeps its own single-use replay guard)", kid)
+			}
+		}
+	}
+	sm.hardenedReadAuth = v
+	return nil
+}
+
+// hardenedReadScopeGuard refuses reads a city-scoped grant cannot authorize.
+// This closes the aggregate event, dashboard, and static surfaces on a hardened
+// listener with its own read key; the primary listener keeps its existing scope.
+func hardenedReadScopeGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if _, ok := cityScopedObjectPath(r.URL.Path); !ok {
+				problemHardenedReadScopeRefused.writeTo(w)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+var problemHardenedReadScopeRefused = problemBody{
+	status: http.StatusForbidden,
+	body:   []byte(`{"status":403,"title":"Forbidden","detail":"read-auth on the hardened listener serves only grant-signed per-city reads (/v0/city/{city}/...)"}`),
 }

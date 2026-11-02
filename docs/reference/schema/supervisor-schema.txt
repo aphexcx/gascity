@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gastownhall/gascity/internal/supervisor/config",
+  "$ref": "#/$defs/Config",
+  "$defs": {
+    "Config": {
+      "properties": {
+        "supervisor": {
+          "$ref": "#/$defs/Section"
+        },
+        "publication": {
+          "$ref": "#/$defs/PublicationConfig"
+        },
+        "events": {
+          "$ref": "#/$defs/EventsSection"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Config holds machine-wide supervisor configuration loaded from ~/.gc/supervisor.toml (or $GC_HOME/supervisor.toml)."
+    },
+    "EventsSection": {
+      "properties": {
+        "export": {
+          "$ref": "#/$defs/ExportConfig"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsSection holds the events table of supervisor.toml."
+    },
+    "ExportConfig": {
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Endpoint is the HTTP URL that receives batched, envelope-only events."
+        },
+        "cities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Cities optionally restricts export to exact registered city names. A nil\nslice preserves the all-city default; an explicitly empty slice exports no\ncity events."
+        },
+        "token": {
+          "type": "string",
+          "description": "Token, when set, is sent as an Authorization: Bearer header."
+        },
+        "token_file": {
+          "type": "string",
+          "description": "TokenFile, when set, is a path to a file holding the bearer token. It is\nre-read on each POST so the token can be rotated out of band, and takes\nprecedence over Token."
+        },
+        "actor_salt": {
+          "type": "string",
+          "description": "ActorSalt salts the actor hash so it is stable yet non-reversible. It must\nbe at least 16 bytes: a shorter salt makes the hash brute-forceable, so the\nprojection fails closed and drops every event (the supervisor warns at\nstartup). Leave empty to use a random per-install salt."
+        },
+        "batch_max_events": {
+          "type": "integer",
+          "description": "BatchMaxEvents caps events per POST (default 1000)."
+        },
+        "batch_interval": {
+          "type": "string",
+          "description": "BatchInterval caps the time between POSTs (default 5s)."
+        },
+        "export_ref": {
+          "type": "boolean",
+          "description": "ExportRef toggles the id-gated ref field (default true)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ExportConfig configures the redacted event export ([events.export])."
+    },
+    "HardenedListener": {
+      "properties": {
+        "bind": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "write_auth_verify_key": {
+          "type": "string"
+        },
+        "read_auth_verify_key": {
+          "type": "string",
+          "description": "ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list.\nIt is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids\nmust be disjoint from the primary read keys; it may use the hardened write\nkey's kid because read grants have the separate gc-city-read audience."
+        },
+        "read_auth_required": {
+          "type": "boolean",
+          "description": "ReadAuthRequired refuses startup before either listener binds when the\nhardened read key is empty. A configured key always gates reads."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "HardenedListener holds the [supervisor.hardened] table: an additional grant-gated listener."
+    },
+    "PublicationConfig": {
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "tenant_slug": {
+          "type": "string"
+        },
+        "public_base_domain": {
+          "type": "string"
+        },
+        "tenant_base_domain": {
+          "type": "string"
+        },
+        "tenant_auth": {
+          "$ref": "#/$defs/PublicationTenantAuthConfig"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PublicationConfig holds machine-wide publication policy for workspace services."
+    },
+    "PublicationTenantAuthConfig": {
+      "properties": {
+        "policy_ref": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PublicationTenantAuthConfig configures tenant-route auth policy."
+    },
+    "Section": {
+      "properties": {
+        "port": {
+          "type": "integer"
+        },
+        "bind": {
+          "type": "string"
+        },
+        "patrol_interval": {
+          "type": "string"
+        },
+        "allow_mutations": {
+          "type": "boolean"
+        },
+        "allowed_origins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_hosts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "write_auth_verify_key": {
+          "type": "string",
+          "description": "WriteAuthVerifyKey / WriteAuthRequired require a signed write grant on\nevery mutating request to an already-registered city (the per-city routes\nunder /v0/city/{cityName}); city registry creation (POST /v0/city) stays\non the supervisor-registry guards. See config.APIConfig for the key format\nand full semantics."
+        },
+        "write_auth_required": {
+          "type": "boolean"
+        },
+        "write_auth_allow_unverified": {
+          "type": "boolean",
+          "description": "WriteAuthAllowUnverified acknowledges a non-loopback bind with\nallow_mutations and no verify key (an unauthenticated write plane behind a\nnetwork front); without it that combination is a fail-closed boot error\n(gate G10). See config.APIConfig for the full semantics."
+        },
+        "read_auth_verify_key": {
+          "type": "string",
+          "description": "ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every\nread (GET/HEAD) of an already-registered city (the per-city routes under\n/v0/city/{cityName}); supervisor-scope reads (/v0/cities, /health) stay\nopen. See config.APIConfig for the key format and full semantics."
+        },
+        "read_auth_required": {
+          "type": "boolean"
+        },
+        "hardened": {
+          "$ref": "#/$defs/HardenedListener",
+          "description": "Hardened is an OPTIONAL second listener ([supervisor.hardened]) that\nserves the same mux as the primary listener but with a write-auth verify\nkey of its own, so every per-city mutation arriving on it must carry a\nsigned write grant while the primary (loopback) listener keeps\nserving first-party callers — the dashboard SPA, workspace-service\nadapters, the local gc client — that mint no grant. It exists for the\ndeployment where one supervisor must be BOTH the trusted local control\nplane and a grant-gated remote city (front the hardened port with a TLS /\nprivate-network edge; gc has no TLS of its own). See HardenedListener."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Section holds the supervisor table fields."
+    }
+  },
+  "title": "Gas City Supervisor Configuration",
+  "description": "Schema for supervisor.toml — machine-wide listener, publication, and event settings."
+}
