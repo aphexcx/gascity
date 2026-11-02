@@ -616,7 +616,11 @@ func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d orphaned session(s)", len(scan.orphans))
 	}
 	for _, orphan := range scan.orphans {
-		r.Details = append(r.Details, orphan.name+": "+orphan.reason+"; agent not configured")
+		detail := orphan.name + ": " + orphan.reason + "; agent not configured"
+		if err := c.orphanScopeError(orphan); err != nil {
+			detail += "; cleanup refused: " + err.Error()
+		}
+		r.Details = append(r.Details, detail)
 	}
 	r.FixHint = "inspect the candidates, then use gc doctor --fix --fix-orphans while the controller is stopped"
 	if len(scan.unreadable) > 0 {
@@ -629,9 +633,9 @@ func (c *OrphanSessionsCheck) Run(ctx *CheckContext) *CheckResult {
 // CanFix reports whether stopping orphan sessions was explicitly requested.
 func (c *OrphanSessionsCheck) CanFix() bool { return c.AllowFix }
 
-// Fix kills all orphaned sessions. It refuses while a controller is running
-// (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it.
+// Fix stops orphaned sessions whose owning provider confirms city scope and
+// reports each refusal. It refuses all cleanup while a controller is running
+// (GH#5742): an uncoordinated Stop would race its health patrol.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -645,10 +649,6 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if _, err := c.expectedSessionNames(); err != nil {
 		return err
 	}
-	scoped, ok := c.sp.(interface{ IsCityScoped(string) bool })
-	if !ok || !scoped.IsCityScoped(c.cityName) {
-		return fmt.Errorf("refusing orphan cleanup: runtime cannot confirm a city-scoped socket for %q (default, shared, or unknown socket)", c.cityName)
-	}
 	scan, err := c.orphanSessions(ctx)
 	if runtime.IsPartialListError(err) {
 		return fmt.Errorf("listing sessions partially failed: %w", err)
@@ -659,12 +659,17 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if len(scan.unreadable) > 0 {
 		return fmt.Errorf("refusing orphan cleanup: incomplete ownership metadata: %w", errors.Join(scan.unreadable...))
 	}
+	var failures []error
 	for _, orphan := range scan.orphans {
+		if err := c.orphanScopeError(orphan); err != nil {
+			failures = append(failures, fmt.Errorf("refusing orphan cleanup: %w", err))
+			continue
+		}
 		if err := orphan.provider.Stop(orphan.name); err != nil {
-			return fmt.Errorf("killing orphan session %q: %w", orphan.name, err)
+			failures = append(failures, fmt.Errorf("killing orphan session %q: %w", orphan.name, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // --- Data checks ---

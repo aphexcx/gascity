@@ -11,17 +11,29 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
-type scopedOrphanProvider struct {
+type orphanSocketScope interface {
+	IsCityScoped(string) bool
+}
+
+type orphanMetadataProvider struct {
 	runtime.Provider
-	scoped  bool
 	metaErr error
 }
 
-func (p scopedOrphanProvider) IsCityScoped(string) bool { return p.scoped }
+type orphanScopedProvider struct {
+	orphanMetadataProvider
+	orphanSocketScope
+}
 
-func (p scopedOrphanProvider) GetMeta(name, key string) (string, error) {
+// Use tmux's production scope check while keeping session operations in memory.
+func orphanProvider(sp runtime.Provider, socket string, metaErr error) orphanScopedProvider {
+	return orphanScopedProvider{orphanMetadataProvider{sp, metaErr}, tmux.NewProviderWithConfig(tmux.Config{SocketName: socket})}
+}
+
+func (p orphanMetadataProvider) GetMeta(name, key string) (string, error) {
 	if p.metaErr != nil {
 		return "", p.metaErr
 	}
@@ -31,9 +43,63 @@ func (p scopedOrphanProvider) GetMeta(name, key string) (string, error) {
 	return p.Provider.GetMeta(name, key)
 }
 
-type scopedAutoOrphanProvider struct{ *auto.Provider }
+func TestOrphanSessionsCheckCompositeScopedLeaf(t *testing.T) {
+	for _, backend := range []string{"auto", "hybrid"} {
+		t.Run(backend, func(t *testing.T) {
+			local := runtime.NewFake()
+			if err := local.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			leaf := orphanProvider(local, "test", nil)
+			var sp runtime.Provider = auto.New(leaf, runtime.NewFake())
+			if backend == "hybrid" {
+				sp = hybrid.New(leaf, runtime.NewFake(), func(string) bool { return false })
+			}
+			c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
+			c.AllowFix = true
+			if err := c.Fix(&CheckContext{}); err != nil {
+				t.Fatal(err)
+			}
+			if local.IsRunning("test-stale") {
+				t.Fatal("cleanup did not reach the scoped owning leaf")
+			}
+		})
+	}
+}
 
-func (scopedAutoOrphanProvider) IsCityScoped(string) bool { return true }
+func TestOrphanSessionsCheckRecordedRuntimeName(t *testing.T) {
+	for _, tt := range []struct {
+		name, identity, key, city string
+		want                      int
+	}{
+		{"s-ci-123", "s", "GC_AGENT", "/cities/test", 1},
+		{"s-ci-123", "s-ci-123", "GC_AGENT", "/cities/test", 1},
+		{"s-ci-123", "s-ci-123", "GC_TEMPLATE", "/cities/test", 1},
+		{"runtime.name-ci-123", "runtime.name", "GC_AGENT", "/cities/test", 1},
+		{"s-ci-123", "s-ci-123", "GC_AGENT", "/cities/other", 0},
+		{"s-ci-123", "s-ci-123", "GC_AGENT", "", 0},
+	} {
+		t.Run(tt.name+"/"+tt.identity+"/"+tt.key+"/"+tt.city, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), tt.name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range map[string]string{"GC_CITY_PATH": tt.city, tt.key: tt.identity, "GC_SESSION_ID": "ci-123"} {
+				if err := sp.SetMeta(tt.name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
+			r := c.Run(&CheckContext{CityPath: "/cities/test"})
+			if len(r.Details) != tt.want {
+				t.Fatalf("Run() = %+v, want %d candidates", r, tt.want)
+			}
+			if tt.want > 0 && !strings.Contains(r.Details[0], tt.name+": GC_CITY_PATH matches this city") {
+				t.Errorf("Details = %v, want recorded identity with city ownership", r.Details)
+			}
+		})
+	}
+}
 
 func TestOrphanSessionsCheckMixedBackends(t *testing.T) {
 	for _, tt := range []struct {
@@ -55,15 +121,15 @@ func TestOrphanSessionsCheckMixedBackends(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			var acpBackend runtime.Provider = scopedOrphanProvider{Provider: acp, metaErr: tt.err}
+			var acpBackend runtime.Provider = orphanMetadataProvider{Provider: acp, metaErr: tt.err}
 			if tt.batch {
-				acpBackend = failedBatchOrphanProvider{scopedOrphanProvider{Provider: acp}}
+				acpBackend = failedBatchOrphanProvider{orphanProvider(acp, "", nil)}
 			}
 			if tt.nested {
 				acpBackend = hybrid.New(runtime.NewFake(), acpBackend, func(string) bool { return false })
 			}
 			// The ACP session is deliberately absent from both routing tables.
-			sp := scopedAutoOrphanProvider{auto.New(scopedOrphanProvider{Provider: local}, acpBackend)}
+			sp := auto.New(orphanProvider(local, "test", nil), acpBackend)
 			c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
 			c.AllowFix = true
 			ctx := &CheckContext{}
@@ -90,17 +156,20 @@ func TestOrphanSessionsCheckMixedBackends(t *testing.T) {
 				}
 				return
 			}
-			if err := c.Fix(ctx); err != nil {
-				t.Fatal(err)
+			if !strings.Contains(details, "test-acp-stale: runtime cannot confirm a city-scoped socket") {
+				t.Errorf("Details = %q, want the unscoped candidate's cleanup refusal", details)
 			}
-			if local.IsRunning("test-local-stale") || acp.IsRunning("test-acp-stale") {
-				t.Fatal("cleanup did not reach the backend that listed each orphan")
+			if err := c.Fix(ctx); err == nil || !strings.Contains(err.Error(), "test-acp-stale") {
+				t.Errorf("Fix() = %v, want the unscoped candidate named", err)
+			}
+			if local.IsRunning("test-local-stale") || !acp.IsRunning("test-acp-stale") {
+				t.Fatal("cleanup must stop the scoped leaf's orphan and retain the unscoped leaf's orphan")
 			}
 		})
 	}
 }
 
-type failedBatchOrphanProvider struct{ scopedOrphanProvider }
+type failedBatchOrphanProvider struct{ orphanScopedProvider }
 
 func (failedBatchOrphanProvider) GetAllEnvironment(string) (map[string]string, error) {
 	return nil, context.DeadlineExceeded
@@ -111,7 +180,7 @@ func TestOrphanSessionsCheckBatchOwnershipErrors(t *testing.T) {
 	if err := sp.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	p := failedBatchOrphanProvider{scopedOrphanProvider{Provider: sp, scoped: true}}
+	p := failedBatchOrphanProvider{orphanProvider(sp, "test", nil)}
 	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", p)
 	c.AllowFix = true
 	r := c.Run(&CheckContext{})
@@ -136,7 +205,7 @@ func TestOrphanSessionsCheckSameNameAcrossBackends(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sp := scopedAutoOrphanProvider{auto.New(local, acp)}
+	sp := auto.New(local, orphanProvider(acp, "test", nil))
 	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "{{.City}}-{{.Agent}}", sp)
 	c.AllowFix = true
 	ctx := &CheckContext{CityPath: "/cities/test"}
@@ -166,7 +235,7 @@ func TestOrphanSessionsCheckRemovedRigTemplate(t *testing.T) {
 			}
 		}
 	}
-	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker", Dir: "beta"}}}, "test", "", scopedOrphanProvider{Provider: sp, scoped: true})
+	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker", Dir: "beta"}}}, "test", "", orphanProvider(sp, "test", nil))
 	c.AllowFix = true
 	ctx := &CheckContext{CityPath: "/cities/test"}
 	r := c.Run(ctx)
@@ -229,7 +298,7 @@ func TestOrphanSessionsCheckOptInStopsOnlyOwnedOrphans(t *testing.T) {
 	if err := sp.SetMeta("test-foreign", "GC_CITY_PATH", "/cities/other"); err != nil {
 		t.Fatal(err)
 	}
-	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "core.worker", Dir: "repo"}}}, "test", "{{.City}}-{{.Agent}}", scopedOrphanProvider{Provider: sp, scoped: true})
+	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "core.worker", Dir: "repo"}}}, "test", "{{.City}}-{{.Agent}}", orphanProvider(sp, "test", nil))
 	c.AllowFix = true
 	if err := c.Fix(&CheckContext{CityPath: "/cities/test"}); err != nil {
 		t.Fatal(err)
@@ -263,7 +332,7 @@ func TestOrphanSessionsCheckAgentOnlyNamesNeedOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "", scopedOrphanProvider{Provider: sp, scoped: true})
+	c := NewOrphanSessionsCheck(&config.City{Agents: []config.Agent{{Name: "worker"}}}, "test", "", orphanProvider(sp, "test", nil))
 	c.AllowFix = true
 	ctx := &CheckContext{CityPath: "/cities/test"}
 	r := c.Run(ctx)
@@ -302,7 +371,11 @@ func TestOrphanSessionsCheckRefusesUnsafeFix(t *testing.T) {
 			if err := sp.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
 				t.Fatal(err)
 			}
-			c := NewOrphanSessionsCheck(tt.cfg, "test", tt.template, scopedOrphanProvider{Provider: sp, scoped: tt.scoped, metaErr: tt.metaErr})
+			socket := "default"
+			if tt.scoped {
+				socket = "test"
+			}
+			c := NewOrphanSessionsCheck(tt.cfg, "test", tt.template, orphanProvider(sp, socket, tt.metaErr))
 			c.AllowFix = true
 			if err := c.Fix(&CheckContext{}); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Fix() = %v, want %q", err, tt.want)

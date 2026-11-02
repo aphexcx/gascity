@@ -1096,7 +1096,7 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", scopedOrphanProvider{Provider: sp, scoped: true})
+	c := NewOrphanSessionsCheck(cfg, "test", "", orphanProvider(sp, "test", nil))
 	c.AllowFix = true
 	if err := c.Fix(&CheckContext{CityPath: "/cities/test"}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
@@ -1176,7 +1176,7 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	c := NewOrphanSessionsCheck(cfg, "test", "", scopedOrphanProvider{Provider: sp, scoped: true})
+	c := NewOrphanSessionsCheck(cfg, "test", "", orphanProvider(sp, "test", nil))
 	c.AllowFix = true
 	if err := c.Fix(&CheckContext{}); err == nil || !strings.Contains(err.Error(), "partially failed") {
 		t.Fatalf("Fix() = %v, want partial list failure", err)

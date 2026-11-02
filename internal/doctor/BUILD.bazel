@@ -163,6 +163,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/auto",
         "//internal/runtime/hybrid",
+        "//internal/runtime/tmux",
         "//internal/shellquote",
         "//internal/supervisor",
         "//internal/suspensionstate",

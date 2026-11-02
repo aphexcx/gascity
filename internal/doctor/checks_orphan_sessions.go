@@ -25,6 +25,14 @@ type orphanSessionScan struct {
 	unreadable []error
 }
 
+func (c *OrphanSessionsCheck) orphanScopeError(orphan orphanSession) error {
+	scoped, ok := orphan.provider.(interface{ IsCityScoped(string) bool })
+	if !ok || !scoped.IsCityScoped(c.cityName) {
+		return fmt.Errorf("%s: runtime cannot confirm a city-scoped socket for %q (default, shared, or unknown socket)", orphan.name, c.cityName)
+	}
+	return nil
+}
+
 func (c *OrphanSessionsCheck) expectedSessionNames() (map[string]bool, error) {
 	expected := make(map[string]bool)
 	if c.cfg == nil {
@@ -166,6 +174,9 @@ func (c *OrphanSessionsCheck) matchesRuntimeIdentity(name string, env map[string
 		identity := env[key]
 		if identity == "" {
 			continue
+		}
+		if name == identity || (id != "" && name == identity+"-"+id) {
+			return true
 		}
 		base := agent.SessionNameFor(c.cityName, identity, c.sessionTemplate)
 		poolBase := agent.SanitizeQualifiedNameForSession(path.Base(identity))
