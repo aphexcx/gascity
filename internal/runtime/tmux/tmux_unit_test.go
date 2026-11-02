@@ -43,7 +43,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		if len(executor.calls) != 1 {
 			t.Fatalf("tmux calls = %d, want one atomic observation", len(executor.calls))
 		}
-		want := []string{"-u", "display-message", "-t", "session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
+		want := []string{"-u", "display-message", "-t", "=session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
 		if !slices.Equal(executor.calls[0], want) {
 			t.Fatalf("tmux args = %q, want atomic pid/dead format %q", executor.calls[0], want)
 		}
@@ -92,16 +92,16 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 
 		t.Run("missing session owner corroborates absence", func(t *testing.T) {
 			executor := &fakeExecutor{
-				outs: []string{"\t\n", ""},
-				errs: []error{nil, ErrSessionNotFound},
+				outs: []string{"\t\n", "", ""},
+				errs: []error{nil, ErrSessionNotFound, ErrSessionNotFound},
 			}
 			tmux := NewTmux()
 			tmux.exec = executor
 			if err := tmux.KillSessionWithProcesses("session"); err != nil {
 				t.Fatalf("KillSessionWithProcesses repeated stop = %v, want corroborated absence", err)
 			}
-			if len(executor.calls) != 2 {
-				t.Fatalf("tmux calls = %d, want observation then owner kill", len(executor.calls))
+			if len(executor.calls) != 3 {
+				t.Fatalf("tmux calls = %d, want observation, exact session probe, then owner kill", len(executor.calls))
 			}
 		})
 

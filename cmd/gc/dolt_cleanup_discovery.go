@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
+	"gopkg.in/yaml.v3"
 )
 
 // recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
@@ -147,6 +151,7 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 			CWDState:         doltProcCWDState(pid),
 			ConfigPathState:  doltConfigPathState(argv),
 			ContainerRuntime: doltProcContainerRuntime(pid),
+			HostNamespace:    doltProcHostNamespace(pid),
 		})
 	}
 	return out, nil
@@ -165,8 +170,13 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 			continue
 		}
 		// No /proc on this host, so CWDState stays unknown (protect-leaning),
-		// but the --config path can still be checked on disk.
+		// and flattened ps arguments require verification before cleanup.
+		if argv, verified := readDoltSQLServerArgv(proc.PID); verified {
+			proc.Argv = argv
+			proc.ArgvUnverified = false
+		}
 		proc.ConfigPathState = doltConfigPathState(proc.Argv)
+		proc.HostNamespace = doltProcHostNamespace(proc.PID)
 		out = append(out, proc)
 	}
 	return out, nil
@@ -263,14 +273,10 @@ func doltProcCWDState(pid int) string {
 
 // doltProcContainerRuntime reports the container runtime managing pid, by
 // scanning every line of /proc/<pid>/cgroup for that runtime's cgroup path
-// markers. Both the systemd-driver shapes (`libpod-<id>.scope`,
-// `docker-<id>.scope`, used by cgroup v2 and v1-with-systemd) and the
-// cgroupfs-driver shape `/docker/<id>` (emitted by cgroup v1, which carries no
-// `docker-` marker at all) are matched, and every line is checked because
-// cgroup v1 emits one line per controller in no guaranteed order. Returns ""
-// for a normal host process, a process whose cgroup can't be read (host with
-// no /proc, timeout, permission), or cgroup lines that carry no marker —
-// classifyDoltProcess treats "" as no signal (ga-sm1cvj).
+// markers. It recognizes Docker, Podman, containerd, and CRI-O systemd scopes,
+// plus Docker cgroupfs paths. Every line is checked because cgroup v1 emits
+// one line per controller in no guaranteed order. An empty result means the
+// runtime is unidentified; it does not establish namespace compatibility.
 func doltProcContainerRuntime(pid int) string {
 	if pid <= 0 {
 		return ""
@@ -280,6 +286,40 @@ func doltProcContainerRuntime(pid int) string {
 		return ""
 	}
 	return containerRuntimeFromCgroup(data)
+}
+
+// doltProcHostNamespace verifies the namespace boundary independently of cgroup
+// naming. Native platforms without Linux namespaces share the host PID space.
+func doltProcHostNamespace(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	return doltProcHostNamespaceAt("/proc", pid)
+}
+
+func doltProcHostNamespaceAt(procRoot string, pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	processDir := filepath.Join(procRoot, strconv.Itoa(pid))
+	selfDir := filepath.Join(procRoot, "self")
+	for _, ns := range []string{"mnt", "pid"} {
+		self, err := os.Readlink(filepath.Join(selfDir, "ns", ns))
+		if err != nil || self == "" {
+			return false
+		}
+		process, err := os.Readlink(filepath.Join(processDir, "ns", ns))
+		if err != nil || process != self {
+			return false
+		}
+	}
+	// A chroot can change absolute-path meaning without changing namespaces.
+	selfRoot, err := statWithTimeout(filepath.Join(selfDir, "root"))
+	if err != nil {
+		return false
+	}
+	processRoot, err := statWithTimeout(filepath.Join(processDir, "root"))
+	return err == nil && os.SameFile(selfRoot, processRoot)
 }
 
 // containerRuntimeFromCgroup is doltProcContainerRuntime's pure parser over
@@ -292,6 +332,10 @@ func containerRuntimeFromCgroup(data []byte) string {
 			return "podman"
 		case strings.Contains(line, "docker-"), strings.Contains(line, "/docker/"):
 			return "docker"
+		case strings.Contains(line, "cri-containerd-"):
+			return "containerd"
+		case strings.Contains(line, "crio-"):
+			return "cri-o"
 		}
 	}
 	return ""
@@ -392,6 +436,13 @@ func discoverActiveTestRootsFromPS(homeDir, tempDir string) []string {
 
 func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
+	if root, ok := pytestTestRoot(clean, tempDir); ok {
+		// Helper argv can outlive pytest; use pytest's own ownership evidence.
+		if statConfigPathState(root) == procPathStateDeleted {
+			return "", false
+		}
+		return root, pytestPathMayBeLive(path, root)
+	}
 	for _, root := range []string{"/tmp", tempDir} {
 		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
 			return testRoot, true
@@ -408,6 +459,224 @@ func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 		return "", false
 	}
 	return activeTestRootUnder(clean, filepath.Join(homeDir, ".gotmp"), []string{"Test"})
+}
+
+// pytestTestRoot recognizes pytest's default basetemps and pytest-current
+// alias, not custom --basetemp paths. Match whole path components.
+func pytestTestRoot(path, tempDir string) (string, bool) {
+	clean := cleanPytestPath(path)
+	for _, root := range []string{tempDir, "/tmp"} {
+		root = cleanPytestPath(root)
+		if root == "." || root == string(filepath.Separator) {
+			continue
+		}
+		rel, ok := strings.CutPrefix(clean, root+string(filepath.Separator))
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rel, string(filepath.Separator), 3)
+		if len(parts) < 2 || !strings.HasPrefix(parts[0], "pytest-of-") || parts[0] == "pytest-of-" {
+			continue
+		}
+		if _, ok := pytestRunNumber(parts[1]); ok || parts[1] == "pytest-current" {
+			return filepath.Join(root, parts[0], parts[1]), true
+		}
+	}
+	return "", false
+}
+
+// cleanPytestPath matches pytest's resolved macOS temp paths without following
+// arbitrary symlinks or requiring a leaked process's config to still exist.
+func cleanPytestPath(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "darwin" {
+		for _, root := range []string{"/private/tmp", "/private/var"} {
+			if path == root || strings.HasPrefix(path, root+"/") {
+				return strings.TrimPrefix(path, "/private")
+			}
+		}
+	}
+	return path
+}
+
+func pytestRunNumber(name string) (uint64, bool) {
+	suffix, ok := strings.CutPrefix(name, "pytest-")
+	if !ok || suffix == "" {
+		return 0, false
+	}
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseUint(suffix, 10, 64)
+	return n, err == nil
+}
+
+// pytestPathMayBeLive protects pytest-current's target and the highest numbered
+// directory, including the window before pytest updates the symlink, and older
+// roots with a live pytest owner. Redirected, unreadable, or missing basetemps
+// fail closed because an absent path does not establish owner exit.
+func pytestPathMayBeLive(path, root string) bool {
+	if filepath.Base(root) == "pytest-current" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() { ch <- pytestPathUnverified(path, root) || pytestRootMayBeLiveOnDisk(root) }()
+	select {
+	case live := <-ch:
+		return live
+	case <-ctx.Done():
+		return true
+	}
+}
+
+// pytestPathUnverified rejects symlinks from the per-user pytest directory
+// through the requested path, including intermediate symlinks RemoveAll follows.
+func pytestPathUnverified(path, root string) bool {
+	// Cleaning parent traversal can hide a symlink that the kernel follows.
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	current := filepath.Dir(cleanPytestPath(root))
+	rel, err := filepath.Rel(current, cleanPytestPath(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	for _, part := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return !os.IsNotExist(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func pytestRootMayBeLiveOnDisk(root string) bool {
+	parent := filepath.Dir(root)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return true
+	}
+	var highest uint64
+	found := false
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(root) {
+			if !entry.IsDir() {
+				return true // Never trust a replaced basetemp (file or symlink).
+			}
+			found = true
+		}
+		if n, ok := pytestRunNumber(entry.Name()); ok && entry.IsDir() && n > highest {
+			highest = n
+		}
+	}
+	if !found {
+		return true
+	}
+	if pytestOwnerMayBeLive(root, func(pid int) bool {
+		// Only ESRCH proves absence; permission and other errors protect.
+		return syscall.Kill(pid, 0) != syscall.ESRCH
+	}) {
+		return true
+	}
+	if n, _ := pytestRunNumber(filepath.Base(root)); n == highest {
+		return true
+	}
+	current, err := os.Readlink(filepath.Join(parent, "pytest-current"))
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	if !filepath.IsAbs(current) {
+		current = filepath.Join(parent, current)
+	}
+	return cleanPytestPath(current) == cleanPytestPath(root)
+}
+
+// pytestConfigDataOwned requires an explicit absolute YAML data_dir in the
+// verified basetemp. Defaults, interpolation, relative paths, and unreadable
+// configs protect.
+func pytestConfigDataOwned(configPath, root string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() { ch <- pytestConfigDataOwnedOnDisk(configPath, root) }()
+	select {
+	case owned := <-ch:
+		return owned
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func pytestConfigDataOwnedOnDisk(configPath, root string) bool {
+	f, err := os.Open(configPath)
+	if err != nil {
+		return false
+	}
+	const maxConfigBytes = 64 * 1024
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || len(data) > maxConfigBytes {
+		return false
+	}
+	// Dolt expands environment variables before parsing the YAML document.
+	// The server's environment is unknown, so raw YAML cannot prove ownership
+	// when any part of the document may be changed by that expansion.
+	if strings.ContainsRune(string(data), '$') {
+		return false
+	}
+	var document yaml.Node
+	if yaml.Unmarshal(data, &document) != nil {
+		return false
+	}
+	// Dolt's YAML parser can resolve merges differently. Only literal
+	// documents establish ownership across parser versions.
+	pending := []*yaml.Node{&document}
+	for len(pending) > 0 {
+		node := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if node.Kind == yaml.AliasNode || node.Tag == "!!merge" {
+			return false
+		}
+		pending = append(pending, node.Content...)
+	}
+	var cfg struct {
+		DataDir string `yaml:"data_dir"`
+	}
+	if document.Decode(&cfg) != nil || !filepath.IsAbs(cfg.DataDir) {
+		return false
+	}
+	return pathUnderActiveTestRoot(cleanPytestPath(cfg.DataDir), []string{root}) && !pytestPathUnverified(cfg.DataDir, root)
+}
+
+// pytestOwnerMayBeLive reads pytest's cleanup lock, which contains the owning
+// runner PID and is removed on normal exit. A stale file alone is not liveness:
+// the process table is authoritative. Missing, invalid, or unreadable locks
+// protect: pytest can disable retention and run without creating a lock.
+func pytestOwnerMayBeLive(root string, alive func(int) bool) bool {
+	f, err := os.Open(filepath.Join(root, ".lock"))
+	if err != nil {
+		return true
+	}
+	defer f.Close() //nolint:errcheck // Read-only ownership evidence.
+	data, err := io.ReadAll(io.LimitReader(f, 32))
+	if err != nil || len(data) == 32 {
+		return true
+	}
+	pid, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 32)
+	if err != nil || pid <= 0 {
+		return true
+	}
+	return alive(int(pid))
 }
 
 func activeTestRootUnder(cleanPath, root string, prefixes []string) (string, bool) {
@@ -494,15 +763,23 @@ func readProcRSSBytes(pid int) int64 {
 	return pages * int64(os.Getpagesize())
 }
 
-// readDoltSQLServerArgv reads /proc/<pid>/cmdline and returns the NUL-split
-// argv if and only if the process looks like `dolt sql-server`. The boolean
-// is false for any non-dolt process so callers can skip cheaply.
+// readDoltSQLServerArgv reads argument boundaries from /proc or Darwin's
+// kern.procargs2. Flattened ps output cannot authorize cleanup.
 func readDoltSQLServerArgv(pid int) ([]string, bool) {
-	data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil || len(data) == 0 {
-		return nil, false
+	var argv []string
+	if runtime.GOOS == "darwin" {
+		var err error
+		argv, err = pidutil.Cmdline(pid)
+		if err != nil {
+			return nil, false
+		}
+	} else {
+		data, err := readWithTimeout(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		if err != nil || len(data) == 0 {
+			return nil, false
+		}
+		argv = splitCmdline(data)
 	}
-	argv := splitCmdline(data)
 	if !looksLikeDoltSQLServer(argv) {
 		return nil, false
 	}
@@ -550,10 +827,12 @@ func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
 		return DoltProcInfo{}, false
 	}
 	return DoltProcInfo{
-		PID:           pid,
-		Argv:          argv,
-		Ports:         pidPorts[pid],
-		StartIdentity: strings.Join(fields[1:6], " "),
+		PID:               pid,
+		Argv:              argv,
+		ArgvUnverified:    true,
+		ConfigOnlyCleanup: true,
+		Ports:             pidPorts[pid],
+		StartIdentity:     strings.Join(fields[1:6], " "),
 	}, true
 }
 

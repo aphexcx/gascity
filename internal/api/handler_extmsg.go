@@ -267,6 +267,7 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 			Undelivered:   string(result.Undelivered),
 		})
 		outcome.Status = verdict.Status
+		outcome.Terminal = verdict.Terminal
 		outcome.DeliveredBytes = verdict.DeliveredBytes
 		outcome.Error = verdict.Reason
 		if verdict.Status != extmsg.InboundDeliveryDelivered {

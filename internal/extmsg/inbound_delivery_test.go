@@ -127,6 +127,31 @@ func TestSummarizeInboundDeliverySumsBytesAcrossMembers(t *testing.T) {
 	}
 }
 
+func TestSummarizeInboundDeliveryTerminalHold(t *testing.T) {
+	lost := InboundDeliveryMember{SessionID: "lost", Status: InboundDeliveryPending, Terminal: true, DeliveredBytes: 4, ExpectedBytes: 10}
+	for _, sibling := range []InboundDeliveryStatus{"", InboundDeliveryDelivered, InboundDeliveryPending, InboundDeliveryPartial, InboundDeliveryFailed} {
+		t.Run(string(sibling), func(t *testing.T) {
+			members := []InboundDeliveryMember{lost}
+			if sibling != "" {
+				members = append(members, InboundDeliveryMember{SessionID: "sibling", Status: sibling, ExpectedBytes: 20})
+			}
+			got := SummarizeInboundDelivery("ir-terminal", members)
+			if got.Status != InboundDeliveryPending || !got.Terminal {
+				t.Fatalf("receipt = %+v, want terminal pending: no sibling can repair ownership loss", got)
+			}
+			if got.DeliveredBytes != 4 || len(got.Members) != len(members) {
+				t.Fatalf("terminal hold lost member evidence: %+v", got)
+			}
+		})
+	}
+	if got := PendingInboundDelivery("ir-running"); got.Terminal {
+		t.Fatalf("running fan-out must remain unconcluded: %+v", got)
+	}
+	if got := SummarizeInboundDelivery("ir-unconfirmed", []InboundDeliveryMember{{Status: InboundDeliveryPending}}); got.Terminal {
+		t.Fatalf("unconfirmed submit must remain unconcluded: %+v", got)
+	}
+}
+
 // TestPendingInboundDeliveryCarriesNoCounts guards a subtle overclaim: a
 // pending receipt with zeroed byte counts satisfies delivered >= expected
 // (0 >= 0) and would read to a consumer as a completed empty delivery.

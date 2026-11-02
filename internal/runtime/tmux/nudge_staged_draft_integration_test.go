@@ -233,7 +233,7 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			if edited {
 				message = strings.Repeat("a", 76) + " b"
 				if ownership.timing == "blocking" {
-					// The hard-wrap matcher trims both spaces at column 78,
+					// The round-base hard-wrap matcher trims both spaces at column 78,
 					// accepting the edited 76-cell row followed by a newline.
 					// That makes stale provenance observable during the hook.
 					message = strings.Repeat("a", 76) + "  b"
@@ -403,8 +403,8 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 			}
 			if edited || ownership.removed {
 				receipts := collectReceipts(tm)
-				if err := tm.NudgeSession("wrapped", message); !errors.Is(err, ErrNudgeDraftDeferred) {
-					t.Fatalf("attach/edit/detach retry=%v, want deferred ownership", err)
+				if err := tm.NudgeSession("wrapped", message); !errors.Is(err, ErrNudgeDraftDeferred) || !errors.Is(err, runtime.ErrNudgeDraftUnowned) || errors.Is(err, runtime.ErrNudgeDraftUnmatched) {
+					t.Fatalf("attach/edit/detach retry=%v, want deferred unowned draft, not unmatched", err)
 				}
 				if got := count(t, logPath, "SUBMIT"); got != 0 || len(receipts()) != 0 {
 					t.Fatalf("edited draft submitted %d times with %d receipts", got, len(receipts()))

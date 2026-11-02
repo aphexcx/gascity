@@ -34,6 +34,7 @@ type InboundMemberEvidence struct {
 // carries (empty on delivered).
 type InboundMemberOutcome struct {
 	Status         InboundDeliveryStatus
+	Terminal       bool
 	DeliveredBytes int
 	Reason         string
 }
@@ -114,9 +115,9 @@ func ClassifyInboundMember(e InboundMemberEvidence) InboundMemberOutcome {
 	}
 
 	if e.Submit == runtime.NudgeSubmitOwnershipLost {
-		// Pending is the existing non-replayable receipt status. The reason
-		// records that this hold is terminal, even if the send path errored.
-		return hold(max(e.Bytes, 0), "draft ownership lost before confirmation; terminal outcome, do not redeliver")
+		out := hold(max(e.Bytes, 0), "draft ownership lost before confirmation; terminal outcome, do not redeliver")
+		out.Terminal = true
+		return out
 	}
 
 	if e.Submit == "" {

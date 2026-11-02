@@ -667,10 +667,14 @@ Invalid paths fail explicitly. Leave `GC_TEST_BD` unset to exercise the build
 path. The Makefile and nested shard runners preserve this override; topology
 acceptance uses its separate `GC_ACCEPTANCE_BD_BIN` setting.
 
-By default, the local runners bound concurrency by both detected CPUs and
-available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
-If memory cannot be detected, they use three jobs. An explicit override always
-wins:
+By default, local runners subtract the integer part of the one-minute load
+from the CPU count on Linux and Darwin, with a two-job floor. Machines with
+four or fewer CPUs keep their CPU budget. Available memory imposes a separate
+ceiling of one job per 4 GiB (three jobs when memory is unknown), and automatic
+fan-out is capped at 16. The load floor never raises the CPU or memory ceiling.
+The selector prints `cpus`, `memory_jobs`, `load_adjusted_jobs`, the load reading
+and chosen count to stderr; unavailable load is reported as `unknown`.
+An explicit override always wins:
 
 ```bash
 LOCAL_TEST_JOBS=48 CORE_SHARD_TOTAL=8 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
@@ -680,7 +684,12 @@ On Darwin, the parallel runner defaults scratch space to the per-user temp
 directory from `getconf DARWIN_USER_TEMP_DIR`. A caller's `TMPDIR` takes
 precedence; a short, staff-owned path without a `/private` alias is valid, and
 tests must not assume that alias exists. Set `LOCAL_TEST_LOG_DIR` to create and
-retain logs at a chosen path. `make test-fast-parallel` preserves both settings
+retain logs at a chosen path. Otherwise logs survive in a unique dated
+`gc-local-tests.<UTC timestamp>.*` directory under `${TMPDIR:-/var/tmp}`.
+The runner prints the absolute directory at startup and in its completion
+summary, and slot-holder diagnostics name the same directory. Successful runs
+retain their logs; remove those directories after collecting needed evidence.
+`make test-fast-parallel` preserves both settings
 and the `GC_TEST_INNER_P` override through its environment scrub.
 
 The `fast` and `full` modes split non-`cmd/gc` packages into six core shards
@@ -692,8 +701,10 @@ Every package runs once; empty shards are omitted. The actual job count feeds
 the existing `inner_p` calculation, so adding shards keeps the total parallel
 budget bounded by `LOCAL_TEST_JOBS`.
 
-The core and `cmd/gc` shards share one 20m per-package budget and run with
-`-count=1`. The integration shards keep `scripts/test-integration-shard`'s own
+The core and `cmd/gc` shards share a per-package budget and run with `-count=1`.
+The default is 20m at one or two jobs, plus 10m for each doubling of the chosen
+fan-out: 30m at four jobs, 40m at eight, 50m at sixteen. Intermediate counts
+round up to the next band. The integration shards keep `scripts/test-integration-shard`'s own
 30m default, and the `productmetrics-testhook` job scheduled by
 `full`/`cmd-gc-process` inherits Go's 10m. Raise the shared budget on a slow host:
 
@@ -1165,10 +1176,27 @@ the `scope=all` audit row, which fails on any change, growth or shrinkage
 alike, with no per-file exemption available — so driving the script as a
 plain shell job avoids that ratchet entirely instead of bumping it.
 
-Only `scripts/test-local-parallel` is wired to this gate — the same targets
-axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
-`test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
-`go test` invocations) are outside this bound too.
+For a bead-ordered package run, prefer the covering Makefile target. If the
+contract requires an unsharded command, use the same slot bound explicitly and
+name its execution budget:
+
+```bash
+scripts/with-push-gate-slot -- go test -timeout=40m -count=1 ./cmd/gc
+```
+
+The wrapper preserves command arguments and exit status, waits with the same
+holder diagnostics and tunables, and exits 75 if no slot becomes available.
+It holds the slot through command completion, releases it on signals, and keeps
+the lock descriptor out of the command's descendants. It does not configure the
+Go toolchain or test environment; retain the command's required settings. If
+`LOCAL_TEST_LOG_DIR` is set, the holder diagnostic includes that directory.
+
+Do not wrap an already gated target (`test-fast-parallel`,
+`test-cmd-gc-process-parallel`, `test-integration-shards-parallel`, or
+`test-local-full-parallel`): nested acquisition can wait on its own slot.
+Other direct targets (`test-acceptance*`, `test-integration`,
+`test-integration-huma`, `test-worker-*`, `test-cover`) remain outside the bound
+unless invoked through the wrapper.
 
 This mechanism does not extend `bd` claim-lease heartbeats across the
 wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)

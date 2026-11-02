@@ -296,6 +296,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Reads only ctx.CityPath, so it stays outside the config gate: a broken
 	// city.toml is precisely when session diagnostics need to be visible.
 	register(doctor.NewNudgeUnconfirmedCheck())
+	register(doctor.NewNudgeDeadLettersCheck())
 
 	// Config-dependent checks run only when city.toml loaded cleanly. If it
 	// fails, the core config check above reports the parse error.

@@ -718,6 +718,14 @@ func TestNudgeDeliveredReportsFalseWhenSessionIsGone(t *testing.T) {
 			if err := p.Nudge("gt-vanished", runtime.TextContent("ship it")); err != nil {
 				t.Fatalf("Nudge() error = %v, want nil — best-effort semantics must not regress", err)
 			}
+			// Immediate sends must report absence so a queued delivery can retry.
+			if err := p.NudgeNow("gt-vanished", runtime.TextContent("ship it")); !errors.Is(err, tc.err) {
+				t.Errorf("NudgeNow() error = %v, want %v", err, tc.err)
+			}
+			delivery, err = p.NudgeNowDelivered("gt-vanished", runtime.TextContent("ship it"))
+			if !errors.Is(err, tc.err) || delivery != (runtime.NudgeDelivery{}) {
+				t.Errorf("NudgeNowDelivered() = %+v, %v; want zero delivery and %v", delivery, err, tc.err)
+			}
 		})
 	}
 }

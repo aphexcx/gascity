@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Run a command that does not already acquire a push-gate slot.
+set -euo pipefail
+
+if [[ "${1:-}" != -- || $# -lt 2 ]]; then
+  echo 'usage: scripts/with-push-gate-slot -- CMD [ARG ...]' >&2
+  echo 'Example: scripts/with-push-gate-slot -- go test -timeout=40m ./cmd/gc' >&2
+  exit 2
+fi
+shift
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=push-gate-lock-lib.sh
+source "$script_dir/push-gate-lock-lib.sh"
+# shellcheck source=lib/harness-reap.sh
+source "$script_dir/lib/harness-reap.sh"
+
+slot_dir="$(push_gate_slots_dir)" || {
+  echo 'push-gate: cannot resolve a city or repository slot directory' >&2
+  exit 1
+}
+gate_fd=""
+label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:$1"
+if ! push_gate_acquire_slot "$slot_dir" gate_fd "$label"; then
+  exit 75
+fi
+
+# Commands such as make test-cover supervise their own isolated test groups.
+# As in test-local-parallel, allow those supervisors to finish their shorter
+# drain before escalating against them, or their test groups can be orphaned.
+drain_ticks=100
+on_signal() {
+  local sig="$1"
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"
+  trap - "$sig"
+  kill -"$sig" $$
+}
+trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap 'on_signal HUP' HUP
+
+run_command() {
+  if [[ -n "$gate_fd" ]]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  "$@"
+}
+
+status=0
+gc_harness_run_supervised "$label" "" 0 -- run_command "$@" || status=$?
+exit "$status"

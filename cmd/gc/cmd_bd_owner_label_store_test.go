@@ -1,0 +1,195 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(root, ".beads", "dolt")
+	dir := filepath.Join(root, "work")
+	response := func(path string) string {
+		b, err := json.Marshal(struct {
+			Path         string `json:"path"`
+			DatabasePath string `json:"database_path"`
+		}{filepath.Dir(path), path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tt := range []struct {
+		name     string
+		base     string
+		selected string
+		failCall int
+		want     bool
+		wantErr  string
+	}{
+		{"same store", response(store), response(store), 0, true, ""},
+		{"normalized store", response(store), response(filepath.Dir(store) + "/./dolt"), 0, true, ""},
+		{"different store", response(store), response(filepath.Join(dir, ".beads", "dolt")), 0, false, ""},
+		{"redirected scope without source metadata", response(filepath.Join(dir, ".beads", "dolt")), response(filepath.Join(dir, ".beads", "dolt")), 0, true, ""},
+		{"baseline failure", "", "", 1, false, "probe unavailable"},
+		{"selected failure", response(store), "", 3, false, "probe unavailable"},
+		{"database probe failure", response(store), response(store), 2, false, "probe unavailable"},
+		{"invalid baseline JSON", "not JSON", response(store), 0, false, "answer"},
+		{"invalid selected JSON", response(store), "not JSON", 0, false, "answer"},
+		{"missing path", response(store), "{}", 0, false, "database_path"},
+		{"relative path", response(store), response(".beads/dolt"), 0, false, "database_path"},
+		{"missing database name", response(store), response(store), 0, false, "database name"},
+		{"missing backend", response(store), response(store), 0, false, "backend"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls [][]string
+			run := func(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Error("store probes need a deadline")
+				}
+				calls = append(calls, args)
+				if len(calls) == tt.failCall {
+					if _, err := fmt.Fprint(stderr, "probe unavailable"); err != nil {
+						t.Fatal(err)
+					}
+					return 1
+				}
+				payload := tt.base
+				if slices.Contains(args, "--directory") {
+					payload = tt.selected
+				}
+				if args[0] == "dolt" {
+					payload = `{"backend":"dolt","database":"probe"}`
+					if tt.name == "missing database name" {
+						payload = `{"backend":"dolt"}`
+					}
+					if tt.name == "missing backend" {
+						payload = `{}`
+					}
+				}
+				if _, err := fmt.Fprint(stdout, payload); err != nil {
+					t.Fatal(err)
+				}
+				return 0
+			}
+			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, dir, nil)
+			if got != tt.want || (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("match=%v, err=%v; want match=%v, error containing %q", got, err, tt.want, tt.wantErr)
+			}
+			wantCalls := [][]string{
+				{"where", "--json"},
+				{"dolt", "show", "--json"},
+				{"where", "--json", "--directory", dir},
+				{"dolt", "show", "--json", "--directory", dir},
+			}
+			if len(calls) == 0 || len(calls) > len(wantCalls) {
+				t.Fatalf("unexpected probes: %q", calls)
+			}
+			for i, call := range calls {
+				if !slices.Equal(call, wantCalls[i]) {
+					t.Errorf("probe %d = %q, want %q", i, call, wantCalls[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
+	for _, tt := range []struct {
+		name, metadata string
+		want, wantErr  bool
+		gitRoot        bool
+		foreignGit     bool
+	}{
+		{"no metadata", "", true, false, false, false},
+		{"no source database", `{}`, true, false, false, false},
+		{"same database", `{"dolt_database":"target"}`, true, false, false, false},
+		{"different database", `{"dolt_database":"source"}`, false, false, false, false},
+		{"invalid metadata", `{`, false, true, false, false},
+		{"Git root preserves source for both", `{"dolt_database":"source"}`, true, false, true, false},
+		{"projected Git environment has no redirect", `{"dolt_database":"source"}`, false, false, true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.metadata != "" {
+				if err := os.Mkdir(filepath.Join(root, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".beads", "metadata.json"), []byte(tt.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.gitRoot {
+				mustGitImport(t, root, "init", "--quiet")
+				target := filepath.Join(root, "target", ".beads")
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".beads", "redirect"), []byte(target+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var env []string
+			if tt.foreignGit {
+				foreign := t.TempDir()
+				mustGitImport(t, foreign, "init", "--quiet")
+				env = append(os.Environ(), "GIT_DIR="+filepath.Join(foreign, ".git"), "GIT_WORK_TREE="+foreign)
+			}
+			run := func(_ context.Context, _ []string, stdout, _ io.Writer) int {
+				if err := json.NewEncoder(stdout).Encode(struct {
+					Path         string `json:"path"`
+					DatabasePath string `json:"database_path"`
+					Database     string `json:"database"`
+					Backend      string `json:"backend"`
+				}{filepath.Join(root, "target", ".beads"), filepath.Join(root, "shared-data"), "target", "dolt"}); err != nil {
+					t.Fatal(err)
+				}
+				return 0
+			}
+			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, root, env)
+			if got != tt.want || (err != nil) != tt.wantErr {
+				t.Fatalf("match=%v, err=%v; want match=%v, error=%v", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestBdOwnerLabelDirectoryRejectsSharedDataPath(t *testing.T) {
+	root := t.TempDir()
+	for _, sameProject := range []bool{false, true} {
+		t.Run(fmt.Sprintf("same_project=%v", sameProject), func(t *testing.T) {
+			run := func(_ context.Context, args []string, stdout, _ io.Writer) int {
+				path := filepath.Join(root, ".beads")
+				database := "first"
+				if slices.Contains(args, "--directory") {
+					database = "second"
+					if !sameProject {
+						path = filepath.Join(root, "nested", ".beads")
+					}
+				}
+				// Dolt server projects can share their data directory while
+				// selecting different SQL databases, including via a redirect.
+				if err := json.NewEncoder(stdout).Encode(struct {
+					Path         string `json:"path"`
+					DatabasePath string `json:"database_path"`
+					Database     string `json:"database"`
+					Backend      string `json:"backend"`
+				}{path, filepath.Join(root, "shared-data"), database, "dolt"}); err != nil {
+					t.Fatal(err)
+				}
+				return 0
+			}
+			matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, filepath.Join(root, "nested"), nil)
+			if err != nil || matches {
+				t.Fatalf("different SQL databases sharing a data directory: match=%v, err=%v", matches, err)
+			}
+		})
+	}
+}

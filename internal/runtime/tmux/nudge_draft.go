@@ -21,7 +21,7 @@ const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
 // Invalidation runs before user hooks, which may block. Checking that ordering
 // on retry also detects another caller replacing or moving the clear.
 func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (string, error) {
-	pane, err := t.run("display-message", "-p", "-t", target, "#{pane_id}")
+	pane, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_id}")
 	if err != nil {
 		return "", err
 	}
@@ -31,7 +31,7 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 	}
 	hook := fmt.Sprintf("set-option -p -t %q %s ''", pane, nudgeDraftPayloadOption)
 	for _, event := range []string{"client-attached", "client-session-changed"} {
-		hooks, err := t.run("show-hooks", "-t", session, event)
+		hooks, err := t.run("show-hooks", "-t", exactPaneTarget(session), event)
 		if err != nil {
 			return "", err
 		}
@@ -64,7 +64,7 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 				commands = append(commands, command)
 			}
 		}
-		if _, err := t.run("set-hook", "-t", session, event, strings.Join(commands, " ; ")); err != nil {
+		if _, err := t.run("set-hook", "-t", exactPaneTarget(session), event, strings.Join(commands, " ; ")); err != nil {
 			return "", err
 		}
 	}
@@ -75,7 +75,7 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 // An attachment clears the marker even if it occurs during the paste.
 func (t *Tmux) stageNudgeDraftProvenance(pane, message string) error {
 	set := fmt.Sprintf("set-option -p -t %q %s ", pane, nudgeDraftPayloadOption)
-	_, err := t.run("if-shell", "-F", "-t", pane, "#{==:#{session_attached},0}",
+	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane), "#{==:#{session_attached},0}",
 		set+"pending:"+runtime.NudgePayloadDigest(message), set+"''")
 	return err
 }
@@ -84,7 +84,7 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string) error {
 // invalidated its pending marker. The comparison and update run in tmux.
 func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
 	digest := runtime.NudgePayloadDigest(message)
-	_, err := t.run("if-shell", "-F", "-t", pane,
+	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane),
 		fmt.Sprintf("#{==:#{%s},pending:%s}", nudgeDraftPayloadOption, digest),
 		fmt.Sprintf("set-option -p -t %q %s %s", pane, nudgeDraftPayloadOption, digest))
 	return err
@@ -99,8 +99,8 @@ func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []strin
 		if i > 0 {
 			time.Sleep(nudgeSubmitKeySettle)
 		}
-		out, err := t.run("if-shell", "-F", "-t", target, condition,
-			shellquote.Join([]string{"send-keys", "-t", target, key}),
+		out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target), condition,
+			shellquote.Join([]string{"send-keys", "-t", exactPaneTarget(target), key}),
 			"display-message -p draft-ownership-changed")
 		if err != nil {
 			return sent, err
@@ -121,8 +121,8 @@ func nudgeDraftOwnershipCondition(message string) string {
 // to this payload. Ownership and capture share a tmux command so a later attach
 // cannot invalidate the snapshot that already established confirmation.
 func (t *Tmux) captureNudgeDraftSubmit(target, message string) ([]string, error) {
-	out, err := t.run("if-shell", "-F", "-t", target, nudgeDraftOwnershipCondition(message),
-		shellquote.Join([]string{"capture-pane", "-p", "-t", target, "-S", fmt.Sprintf("-%d", promptObservationLines)}),
+	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target), nudgeDraftOwnershipCondition(message),
+		shellquote.Join([]string{"capture-pane", "-p", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines)}),
 		"display-message -p draft-ownership-changed")
 	if err != nil {
 		return nil, err

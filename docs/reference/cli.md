@@ -1534,7 +1534,11 @@ protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
 os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
-/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*, and pytest-of-&lt;user&gt;/pytest-&lt;N&gt;
+under /tmp or os.TempDir()). The pytest-current target and highest numbered
+pytest basetemp are protected. Older retained basetemps are eligible only when
+their recorded pytest owner PID is confirmed gone. Missing or unreadable owner
+locks and container-managed pytest servers remain protected. A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the
@@ -2919,6 +2923,7 @@ gc nudge
 | Subcommand | Description |
 |------------|-------------|
 | [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
+| [gc nudge replay](#gc-nudge-replay) | Re-enqueue a dead-letter nudge once |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
 
 ## gc nudge drop
@@ -2942,6 +2947,36 @@ gc nudge drop <id>... [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+
+## gc nudge replay
+
+Re-enqueue a dead-letter nudge's preserved input as a new item for the same session.
+
+Resolve the pane input or delivery failure before replaying. The original
+stays dead with the new item's ID recorded on it; a second replay is refused.
+The new item retains the original source, reference and session fence, and
+uses the normal delivery bounds. Prints the new item ID on success.
+
+Use --dismiss to record an explicit dismissal without sending the input.
+Unresolved items remain for seven days from the dead transition. Disposed
+receipts remain for one hour after replay, dismissal, drop, or supersession,
+bounded by that seven-day cap. Cap expiry reports unresolved input loss by
+log and mail. Superseded reminders and operator drops cannot be replayed
+and do not produce failure alerts or unresolved doctor entries.
+
+Use --dry-run to preview without writing. Find dead items with gc doctor
+or gc nudge status. Dead transitions send one mail to the referenced bead's
+escalation_recipient metadata, falling back to session.park_alert_to. An
+unset recipient or mail failure is logged and leaves the doctor row visible.
+
+```
+gc nudge replay ITEM [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dismiss` | bool |  | Dismiss the dead letter without replaying its input |
+| `--dry-run` | bool |  | Preview the replay without changing the queue |
 
 ## gc nudge status
 

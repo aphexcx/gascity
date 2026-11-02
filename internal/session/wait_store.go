@@ -36,6 +36,42 @@ var ErrNotAWait = errors.New("not a wait")
 // "X is not a session" text / 400 status.
 var ErrNotSessionBead = errors.New("not a session bead")
 
+// ClearIdleWaitHold clears only wait-specific markers when no non-terminal wait
+// remains. The revision fence preserves lifecycle intents replaced concurrently;
+// unsupported conditional writes return an error without an unconditional fallback.
+func (s *Store) ClearIdleWaitHold(id string) error {
+	b, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	waits, err := s.WaitsForSession(id)
+	if err != nil {
+		return err
+	}
+	for _, wait := range waits {
+		if !IsWaitTerminalState(wait.State) {
+			return nil
+		}
+	}
+	patch := make(map[string]string)
+	if b.Metadata["wait_hold"] != "" {
+		patch["wait_hold"] = ""
+	}
+	for _, key := range []string{"sleep_intent", "sleep_reason"} {
+		if b.Metadata[key] == string(SleepReasonWaitHold) {
+			patch[key] = ""
+		}
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	writer, ok := beads.ConditionalWriterFor(s.store.Store)
+	if !ok {
+		return beads.ErrConditionalWriteUnsupported
+	}
+	return writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: patch})
+}
+
 // GetWait returns the WaitInfo projection of a durable wait bead. A missing bead
 // passes the bare store error through (errors.Is(err, beads.ErrNotFound) keeps
 // working); a bead that is not a durable wait returns an error wrapping

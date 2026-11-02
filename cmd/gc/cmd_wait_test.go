@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1153,61 +1154,82 @@ func (s waitErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 }
 
 func TestPrepareWaitWakeState_MarksDepsReady(t *testing.T) {
-	store := beads.NewMemStore()
-	sessionBead, err := store.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"agent_name":         "worker",
-			"continuation_epoch": "1",
-			"provider":           "codex",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
-	dep, err := store.Create(beads.Bead{Title: "dep"})
-	if err != nil {
-		t.Fatalf("create dep bead: %v", err)
-	}
-	if err := store.Close(dep.ID); err != nil {
-		t.Fatalf("close dep bead: %v", err)
-	}
-	waitBead, err := store.Create(beads.Bead{
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
-		Metadata: map[string]string{
-			"session_id":       sessionBead.ID,
-			"session_name":     "worker",
-			"kind":             "deps",
-			"state":            waitStatePending,
-			"dep_ids":          dep.ID,
-			"dep_mode":         "all",
-			"registered_epoch": "1",
-			"delivery_attempt": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
+	for _, corruptState := range []bool{false, true} {
+		t.Run(fmt.Sprintf("corrupt-state=%t", corruptState), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":       "worker",
+					"agent_name":         "worker",
+					"continuation_epoch": "1",
+					"provider":           "codex",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			dep, err := store.Create(beads.Bead{Title: "dep"})
+			if err != nil {
+				t.Fatalf("create dep bead: %v", err)
+			}
+			if err := store.Close(dep.ID); err != nil {
+				t.Fatalf("close dep bead: %v", err)
+			}
+			waitBead, err := store.Create(beads.Bead{
+				Type:   waitBeadType,
+				Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+				Metadata: map[string]string{
+					"session_id":       sessionBead.ID,
+					"session_name":     "worker",
+					"kind":             "deps",
+					"state":            waitStatePending,
+					"dep_ids":          dep.ID,
+					"dep_mode":         "all",
+					"registered_epoch": "1",
+					"delivery_attempt": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
 
-	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("prepareWaitWakeState: %v", err)
-	}
-	if !readyWaitSet[sessionBead.ID] {
-		t.Fatalf("readyWaitSet missing session %s", sessionBead.ID)
-	}
-	updated, err := store.Get(waitBead.ID)
-	if err != nil {
-		t.Fatalf("store.Get(wait): %v", err)
-	}
-	if got := updated.Metadata["state"]; got != waitStateReady {
-		t.Fatalf("wait state = %q, want %q", got, waitStateReady)
-	}
-	if updated.Metadata["ready_at"] == "" {
-		t.Fatal("ready_at was not recorded")
+			dir := ""
+			var warnings bytes.Buffer
+			if corruptState {
+				dir = t.TempDir()
+				if err := nudgequeue.WithState(dir, func(*nudgeQueueState) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(nudgequeue.StatePath(dir), []byte("{corrupt queue"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				oldWriter := nudgeWarningWriter
+				nudgeWarningWriter = &warnings
+				t.Cleanup(func() { nudgeWarningWriter = oldWriter })
+			}
+			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(dir, cliSessionFrontDoor(store, nil, dir), store, beads.NudgesStore{Store: store}, time.Now().UTC(), nil)
+			if err != nil {
+				t.Fatalf("prepareWaitWakeState: %v", err)
+			}
+			if !readyWaitSet[sessionBead.ID] {
+				t.Fatalf("readyWaitSet missing session %s", sessionBead.ID)
+			}
+			updated, err := store.Get(waitBead.ID)
+			if err != nil {
+				t.Fatalf("store.Get(wait): %v", err)
+			}
+			if got := updated.Metadata["state"]; got != waitStateReady {
+				t.Fatalf("wait state = %q, want %q", got, waitStateReady)
+			}
+			if updated.Metadata["ready_at"] == "" {
+				t.Fatal("ready_at was not recorded")
+			}
+			if corruptState && (!strings.Contains(warnings.String(), nudgequeue.StatePath(dir)) || strings.Count(warnings.String(), "\n") != 1) {
+				t.Fatalf("want one queue-load warning: %s", warnings.String())
+			}
+		})
 	}
 }
 
@@ -2911,6 +2933,7 @@ func TestPrepareWaitWakeState_DarkCityWorkLegStillAbortsThePass(t *testing.T) {
 	darkWork := waitDependencyGetErrorStore{Store: cityStore, prefix: "gcg", err: hardErr}
 
 	_, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		waitDependencyReaderOver(darkWork, nil),
 		beads.NudgesStore{Store: cityStore},
@@ -2933,6 +2956,7 @@ func TestPrepareWaitWakeState_SuspendedFrameRetainsAnUnprovedWait(t *testing.T) 
 	cityStore := waitWakeCityStore(now, depID)
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, nil, nil), true),
 		beads.NudgesStore{Store: cityStore},
@@ -2966,6 +2990,7 @@ func TestPrepareWaitWakeState_ResolvesBindingResidentDependency(t *testing.T) {
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
 		beads.NudgesStore{Store: cityStore},
@@ -3023,6 +3048,7 @@ func TestPrepareWaitWakeState_MigrationPreservedDependencyAnswersFromTheBinding(
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(assembleResidencyTopology(nil, cityStore, nil, bindings, nil), false),
 		beads.NudgesStore{Store: cityStore},
@@ -3115,6 +3141,7 @@ func TestPrepareWaitWakeState_CoResidentDependencyAnswersFromTheWorkStore(t *tes
 	}
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 		beads.NudgesStore{Store: cityStore},
@@ -3157,6 +3184,7 @@ func TestPrepareWaitWakeState_PrefixUncoveredRigDependencyDoesNotReapTheWaiter(t
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "frontend", Prefix: "fe"})
 
 	if _, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(
 			assembleResidencyTopology(cfg, cityStore, map[string]beads.Store{"frontend": rigStore}, nil, nil),
@@ -3200,6 +3228,7 @@ func TestPrepareWaitWakeState_AgreeingPrefixRigStillProvesTheDependencyGone(t *t
 	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "frontend", Prefix: declaredStoreIDPrefix(rigStore)})
 
 	readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+		"",
 		sessionFrontDoor(cityStore),
 		newWaitDependencyPlanReader(
 			assembleResidencyTopology(cfg, cityStore, map[string]beads.Store{"frontend": rigStore}, nil, nil),
@@ -3373,6 +3402,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 			}
 
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				"",
 				sessionFrontDoor(cityStore),
 				waitDependencyReaderOver(cityStore, map[string]beads.Store{"frontend": rigStore}),
 				beads.NudgesStore{Store: cityStore},
@@ -4168,6 +4198,7 @@ func TestPrepareWaitWakeState_ResolvesGraphBindingDependencyBeads(t *testing.T) 
 				t.Fatalf("soleBindingResidency: %v", refused)
 			}
 			readyWaitSet, err := prepareWaitWakeStateWithSnapshot(
+				"",
 				sessionFrontDoor(cityStore),
 				newWaitDependencyPlanReader(
 					assembleResidencyTopology(nil, cityStore, map[string]beads.Store{"frontend": rigStore}, bindings, nil),

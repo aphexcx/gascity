@@ -27,6 +27,7 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 		name     string
 		evidence InboundMemberEvidence
 		status   InboundDeliveryStatus
+		terminal bool
 		bytes    int
 		reason   string // substring the reason must contain; "" means the reason must be empty
 	}{
@@ -178,6 +179,7 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 			name:     "landed whole, ownership lost: terminal hold, never redeliver",
 			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(true, expected, runtime.NudgeSubmitOwnershipLost)},
 			status:   InboundDeliveryPending,
+			terminal: true,
 			bytes:    expected,
 			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver",
 		},
@@ -185,6 +187,7 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 			name:     "ownership lost with a fragment: never license replay of unattributable input",
 			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(false, 41, runtime.NudgeSubmitOwnershipLost)},
 			status:   InboundDeliveryPending,
+			terminal: true,
 			bytes:    41,
 			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver",
 		},
@@ -192,6 +195,7 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 			name:     "ownership lost and send path errored: terminal reason survives",
 			evidence: InboundMemberEvidence{ExpectedBytes: expected, NudgeDelivery: evidence(true, expected, runtime.NudgeSubmitOwnershipLost), Err: sendErr},
 			status:   InboundDeliveryPending,
+			terminal: true,
 			bytes:    expected,
 			reason:   "draft ownership lost before confirmation; terminal outcome, do not redeliver; send path errored: " + sendErr.Error(),
 		},
@@ -207,6 +211,9 @@ func TestClassifyInboundMemberTable(t *testing.T) {
 			got := ClassifyInboundMember(tc.evidence)
 			if got.Status != tc.status {
 				t.Fatalf("status = %q, want %q (%+v)", got.Status, tc.status, got)
+			}
+			if got.Terminal != tc.terminal {
+				t.Fatalf("terminal = %t, want %t (%+v)", got.Terminal, tc.terminal, got)
 			}
 			if got.DeliveredBytes != tc.bytes {
 				t.Fatalf("delivered bytes = %d, want %d (%+v)", got.DeliveredBytes, tc.bytes, got)

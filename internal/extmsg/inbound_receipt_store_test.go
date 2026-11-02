@@ -82,6 +82,28 @@ func TestInboundReceiptStoreConcludedEntriesExpireAfterRetention(t *testing.T) {
 	}
 }
 
+func TestInboundReceiptStoreTerminalHoldRetainsDedupUntilExpiry(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	s := newTestReceiptStore(&now)
+	s.BeginFor("c", "ir-lost", "message")
+	s.Conclude("c", "ir-lost", InboundDelivery{
+		ReceiptID: "ir-lost", Status: InboundDeliveryPending, Terminal: true,
+		Members: []InboundDeliveryMember{{SessionID: "s", Status: InboundDeliveryPending, Terminal: true}},
+	})
+	now = now.Add(inboundReceiptRetention - time.Second)
+	prior, claimed := s.ClaimFor("c", "ir-retry", "message")
+	if claimed || prior.State != InboundReceiptConcluded || prior.Delivery == nil || !prior.Delivery.Terminal || !prior.Delivery.Members[0].Terminal {
+		t.Fatalf("terminal hold must conclude and retain dedup: claimed=%t receipt=%+v", claimed, prior)
+	}
+	if got := s.Lookup("c", "ir-retry"); got.State != InboundReceiptUnknown {
+		t.Fatalf("refused retry left a pending receipt: %+v", got)
+	}
+	now = now.Add(2 * time.Second)
+	if got := s.Lookup("c", "ir-lost"); got.State != InboundReceiptUnknown {
+		t.Fatalf("terminal hold must use the concluded receipt retention: %+v", got)
+	}
+}
+
 // A pending record is never expired: the fan-out goroutine behind it is
 // still running, and a record that vanished under it would let a later
 // poll read "unknown" — "nobody is still trying" — for a send that then

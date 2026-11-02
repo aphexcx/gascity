@@ -23,6 +23,7 @@ set -uo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$TEST_DIR/push-gate-lock-lib.sh"
 LOCAL_PARALLEL="$TEST_DIR/test-local-parallel"
+WRAPPER="$TEST_DIR/with-push-gate-slot"
 
 # shellcheck source=./push-gate-lock-lib.sh disable=SC1091
 . "$LIB"
@@ -38,13 +39,22 @@ assert_eq() {
 }
 assert_true()  { if "${@:2}"; then record_pass "$1"; else record_fail "$1" "expected true"; fi; }
 assert_false() { if "${@:2}"; then record_fail "$1" "expected false"; else record_pass "$1"; fi; }
+wait_for_match() {
+    local file="$1" pattern="$2" attempt
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if grep -q "$pattern" "$file" 2>/dev/null; then return 0; fi
+        sleep 0.05
+    done
+    return 1
+}
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
     if [[ "$haystack" == *"$needle"* ]]; then record_pass "$name"
     else record_fail "$name" "missing '$needle' in: $haystack"; fi
 }
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")"
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 SLOTS="$WORK/gate-slots"
 
@@ -112,6 +122,100 @@ CHILD_FREE="$(LIB="$LIB" DIR="$SLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_W
     bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z holder-E; then echo ACQUIRED; else echo DENIED; fi')"
 assert_eq "release.lib_from_child" "$CHILD_FREE" "ACQUIRED"
 push_gate_release_slot "$FD1"
+
+# The public wrapper must share the library's slots, preserve argv and command
+# failures, and keep its lock FD out of the command's descendants.
+WRAP_CITY="$WORK/wrapper-city"
+mkdir -p "$WRAP_CITY/.gc"
+WRAP_SLOTS="$WRAP_CITY/.gc/gate-slots"
+LOCAL_TEST_LOG_DIR="$WORK/retained logs" push_gate_acquire_slot "$WRAP_SLOTS" FD0 "wrapper-holder-A"
+push_gate_acquire_slot "$WRAP_SLOTS" FD1 "wrapper-holder-B"
+CHILD_OUT="$(GC_CITY_PATH="$WRAP_CITY" PUSH_GATE_MAX_WAIT_SECONDS=1 PUSH_GATE_POLL_SECONDS=1 bash "$WRAPPER" -- touch "$WORK/ran-while-busy" 2>&1)"
+CHILD_RC=$?
+assert_eq "wrapper.contention_exits_75" "$CHILD_RC" "75"
+assert_contains "wrapper.names_first_holder" "$CHILD_OUT" "wrapper-holder-A"
+assert_contains "wrapper.names_second_holder" "$CHILD_OUT" "wrapper-holder-B"
+assert_contains "wrapper.names_retained_logs" "$CHILD_OUT" "logs=$WORK/retained logs"
+assert_false "wrapper.does_not_run_command_while_busy" test -e "$WORK/ran-while-busy"
+push_gate_release_slot "$FD0"
+push_gate_release_slot "$FD1"
+CHILD_OUT="$(GC_CITY_PATH="$WRAP_CITY" bash "$WRAPPER" -- bash -c 'printf "<%s>\n" "$@"; exit 23' _ 'a b' '*' 2>&1)"
+CHILD_RC=$?
+assert_eq "wrapper.preserves_command_exit" "$CHILD_RC" "23"
+assert_contains "wrapper.preserves_argv" "$CHILD_OUT" $'<a b>\n<*>'
+assert_true "wrapper.releases_after_failure" flock -n "$WRAP_SLOTS/slot-0.lock" -c 'exit 0'
+CHILD_OUT="$(GC_CITY_PATH="$WRAP_CITY" PUSH_GATE_MAX_CONCURRENT=1 bash "$WRAPPER" -- bash -c '
+    if ( true <&200 ) 2>/dev/null; then echo FD_LEAKED; exit 1; fi
+    if flock -n "$1/slot-0.lock" -c "exit 0"; then echo SLOT_NOT_HELD; exit 1; fi
+    echo HELD_WITHOUT_INHERITED_FD
+' _ "$WRAP_SLOTS" 2>&1)"
+CHILD_RC=$?
+assert_eq "wrapper.command_runs_under_slot" "$CHILD_RC" "0"
+assert_contains "wrapper.severs_fd_inheritance" "$CHILD_OUT" "HELD_WITHOUT_INHERITED_FD"
+
+push_gate_acquire_slot "$WRAP_SLOTS" FD0 "wrapper-wait-holder-A"
+push_gate_acquire_slot "$WRAP_SLOTS" FD1 "wrapper-wait-holder-B"
+GC_CITY_PATH="$WRAP_CITY" PUSH_GATE_MAX_WAIT_SECONDS=10 PUSH_GATE_POLL_SECONDS=1 \
+    bash "$WRAPPER" -- printf '%s\n' AFTER_RELEASE >"$WORK/wrapper-wait.log" 2>&1 &
+WAITER=$!
+assert_true "wrapper.waits_before_release" wait_for_match "$WORK/wrapper-wait.log" 'all 2 slot(s) busy'
+assert_false "wrapper.command_waits_for_release" grep -q AFTER_RELEASE "$WORK/wrapper-wait.log"
+push_gate_release_slot "$FD0"
+wait "$WAITER"
+assert_eq "wrapper.succeeds_after_release" "$?" "0"
+assert_contains "wrapper.reports_acquisition" "$(cat "$WORK/wrapper-wait.log")" 'acquired after wait'
+assert_contains "wrapper.runs_after_release" "$(cat "$WORK/wrapper-wait.log")" AFTER_RELEASE
+push_gate_release_slot "$FD1"
+
+mkfifo "$WORK/command-block"
+GC_CITY_PATH="$WRAP_CITY" bash "$WRAPPER" -- bash -c \
+    'printf "%s\n" "$$" >"$1/command-pid"; read -r line <"$1/command-block"' _ "$WORK" \
+    >"$WORK/wrapper-signal.log" 2>&1 &
+SIGNALLED=$!
+assert_true "wrapper.command_started_before_signal" wait_for_match "$WORK/command-pid" '^[0-9]'
+kill -TERM "$SIGNALLED"
+wait "$SIGNALLED" 2>/dev/null
+assert_eq "wrapper.preserves_signal_status" "$?" "143"
+assert_true "wrapper.signal_releases_slot" flock -n "$WRAP_SLOTS/slot-0.lock" -c 'exit 0'
+if [[ -s "$WORK/command-pid" ]]; then
+    assert_false "wrapper.signal_drains_command" kill -0 "$(cat "$WORK/command-pid")"
+fi
+
+# A command can itself supervise an isolated test group. Its drain must finish
+# before the wrapper escalates against the supervisor. Six seconds here models
+# a five-second shard drain plus scheduling overhead, with a TERM-ignoring test.
+cat >"$WORK/nested-supervisor" <<'SH'
+#!/usr/bin/env bash
+source "$1"
+on_term() {
+    gc_harness_terminate_group "$gc_harness_supervised_pgid" 30
+    trap - TERM
+    kill -TERM $$
+}
+trap on_term TERM
+trap 'gc_harness_terminate_group "$gc_harness_supervised_pgid" 30' EXIT
+gc_harness_run_supervised nested "" 0 -- bash -c \
+    'trap "" TERM; printf "%s\n" "$$" >"$1/nested-pid"; read -r line <"$1/command-block"' _ "$2"
+SH
+GC_CITY_PATH="$WRAP_CITY" bash "$WRAPPER" -- bash "$WORK/nested-supervisor" \
+    "$TEST_DIR/lib/harness-reap.sh" "$WORK" >"$WORK/wrapper-nested.log" 2>&1 &
+NESTED_WRAPPER=$!
+assert_true "wrapper.nested_group_started" wait_for_match "$WORK/nested-pid" '^[0-9]'
+kill -TERM "$NESTED_WRAPPER"
+wait "$NESTED_WRAPPER" 2>/dev/null
+assert_eq "wrapper.nested_signal_status" "$?" "143"
+if [[ -s "$WORK/nested-pid" ]]; then
+    NESTED_PID="$(cat "$WORK/nested-pid")"
+    NESTED_STATE="$(ps -o stat= -p "$NESTED_PID" 2>/dev/null || true)"
+    if [[ -z "$NESTED_STATE" || "$NESTED_STATE" == *Z* ]]; then
+        record_pass "wrapper.nested_group_drained_before_release"
+    else
+        record_fail "wrapper.nested_group_drained_before_release" "test process $NESTED_PID survived in state $NESTED_STATE"
+        # Only this fixture's isolated group; never leave the red repro running.
+        kill -KILL -- -"$NESTED_PID" 2>/dev/null || true
+    fi
+fi
+assert_true "wrapper.nested_signal_releases_slot" flock -n "$WRAP_SLOTS/slot-0.lock" -c 'exit 0'
 
 # ---------------- FD inheritance: a live detached descendant must not pin a slot ----------------
 # scripts/test-local-parallel closes the gate FD before the fan-out so jobs

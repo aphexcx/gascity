@@ -38,6 +38,11 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		t.Fatalf("len(Steps) = %d, want 1 so shell state stays inside one formula step", len(f.Steps))
 	}
 
+	for _, want := range []string{`pytest-of-<user>/pytest-<N>`, `pytest-current`} {
+		if !strings.Contains(f.Description, want) {
+			t.Errorf("formula safety description missing %q", want)
+		}
+	}
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,

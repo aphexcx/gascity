@@ -32,6 +32,10 @@ type Reference struct {
 type Item struct {
 	ID                string     `json:"id"`
 	BeadID            string     `json:"bead_id,omitempty"`
+	OriginID          string     `json:"origin_id,omitempty"`
+	ReplayID          string     `json:"replay_id,omitempty"`
+	ReplayedAt        time.Time  `json:"replayed_at,omitempty"`
+	DismissedAt       time.Time  `json:"dismissed_at,omitempty"`
 	Agent             string     `json:"agent"`
 	SessionID         string     `json:"session_id,omitempty"`
 	ContinuationEpoch string     `json:"continuation_epoch,omitempty"`
@@ -42,6 +46,7 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
+	FirstAttemptAt    time.Time  `json:"first_attempt_at,omitempty"`
 	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
 	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
@@ -49,11 +54,29 @@ type Item struct {
 	DeadAt            time.Time  `json:"dead_at,omitempty"`
 }
 
+// Tombstone preserves terminalization intent after a dead letter's payload expires.
+// Pending repairs have no expiry; repaired receipts remain for DispositionRetention.
+type Tombstone struct {
+	ID             string     `json:"id"`
+	BeadID         string     `json:"bead_id,omitempty"`
+	Agent          string     `json:"agent"`
+	SessionID      string     `json:"session_id,omitempty"`
+	Source         string     `json:"source"`
+	Reference      *Reference `json:"reference,omitempty"`
+	TerminalState  string     `json:"terminal_state"`
+	TerminalReason string     `json:"terminal_reason"`
+	TerminalAt     time.Time  `json:"terminal_at"`
+	DeletedAt      time.Time  `json:"deleted_at"`
+	RepairPending  bool       `json:"repair_pending"`
+	RepairedAt     time.Time  `json:"repaired_at,omitempty"`
+}
+
 // State is the persisted nudge queue snapshot.
 type State struct {
-	Pending  []Item `json:"pending,omitempty"`
-	InFlight []Item `json:"in_flight,omitempty"`
-	Dead     []Item `json:"dead,omitempty"`
+	Pending    []Item      `json:"pending,omitempty"`
+	InFlight   []Item      `json:"in_flight,omitempty"`
+	Dead       []Item      `json:"dead,omitempty"`
+	Tombstones []Tombstone `json:"tombstones,omitempty"`
 
 	// DispatchSkips counts, by reason, how many times the supervisor
 	// dispatch tick's per-session loop has silently skipped a target
@@ -63,6 +86,18 @@ type State struct {
 	// stays visible to a `gc nudge status` invocation running in a
 	// different process than the supervisor that incremented it.
 	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
+}
+
+// Tombstone returns the retained terminalization intent for an expired payload.
+func (state *State) Tombstone(id string) (Tombstone, bool) {
+	if state != nil {
+		for _, item := range state.Tombstones {
+			if item.ID == id {
+				return item, true
+			}
+		}
+	}
+	return Tombstone{}, false
 }
 
 // SortState orders items deterministically inside each queue bucket.
@@ -129,6 +164,9 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 		// Persist the batch identity before any delivery side effect. A process
 		// can exit after pasting but before it records an unconfirmed result.
 		if item.LastAttemptAt.IsZero() {
+			if item.FirstAttemptAt.IsZero() && item.Attempts == 0 {
+				item.FirstAttemptAt = now.UTC()
+			}
 			item.LastAttemptAt = now.UTC()
 		}
 		claimed = append(claimed, item)

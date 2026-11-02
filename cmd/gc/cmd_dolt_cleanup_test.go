@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -700,6 +702,446 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 	if len(r.Reaped.ProtectedPIDs) != 0 {
 		t.Errorf("ProtectedPIDs = %v, want none for os.TempDir()/Test* config", r.Reaped.ProtectedPIDs)
+	}
+}
+
+func TestRunDoltCleanup_PytestBasetemps(t *testing.T) {
+	tempDir := t.TempDir()
+	userRoot := filepath.Join(tempDir, "pytest-of-user")
+	for _, name := range []string{"pytest-7", "pytest-9", "pytest-10"} {
+		if err := os.MkdirAll(filepath.Join(userRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldConfig := filepath.Join(userRoot, "pytest-9", "test_city", "config.yaml")
+	writeExitedPytestOwner(t, filepath.Join(userRoot, "pytest-9"))
+	writePytestDoltConfig(t, oldConfig, filepath.Join(userRoot, "pytest-9"))
+	currentConfig := filepath.Join(userRoot, "pytest-10", "test_city", "config.yaml")
+	procs := []DoltProcInfo{
+		{PID: 101, Argv: []string{"dolt", "sql-server", "--config", oldConfig}, CWDState: procPathStateLive},
+		{PID: 102, Argv: []string{"dolt", "sql-server", "--config", currentConfig}, CWDState: procPathStateLive},
+		{PID: 103, Argv: []string{"dolt", "sql-server", "--config", "/srv/pytest-of-user/pytest-9/config.yaml"}, CWDState: procPathStateLive},
+		{PID: 104, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-8", "config.yaml")}, CWDState: procPathStateDeleted},
+		{PID: 105, Argv: []string{"dolt", "sql-server", "--data-dir", filepath.Dir(currentConfig)}, CWDState: procPathStateLive},
+		{PID: 106, Argv: []string{"dolt", "sql-server", "--config", filepath.Join(userRoot, "pytest-7", "config.yaml")}, CWDState: procPathStateLive},
+	}
+	for i := range procs {
+		procs[i].HostNamespace = true
+	}
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{}, // No process argv is needed to protect the current basetemp.
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+		KillProcess: func(int, syscall.Signal) error {
+			t.Fatal("dry run attempted to kill a process")
+			return nil
+		},
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var report CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	var targets []int
+	for _, target := range report.Reaped.Targets {
+		targets = append(targets, target.PID)
+	}
+	if !equalIntSlice(targets, []int{101, 104}) {
+		t.Errorf("reap targets = %v, want older and deleted basetemps [101 104]", targets)
+	}
+	if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{102, 103, 105, 106}) {
+		t.Errorf("protected = %v, want current/lockless basetemps and non-temp path [102 103 105 106]", report.Reaped.ProtectedPIDs)
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsActiveDataDir(t *testing.T) {
+	tempDir := t.TempDir()
+	root := filepath.Join(tempDir, "TestLive123")
+	for _, configArgs := range []string{"", " --config /tmp/TestOld/config.yaml"} {
+		t.Run(configArgs, func(t *testing.T) {
+			argv := []string{"dolt", "sql-server", "--data-dir", filepath.Join(root, "dolt")}
+			if configArgs != "" {
+				argv = append(argv, "--config", "/tmp/TestOld/config.yaml")
+			}
+			proc := DoltProcInfo{PID: 12345, Argv: argv, StartTimeTicks: 10, CWDState: procPathStateLive}
+			var signals []int
+			var removed []string
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{root},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				RemoveDataDir: func(path string) error {
+					removed = append(removed, path)
+					return nil
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			if len(signals) != 0 || len(removed) != 0 {
+				t.Errorf("active test root: signals=%v, removed=%v; want no mutations", signals, removed)
+			}
+			var report CleanupReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if !equalIntSlice(report.Reaped.ProtectedPIDs, []int{12345}) {
+				t.Errorf("protected = %v, want [12345]", report.Reaped.ProtectedPIDs)
+			}
+		})
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsAmbiguousPSPath(t *testing.T) {
+	line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/TestOwner/config.yaml --data-dir /tmp/TestRun - copy/dolt"
+	proc, ok := parseDoltPSLine(line, nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true,
+		ActiveTestRoots:   []string{},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return nil
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if len(signals) != 0 || len(removed) != 0 {
+		t.Errorf("ambiguous ps path: signals=%v, removed=%v; want no mutations", signals, removed)
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsPytestSymlink(t *testing.T) {
+	for _, traversal := range []string{"direct", "parent"} {
+		t.Run(traversal, func(t *testing.T) {
+			tempDir := t.TempDir()
+			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+			current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+			for _, root := range []string{older, filepath.Join(current, "db")} {
+				if err := os.MkdirAll(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeExitedPytestOwner(t, older)
+			marker := filepath.Join(current, "db", "active-data")
+			writePytestDoltConfig(t, filepath.Join(older, "config.yaml"), older)
+			if err := os.WriteFile(marker, []byte("active"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(older, "link")
+			if err := os.Symlink(current, link); err != nil {
+				t.Fatal(err)
+			}
+			dataDir := filepath.Join(link, "db")
+			if traversal == "parent" {
+				dataDir = link + "/../pytest-10/db"
+			}
+			proc := DoltProcInfo{
+				PID: 12345, HostNamespace: true, CWDState: procPathStateLive, StartTimeTicks: 10,
+				Argv: []string{"dolt", "sql-server", "--config", filepath.Join(older, "config.yaml"), "--data-dir", dataDir},
+			}
+			var signals []int
+			var removed []string
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				RemoveDataDir: func(path string) error {
+					removed = append(removed, path)
+					return os.RemoveAll(path)
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			if len(signals) != 0 || len(removed) != 0 {
+				t.Errorf("redirected pytest path: signals=%v, removed=%v; want no mutations", signals, removed)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Errorf("current run data must remain intact: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunDoltCleanup_ForcePreservesReusedPytestDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	dataDir := filepath.Join(tempDir, "pytest-of-user", "pytest-0", "db")
+	marker := filepath.Join(dataDir, "new-run-data")
+	proc := DoltProcInfo{
+		PID: 12345, HostNamespace: true, CWDState: procPathStateDeleted, StartTimeTicks: 10,
+		Argv: []string{"dolt", "sql-server", "--data-dir", dataDir},
+	}
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(marker, []byte("new run"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return os.RemoveAll(path)
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if !equalIntSlice(signals, []int{12345}) || len(removed) != 0 {
+		t.Errorf("signals=%v, removed=%v; want old server reaped with no directory removal", signals, removed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("new run data must remain intact: %v", err)
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsNativePSDataDir(t *testing.T) {
+	tempDir := t.TempDir()
+	older := filepath.Join(tempDir, "TestOld")
+	live := filepath.Join(tempDir, "TestLive")
+	for _, dir := range []string{older, filepath.Join(live, "db")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(live, "db", "active-data")
+	if err := os.WriteFile(marker, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(older, "link")
+	if err := os.Symlink(live, link); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(link, "db")
+	proc, ok := parseDoltPSLine("12345 Sun May 17 09:31:24 2026 dolt sql-server --data-dir "+dataDir, nil)
+	if !ok {
+		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
+	}
+	// Native verification reveals the complete argv of the PS-discovered server.
+	proc.Argv = []string{"dolt", "sql-server", "--data-dir", dataDir}
+	proc.ArgvUnverified = false
+	var signals []int
+	var removed []string
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(cleanupOptions{
+		FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+		ActiveTestRoots:   []string{live},
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+		KillProcess: func(pid int, _ syscall.Signal) error {
+			signals = append(signals, pid)
+			return syscall.ESRCH
+		},
+		RemoveDataDir: func(path string) error {
+			removed = append(removed, path)
+			return os.RemoveAll(path)
+		},
+		ReapGracePeriod: 1,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	if len(signals) != 0 || len(removed) != 0 {
+		t.Errorf("native PS data-dir: signals=%v, removed=%v; want no cleanup authorization", signals, removed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("live test data must remain intact: %v", err)
+	}
+}
+
+func TestRunDoltCleanup_ForceChecksPytestYAMLDataDir(t *testing.T) {
+	for _, kind := range []string{
+		"owned", "owned-equals", "owned-data", "owned-data-equals",
+		"current", "external", "relative", "default", "malformed", "missing",
+		"oversize", "current-with-argv", "linked", "interpolated", "merged",
+		"padded-config", "padded-config-equals", "padded-data",
+		"leading-config-equals", "leading-data-equals", "option-value",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			tempDir := t.TempDir()
+			older := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+			current := filepath.Join(tempDir, "pytest-of-user", "pytest-10")
+			for _, root := range []string{older, current} {
+				if err := os.MkdirAll(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeExitedPytestOwner(t, older)
+			dataDir := older
+			switch kind {
+			case "current", "current-with-argv":
+				dataDir = current
+			case "external":
+				dataDir = "/srv/active-data"
+			case "relative":
+				dataDir = "relative-data"
+			case "interpolated":
+				// Dolt expands this using the server's environment, which cleanup
+				// cannot assume matches its own. DATA_SUBDIR could be ../pytest-10.
+				dataDir = filepath.Join(older, "${DATA_SUBDIR}")
+			case "linked":
+				dataDir = filepath.Join(older, "linked-data")
+				if err := os.Symlink(current, dataDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			content := fmt.Sprintf("data_dir: %q\n", dataDir)
+			switch kind {
+			case "default":
+				content = "log_level: info\n"
+			case "malformed":
+				content = "data_dir: [\n"
+			case "oversize":
+				content += strings.Repeat(" ", 64*1024)
+			case "merged":
+				// Dolt's YAML parser lets the trailing merge override data_dir.
+				content += "<<: {data_dir: /srv/live}\n"
+			}
+			configPath := filepath.Join(older, "config.yaml")
+			if kind != "missing" {
+				if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			proc := DoltProcInfo{
+				PID: 12345, HostNamespace: true, CWDState: procPathStateLive, StartTimeTicks: 10,
+				Argv: []string{"dolt", "sql-server", "--config", configPath},
+			}
+			if kind == "current-with-argv" {
+				proc.Argv = append(proc.Argv, "--data-dir", older)
+			}
+			switch kind {
+			case "owned-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--config=" + configPath}
+			case "owned-data":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir", older}
+			case "owned-data-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir=" + older}
+			case "leading-config-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--config=\t" + configPath}
+			case "leading-data-equals":
+				proc.Argv = []string{"dolt", "sql-server", "--data-dir=\t" + older}
+			case "option-value":
+				// The apparent config flag is the password option's value.
+				proc.Argv = []string{"dolt", "sql-server", "--mcp-password", "--config=" + configPath}
+			case "padded-config", "padded-config-equals":
+				// Both filenames exist; trimming validates a different config.
+				if err := os.WriteFile(configPath+" ", []byte("data_dir: /srv/live\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				proc.Argv = []string{"dolt", "sql-server", "--config", configPath + " "}
+				if kind == "padded-config-equals" {
+					proc.Argv = []string{"dolt", "sql-server", "--config=" + configPath + " "}
+				}
+			case "padded-data":
+				// A leading space makes this a relative path, outside the
+				// absolute basetemp that the trimmed value would appear to name.
+				proc.Argv = append(proc.Argv, "--data-dir", " "+older)
+			}
+			var signals []int
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			want := 0
+			switch kind {
+			case "owned", "owned-equals", "owned-data", "owned-data-equals":
+				want = 1
+			}
+			if len(signals) != want {
+				t.Errorf("signals=%v, want %d for YAML ownership %s", signals, want, kind)
+			}
+		})
+	}
+}
+
+func TestRunDoltCleanup_ForceProtectsRenamedPytestRoot(t *testing.T) {
+	for _, flag := range []string{"--config", "--data-dir"} {
+		t.Run(flag, func(t *testing.T) {
+			tempDir := t.TempDir()
+			root := filepath.Join(tempDir, "pytest-of-user", "pytest-9")
+			configPath := filepath.Join(root, "config.yaml")
+			writePytestDoltConfig(t, configPath, root)
+			if err := os.WriteFile(filepath.Join(root, ".lock"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(root, filepath.Join(tempDir, "renamed-live-root")); err != nil {
+				t.Fatal(err)
+			}
+			path := configPath
+			if flag == "--data-dir" {
+				path = root
+			}
+			proc := DoltProcInfo{
+				PID: 12345, HostNamespace: true, CWDState: procPathStateLive, StartTimeTicks: 10,
+				Argv: []string{"dolt", "sql-server", flag, path},
+			}
+			var signals []int
+			var stdout, stderr bytes.Buffer
+			code := runDoltCleanup(cleanupOptions{
+				FS: fsys.NewFake(), JSON: true, Force: true, TempDir: tempDir,
+				ActiveTestRoots:   []string{},
+				DiscoverProcesses: func() ([]DoltProcInfo, error) { return []DoltProcInfo{proc}, nil },
+				KillProcess: func(pid int, _ syscall.Signal) error {
+					signals = append(signals, pid)
+					return syscall.ESRCH
+				},
+				ReapGracePeriod: 1,
+			}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+			}
+			if len(signals) != 0 {
+				t.Errorf("renamed live basetemp: signals=%v, want none", signals)
+			}
+		})
 	}
 }
 
