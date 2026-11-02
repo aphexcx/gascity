@@ -79,7 +79,7 @@ func TestBdOwnerLabelDirectoryMatchesScope(t *testing.T) {
 				}
 				return 0
 			}
-			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, dir)
+			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, dir, nil)
 			if got != tt.want || (err != nil) != (tt.wantErr != "") || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("match=%v, err=%v; want match=%v, error containing %q", got, err, tt.want, tt.wantErr)
 			}
@@ -106,13 +106,15 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 		name, metadata string
 		want, wantErr  bool
 		gitRoot        bool
+		foreignGit     bool
 	}{
-		{"no metadata", "", true, false, false},
-		{"no source database", `{}`, true, false, false},
-		{"same database", `{"dolt_database":"target"}`, true, false, false},
-		{"different database", `{"dolt_database":"source"}`, false, false, false},
-		{"invalid metadata", `{`, false, true, false},
-		{"Git root preserves source for both", `{"dolt_database":"source"}`, true, false, true},
+		{"no metadata", "", true, false, false, false},
+		{"no source database", `{}`, true, false, false, false},
+		{"same database", `{"dolt_database":"target"}`, true, false, false, false},
+		{"different database", `{"dolt_database":"source"}`, false, false, false, false},
+		{"invalid metadata", `{`, false, true, false, false},
+		{"Git root preserves source for both", `{"dolt_database":"source"}`, true, false, true, false},
+		{"projected Git environment has no redirect", `{"dolt_database":"source"}`, false, false, true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -134,6 +136,12 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			var env []string
+			if tt.foreignGit {
+				foreign := t.TempDir()
+				mustGitImport(t, foreign, "init", "--quiet")
+				env = append(os.Environ(), "GIT_DIR="+filepath.Join(foreign, ".git"), "GIT_WORK_TREE="+foreign)
+			}
 			run := func(_ context.Context, _ []string, stdout, _ io.Writer) int {
 				if err := json.NewEncoder(stdout).Encode(struct {
 					Path         string `json:"path"`
@@ -145,7 +153,7 @@ func TestBdOwnerLabelConfiguredRedirectDatabase(t *testing.T) {
 				}
 				return 0
 			}
-			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, root)
+			got, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, root, env)
 			if got != tt.want || (err != nil) != tt.wantErr {
 				t.Fatalf("match=%v, err=%v; want match=%v, error=%v", got, err, tt.want, tt.wantErr)
 			}
@@ -178,7 +186,7 @@ func TestBdOwnerLabelDirectoryRejectsSharedDataPath(t *testing.T) {
 				}
 				return 0
 			}
-			matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, filepath.Join(root, "nested"))
+			matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), run, root, filepath.Join(root, "nested"), nil)
 			if err != nil || matches {
 				t.Fatalf("different SQL databases sharing a data directory: match=%v, err=%v", matches, err)
 			}

@@ -779,7 +779,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	override := bdOwnerLabelDatabaseOverride(bdArgs, env, true)
 	if dir := extractBdDirectoryFlag(bdArgs); !override && strings.TrimSpace(dir) != "" {
 		runner := &bdWatchRunner{bdPath: bdPath, dir: target.ScopeRoot, env: env, cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr}
-		matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), runner.run, target.ScopeRoot, dir)
+		matches, err := bdOwnerLabelDirectoryMatchesScope(context.Background(), runner.run, target.ScopeRoot, dir, env)
 		override = !matches
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: cannot verify owner-label store: %v\n", err) //nolint:errcheck // best-effort stderr

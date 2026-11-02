@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,9 +18,10 @@ import (
 // SQL database name.
 // A data path alone can contain several Dolt server databases. The runner must
 // use the create's binary, projected environment, and configured scope cwd.
+// env also supplies that same environment to Git-root discovery.
 // Explicit database overrides are handled before this probe. An unavailable or
 // invalid answer cannot authorize a parent read from the configured store.
-func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, scopeRoot, directory string) (bool, error) {
+func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, scopeRoot, directory string, env []string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	query := func(args []string, result any) error {
@@ -89,7 +91,7 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 	if configured.backend == "dolt" && configured.project != normalizePathForCompare(filepath.Join(scopeRoot, ".beads")) {
 		sourceRoot := scopeRoot
 		sharedSource := false
-		gitRoot, inRepo, err := localGitRepoRoot(scopeRoot)
+		gitRoot, inRepo, err := bdOwnerLabelGitRoot(ctx, scopeRoot, env)
 		if err != nil {
 			return false, fmt.Errorf("resolving configured scope Git root: %w", err)
 		}
@@ -130,4 +132,28 @@ func bdOwnerLabelDirectoryMatchesScope(ctx context.Context, run bdWatchRunFunc, 
 		}
 	}
 	return configured == selected, nil
+}
+
+// bdOwnerLabelGitRoot retains Git-locating variables because bd inherits them
+// too. A repository probe that sanitizes them can identify a different redirect.
+func bdOwnerLabelGitRoot(ctx context.Context, scopeRoot string, env []string) (string, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	cmd.Dir = scopeRoot
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", false, ctx.Err()
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	root := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(root) {
+		return "", false, fmt.Errorf("git returned no absolute root: %q", root)
+	}
+	return root, true, nil
 }
