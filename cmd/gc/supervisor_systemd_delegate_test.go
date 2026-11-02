@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // installFakeDelegatedSystemctl writes an executable `systemctl` shim into a fresh
@@ -54,10 +56,10 @@ func installFakeDelegatedSystemctlWithUnitState(t *testing.T, exitCode int, stde
 // installFakeDelegatedSystemctlHangingVerb installs a shim whose
 // invocation of verb hangs (exec sleep) so tests can prove the CLI
 // bounds the systemctl wait. is-active probes report active; other
-// verbs succeed. Returns the path the shim records its argv into.
-func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) string {
+// verbs succeed.
+func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) {
 	t.Helper()
-	return installFakeDelegatedSystemctlHangingVerbWithUnitState(t, verb, 0)
+	installFakeDelegatedSystemctlHangingVerbWithUnitState(t, verb, 0)
 }
 
 // installFakeDelegatedSystemctlHangingVerbWithUnitState is
@@ -65,7 +67,7 @@ func installFakeDelegatedSystemctlHangingVerb(t *testing.T, verb string) string 
 // `is-active` probes (0 = active, non-zero = inactive), so timeout tests
 // can model whether the post-timeout liveness fallback observes a late
 // start.
-func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) string {
+func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb string, isActiveExit int) {
 	t.Helper()
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "systemctl-args")
@@ -74,7 +76,6 @@ func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb st
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return argsFile
 }
 
 // installFakeDelegatedSystemctlHangingStartAndIsActive installs a shim
@@ -1729,26 +1730,26 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
 
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
-	argsFile := installFakeDelegatedSystemctlHangingVerb(t, "try-restart")
+	// Keep the command alive until cancellation, even if the scheduler stalls
+	// longer than the short sleep used by other subprocess-boundary fixtures.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte("#!/bin/sh\nexec sleep 86400\n"), 0o755); err != nil {
+		t.Fatalf("writing fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	oldJob := delegatedSystemctlJobTimeout
 	delegatedSystemctlJobTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { delegatedSystemctlJobTimeout = oldJob })
 
-	// Model a unit that replaces the supervisor binary only after the CLI's
-	// bounded try-restart wait has elapsed: once the fake systemctl has run
-	// (argsFile exists), keep serving the OLD build for the first few
-	// verification probes, then flip to the new build at the late
-	// replacement point. A verify-once implementation would sample an early
-	// old-build probe and misreport "was not replaced"; the poll must retry
-	// past them to the replacement.
+	// One initial status request precedes try-restart; every later request is
+	// after its timeout. Do not depend on the subprocess writing a file before
+	// cancellation: it may not even be scheduled within the CLI's budget.
 	const oldBuildProbesBeforeReplace = 3
-	var postTimeoutProbes atomic.Int32
+	var healthProbes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		build := "old-build-id"
-		if _, err := os.Stat(argsFile); err == nil {
-			if postTimeoutProbes.Add(1) > oldBuildProbesBeforeReplace {
-				build = "new-build-id"
-			}
+		if healthProbes.Add(1) > 1+oldBuildProbesBeforeReplace {
+			build = "new-build-id"
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":1,"cities_total":0,"cities_running":0}`, build)
@@ -1758,21 +1759,39 @@ func TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds(t 
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	t.Cleanup(func() { supervisorAPIBaseURLHook = oldURL })
 
+	// Three failed verification probes consume exactly three retry intervals.
+	// The fourth probe must see the replacement at the fake deadline. Real
+	// systemctl cancellation remains covered by the subprocess-boundary test.
+	fakeClock := &clock.Fake{Time: time.Unix(0, 0)}
+	oldNow, oldSleep, oldReady := driftVerifyNow, driftVerifySleep, driftReadyTimeout
+	t.Cleanup(func() {
+		driftVerifyNow, driftVerifySleep, driftReadyTimeout = oldNow, oldSleep, oldReady
+	})
+	driftVerifyNow = fakeClock.Now
+	driftReadyTimeout = oldBuildProbesBeforeReplace * supervisorReadyPollInterval
+	retries := 0
+	driftVerifySleep = func(d time.Duration) {
+		retries++
+		if d != supervisorReadyPollInterval || retries > oldBuildProbesBeforeReplace {
+			t.Fatalf("verification retry %d slept %s, want at most %d retries of %s", retries, d, oldBuildProbesBeforeReplace, supervisorReadyPollInterval)
+		}
+		fakeClock.Advance(d)
+	}
+
 	var stdout, stderr bytes.Buffer
-	start := time.Now()
+	start := fakeClock.Now()
 	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
-	elapsed := time.Since(start)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0; stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
 	if !cont {
 		t.Fatalf("cont = false after a verified late replacement; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	if postTimeoutProbes.Load() <= oldBuildProbesBeforeReplace {
-		t.Fatalf("verification made %d post-timeout probes; want > %d (the poll must retry past the early old-build probes to the late replacement)", postTimeoutProbes.Load(), oldBuildProbesBeforeReplace)
+	if probes := healthProbes.Load(); probes < 1+oldBuildProbesBeforeReplace+1 {
+		t.Fatalf("health probes = %d, want initial probe plus %d stale and one replacement probe", probes, oldBuildProbesBeforeReplace)
 	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("delegated try-restart took %s; the job timeout did not bound the systemctl invocation", elapsed)
+	if elapsed := fakeClock.Now().Sub(start); retries != oldBuildProbesBeforeReplace || elapsed != driftReadyTimeout {
+		t.Fatalf("verification used %d retries and %s fake time, want %d retries and %s", retries, elapsed, oldBuildProbesBeforeReplace, driftReadyTimeout)
 	}
 	if !strings.Contains(stdout.String(), " ready (") {
 		t.Errorf("stdout = %q, want ready line after verified late replacement", stdout.String())
