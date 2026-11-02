@@ -765,7 +765,8 @@ export const zInboundDeliveryMember = z.object({
     expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     selector: z.string().optional(),
     session_id: z.string(),
-    status: z.string()
+    status: z.string(),
+    terminal: z.boolean().optional()
 });
 
 export const zInboundDelivery = z.object({
@@ -773,7 +774,8 @@ export const zInboundDelivery = z.object({
     expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     members: z.array(zInboundDeliveryMember).nullish(),
     receipt_id: z.string(),
-    status: z.string()
+    status: z.string(),
+    terminal: z.boolean().optional()
 });
 
 export const zInboundDroppedEventPayload = z.object({

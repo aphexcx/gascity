@@ -280,16 +280,21 @@ func TestExtmsgNotifyMembersReceiptHonorsRuntimeThatDeclinesToVouch(t *testing.T
 // handed to the runtime.
 type unconfirmedSubmitFakeProvider struct {
 	*runtime.Fake
+	submit runtime.NudgeSubmit
 }
 
 func (p *unconfirmedSubmitFakeProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
 	if err := p.Nudge(name, content); err != nil {
 		return runtime.NudgeDelivery{}, err
 	}
+	submit := p.submit
+	if submit == "" {
+		submit = runtime.NudgeSubmitUnconfirmed
+	}
 	return runtime.NudgeDelivery{
 		Delivered: true,
 		Bytes:     len(runtime.FlattenText(content)),
-		Submit:    runtime.NudgeSubmitUnconfirmed,
+		Submit:    submit,
 	}, nil
 }
 
@@ -345,6 +350,61 @@ func TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes(t *te
 	}
 	if got.DeliveredBytes != got.ExpectedBytes || got.ExpectedBytes == 0 {
 		t.Fatalf("aggregate bytes = %d/%d, want equal and non-zero", got.DeliveredBytes, got.ExpectedBytes)
+	}
+}
+
+func TestExtmsgOwnershipLossCarriesTerminalHoldThroughReceipt(t *testing.T) {
+	fs, srv, ref := notifyDeliveryFixture(t)
+	fs.sessionProvider = &unconfirmedSubmitFakeProvider{Fake: fs.sp, submit: runtime.NudgeSubmitOwnershipLost}
+	store := extmsg.NewInboundReceiptStore()
+	srv.inboundReceipts = store
+	msg := extmsg.ExternalInboundMessage{Conversation: ref, ProviderMessageID: "ownership-lost", Text: "keep this draft"}
+	id, _, held := srv.extmsgClaimInboundFanout(&extmsg.InboundResult{}, msg)
+	if held || id == "" {
+		t.Fatal("first fan-out was not claimed")
+	}
+	members, err := srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{
+		Conversation: ref, ActorDisplay: "Taylor", ActorKind: "human", Text: msg.Text, ProviderMessageID: msg.ProviderMessageID,
+	})
+	if err != nil || len(members) != 2 {
+		t.Fatalf("notify: members=%+v err=%v", members, err)
+	}
+	for _, member := range members {
+		if member.Status != extmsg.InboundDeliveryPending || !member.Terminal || !strings.Contains(member.Error, "ownership lost") {
+			t.Fatalf("member = %+v, want terminal pending with original reason", member)
+		}
+	}
+	delivery := extmsg.SummarizeInboundDelivery(id, members)
+	store.Conclude(fs.CityName(), id, delivery)
+	_, duplicate, held := srv.extmsgClaimInboundFanout(&extmsg.InboundResult{Duplicate: true}, msg)
+	if !held || duplicate.ReceiptID != id || !duplicate.Terminal {
+		t.Fatalf("redelivery must retain the terminal receipt without another fan-out: held=%t receipt=%+v", held, duplicate)
+	}
+	sm := &SupervisorMux{inboundReceipts: store}
+	poll, err := sm.humaHandleExtMsgInboundReceipt(context.Background(), &ExtMsgInboundReceiptInput{
+		CityScope: CityScope{CityName: fs.CityName()}, ReceiptID: id,
+	})
+	if err != nil || poll.Body.State != extmsg.InboundReceiptConcluded || poll.Body.Delivery == nil || !poll.Body.Delivery.Terminal {
+		t.Fatalf("poll = %+v err=%v, want concluded terminal hold", poll, err)
+	}
+	// Decode the same wire as both a current reader and a status-only reader.
+	// The latter must still see pending, never a new value that licenses retry.
+	raw, err := json.Marshal(poll.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current extmsg.InboundReceiptStatus
+	if err := json.Unmarshal(raw, &current); err != nil || current.Delivery == nil || !current.Delivery.Terminal || len(current.Delivery.Members) != 2 || !current.Delivery.Members[0].Terminal {
+		t.Fatalf("terminal signal missing on wire: %s err=%v", raw, err)
+	}
+	var legacy struct {
+		State    string `json:"state"`
+		Delivery struct {
+			Status string `json:"status"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil || legacy.State != "concluded" || legacy.Delivery.Status != "pending" {
+		t.Fatalf("legacy hold changed: %s err=%v", raw, err)
 	}
 }
 

@@ -1460,6 +1460,10 @@ export type InboundDelivery = {
     members?: Array<InboundDeliveryMember> | null;
     receipt_id: string;
     status: string;
+    /**
+     * When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds.
+     */
+    terminal?: boolean;
 };
 
 export type InboundDeliveryMember = {
@@ -1470,6 +1474,10 @@ export type InboundDeliveryMember = {
     selector?: string;
     session_id: string;
     status: string;
+    /**
+     * When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds.
+     */
+    terminal?: boolean;
 };
 
 export type InboundDroppedEventPayload = {
