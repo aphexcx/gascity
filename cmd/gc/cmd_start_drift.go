@@ -183,6 +183,13 @@ var driftReadyTimeout = 5 * time.Second
 // pollDelegatedRestartVerified's post-restart verification poll.
 var driftVerifyProbeTimeout = 2 * time.Second
 
+// driftVerifyNow and driftVerifySleep keep the verification retry budget on
+// one clock. Tests can advance that clock once per completed retry.
+var (
+	driftVerifyNow   = time.Now
+	driftVerifySleep = time.Sleep
+)
+
 // restartHelpersHook lets tests substitute a fake set of helpers for
 // the production kill+spawn (or systemctl) side effects.
 var restartHelpersHook = defaultRestartHelpers
@@ -430,7 +437,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 // drifted build — mirror the single-probe checks they replace.
 func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localBuildID string, d systemdDelegation, readyTimeout time.Duration) string {
 	client := newHTTPSupervisorClient(baseURL)
-	deadline := time.Now().Add(readyTimeout)
+	deadline := driftVerifyNow().Add(readyTimeout)
 	var lastMsg string
 	for {
 		vctx, vcancel := context.WithTimeout(context.Background(), driftVerifyProbeTimeout)
@@ -451,10 +458,10 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 				return ""
 			}
 		}
-		if !time.Now().Before(deadline) {
+		if !driftVerifyNow().Before(deadline) {
 			return lastMsg
 		}
-		time.Sleep(supervisorReadyPollInterval)
+		driftVerifySleep(supervisorReadyPollInterval)
 	}
 }
 
