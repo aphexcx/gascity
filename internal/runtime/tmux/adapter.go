@@ -546,7 +546,11 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	p.waitForIdleBeforeNudge(name)
-	return p.NudgeNow(name, content)
+	err := p.NudgeNow(name, content)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return err
 }
 
 // waitForIdleBeforeNudge blocks until the agent reaches an idle boundary, up
@@ -600,6 +604,7 @@ func (p *Provider) flattenNudgeContent(name string, content []runtime.ContentBlo
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
+// A missing session is reported as a typed error so queued sends can retry.
 //
 // Like [Tmux.NudgeSession], it reports an unconfirmed submit as
 // ErrNudgeSubmitUnconfirmed: its callers have no evidence channel and the
@@ -630,12 +635,8 @@ func (p *Provider) NudgeNowDelivered(name string, content []runtime.ContentBlock
 // cannot express: whether the payload actually reached the session, and what
 // the runtime observed about the submit.
 //
-// A missing session or a dead tmux server is reported to Nudge/NudgeNow
-// callers as success (nil), because a routine wake-up should not treat a
-// session that is simply gone as an operational failure. That deliberate
-// leniency is exactly what makes a nil error worthless as delivery evidence,
-// so this returns a zero delivery for those cases while keeping the nil error
-// its callers rely on. See [runtime.NudgeVouchingProvider].
+// Immediate callers retain absence errors. The routine wake-up methods Nudge
+// and NudgeDelivered apply their best-effort absence policy at their boundary.
 func (p *Provider) nudgeNowDelivered(name, message string) (runtime.NudgeDelivery, error) {
 	if used, delivery, err := p.tm.sendHiddenAttachedText(name, message); used {
 		// The hidden-attach transport reports its own evidence (see
@@ -648,10 +649,6 @@ func (p *Provider) nudgeNowDelivered(name, message string) (runtime.NudgeDeliver
 	}
 
 	delivery, err := p.tm.nudgeSessionDelivery(name, message)
-	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		// Nothing was delivered: there was no session to deliver into.
-		return runtime.NudgeDelivery{}, nil
-	}
 	if err != nil {
 		// Whatever evidence the send produced before failing rides along.
 		return delivery, err
@@ -678,7 +675,11 @@ func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (
 		// either, so it cannot be vouched for as delivered.
 		return runtime.NudgeDelivery{}, nil
 	}
-	return p.nudgeNowDelivered(name, message)
+	delivery, err := p.nudgeNowDelivered(name, message)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return runtime.NudgeDelivery{}, nil
+	}
+	return delivery, err
 }
 
 // SetMeta stores a key-value pair in the named session's tmux environment.
@@ -951,7 +952,7 @@ func (p *Provider) Attach(name string) error {
 	if p.cfg.SocketName != "" {
 		args = append(args, "-L", p.cfg.SocketName)
 	}
-	args = append(args, "attach-session", "-t", name)
+	args = append(args, "attach-session", "-t", exactTarget(name))
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1298,8 +1299,8 @@ func (o *tmuxStartOps) setRemainOnExit(name string) error {
 }
 
 func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
-	o.tm.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
-	o.tm.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	o.tm.run("set-option", "-t", exactPaneTarget(name), "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", exactPaneTarget(name), "monitor-activity", "off") //nolint:errcheck
 	return nil
 }
 

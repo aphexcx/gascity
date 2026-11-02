@@ -54,8 +54,8 @@ func TestSessionRoster(t *testing.T) {
 
 	wantCalls := [][]string{
 		{"-u", "-L", "x", "list-sessions", "-F", "#{session_name}|#{session_attached}"},
-		{"-u", "-L", "x", "list-windows", "-t", "sess-a", "-F", "#{window_activity}"},
-		{"-u", "-L", "x", "list-windows", "-t", "sess-b", "-F", "#{window_activity}"},
+		{"-u", "-L", "x", "list-windows", "-t", "=sess-a", "-F", "#{window_activity}"},
+		{"-u", "-L", "x", "list-windows", "-t", "=sess-b", "-F", "#{window_activity}"},
 	}
 	if len(exec.calls) != len(wantCalls) {
 		t.Fatalf("len(calls) = %d, want %d: %v", len(exec.calls), len(wantCalls), exec.calls)
