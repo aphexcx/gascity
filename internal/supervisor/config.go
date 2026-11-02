@@ -80,7 +80,7 @@ type Section struct {
 // when enabled — there is no unverified acknowledgement knob for this listener
 // because its whole purpose is to require grants; a hardened port without a key
 // is a boot error (fail closed). ReadAuthVerifyKey optionally gives this listener
-// its own read gate: city GET/HEAD requests require a signed X-GC-City-Read grant,
+// its own read gate: city GET/HEAD requests require a signed city read grant,
 // and reads outside the per-city API are refused. Without it, the primary's read
 // posture is inherited. The primary listener is never changed by these fields.
 type HardenedListener struct {

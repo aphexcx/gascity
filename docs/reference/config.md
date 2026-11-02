@@ -1076,7 +1076,7 @@ Config holds machine-wide supervisor configuration loaded from ~/.gc/supervisor.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `supervisor` | Section | **yes** |  |  |
+| `supervisor` | Section |  |  |  |
 | `publication` | PublicationConfig |  |  |  |
 | `events` | EventsSection |  |  |  |
 

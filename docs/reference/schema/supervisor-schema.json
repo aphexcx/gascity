@@ -17,9 +17,6 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "supervisor"
-      ],
       "description": "Config holds machine-wide supervisor configuration loaded from ~/.gc/supervisor.toml (or $GC_HOME/supervisor.toml)."
     },
     "EventsSection": {

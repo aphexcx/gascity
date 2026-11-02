@@ -173,6 +173,7 @@ func GenerateSupervisorSchema() (*jsonschema.Schema, error) {
 		return nil, err
 	}
 	s := r.Reflect(&supervisor.Config{})
+	removeRequiredField(s, "Config", "supervisor")
 	s.Title = "Gas City Supervisor Configuration"
 	s.Description = "Schema for supervisor.toml — machine-wide listener, publication, and event settings."
 	return s, nil

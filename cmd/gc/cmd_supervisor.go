@@ -1655,7 +1655,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Supervisor hardened API listening on http://%s (every city mutation requires a signed X-GC-City-Write grant)\n", hardenedAddr) //nolint:errcheck
 		if hardenedBind != "127.0.0.1" && hardenedBind != "localhost" && hardenedBind != "::1" {
 			// Only the hardened read gate closes every read surface on this port.
-			warnUnauthenticatedReadPlane(stderr, hardenedBind, true, hardenedReadAuthInstalled(supCfg))
+			warnHardenedReadPlane(stderr, hardenedBind, supCfg)
 		}
 	}
 
@@ -3018,8 +3018,11 @@ type cityInitProgress struct {
 // Compile-time check that *cityRegistry satisfies api.CityResolver.
 var _ api.CityResolver = (*cityRegistry)(nil)
 
-// hardenedReadAuthInstalled reports whether the validated hardened config gates
-// its entire read surface, for the listener's non-loopback read-plane warning.
-func hardenedReadAuthInstalled(supCfg supervisor.Config) bool {
-	return strings.TrimSpace(supCfg.Supervisor.Hardened.ReadAuthVerifyKey) != ""
+// warnHardenedReadPlane reports the read exposure of a validated non-loopback
+// hardened listener, whose writes always require grants.
+func warnHardenedReadPlane(w io.Writer, bind string, supCfg supervisor.Config) {
+	if strings.TrimSpace(supCfg.Supervisor.Hardened.ReadAuthVerifyKey) != "" {
+		return
+	}
+	warnUnauthenticatedReadPlane(w, bind, true, false)
 }

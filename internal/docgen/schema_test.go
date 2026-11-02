@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/invopop/jsonschema"
+	jsonschemavalidator "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // defProperties extracts the properties map for a named $defs entry.
@@ -79,6 +81,53 @@ func TestGenerateSupervisorSchema(t *testing.T) {
 		if !ok || p.Description == "" {
 			t.Errorf("missing documented property %s", name)
 		}
+	}
+}
+
+func TestGenerateSupervisorSchemaEventExportOnly(t *testing.T) {
+	chdirModuleRootForBazel(t)
+	s, err := GenerateSupervisorSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument any
+	if err := json.Unmarshal(data, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschemavalidator.NewCompiler()
+	const schemaURL = "https://example.invalid/supervisor-schema.json"
+	if err := compiler.AddResource(schemaURL, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	validator, err := compiler.Compile(schemaURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Match the event-export-only configurations accepted by
+	// supervisor.TestLoadConfigEventExportCities, with no [supervisor] table.
+	for _, cities := range []string{"", "cities = []", `cities = ["north", " south "]`} {
+		t.Run(cities, func(t *testing.T) {
+			contents := "[events.export]\nendpoint = \"https://example.invalid/ingest\"\n" + cities
+			var configDocument map[string]any
+			if _, err := toml.Decode(contents, &configDocument); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(configDocument)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var instance any
+			if err := json.Unmarshal(data, &instance); err != nil {
+				t.Fatal(err)
+			}
+			if err := validator.Validate(instance); err != nil {
+				t.Errorf("valid event-export-only configuration rejected: %v", err)
+			}
+		})
 	}
 }
 
