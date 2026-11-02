@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -159,6 +160,20 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 # bd's leading globals sit before the verb (a cluster like -vv, an attached value like -C/path).
 while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
 case "$1" in
+  info|where)
+    # The installed bd reports the effective project and data path, including -C's
+    # precedence over BEADS_DIR. The directory table supplies its measured
+    # nested-store result; other selectors resolve to the projected store.
+    if [ -n "${INFO_EXPECT_BEADS_DIR:-}" ] && [ "$BEADS_DIR" != "$INFO_EXPECT_BEADS_DIR" ]; then exit 1; fi
+    database="${INFO_CONFIGURED_DATABASE:-${BEADS_DIR}/dolt}"
+    if [ "$3" = "--directory" ]; then database="${INFO_SELECTED_DATABASE:-$database}"; fi
+    if [ "${INFO_OMIT_DATABASE_PATH:-}" = "1" ]; then printf '{"path":"%s"}\n' "${database%/*}";
+    else printf '{"path":"%s","database_path":"%s"}\n' "${database%/*}" "$database"; fi ;;
+  dolt)
+    if [ "$2" = "show" ]; then
+      if [ "${INFO_BACKEND:-dolt}" = "dolt" ]; then printf '{"backend":"dolt","database":"demo"}\n';
+      else printf '{"backend":"%s"}\n' "$INFO_BACKEND"; fi
+    fi ;;
   create|new)
     # bd 1.3.1 applies --labels to the bead(s) it creates (and dedups them
     # against a parent's copied labels); the created bead's show reports them
@@ -317,6 +332,11 @@ func TestGcBdCreateStampsTheCreatedBead(t *testing.T) {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tt.args, got, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
+			// Store probes are asserted by the directory-resolution table;
+			// this table checks parent reads and create/stamp ordering.
+			calls = slices.DeleteFunc(calls, func(c string) bool {
+				return strings.HasPrefix(c, "where ") || strings.HasPrefix(c, "dolt show ")
+			})
 			// The create is the first call that is not a read: a child's
 			// parent is read before it, for the owner it carries.
 			createAt := slices.IndexFunc(calls, func(c string) bool { return !strings.HasPrefix(c, "show ") })
@@ -773,8 +793,14 @@ printf '✓ Created issue: demo-1 — t\n'
 				t.Fatalf("doBd = %d; stderr=%q", code, stderr.String())
 			}
 			calls := fakeBdCalls(t, capture)
-			if len(calls) != 1 || calls[0] != tt.wantArgv {
-				t.Fatalf("bd calls = %q, want only the create %q", calls, tt.wantArgv)
+			wantCalls := []string{tt.wantArgv}
+			if extractBdDirectoryFlag(tt.args) != "" {
+				// This fake has no location response: a failed probe must take the
+				// conservative path without any parent read or follow-up stamp.
+				wantCalls = append([]string{"where --json"}, wantCalls...)
+			}
+			if !slices.Equal(calls, wantCalls) {
+				t.Fatalf("bd calls = %q, want %q", calls, wantCalls)
 			}
 			if got := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database"); got != tt.wantNote {
 				t.Fatalf("stderr=%q, owner-label database-selection notice present = %v, want %v", stderr.String(), got, tt.wantNote)
@@ -808,21 +834,127 @@ func TestBdOwnerLabelDatabaseOverride(t *testing.T) {
 	}
 }
 
-func TestGcBdCreateDirectoryWithinOpenedRigKeepsOwner(t *testing.T) {
-	rigDir := t.TempDir()
-	capture := filepath.Join(t.TempDir(), "args")
-	fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
-	t.Setenv("CAPTURE_PATH", capture)
-	t.Setenv("GC_RIG", "")
-	var stdout, stderr bytes.Buffer
-	args := []string{"create", "child", "--parent", "demo-0", "-C" + rigDir}
-	if code := doBd(args, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd = %d: %s", code, stderr.String())
+func TestGcBdCreateDirectoryUsesResolvedStore(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		dir      string
+		override bool
+		backend  string
+		proxied  bool
+	}{
+		{"no selector", "", false, "", false},
+		{"rig root", ".", false, "", false},
+		{"rig beads directory", ".beads", false, "", false},
+		{"subdirectory without a store", "plain", false, "", false},
+		{"empty beads directory", "empty", false, "", false},
+		{"redirected beads directory", "redirect", false, "", false},
+		{"nested store", "nested", true, "", false},
+		{"nested beads directory", "nested/.beads", true, "", false},
+		{"below nested store", "nested/deep", true, "", false},
+		{"non-Dolt configured store", ".", false, "doltlite", false},
+		{"proxied store with alternate root", ".", false, "dolt", true},
+		{"nested proxied store with alternate root", "nested", true, "dolt", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rigDir := t.TempDir()
+			for _, dir := range []string{".beads", "plain", "empty/.beads", "redirect/.beads", "nested/.beads", "nested/deep"} {
+				if err := os.MkdirAll(filepath.Join(rigDir, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(rigDir, "redirect/.beads/redirect"), []byte(filepath.Join(rigDir, ".beads")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("GC_RIG", "work")
+			t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
+			t.Setenv("INFO_EXPECT_BEADS_DIR", filepath.Join(rigDir, ".beads"))
+			t.Setenv("INFO_BACKEND", tt.backend)
+			if tt.proxied {
+				// An alternate sidecar root has no local .beads/dolt, so bd
+				// where reports the workspace but omits database_path.
+				t.Setenv("INFO_OMIT_DATABASE_PATH", "1")
+			}
+			if tt.override {
+				t.Setenv("INFO_SELECTED_DATABASE", filepath.Join(rigDir, "nested/.beads/dolt"))
+			}
+			args := []string{"create", "child", "--parent", "demo-0"}
+			if tt.dir != "" {
+				args = append(args, "-C", filepath.Join(rigDir, tt.dir))
+			}
+			var stdout, stderr bytes.Buffer
+			// Pin the scope so prefix-discovery probes do not mask owner reads.
+			if code := doBd(append([]string{"--rig", "work"}, args...), &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if readParent := slices.Contains(calls, "show --json demo-0"); readParent == tt.override {
+				t.Errorf("parent read = %v, want %v; calls=%q", readParent, !tt.override, calls)
+			}
+			want := strings.Join(args, " ")
+			if !tt.override {
+				want = "create --labels=owner:jadegate " + strings.Join(args[1:], " ")
+			}
+			if !slices.Contains(calls, want) {
+				t.Errorf("bd calls = %q, want create %q", calls, want)
+			}
+			if tt.dir != "" {
+				for _, command := range []string{"where --json", "dolt show --json"} {
+					if !slices.Contains(calls, command) || !slices.Contains(calls, command+" --directory "+filepath.Join(rigDir, tt.dir)) {
+						t.Errorf("missing configured/selected store probes: %q", calls)
+					}
+				}
+			}
+			if tt.override && len(calls) != 5 {
+				t.Errorf("database override should only probe both identities and create, calls=%q", calls)
+			}
+			notice := strings.Contains(stderr.String(), "owner label not applied") && strings.Contains(stderr.String(), "database")
+			if notice != tt.override {
+				t.Errorf("database override notice = %v, want %v; stderr=%q", notice, tt.override, stderr.String())
+			}
+		})
 	}
-	calls := fakeBdCalls(t, capture)
-	want := "create --labels=owner:jadegate child --parent demo-0 -C" + rigDir
-	if !slices.Contains(calls, want) {
-		t.Fatalf("bd calls = %q, want %q", calls, want)
+}
+
+func TestGcBdCreateBlankDirectoryKeepsConfiguredStore(t *testing.T) {
+	for _, directory := range []string{"", " ", "\t", " \t "} {
+		t.Run(fmt.Sprintf("%q", directory), func(t *testing.T) {
+			rigDir, targetDir := t.TempDir(), t.TempDir()
+			beadsDir := filepath.Join(rigDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, data := range map[string]string{
+				"redirect":      targetDir + "\n",
+				"metadata.json": `{"backend":"dolt","dolt_database":"source"}`,
+			} {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			capture := filepath.Join(t.TempDir(), "args")
+			fakeBdCityTestSetup(t, federatedDemoCityTOML+"\n[[rigs]]\nname = \"work\"\npath = \""+rigDir+"\"\nprefix = \"demo\"\n", createFakeBd)
+			t.Setenv("CAPTURE_PATH", capture)
+			t.Setenv("INFO_CONFIGURED_DATABASE", filepath.Join(targetDir, "dolt"))
+			var stdout, stderr bytes.Buffer
+			if code := doBd([]string{"--rig", "work", "create", "child", "--parent", "demo-0", "-C", directory}, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd = %d: %s", code, stderr.String())
+			}
+			calls := fakeBdCalls(t, capture)
+			if !slices.Contains(calls, "show --json demo-0") || !slices.Contains(calls, "create --labels=owner:jadegate child --parent demo-0 -C "+directory) {
+				t.Errorf("blank selector must preserve parent ownership; calls=%q", calls)
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "where ") || strings.HasPrefix(call, "dolt show ") {
+					t.Errorf("blank selector must not probe another store: %q", call)
+				}
+			}
+			if strings.Contains(stderr.String(), "owner label not applied") {
+				t.Errorf("blank selector produced an override notice: %s", stderr.String())
+			}
+		})
 	}
 }
 
