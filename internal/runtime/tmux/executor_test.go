@@ -497,7 +497,7 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 		t.Fatal("expected capture-pane call")
 	}
 	got := fe.calls[0]
-	want := []string{"-u", "capture-pane", "-p", "-t", "=mayor", "-S", "-120"}
+	want := []string{"-u", "capture-pane", "-p", "-t", "=mayor:", "-S", "-120"}
 	if len(got) != len(want) {
 		t.Fatalf("first call = %v, want %v", got, want)
 	}

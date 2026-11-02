@@ -20,7 +20,7 @@ func TestProviderPeekPreservesAttributes(t *testing.T) {
 			if lines > 0 {
 				start = fmt.Sprintf("-%d", lines)
 			}
-			want := []string{"-u", "capture-pane", "-p", "-e", "-t", "=worker", "-S", start}
+			want := []string{"-u", "capture-pane", "-p", "-e", "-t", "=worker:", "-S", start}
 			if len(exec.calls) != 1 || !slices.Equal(exec.calls[0], want) {
 				t.Fatalf("capture calls = %v, want %v", exec.calls, want)
 			}

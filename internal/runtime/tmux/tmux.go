@@ -217,9 +217,13 @@ var validEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Common errors
 var (
-	ErrNoServer           = errors.New("no tmux server running")
-	ErrSessionExists      = errors.New("session already exists")
-	ErrSessionNotFound    = errors.New("session not found")
+	ErrNoServer        = errors.New("no tmux server running")
+	ErrSessionExists   = errors.New("session already exists")
+	ErrSessionNotFound = errors.New("session not found")
+	// ErrWindowNotFound identifies a missing window without implying session absence.
+	ErrWindowNotFound = errors.New("window not found")
+	// ErrPaneNotFound identifies a missing pane without implying session absence.
+	ErrPaneNotFound       = errors.New("pane not found")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
 	// ErrNudgeSubmitUnconfirmed indicates the submit Enter was handed to tmux
@@ -472,6 +476,17 @@ func exactTarget(target string) string {
 	return "=" + target
 }
 
+// exactPaneTarget qualifies session names for pane/window commands, which
+// recognize the exact-session prefix only before a colon. Explicit pane/window
+// selectors and tmux IDs retain their original meaning.
+func exactPaneTarget(target string) string {
+	target = exactTarget(target)
+	if strings.HasPrefix(target, "=") && !strings.Contains(target, ":") {
+		return target + ":"
+	}
+	return target
+}
+
 // wrapError wraps tmux errors with context.
 func wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
@@ -492,9 +507,14 @@ func wrapError(err error, stderr string, args []string) error {
 	}
 	if strings.Contains(stderr, "session not found") ||
 		strings.Contains(stderr, "no such session") ||
-		strings.Contains(stderr, "can't find session") ||
-		strings.Contains(stderr, "can't find pane") {
+		strings.Contains(stderr, "can't find session") {
 		return ErrSessionNotFound
+	}
+	if strings.Contains(stderr, "no such window") || strings.Contains(stderr, "can't find window") {
+		return ErrWindowNotFound
+	}
+	if strings.Contains(stderr, "no such pane") || strings.Contains(stderr, "can't find pane") {
+		return ErrPaneNotFound
 	}
 
 	if stderr != "" {
@@ -582,7 +602,7 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	// tmux 3.3+ sets window-size=manual on detached sessions, locking them
 	// at 80x24 even after a client attaches. Reset to "latest" so the window
 	// adapts to the largest attached client.
-	t.run("set-option", "-wt", exactTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
+	t.run("set-option", "-wt", exactPaneTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
 	return nil
 }
 
@@ -610,7 +630,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	}
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
-	t.run("set-option", "-wt", exactTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
+	t.run("set-option", "-wt", exactPaneTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
 	return nil
 }
 
@@ -793,7 +813,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
-	t.run("set-option", "-wt", exactTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
+	t.run("set-option", "-wt", exactPaneTarget(name), "window-size", "latest") //nolint:errcheck // best-effort
 	return nil
 }
 
@@ -1591,11 +1611,11 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 // a copy-mode guard must never abort delivery on a pane that simply is not in
 // a mode.
 func (t *Tmux) cancelCopyModeIfParked(session string) {
-	inMode, err := t.run("display-message", "-t", exactTarget(session), "-p", "#{pane_in_mode}")
+	inMode, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{pane_in_mode}")
 	if err != nil || strings.TrimSpace(inMode) != "1" {
 		return
 	}
-	_, _ = t.run("send-keys", "-t", exactTarget(session), "-X", "cancel")
+	_, _ = t.run("send-keys", "-t", exactPaneTarget(session), "-X", "cancel")
 }
 
 // SendKeys sends keystrokes to a session and presses Enter.
@@ -1618,7 +1638,7 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
 	// agent that never actually responds. See discountPokeActivity.
 	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", exactTarget(session), "-l", keys); err != nil {
+	if _, err := t.run("send-keys", "-t", exactPaneTarget(session), "-l", keys); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1626,13 +1646,13 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
 		time.Sleep(time.Duration(debounceMs) * time.Millisecond)
 	}
 	// Send Enter separately - more reliable than appending to send-keys
-	_, err := t.run("send-keys", "-t", exactTarget(session), "Enter")
+	_, err := t.run("send-keys", "-t", exactPaneTarget(session), "Enter")
 	return err
 }
 
 // SendKeysRaw sends keystrokes without adding Enter.
 func (t *Tmux) SendKeysRaw(session, keys string) error {
-	_, err := t.run("send-keys", "-t", exactTarget(session), keys)
+	_, err := t.run("send-keys", "-t", exactPaneTarget(session), keys)
 	return err
 }
 
@@ -1642,7 +1662,7 @@ func (t *Tmux) SendKeysRaw(session, keys string) error {
 // The delay parameter controls how long to wait after clearing before sending (ms).
 func (t *Tmux) SendKeysReplace(session, keys string, clearDelayMs int) error {
 	// Send Ctrl-U to clear any pending input on the line
-	if _, err := t.run("send-keys", "-t", exactTarget(session), "C-u"); err != nil {
+	if _, err := t.run("send-keys", "-t", exactPaneTarget(session), "C-u"); err != nil {
 		return err
 	}
 
@@ -1707,7 +1727,7 @@ func releaseNudgeLock(session string) {
 
 // IsSessionAttached returns true if the session has any clients attached.
 func (t *Tmux) IsSessionAttached(target string) bool {
-	attached, err := t.run("display-message", "-t", exactTarget(target), "-p", "#{session_attached}")
+	attached, err := t.run("display-message", "-t", exactPaneTarget(target), "-p", "#{session_attached}")
 	return err == nil && attached == "1"
 }
 
@@ -1723,9 +1743,9 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 func (t *Tmux) WakePane(target string) {
 	// Resize pane down by 1 row, then up by 1 row
 	// This triggers SIGWINCH without changing the final pane size
-	_, _ = t.run("resize-pane", "-t", exactTarget(target), "-y", "-1")
+	_, _ = t.run("resize-pane", "-t", exactPaneTarget(target), "-y", "-1")
 	time.Sleep(50 * time.Millisecond)
-	_, _ = t.run("resize-pane", "-t", exactTarget(target), "-y", "+1")
+	_, _ = t.run("resize-pane", "-t", exactPaneTarget(target), "-y", "+1")
 }
 
 // WakePaneIfDetached triggers a SIGWINCH only if the session is detached.
@@ -1799,7 +1819,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	// hook is still caught; an empty channel (set-hook failed) falls back to the
 	// legacy poll.
 	channel := fmt.Sprintf("gc-hidden-attach-%d", t.hiddenAttachSeq.Add(1))
-	if _, err := t.run("set-hook", "-t", exactTarget(target), "client-attached", "wait-for -S "+channel); err != nil {
+	if _, err := t.run("set-hook", "-t", exactPaneTarget(target), "client-attached", "wait-for -S "+channel); err != nil {
 		channel = ""
 	}
 	client := &hiddenAttachClient{
@@ -1928,7 +1948,7 @@ func (t *Tmux) CloseHiddenAttachClient(target string) {
 	if client.channel != "" {
 		// Remove the client-attached hook armed for this client. Best-effort: a
 		// killed session drops its hooks with it.
-		_, _ = t.run("set-hook", "-u", "-t", exactTarget(target), "client-attached")
+		_, _ = t.run("set-hook", "-u", "-t", exactPaneTarget(target), "client-attached")
 	}
 	client.cancel()
 	// Close the pipe immediately after canceling — never wait on writeMu. A
@@ -2213,7 +2233,7 @@ func (t *Tmux) pasteLiteralText(target, text string) (int, error) {
 	// raw-mode TUI with the mode enabled, the payload arrives as
 	// ESC[200~ ... ESC[201~; against a pane that never requested the mode
 	// tmux omits the markers, so this is safe for non-TUI panes too.
-	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", exactTarget(target)); err != nil {
+	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", exactPaneTarget(target)); err != nil {
 		return 0, fmt.Errorf("pasting tmux buffer: %w", err)
 	}
 	loaded = false
@@ -2664,7 +2684,7 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 		if i > 0 {
 			time.Sleep(nudgeSubmitKeySettle)
 		}
-		if _, err := t.run("send-keys", "-t", exactTarget(target), key); err != nil {
+		if _, err := t.run("send-keys", "-t", exactPaneTarget(target), key); err != nil {
 			return err
 		}
 	}
@@ -2795,7 +2815,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		// attachment cannot revoke it. Without confirmation, losing ownership
 		// ends retries: a subsequent empty composer must not invite a new paste.
 		if resumeOwnedDraft && !submitted && delivery.Submit != runtime.NudgeSubmitOwnershipLost {
-			stored, err := t.run("show-options", "-p", "-qv", "-t", exactTarget(target), nudgeDraftPayloadOption)
+			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 			if ownershipLost || err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
 				log.Printf("tmux nudge: cannot retain draft ownership for %q: %v", target, err)
 				delivery.Submit = runtime.NudgeSubmitOwnershipLost
@@ -2806,7 +2826,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			log.Printf("tmux nudge: target=%q digest=%s reason=draft_ownership_lost; draft preserved, automatic replay stopped", target, runtime.NudgePayloadDigest(message))
 		}
 		if submitted {
-			if _, err := t.run("set-option", "-p", "-t", exactTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
 			}
 		}
@@ -2828,7 +2848,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	idleBeforePaste := false
 	resumeDraft := false
 	if verifySubmit {
-		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 		if err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("reading composer before nudge to %q: %w", target, err)
 		}
@@ -2853,7 +2873,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
 				}
-				stored, err := t.run("show-options", "-p", "-qv", "-t", exactTarget(target), nudgeDraftPayloadOption)
+				stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
 				}
@@ -2863,7 +2883,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 					}
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
 				}
-				attached, err := t.run("display-message", "-t", exactTarget(session), "-p", "#{session_attached}")
+				attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
 				}
@@ -2871,7 +2891,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
 				}
 				if !collapsed {
-					widthText, err := t.run("display-message", "-p", "-t", exactTarget(target), "#{pane_width}")
+					widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 					if err != nil {
 						return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
 					}
@@ -2886,7 +2906,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 				resumeOwnedDraft = true
 			}
 			resumeDraft = true
-		} else if _, err := t.run("set-option", "-p", "-t", exactTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
@@ -2897,7 +2917,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// draft gets a submit-only retry; other nonempty drafts defer the nudge.
 	// Other families retain their replacement behavior on detached panes.
 	if !verifySubmit && !t.IsSessionAttached(session) {
-		if _, err := t.run("send-keys", "-t", exactTarget(target), "C-u"); err != nil {
+		if _, err := t.run("send-keys", "-t", exactPaneTarget(target), "C-u"); err != nil {
 			return runtime.NudgeDelivery{}, err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -2957,7 +2977,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// must not synthesize it for them.
 	if t.shouldSendEscapeBeforeEnter(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
-		_, _ = t.run("send-keys", "-t", exactTarget(target), "Escape")
+		_, _ = t.run("send-keys", "-t", exactPaneTarget(target), "Escape")
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -3180,7 +3200,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 	// 3. See NudgeSession for why Escape is provider-specific.
 	if t.shouldSendEscapeBeforeEnter(pane) {
-		_, _ = t.run("send-keys", "-t", exactTarget(pane), "Escape")
+		_, _ = t.run("send-keys", "-t", exactPaneTarget(pane), "Escape")
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -3279,7 +3299,7 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 		func(lines int) (string, error) { return t.CapturePane(sess, lines) },
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", exactTarget(sess), k); err != nil {
+				if _, err := t.run("send-keys", "-t", exactPaneTarget(sess), k); err != nil {
 					return err
 				}
 			}
@@ -3328,7 +3348,7 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	_, _ = dismissModelSwitchModal(content,
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", exactTarget(target), k); err != nil {
+				if _, err := t.run("send-keys", "-t", exactPaneTarget(target), k); err != nil {
 					return err
 				}
 			}
@@ -3382,7 +3402,7 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	}
 	sendKeys := func(keys ...string) error {
 		for _, k := range keys {
-			if _, err := t.run("send-keys", "-t", exactTarget(target), k); err != nil {
+			if _, err := t.run("send-keys", "-t", exactPaneTarget(target), k); err != nil {
 				return err
 			}
 		}
@@ -3534,7 +3554,7 @@ func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
 // a pane ID (e.g., "%5"), uses it directly.
 func (t *Tmux) GetPanePID(target string) (string, error) {
 	tmuxTarget := primaryPaneTarget(target)
-	out, err := t.run("display-message", "-t", exactTarget(tmuxTarget), "-p", "#{pane_pid}")
+	out, err := t.run("display-message", "-t", exactPaneTarget(tmuxTarget), "-p", "#{pane_pid}")
 	if err != nil {
 		return "", err
 	}
@@ -3596,7 +3616,7 @@ func (t *Tmux) capturePaneProcessKillPlan(target string, exclude map[int]bool) (
 // When target is a session name, pane 0 is queried explicitly.
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	tmuxTarget := primaryPaneTarget(target)
-	out, err := t.run("display-message", "-t", exactTarget(tmuxTarget), "-p", "#{pane_dead}")
+	out, err := t.run("display-message", "-t", exactPaneTarget(tmuxTarget), "-p", "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
@@ -3621,7 +3641,7 @@ func (t *Tmux) PaneDeadInfo(session string) (status, signal string) {
 	if !strings.HasPrefix(session, "%") {
 		target = session + ":^.0"
 	}
-	out, err := t.run("display-message", "-t", exactTarget(target), "-p", "#{pane_dead_status}|#{pane_dead_signal}")
+	out, err := t.run("display-message", "-t", exactPaneTarget(target), "-p", "#{pane_dead_status}|#{pane_dead_signal}")
 	if err != nil {
 		return "", ""
 	}
@@ -4022,7 +4042,7 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 
 // CapturePane captures the visible content of a pane.
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
-	content, err := t.run("capture-pane", "-p", "-t", exactTarget(session), "-S", fmt.Sprintf("-%d", lines))
+	content, err := t.run("capture-pane", "-p", "-t", exactPaneTarget(session), "-S", fmt.Sprintf("-%d", lines))
 	return content, err
 }
 
@@ -4034,7 +4054,7 @@ func (t *Tmux) CapturePaneWithAttributes(session string, lines int) (string, err
 	if lines > 0 {
 		start = fmt.Sprintf("-%d", lines)
 	}
-	return t.run("capture-pane", "-p", "-e", "-t", exactTarget(session), "-S", start)
+	return t.run("capture-pane", "-p", "-e", "-t", exactPaneTarget(session), "-S", start)
 }
 
 // CapturePaneJoined captures the visible content of a pane with wrapped lines
@@ -4047,12 +4067,12 @@ func (t *Tmux) CapturePaneWithAttributes(session string, lines int) (string, err
 // text for a known string want this variant; callers that reason about the
 // visible layout want the plain one.
 func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
-	return t.run("capture-pane", "-p", "-J", "-t", exactTarget(session), "-S", fmt.Sprintf("-%d", lines))
+	return t.run("capture-pane", "-p", "-J", "-t", exactPaneTarget(session), "-S", fmt.Sprintf("-%d", lines))
 }
 
 // CapturePaneAll captures all scrollback history.
 func (t *Tmux) CapturePaneAll(session string) (string, error) {
-	return t.run("capture-pane", "-p", "-t", exactTarget(session), "-S", "-")
+	return t.run("capture-pane", "-p", "-t", exactPaneTarget(session), "-S", "-")
 }
 
 // CapturePaneLines captures the last N lines of a pane as a slice.
@@ -4163,7 +4183,7 @@ type SessionInfo struct {
 func (t *Tmux) DisplayMessage(session, message string, durationMs int) error {
 	// Set display time temporarily, show message, then restore
 	// Use -d flag for duration in tmux 2.9+
-	_, err := t.run("display-message", "-t", exactTarget(session), "-d", fmt.Sprintf("%d", durationMs), message)
+	_, err := t.run("display-message", "-t", exactPaneTarget(session), "-d", fmt.Sprintf("%d", durationMs), message)
 	return err
 }
 
@@ -4911,7 +4931,7 @@ func (t *Tmux) GetSessionInfo(name string) (*SessionInfo, error) {
 
 // ApplyTheme sets the status bar style for a session.
 func (t *Tmux) ApplyTheme(session string, theme Theme) error {
-	_, err := t.run("set-option", "-t", exactTarget(session), "status-style", theme.Style())
+	_, err := t.run("set-option", "-t", exactPaneTarget(session), "status-style", theme.Style())
 	return err
 }
 
@@ -4939,10 +4959,10 @@ func (t *Tmux) SetStatusFormat(session, rig, worker, role string) error {
 		left = fmt.Sprintf("%s %s ", icon, session)
 	}
 
-	if _, err := t.run("set-option", "-t", exactTarget(session), "status-left-length", "25"); err != nil {
+	if _, err := t.run("set-option", "-t", exactPaneTarget(session), "status-left-length", "25"); err != nil {
 		return err
 	}
-	_, err := t.run("set-option", "-t", exactTarget(session), "status-left", left)
+	_, err := t.run("set-option", "-t", exactPaneTarget(session), "status-left", left)
 	return err
 }
 
@@ -4957,14 +4977,14 @@ func (t *Tmux) SetDynamicStatus(session string) error {
 	// gt status-line reads env vars and mail to build the status
 	right := fmt.Sprintf(`#(gt status-line --session=%s 2>/dev/null) %%H:%%M`, session)
 
-	if _, err := t.run("set-option", "-t", exactTarget(session), "status-right-length", "80"); err != nil {
+	if _, err := t.run("set-option", "-t", exactPaneTarget(session), "status-right-length", "80"); err != nil {
 		return err
 	}
 	// Set faster refresh for more responsive status
-	if _, err := t.run("set-option", "-t", exactTarget(session), "status-interval", "5"); err != nil {
+	if _, err := t.run("set-option", "-t", exactPaneTarget(session), "status-interval", "5"); err != nil {
 		return err
 	}
-	_, err := t.run("set-option", "-t", exactTarget(session), "status-right", right)
+	_, err := t.run("set-option", "-t", exactPaneTarget(session), "status-right", right)
 	return err
 }
 
@@ -5003,12 +5023,12 @@ func (t *Tmux) ConfigureGasTownSession(session string, theme Theme, rig, worker,
 // and dragging to resize panes. Hold Shift for native terminal text selection.
 // Also enables clipboard integration so copied text goes to system clipboard.
 func (t *Tmux) EnableMouseMode(session string) error {
-	if _, err := t.run("set-option", "-t", exactTarget(session), "mouse", "on"); err != nil {
+	if _, err := t.run("set-option", "-t", exactPaneTarget(session), "mouse", "on"); err != nil {
 		return err
 	}
 	// Enable clipboard integration with terminal (OSC 52)
 	// This allows copying text to system clipboard when selecting with mouse
-	_, err := t.run("set-option", "-t", exactTarget(session), "set-clipboard", "on")
+	_, err := t.run("set-option", "-t", exactPaneTarget(session), "set-clipboard", "on")
 	return err
 }
 
@@ -5047,7 +5067,7 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // This is used for "hot reload" of agent sessions - instantly restart in place.
 // The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
 func (t *Tmux) RespawnPane(pane, command string) error {
-	_, err := t.run("respawn-pane", "-k", "-t", exactTarget(pane), t.wrapPaneCommand(command))
+	_, err := t.run("respawn-pane", "-k", "-t", exactPaneTarget(pane), t.wrapPaneCommand(command))
 	return err
 }
 
@@ -5055,7 +5075,7 @@ func (t *Tmux) RespawnPane(pane, command string) error {
 // in the specified working directory. Use this when the pane's current working
 // directory may have been deleted.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
-	args := []string{"respawn-pane", "-k", "-t", exactTarget(pane)}
+	args := []string{"respawn-pane", "-k", "-t", exactPaneTarget(pane)}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
@@ -5068,7 +5088,7 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // This resets copy-mode display from [0/N] to [0/0].
 // The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
 func (t *Tmux) ClearHistory(pane string) error {
-	_, err := t.run("clear-history", "-t", exactTarget(pane))
+	_, err := t.run("clear-history", "-t", exactPaneTarget(pane))
 	return err
 }
 
@@ -5081,7 +5101,7 @@ func (t *Tmux) SetRemainOnExit(pane string, on bool) error {
 	if !on {
 		value = "off"
 	}
-	_, err := t.run("set-option", "-t", exactTarget(pane), "remain-on-exit", value)
+	_, err := t.run("set-option", "-t", exactPaneTarget(pane), "remain-on-exit", value)
 	return err
 }
 
@@ -5373,7 +5393,7 @@ func (t *Tmux) SetAgentsBinding(_ string) error {
 // GetSessionCreatedUnix returns the Unix timestamp when a session was created.
 // Returns 0 if the session doesn't exist or can't be queried.
 func (t *Tmux) GetSessionCreatedUnix(session string) (int64, error) {
-	out, err := t.run("display-message", "-t", exactTarget(session), "-p", "#{session_created}")
+	out, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_created}")
 	if err != nil {
 		return 0, err
 	}
@@ -5400,7 +5420,7 @@ func CurrentSessionName() string {
 	var out []byte
 	var err error
 	if pane != "" {
-		out, err = exec.Command("tmux", "display-message", "-t", exactTarget(pane), "-p", "#{session_name}").Output()
+		out, err = exec.Command("tmux", "display-message", "-t", exactPaneTarget(pane), "-p", "#{session_name}").Output()
 	} else {
 		out, err = exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
 	}
@@ -5465,7 +5485,7 @@ func (t *Tmux) SetPaneDiedHook(session, agentID string) error {
 		agentID, session)
 
 	// Set the hook on this specific session
-	_, err := t.run("set-hook", "-t", exactTarget(session), "pane-died", hookCmd)
+	_, err := t.run("set-hook", "-t", exactPaneTarget(session), "pane-died", hookCmd)
 	return err
 }
 
@@ -5489,7 +5509,7 @@ func (t *Tmux) SetAutoRespawnHook(session string) error {
 	}
 
 	// Sanitize session name for shell safety
-	safeSession := strings.ReplaceAll(exactTarget(session), "'", "'\\''")
+	safeSession := strings.ReplaceAll(exactPaneTarget(session), "'", "'\\''")
 
 	// Hook command: wait, respawn, then re-enable remain-on-exit
 	// IMPORTANT: respawn-pane automatically resets remain-on-exit to off!
@@ -5498,7 +5518,7 @@ func (t *Tmux) SetAutoRespawnHook(session string) error {
 	hookCmd := fmt.Sprintf(`run-shell "sleep 3 && tmux respawn-pane -k -t '%s' && tmux set-option -t '%s' remain-on-exit on"`, safeSession, safeSession)
 
 	// Set the hook on this specific session
-	_, err := t.run("set-hook", "-t", exactTarget(session), "pane-died", hookCmd)
+	_, err := t.run("set-hook", "-t", exactPaneTarget(session), "pane-died", hookCmd)
 	if err != nil {
 		return fmt.Errorf("setting pane-died hook: %w", err)
 	}

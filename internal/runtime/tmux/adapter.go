@@ -1298,8 +1298,8 @@ func (o *tmuxStartOps) setRemainOnExit(name string) error {
 }
 
 func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
-	o.tm.run("set-option", "-t", exactTarget(name), "mouse", "off")             //nolint:errcheck
-	o.tm.run("set-option", "-wt", exactTarget(name), "monitor-activity", "off") //nolint:errcheck
+	o.tm.run("set-option", "-t", exactPaneTarget(name), "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", exactPaneTarget(name), "monitor-activity", "off") //nolint:errcheck
 	return nil
 }
 
