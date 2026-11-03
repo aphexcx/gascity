@@ -130,6 +130,8 @@ cmd_gc_integration_tests=(
   TestCmdStopRealTmuxPendingCreation
   TestCmdStopRealTmuxUnreachableServer
   TestCmdStopRealTmuxWithoutConfiguredAgents
+  TestCmdStopSubprocessChildHelper
+  TestCmdStopSubprocessPersistedIdentity
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
