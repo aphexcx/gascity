@@ -31,12 +31,19 @@ func fakeGCBin(t *testing.T, body string) (binDir, logPath string) {
 // makes the default-recipient assertion read the host's routing rather than
 // the script's own default.
 var escalationEnvKeys = map[string]struct{}{
-	"GC_ESCALATION_RECIPIENT":       {},
-	"GC_ESCALATE_SEND_TIMEOUT_SECS": {},
+	"GC_ESCALATION_RECIPIENT":            {},
+	"GC_ESCALATE_SEND_TIMEOUT_SECS":      {},
+	"GC_ESCALATE_TIMEOUT_IS_UNCONFIRMED": {},
 }
 
 func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error) {
 	t.Helper()
+	cmd := escalateCommand(binDir, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func escalateCommand(binDir string, extraEnv ...string) *exec.Cmd {
 	cmd := exec.Command("bash", escalateScriptPath, "--subject", "Dolt backup: 1/2 databases failed to sync [MEDIUM]", "--message", "Failed databases: hq(sync failed)")
 	inherited := os.Environ()
 	env := make([]string, 0, len(inherited)+1+len(extraEnv))
@@ -51,8 +58,7 @@ func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error
 	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	env = append(env, extraEnv...)
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return cmd
 }
 
 // TestEscalateWakesAnAgentRecipient pins that an escalation addressed to an
@@ -114,14 +120,52 @@ func TestEscalateDoesNotNotifyTheOperatorInbox(t *testing.T) {
 // message, and reporting failure would make a caller retry a message that
 // landed.
 func TestEscalateSurvivesAHangingWake(t *testing.T) {
-	if _, err := exec.LookPath("timeout"); err != nil {
+	realTimeout, err := exec.LookPath("timeout")
+	if err != nil {
 		t.Skipf("timeout(1) not available: %v", err)
 	}
-	binDir, logPath := fakeGCBin(t, "sleep 30\nexit 0\n")
+	binDir, logPath := fakeGCBin(t, "printf 'ready\\n' >&4\nexec sleep 30\n")
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readyRead.Close(); _ = readyWrite.Close() })
+	// This double expires only after gc has logged its send. The real timeout
+	// below is a readiness watchdog, not the one-second behavior being tested.
+	// Its failure must not masquerade as the injected timeout result.
+	const timeoutDouble = `#!/bin/sh
+if [ "$1" != 1 ]; then
+    echo "unexpected send timeout: $1" >&2
+    exit 125
+fi
+shift
+"$GC_TEST_REAL_TIMEOUT" --kill-after=1 30 sh -c '
+    "$@" 3<&- &
+    child=$!
+    trap '\''kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :'\'' EXIT
+    trap '\''exit 125'\'' TERM
+    IFS= read -r ready <&3 || exit 125
+    [ "$ready" = ready ] || exit 125
+    exit 42
+' timeout-double "$@"
+result=$?
+if [ "$result" = 42 ]; then
+    exit 124
+fi
+echo "fake gc readiness failed: $result" >&2
+exit 125
+`
+	if err := os.WriteFile(filepath.Join(binDir, "timeout"), []byte(timeoutDouble), 0o755); err != nil {
+		t.Fatalf("write timeout double: %v", err)
+	}
 
-	out, err := runEscalate(t, binDir,
+	cmd := escalateCommand(binDir,
+		"GC_TEST_REAL_TIMEOUT="+realTimeout,
 		"GC_ESCALATION_RECIPIENT=local-core.manager",
 		"GC_ESCALATE_SEND_TIMEOUT_SECS=1")
+	cmd.ExtraFiles = []*os.File{readyRead, readyWrite}
+	output, err := cmd.CombinedOutput()
+	out := string(output)
 	if err != nil {
 		t.Fatalf("a hung wake must not fail the escalation: %v\n%s", err, out)
 	}
@@ -135,5 +179,24 @@ func TestEscalateSurvivesAHangingWake(t *testing.T) {
 	}
 	if !strings.Contains(string(logged), "mail send local-core.manager --notify") {
 		t.Fatalf("the send must still have been attempted:\n%s", logged)
+	}
+}
+
+// TestEscalateRealTimeoutBoundsCommand owns the real timeout boundary. A
+// deadline can expire before gc starts; send ordering belongs to the ready
+// fixture above, while this proof requires the actual timeout to stop a hang.
+func TestEscalateRealTimeoutBoundsCommand(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skipf("timeout(1) not available: %v", err)
+	}
+	binDir, _ := fakeGCBin(t, "exec sleep 30\n")
+	out, err := runEscalate(t, binDir,
+		"GC_ESCALATION_RECIPIENT=local-core.manager",
+		"GC_ESCALATE_SEND_TIMEOUT_SECS=1")
+	if err != nil {
+		t.Fatalf("a hung command must not fail the escalation: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "wake exceeded 1s") {
+		t.Fatalf("real timeout must bound the command:\n%s", out)
 	}
 }
