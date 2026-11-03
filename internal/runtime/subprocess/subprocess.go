@@ -434,7 +434,8 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 }
 
 // SessionOwnership reads the persisted city and session identity together.
-// Missing metadata leaves ownership unknown unless the process is confirmed absent.
+// A complete sidecar is stale when neither a tracked process nor a control
+// socket remains. Partial metadata always leaves ownership unknown.
 func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -445,8 +446,14 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 			return "", "", fmt.Errorf("reading subprocess %q ownership: %w", name, err)
 		}
 	}
-	if cityErr != nil || idErr != nil {
+	if cityErr != nil && idErr != nil {
 		return "", "", p.missingOwnershipLocked(name)
+	}
+	if cityErr != nil || idErr != nil || len(city) == 0 || len(id) == 0 {
+		return "", "", nil
+	}
+	if err := p.missingOwnershipLocked(name); err != nil {
+		return "", "", err
 	}
 	return string(city), string(id), nil
 }

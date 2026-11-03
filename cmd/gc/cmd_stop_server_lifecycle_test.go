@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,7 +24,117 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/runtime/k8s"
+	"github.com/gastownhall/gascity/internal/runtime/subprocess"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, missing string
+		force, live           bool
+	}{
+		{name: "stale manual forced", origin: "manual", force: true},
+		{name: "stale manual graceful", origin: "manual"},
+		{name: "stale named forced", origin: "named", force: true},
+		{name: "stale named graceful", origin: "named"},
+		{name: "live socket", origin: "manual", force: true, live: true},
+		{name: "partial city", origin: "manual", force: true, missing: "GC_SESSION_ID"},
+		{name: "partial session", origin: "manual", force: true, missing: "GC_CITY_PATH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldBound := stopPerTargetTimeoutDefault
+			stopPerTargetTimeoutDefault = 100 * time.Millisecond
+			t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
+			cityDir := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"},
+				Session: config.SessionConfig{Provider: "subprocess"}, Daemon: config.DaemonConfig{ShutdownTimeout: "1ns"},
+			}
+			writeStopLifecycleCityConfig(t, cityDir, cfg)
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const name = "persisted-runtime"
+			metadata := map[string]string{"session_origin": tc.origin, "session_name": name, "state": "active"}
+			if tc.origin == "named" {
+				metadata["configured_named_session"] = "true"
+				metadata["configured_named_identity"] = "sky"
+			}
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: metadata})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := testutil.ShortTempDir(t, "gc-stop-")
+			sp := subprocess.NewSeamBackedWithDir(dir)
+			for key, value := range map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID} {
+				if key != tc.missing {
+					if err := sp.SetMeta(name, key, value); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if tc.live {
+				// A control peer acknowledges stop but keeps serving the session.
+				// Use the provider's supported legacy socket path.
+				listener, err := net.Listen("unix", filepath.Join(dir, name+".sock"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for {
+						conn, err := listener.Accept()
+						if err != nil {
+							return
+						}
+						_ = conn.SetDeadline(time.Now().Add(testutil.ExecRaceTimeout))
+						if bufio.NewScanner(conn).Scan() {
+							_, _ = io.WriteString(conn, "ok\n")
+						}
+						_ = conn.Close()
+					}
+				}()
+				t.Cleanup(func() {
+					_ = listener.Close()
+					<-done
+				})
+			}
+			oldFactory := sessionProviderForStopCity
+			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+			overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+			for attempt := 1; attempt <= 2; attempt++ {
+				var stdout, stderr lockedBuffer
+				started := time.Now()
+				code := cmdStopBody(cityDir, cfg, tc.force, &stdout, &stderr)
+				t.Logf("attempt=%d exit=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
+				if tc.live || tc.missing != "" {
+					if code != 1 || strings.Contains(stdout.String(), "City stopped.") {
+						t.Errorf("unresolved identity must fail closed: exit=%d", code)
+					}
+					if tc.live && (time.Since(started) < stopPerTargetTimeoutDefault || !strings.Contains(stderr.String(), "remains after shutdown")) {
+						t.Error("live socket must survive until the shutdown bound")
+					}
+					if tc.missing != "" && !strings.Contains(stderr.String(), "incomplete ownership") {
+						t.Error("partial sidecar must report incomplete ownership")
+					}
+					continue
+				}
+				if code != 0 || !strings.Contains(stdout.String(), "City stopped.") {
+					t.Errorf("stale sidecar must not block shutdown: exit=%d", code)
+				}
+				owner := sp.(interface {
+					SessionOwnership(string) (string, string, error)
+				})
+				if _, _, err := owner.SessionOwnership(name); !runtime.IsSessionNotFound(err) {
+					t.Errorf("stale sidecar ownership error = %v, want typed absence", err)
+				}
+			}
+		})
+	}
+}
 
 // lifecycleOrderProvider wraps runtime.Fake and additionally implements
 // runtime.ServerLifecycleProvider. It records the order of ListRunning and
