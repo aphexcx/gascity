@@ -196,6 +196,24 @@ the last observed state, and have one named boundary owner. Busy loops and a
 fixed sleep before the helper are forbidden. The deadline rule below supplies
 safety timeouts; those deadlines must not determine the normal test duration.
 
+### Shell fixtures separate startup from behavior
+
+A newly written shell script may take longer to start than a product deadline.
+Signal readiness through a pipe or a file after the fixture establishes the
+state being asserted, and wait with a bounded watchdog before simulating the
+next transition. A readiness failure must report a distinct error, never the
+successful result the fixture was meant to simulate. Reap every child process.
+
+When production starts its deadline before launching the child, a marker alone
+cannot exclude startup time. The detached-probe caller tests use
+`testing/synctest` to preserve real subprocess exit status while keeping host
+scheduling outside the logical deadline. `TestProbeDetachedWork_Timeout` retains
+the real timeout proof. The escalation send-order fixture waits for fake `gc`
+to log its invocation and signal readiness before a timeout double returns 124;
+`TestEscalateRealTimeoutBoundsCommand` separately exercises the real one-second
+timeout without assuming the child starts before that deadline. Keep production
+bounds and behavioral assertions unchanged when applying these patterns.
+
 ## Test doubles and conformance are one contract
 
 A fast substitute is trustworthy only when it is held to the same observable
