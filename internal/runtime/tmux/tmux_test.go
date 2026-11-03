@@ -592,7 +592,8 @@ func TestWrapError(t *testing.T) {
 		want   error
 	}{
 		{"no server running on /tmp/tmux-...", ErrNoServer},
-		{"error connecting to /tmp/tmux-...", ErrNoServer},
+		{"error connecting to /tmp/tmux-... (No such file or directory)", ErrNoServer},
+		{"error connecting to /tmp/tmux-... (Connection refused)", ErrNoServer},
 		{"no current target", ErrNoServer},
 		{"duplicate session: test", ErrSessionExists},
 		{"session not found: test", ErrSessionNotFound},
@@ -603,6 +604,17 @@ func TestWrapError(t *testing.T) {
 		err := wrapError(nil, tt.stderr, []string{"test"})
 		if !errors.Is(err, tt.want) {
 			t.Errorf("wrapError(%q) = %v, want %v", tt.stderr, err, tt.want)
+		}
+	}
+	for _, stderr := range []string{
+		"error connecting to /tmp/tmux-... (Permission denied)",
+		"error connecting to /tmp/tmux-... (Operation not permitted)",
+		"error connecting to /tmp/tmux-... (Too many open files)",
+		"error connecting to /tmp/tmux-...",
+		"server exited unexpectedly",
+	} {
+		if err := wrapError(nil, stderr, []string{"list-sessions"}); errors.Is(err, ErrNoServer) || !strings.Contains(err.Error(), stderr) {
+			t.Errorf("uncertain server must retain diagnostic: wrapError(%q) = %v", stderr, err)
 		}
 	}
 }

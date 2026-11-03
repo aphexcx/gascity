@@ -53,3 +53,8 @@ func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
 }
+
+// SessionOwnership preserves the host ownership record through the seam adapter.
+func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
+	return s.raw.SessionOwnership(name)
+}

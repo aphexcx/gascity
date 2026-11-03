@@ -224,6 +224,8 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	go func() {
 		_ = cmd.Wait()
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		// Clean up socket before signaling done so ListRunning
 		// never sees a stale socket after Stop returns.
 		lis.Close() //nolint:errcheck
@@ -413,16 +415,57 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
-// Returns ("", nil) if the key is not set.
+// It returns ("", nil) for an unset key, or ErrSessionNotFound when an
+// ownership key is missing and the process is confirmed absent.
 func (p *Provider) GetMeta(name, key string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	data, err := os.ReadFile(p.metaPath(name, key))
 	if err != nil {
 		if os.IsNotExist(err) {
+			if key == "GC_CITY_PATH" || key == "GC_SESSION_ID" {
+				return "", p.missingOwnershipLocked(name)
+			}
 			return "", nil
 		}
 		return "", err
 	}
 	return string(data), nil
+}
+
+// SessionOwnership reads the persisted city and session identity together.
+// Missing metadata leaves ownership unknown unless the process is confirmed absent.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	city, cityErr := os.ReadFile(p.metaPath(name, "GC_CITY_PATH"))
+	id, idErr := os.ReadFile(p.metaPath(name, "GC_SESSION_ID"))
+	for _, err := range []error{cityErr, idErr} {
+		if err != nil && !os.IsNotExist(err) {
+			return "", "", fmt.Errorf("reading subprocess %q ownership: %w", name, err)
+		}
+	}
+	if cityErr != nil || idErr != nil {
+		return "", "", p.missingOwnershipLocked(name)
+	}
+	return string(city), string(id), nil
+}
+
+// missingOwnershipLocked distinguishes unknown ownership from confirmed absence.
+// The caller holds p.mu and must not reread metadata after the socket probe:
+// another provider can publish a replacement while that probe is in flight.
+func (p *Provider) missingOwnershipLocked(name string) error {
+	sc := p.procs[name]
+	if sc == nil || !sc.alive() {
+		// A replacement can live in another provider instance.
+		if err := p.sendSocketCommand(name, "ping", 500*time.Millisecond); err != nil {
+			if isUnavailableSocketError(err) {
+				return runtime.ErrSessionNotFound
+			}
+			return fmt.Errorf("reading subprocess %q ownership: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // RemoveMeta removes a metadata sidecar file.

@@ -8,6 +8,7 @@ go_library(
         "provider.go",
         "reuse.go",
         "seams.go",
+        "shutdown.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/t3bridge",
     visibility = ["//:__subpackages__"],
@@ -33,8 +34,11 @@ go_test(
     ],
     embed = [":t3bridge"],
     deps = [
+        "//internal/beads",
         "//internal/runtime",
+        "//internal/session",
         "//internal/testenv",
+        "//internal/worker",
         "@com_github_gorilla_websocket//:websocket",
     ],
 )

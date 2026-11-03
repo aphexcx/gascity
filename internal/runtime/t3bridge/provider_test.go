@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gorilla/websocket"
 )
 
@@ -1027,26 +1030,29 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t                  *testing.T
-	server             *httptest.Server
-	mu                 sync.Mutex
-	commands           []string
-	snapshot           map[string]interface{}
-	authFailures       int
-	authFailureStatus  int
-	authFailureBody    string
-	authRequestCount   int
-	authAuthorization  []string
-	authRawType        string
-	authRawBody        string
-	snapshotRequests   int
-	snapshotAuth       []string
-	snapshotFailStatus int
-	snapshotFailBody   string
-	snapshotRawType    string
-	snapshotRawBody    string
-	wsAuthorization    []string
-	wsRequestCount     int
+	t                   *testing.T
+	server              *httptest.Server
+	mu                  sync.Mutex
+	commands            []string
+	snapshot            map[string]interface{}
+	authFailures        int
+	authFailureStatus   int
+	authFailureBody     string
+	authRequestCount    int
+	authAuthorization   []string
+	authRawType         string
+	authRawBody         string
+	snapshotRequests    int
+	snapshotAuth        []string
+	snapshotFailStatus  int
+	snapshotFailBody    string
+	snapshotRawType     string
+	snapshotRawBody     string
+	wsAuthorization     []string
+	wsRequestCount      int
+	stopSessions        bool
+	rejectSessionStop   bool
+	rejectTurnInterrupt bool
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
@@ -1112,7 +1118,9 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			ts.mu.Lock()
 			_ = json.NewEncoder(w).Encode(ts.snapshot)
+			ts.mu.Unlock()
 			return
 		}
 		ts.mu.Lock()
@@ -1146,7 +1154,37 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				t.Errorf("decode dispatch payload: %v", err)
 				return
 			}
-			ts.recordCommand(commandType(payload))
+			typ := commandType(payload)
+			ts.recordCommand(typ)
+			if typ == "thread.turn.interrupt" {
+				ts.mu.Lock()
+				reject := ts.rejectTurnInterrupt
+				ts.mu.Unlock()
+				if reject {
+					_ = conn.WriteJSON(map[string]interface{}{"_tag": "Exit", "requestId": req.ID, "exit": map[string]interface{}{"_tag": "Failure", "cause": "interrupt rejected"}})
+					return
+				}
+			}
+			if typ == "thread.session.stop" {
+				command := payload
+				if nested, ok := payload["command"].(map[string]interface{}); ok {
+					command = nested
+				}
+				ts.mu.Lock()
+				reject := ts.rejectSessionStop
+				if ts.stopSessions && !reject {
+					for _, thread := range snapshotThreads(ts.snapshot) {
+						if thread["id"] == command["threadId"] {
+							thread["session"] = map[string]interface{}{"status": "stopped"}
+						}
+					}
+				}
+				ts.mu.Unlock()
+				if reject {
+					_ = conn.WriteJSON(map[string]interface{}{"_tag": "Exit", "requestId": req.ID, "exit": map[string]interface{}{"_tag": "Failure", "cause": "stop rejected"}})
+					return
+				}
+			}
 		}
 
 		resp := map[string]interface{}{
@@ -1673,6 +1711,205 @@ func TestListRunningClassifiesT3SessionStatuses(t *testing.T) {
 			}
 			if strings.Join(names, ",") != strings.Join(wantNames, ",") {
 				t.Fatalf("ListRunning names = %v, want %v", names, wantNames)
+			}
+		})
+	}
+}
+
+func TestSeamBackedCodexShutdownInterrupt(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		t.Run(map[bool]string{false: "interrupts before teardown", true: "retains interruption failure"}[reject], func(t *testing.T) {
+			server := newT3BridgeTestServer(t, t3SessionStatusSnapshot("s-manual", t3SessionStatusExpectation{status: "ready", includeStatus: true}))
+			defer server.Close()
+			server.mu.Lock()
+			server.stopSessions, server.rejectTurnInterrupt = true, reject
+			server.mu.Unlock()
+			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				"session_name": "s-manual", "session_origin": "manual", "provider": "codex", "template": "worker", "state": "suspended",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
+				Manager: session.NewManagerWithOptions(store, sp),
+				Session: worker.SessionSpec{ID: b.ID, Template: "worker", Command: "codex", Provider: "codex"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = handle.Interrupt(context.Background(), worker.InterruptRequest{})
+			if (err != nil) != reject {
+				t.Fatalf("interrupt error=%v, want error=%v", err, reject)
+			}
+			wantOperations := "thread.turn.interrupt"
+			if !reject {
+				stopper := sp.(interface{ StopForShutdown(string) error })
+				if err := stopper.StopForShutdown("s-manual"); err != nil {
+					t.Fatal(err)
+				}
+				wantOperations += ",thread.session.stop"
+			}
+			var operations []string
+			for _, command := range server.commandTypes() {
+				if command == "thread.turn.interrupt" || command == "thread.session.stop" {
+					operations = append(operations, command)
+				}
+			}
+			if got := strings.Join(operations, ","); got != wantOperations {
+				t.Fatalf("shutdown operations=%q, want %q", got, wantOperations)
+			}
+		})
+	}
+}
+
+func TestSeamBackedStopForShutdownUnassignedThread(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stops unassigned thread", true: "preserves stop error"}[reject], func(t *testing.T) {
+			snapshot := t3SessionStatusSnapshot("s-manual", t3SessionStatusExpectation{status: "ready", includeStatus: true})
+			thread := snapshotThreads(snapshot)[0]
+			thread["customMetadata"].(map[string]interface{})["gc.sessionEnv"] = `{"GC_CITY_PATH":"/cities/test","GC_SESSION_ID":"manual"}`
+			foreign := t3SessionStatusSnapshot("s-foreign", t3SessionStatusExpectation{status: "ready", includeStatus: true})
+			snapshot["threads"] = append(snapshot["threads"].([]interface{}), snapshotThreads(foreign)[0])
+			server := newT3BridgeTestServer(t, snapshot)
+			defer server.Close()
+			server.mu.Lock()
+			server.stopSessions, server.rejectSessionStop = true, reject
+			server.mu.Unlock()
+			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+			if err := sp.Stop("s-manual"); err != nil {
+				t.Fatal(err)
+			}
+			if !sp.IsRunning("s-manual") {
+				t.Fatal("ordinary Stop must preserve the unassigned thread")
+			}
+			stopper, ok := sp.(interface{ StopForShutdown(string) error })
+			if !ok {
+				t.Fatal("production adapter lacks explicit city shutdown")
+			}
+			err := stopper.StopForShutdown("s-manual")
+			if (err != nil) != reject {
+				t.Fatalf("shutdown error=%v, want error=%v", err, reject)
+			}
+			if sp.IsRunning("s-manual") != reject || !sp.IsRunning("s-foreign") {
+				t.Fatalf("manual running=%v foreign running=%v reject=%v", sp.IsRunning("s-manual"), sp.IsRunning("s-foreign"), reject)
+			}
+			if !strings.Contains(strings.Join(server.commandTypes(), ","), "thread.session.stop") {
+				t.Fatal("shutdown never dispatched the stop command")
+			}
+		})
+	}
+	t.Run("bridge unavailable", func(t *testing.T) {
+		_, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+		stopper, ok := sp.(interface{ StopForShutdown(string) error })
+		if !ok {
+			t.Fatal("production adapter lacks explicit city shutdown")
+		}
+		if err := stopper.StopForShutdown("s-manual"); err == nil {
+			t.Fatal("shutdown must retain bridge failure")
+		}
+	})
+}
+
+func TestSeamBackedShutdownPreservesReplacementThread(t *testing.T) {
+	for _, change := range []string{"unchanged", "replacement", "foreign", "missing", "unreadable"} {
+		t.Run(change, func(t *testing.T) {
+			snapshot := t3SessionStatusSnapshot("s-manual", t3SessionStatusExpectation{status: "ready", includeStatus: true})
+			thread := snapshotThreads(snapshot)[0]
+			thread["customMetadata"].(map[string]interface{})["gc.sessionEnv"] = `{"GC_CITY_PATH":"/cities/test","GC_SESSION_ID":"manual"}`
+			server := newT3BridgeTestServer(t, snapshot)
+			defer server.Close()
+			server.mu.Lock()
+			server.stopSessions = true
+			server.mu.Unlock()
+			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+			binder, ok := sp.(interface {
+				BindForShutdown(string, string, string) (runtime.Provider, error)
+			})
+			if !ok {
+				t.Fatal("production adapter must expose identity-bound shutdown")
+			}
+			var err error
+			sp, err = binder.BindForShutdown("s-manual", "/cities/test", "manual")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sp.Interrupt("s-manual"); err != nil {
+				t.Fatal(err)
+			}
+			if !sp.IsRunning("s-manual") {
+				t.Fatal("precondition: original thread is running")
+			}
+			server.mu.Lock()
+			switch change {
+			case "replacement":
+				// Identical owner metadata cannot make a different thread ours.
+				thread["id"] = "replacement-thread"
+			case "foreign":
+				thread["customMetadata"].(map[string]interface{})["gc.sessionEnv"] = `{"GC_CITY_PATH":"/cities/foreign","GC_SESSION_ID":"manual"}`
+			case "missing":
+				delete(thread["customMetadata"].(map[string]interface{}), "gc.sessionEnv")
+			case "unreadable":
+				thread["customMetadata"].(map[string]interface{})["gc.sessionEnv"] = "{"
+			}
+			server.mu.Unlock()
+			stopper := sp.(interface{ StopForShutdown(string) error })
+			wantStop := change == "unchanged"
+			if err := stopper.StopForShutdown("s-manual"); (err == nil) != wantStop {
+				t.Errorf("shutdown error=%v, want stop=%v", err, wantStop)
+			}
+			stopped := false
+			for _, command := range server.commandTypes() {
+				if command == "thread.session.stop" {
+					stopped = true
+				}
+			}
+			if stopped != wantStop {
+				t.Fatalf("stop command dispatched=%v, want %v", stopped, wantStop)
+			}
+		})
+	}
+}
+
+func TestSeamBackedSessionOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		env         string
+		missing     bool
+		unavailable bool
+		wantCity    string
+		wantID      string
+		wantErr     bool
+	}{
+		{name: "owned", env: `{"GC_CITY_PATH":"/cities/test","GC_SESSION_ID":"session-1"}`, wantCity: "/cities/test", wantID: "session-1"},
+		{name: "missing env"},
+		{name: "missing thread", missing: true, wantErr: true},
+		{name: "malformed env", env: "{", wantErr: true},
+		{name: "wrong env type", env: `{"GC_SESSION_ID":123}`, wantErr: true},
+		{name: "snapshot unavailable", unavailable: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			if !tc.unavailable {
+				var threads []interface{}
+				if !tc.missing {
+					threads = append(threads, map[string]interface{}{
+						"id": "thread-1", "projectId": "project-1",
+						"customMetadata": map[string]interface{}{"gc.sessionName": "s-session-1", "gc.sessionEnv": tc.env},
+					})
+				}
+				backed.raw.cacheSnapshot(map[string]interface{}{"threads": threads})
+			}
+			owner, ok := sp.(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				t.Fatal("production adapter does not expose session ownership")
+			}
+			city, id, err := owner.SessionOwnership("s-session-1")
+			if city != tc.wantCity || id != tc.wantID || (err != nil) != tc.wantErr {
+				t.Fatalf("city=%q id=%q err=%v; want city=%q id=%q error=%v", city, id, err, tc.wantCity, tc.wantID, tc.wantErr)
 			}
 		})
 	}

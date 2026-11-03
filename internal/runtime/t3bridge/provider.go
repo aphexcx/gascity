@@ -1273,7 +1273,10 @@ func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 		return snapshot, nil
 	}
 	p.mu.Unlock()
+	return p.rpcFreshSnapshot()
+}
 
+func (p *Provider) rpcFreshSnapshot() (map[string]interface{}, error) {
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
@@ -2634,10 +2637,20 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 // Stop tears down the session's event watcher and stops or archives its T3
 // thread; persistent agents are left running.
 func (p *Provider) Stop(name string) error {
+	return p.stop(name, false)
+}
+
+// StopForShutdown stops even unassigned threads, retaining their history and
+// worktrees. Runtime-stop and bridge failures are returned to the caller.
+func (p *Provider) StopForShutdown(name string) error {
+	return p.stop(name, true)
+}
+
+func (p *Provider) stop(name string, cityShutdown bool) error {
 	p.stopEventWatcher(name)
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
-		if isSoftBridgeUnavailable(err) {
+		if !cityShutdown && isSoftBridgeUnavailable(err) {
 			p.clearRecentStart(name)
 			p.clearBridgeMeta(name)
 			return nil
@@ -2652,7 +2665,7 @@ func (p *Provider) Stop(name string) error {
 		return nil
 	}
 
-	if p.isPersistentAgent(thread) {
+	if !cityShutdown && p.isPersistentAgent(thread) {
 		p.recordStateChange(binding.ThreadID, "persistent-alive", "GC stop skipped (persistent agent)", map[string]interface{}{
 			"reason": "persistent agent not killed",
 		})
@@ -2660,13 +2673,17 @@ func (p *Provider) Stop(name string) error {
 		return nil
 	}
 
-	drained, _ := p.GetMeta(name, "drained")
+	if err := p.dispatchThreadSessionStop(binding.ThreadID); err != nil {
+		return fmt.Errorf("stopping T3 session %q: %w", name, err)
+	}
 	p.recordStateChange(binding.ThreadID, "stopped", "GC session stopped", nil)
-	_ = p.dispatchThreadSessionStop(binding.ThreadID)
 
-	if drained == "1" {
-		_ = p.dispatchThreadMeta(binding.ThreadID, map[string]interface{}{"gc.state": "archived"})
-		p.removeWorktreeForThread(thread)
+	if !cityShutdown {
+		drained, _ := p.GetMeta(name, "drained")
+		if drained == "1" {
+			_ = p.dispatchThreadMeta(binding.ThreadID, map[string]interface{}{"gc.state": "archived"})
+			p.removeWorktreeForThread(thread)
+		}
 	}
 	p.clearRecentStart(name)
 	p.clearBridgeMeta(name)
@@ -2797,6 +2814,32 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // GetMeta reads a previously stored session metadata value.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	return readMetaValue(name, key)
+}
+
+// SessionOwnership reads startup ownership from the same eligible thread that
+// Stop and Interrupt target. Missing environment metadata means unknown ownership.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		return "", "", fmt.Errorf("reading ownership for %q: %w", name, err)
+	}
+	thread := snapshotThreadBySessionName(snapshot, name)
+	if thread == nil {
+		return "", "", fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+	}
+	return threadSessionOwnership(thread)
+}
+
+func threadSessionOwnership(thread map[string]interface{}) (string, string, error) {
+	data := threadCustomMetadata(thread)["gc.sessionEnv"]
+	if data == "" {
+		return "", "", nil
+	}
+	var env map[string]string
+	if err := json.Unmarshal([]byte(data), &env); err != nil {
+		return "", "", fmt.Errorf("decoding thread ownership: %w", err)
+	}
+	return env["GC_CITY_PATH"], env["GC_SESSION_ID"], nil
 }
 
 // RemoveMeta deletes a session metadata key and reflects drain-clearing onto the
@@ -2991,8 +3034,13 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	return nil
 }
 
-// SendKeys is a no-op; T3 sessions do not accept raw key input.
-func (p *Provider) SendKeys(_ string, _ ...string) error {
+// SendKeys maps Escape to native turn cancellation. T3 ignores other raw keys.
+func (p *Provider) SendKeys(name string, keys ...string) error {
+	for _, key := range keys {
+		if key == "Escape" {
+			return p.Interrupt(name)
+		}
+	}
 	return nil
 }
 

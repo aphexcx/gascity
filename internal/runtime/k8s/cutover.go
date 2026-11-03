@@ -43,3 +43,8 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
 }
+
+// SessionOwnership preserves host ownership through the seam adapter.
+func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
+	return s.raw.SessionOwnership(name)
+}

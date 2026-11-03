@@ -1285,24 +1285,48 @@ func (m *Manager) Suspend(id string) error {
 // every restart SKIP them, so they survived as live panes still holding their
 // pool slot names (ga-rxhu2). The runtime is torn down and the bead is left in
 // draining for the drain machinery or the reconciler to finish.
+// Suspended beads also retry runtime teardown without changing persisted state.
+// Creating and start-pending records roll back to failed-create after successful
+// teardown; the reconciler retains responsibility for closing them. Drained,
+// archived, and closed records permit teardown without changing their state.
 func (m *Manager) SuspendForShutdown(id string) error {
 	return m.suspend(id, suspendIntentShutdown)
 }
 
 func (m *Manager) suspend(id string, intent suspendIntent) error {
 	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.loadSessionBead(id, intent == suspendIntentShutdown)
 		if err != nil {
 			return err
 		}
 		// Closed beads are terminal; mutating lifecycle metadata after
 		// close produces impossible status=closed + live-state rows.
 		if b.Status == "closed" {
+			if intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName, true)
+			}
 			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
+			if intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName, true)
+			}
 			return nil // idempotent: already suspended
+		}
+		if (current == StateCreating || current == StateStartPending) && intent == suspendIntentShutdown {
+			if err := m.tearDownRuntimeForSuspend(sessName, true); err != nil {
+				return err
+			}
+			if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+				"state":                     string(StateFailedCreate),
+				"state_reason":              "shutdown_before_creation_complete",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+			}}); err != nil {
+				return fmt.Errorf("rolling back creation during shutdown: %w", err)
+			}
+			return nil
 		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only
@@ -1326,6 +1350,9 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		// city-wide); preserving the original name across rollback for cleanup
 		// is tracked as follow-up.
 		if current == StateFailedCreate {
+			if intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName, true)
+			}
 			if strings.TrimSpace(sessName) != "" {
 				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
 			}
@@ -1353,8 +1380,8 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		// the transition table — suspended is still an OPEN row, so the edge would
 		// release no pool name while silently losing the drain. Only a close frees
 		// the name, and CmdClose is already legal from draining.
-		if current == StateDraining && intent == suspendIntentShutdown {
-			return m.tearDownRuntimeForSuspend(sessName)
+		if (current == StateDraining || current == StateDrained || current == StateArchived || current == StateClosed) && intent == suspendIntentShutdown {
+			return m.tearDownRuntimeForSuspend(sessName, true)
 		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
@@ -1364,7 +1391,7 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 			return err
 		}
 
-		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+		if err := m.tearDownRuntimeForSuspend(sessName, intent == suspendIntentShutdown); err != nil {
 			return err
 		}
 
@@ -1388,24 +1415,18 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 // tmux remain-on-exit panes can be non-running but still need their session
 // artifact removed.
 //
-// A Stop failure is suppressed ONLY when the runtime did not report a live
-// process beforehand (historical Suspend semantics: cleanup of an already-dead
-// session is best-effort). A failure to tear down a runtime that WAS live is
-// reported: callers treat a nil return as "the seat stopped" — stopTargetsBounded
-// prints "Stopped agent", counts it, and records SessionStopped — so swallowing
-// it would make `gc stop` claim success over a pane that is still alive holding
-// its pool slot name, which is the exact condition this whole change exists to
-// surface.
-func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
+// Shutdown requires an explicit absence sentinel before treating a failed Stop
+// as benign. Ordinary Suspend retains its best-effort non-running cleanup.
+func (m *Manager) tearDownRuntimeForSuspend(sessName string, shutdown bool) error {
 	if strings.TrimSpace(sessName) == "" {
 		return nil
 	}
-	running := m.sp.IsRunning(sessName)
-	err := m.sp.Stop(sessName)
-	if err != nil && !running {
-		err = nil
+	running := false
+	if !shutdown {
+		running = m.sp.IsRunning(sessName)
 	}
-	if err != nil {
+	err := m.sp.Stop(sessName)
+	if err != nil && !runtime.IsSessionNotFound(err) && (shutdown || running) {
 		return fmt.Errorf("stopping runtime session: %w", err)
 	}
 	return nil

@@ -124,9 +124,16 @@ rest_smoke_tests=(
 # canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
+  TestCmdStopRealSubprocessGracefulManual
+  TestCmdStopRealSubprocessRemovedTemplateOrphan
+  TestCmdStopRealTmuxNamedAndIdempotent
+  TestCmdStopRealTmuxPendingCreation
+  TestCmdStopRealTmuxUnreachableServer
+  TestCmdStopRealTmuxWithoutConfiguredAgents
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
+  TestManualStopRealTmuxSessionVanishes
   TestNudgeDeadLetterReplayTmux
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -23,6 +24,57 @@ type orphanSession struct {
 type orphanSessionScan struct {
 	orphans    []orphanSession
 	unreadable []error
+	backends   []runtime.BackendListResult
+}
+
+// CleanupCandidates returns owned orphan names grouped by the backend that
+// listed them. The caller must supply its complete, nonempty desired set;
+// unlike doctor reporting, only these exact runtime names are protected.
+// No candidates are returned when any cleanup safety check fails.
+func (c *OrphanSessionsCheck) CleanupCandidates(ctx *CheckContext, desired map[string]bool) ([]runtime.BackendListResult, error) {
+	if len(desired) == 0 {
+		return nil, fmt.Errorf("refusing orphan cleanup: empty desired session set")
+	}
+	for name, wanted := range desired {
+		if strings.TrimSpace(name) == "" || !wanted {
+			return nil, fmt.Errorf("refusing orphan cleanup: partial desired session set")
+		}
+	}
+	if err := c.validateCleanupRuntime(); err != nil {
+		return nil, err
+	}
+	scan, err := c.scanOrphanSessions(ctx, desired)
+	if err := orphanCleanupScanError(scan, err); err != nil {
+		return nil, err
+	}
+	return scan.backends, nil
+}
+
+func (c *OrphanSessionsCheck) validateCleanupRuntime() error {
+	if c.cfg == nil || len(c.cfg.Agents) == 0 {
+		return fmt.Errorf("refusing orphan cleanup: loaded config has no agents (empty expected set)")
+	}
+	if _, err := c.expectedSessionNames(); err != nil {
+		return err
+	}
+	scoped, ok := c.sp.(interface{ IsCityScoped(string) bool })
+	if !ok || !scoped.IsCityScoped(c.cityName) {
+		return fmt.Errorf("refusing orphan cleanup: runtime cannot confirm a city-scoped socket for %q (default, shared, or unknown socket)", c.cityName)
+	}
+	return nil
+}
+
+func orphanCleanupScanError(scan orphanSessionScan, err error) error {
+	if runtime.IsPartialListError(err) {
+		return fmt.Errorf("listing sessions partially failed: %w", err)
+	}
+	if err != nil {
+		return err
+	}
+	if len(scan.unreadable) > 0 {
+		return fmt.Errorf("refusing orphan cleanup: incomplete ownership metadata: %w", errors.Join(scan.unreadable...))
+	}
+	return nil
 }
 
 func (c *OrphanSessionsCheck) orphanScopeError(orphan orphanSession) error {
@@ -110,6 +162,10 @@ func (c *OrphanSessionsCheck) citySessionShape() (prefix, suffix string) {
 // incomplete listing or failed ownership read therefore cannot partially kill
 // the visible subset. Both reporting and cleanup use this classification.
 func (c *OrphanSessionsCheck) orphanSessions(ctx *CheckContext) (orphanSessionScan, error) {
+	return c.scanOrphanSessions(ctx, nil)
+}
+
+func (c *OrphanSessionsCheck) scanOrphanSessions(ctx *CheckContext, desired map[string]bool) (orphanSessionScan, error) {
 	var scan orphanSessionScan
 	expected, err := c.expectedSessionNames()
 	if err != nil {
@@ -122,13 +178,14 @@ func (c *OrphanSessionsCheck) orphanSessions(ctx *CheckContext) (orphanSessionSc
 	}
 	prefix, suffix := c.citySessionShape()
 	for _, backend := range backends {
+		candidates := runtime.BackendListResult{Label: backend.Label, Provider: backend.Provider}
 		for _, name := range backend.Names {
 			env, err := sessionEnvironment(backend.Provider, name)
 			if err != nil {
 				scan.unreadable = append(scan.unreadable, fmt.Errorf("reading ownership for session %q (%s): %w", name, backend.Label, err))
 				continue
 			}
-			if c.expectedSession(name, expected, env["GC_TEMPLATE"]) {
+			if desired[name] || (desired == nil && c.expectedSession(name, expected, env["GC_TEMPLATE"])) {
 				continue
 			}
 			cityPath := env["GC_CITY_PATH"]
@@ -140,9 +197,14 @@ func (c *OrphanSessionsCheck) orphanSessions(ctx *CheckContext) (orphanSessionSc
 			}
 			if prefix != "" && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) && len(name) > len(prefix)+len(suffix) {
 				scan.orphans = append(scan.orphans, orphanSession{name, fmt.Sprintf("matches city session shape %q + agent + %q", prefix, suffix), backend.Provider})
+				candidates.Names = append(candidates.Names, name)
 			} else if cityPath != "" && c.matchesRuntimeIdentity(name, env) {
 				scan.orphans = append(scan.orphans, orphanSession{name, "GC_CITY_PATH matches this city and name matches runtime agent identity", backend.Provider})
+				candidates.Names = append(candidates.Names, name)
 			}
+		}
+		if len(candidates.Names) > 0 {
+			scan.backends = append(scan.backends, candidates)
 		}
 	}
 	return scan, listErr

@@ -3,12 +3,14 @@ package session
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
 func createTestSession(t *testing.T, m *Manager, template string) string {
@@ -293,6 +295,159 @@ func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 // "the seat stopped" — gc stop prints "Stopped agent", counts it and records
 // session.stopped — so swallowing the error makes the sweep claim success over a
 // pane still alive holding its pool slot name: the exact wedge class here.
+func TestStopTurnSuspendedRuntime(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(map[bool]string{false: "runtime absent", true: "runtime alive"}[running], func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+			id := createTestSession(t, m, "worker")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := b.Metadata["session_name"]
+			if running {
+				if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.SetMetadata(id, "state", string(StateSuspended)); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.StopTurn(id); err != nil {
+				t.Fatal(err)
+			}
+			wantInterrupts := 0
+			if running {
+				wantInterrupts = 1
+			}
+			if got := sp.CountCalls("Interrupt", name); got != wantInterrupts {
+				t.Fatalf("interrupts=%d, want %d", got, wantInterrupts)
+			}
+			if state := getState(t, m, id); state != StateSuspended {
+				t.Fatalf("state=%q, want suspended", state)
+			}
+			if sp.IsRunning(name) != running || sp.CountCalls("Stop", name) != 0 || sp.CountCalls("Start", name) != wantInterrupts {
+				t.Fatal("StopTurn must not start or tear down a suspended runtime")
+			}
+		})
+	}
+}
+
+func TestConformance_SuspendForShutdownRetriesSuspendedRuntime(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stops runtime", true: "retains teardown failure"}[fail], func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+			id := createTestSession(t, m, "worker")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := b.Metadata["session_name"]
+			if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetMetadata(id, "state", string(StateSuspended)); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Suspend(id); err != nil {
+				t.Fatal(err)
+			}
+			if sp.CountCalls("Stop", name) != 0 {
+				t.Fatal("ordinary Suspend must remain idempotent")
+			}
+			wantErr := errors.New("runtime refused shutdown")
+			if fail {
+				sp.StopErrors[name] = wantErr
+			}
+			err = m.SuspendForShutdown(id)
+			if errors.Is(err, wantErr) != fail || (!fail && err != nil) {
+				t.Fatalf("shutdown error=%v, failure=%v", err, fail)
+			}
+			if sp.CountCalls("Stop", name) != 1 || sp.IsRunning(name) != fail {
+				t.Fatalf("stops=%d running=%v failure=%v", sp.CountCalls("Stop", name), sp.IsRunning(name), fail)
+			}
+			after, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Metadata["state"] != string(StateSuspended) {
+				t.Fatalf("state=%q, want suspended", after.Metadata["state"])
+			}
+		})
+	}
+}
+
+func TestSuspendRetainsMixedBackendStopFailure(t *testing.T) {
+	for _, mode := range []string{"operator", "shutdown", "suspended shutdown", "draining shutdown", "nested shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			terminal := runtime.NewFake()
+			m := NewManagerWithOptions(store, terminal)
+			id := createTestSession(t, m, "worker")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := b.Metadata["session_name"]
+			if err := terminal.Start(context.Background(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			state := StateActive
+			switch mode {
+			case "suspended shutdown":
+				state = StateSuspended
+			case "draining shutdown":
+				state = StateDraining
+			}
+			if err := store.SetMetadata(id, "state", string(state)); err != nil {
+				t.Fatal(err)
+			}
+			wantErr := errors.New("live backend refused stop")
+			terminal.StopErrors[name] = wantErr
+			if mode == "nested shutdown" {
+				terminal.StopErrors[name] = errors.Join(wantErr, runtime.ErrSessionNotFound)
+			}
+			// auto.Stop joins the failed live backend with its absent fallback.
+			m.sp = auto.New(terminal, runtime.NewFake())
+			if mode == "operator" {
+				err = m.Suspend(id)
+			} else {
+				err = m.SuspendForShutdown(id)
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("suspend error=%v, want live backend failure", err)
+			}
+			if got := getState(t, m, id); got != state || !terminal.IsRunning(name) {
+				t.Errorf("state=%s runtime running=%v, want unchanged %s and running", got, terminal.IsRunning(name), state)
+			}
+		})
+	}
+}
+
+func TestSuspendAcceptsOnlyAbsentStopCauses(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "operator", true: "shutdown"}[shutdown], func(t *testing.T) {
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(beads.NewMemStore(), sp)
+			id := createTestSession(t, m, "worker")
+			sp.StopErrors["s-test-worker"] = errors.Join(runtime.ErrSessionNotFound, runtime.ErrSessionNotFound)
+			var err error
+			if shutdown {
+				err = m.SuspendForShutdown(id)
+			} else {
+				err = m.Suspend(id)
+			}
+			if err != nil || getState(t, m, id) != StateSuspended {
+				t.Fatalf("pure absence did not suspend: %v", err)
+			}
+		})
+	}
+}
+
 func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -442,6 +597,89 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	}
 	if sp.IsRunning(sessName) {
 		t.Errorf("runtime session %q still running after Suspend(failed-create)", sessName)
+	}
+}
+
+func TestSuspendForShutdownPendingCreation(t *testing.T) {
+	for _, state := range []State{StateCreating, StateStartPending, StateFailedCreate} {
+		for _, stopFails := range []bool{false, true} {
+			t.Run(string(state)+"/stopFails="+strconv.FormatBool(stopFails), func(t *testing.T) {
+				store := beads.NewMemStore()
+				sp := runtime.NewFake()
+				m := NewManagerWithOptions(store, sp)
+				b, err := store.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{
+					"state": string(state), "session_name": "pending-runtime", "pending_create_claim": "true", "pending_create_started_at": "2026-11-01T00:00:00Z",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sp.Start(context.Background(), "pending-runtime", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				failure := errors.New("stop denied")
+				if stopFails {
+					sp.StopErrors = map[string]error{"pending-runtime": errors.Join(runtime.ErrSessionNotFound, failure)}
+				}
+				err = m.SuspendForShutdown(b.ID)
+				if stopFails {
+					if !errors.Is(err, failure) || getState(t, m, b.ID) != state {
+						t.Fatalf("failed teardown: err=%v state=%s", err, getState(t, m, b.ID))
+					}
+					return
+				}
+				after, readErr := store.Get(b.ID)
+				if err != nil || readErr != nil || sp.IsRunning("pending-runtime") || getState(t, m, b.ID) != StateFailedCreate {
+					t.Fatalf("shutdown: err=%v read=%v alive=%v state=%s", err, readErr, sp.IsRunning("pending-runtime"), getState(t, m, b.ID))
+				}
+				if state != StateFailedCreate && (after.Metadata["pending_create_claim"] != "" || after.Metadata["pending_create_started_at"] != "") {
+					t.Fatalf("pending creation markers survived: %v", after.Metadata)
+				}
+			})
+		}
+	}
+}
+
+func TestSuspendForShutdownTerminalRuntime(t *testing.T) {
+	for _, state := range []State{StateDrained, StateArchived, StateClosed} {
+		for _, stopFails := range []bool{false, true} {
+			t.Run(string(state)+"/stopFails="+strconv.FormatBool(stopFails), func(t *testing.T) {
+				store := beads.NewMemStore()
+				sp := runtime.NewFake()
+				m := NewManagerWithOptions(store, sp)
+				b, err := store.Create(beads.Bead{Type: BeadType, Metadata: map[string]string{"state": string(state), "session_name": "terminal-runtime"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state == StateClosed {
+					if err := store.Close(b.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sp.Start(context.Background(), "terminal-runtime", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				failure := errors.New("deletion denied")
+				if stopFails {
+					sp.StopErrors = map[string]error{"terminal-runtime": failure}
+				}
+				err = m.SuspendForShutdown(b.ID)
+				if stopFails {
+					if !errors.Is(err, failure) || !sp.IsRunning("terminal-runtime") {
+						t.Fatalf("failed teardown: %v", err)
+					}
+				} else if err != nil || sp.IsRunning("terminal-runtime") {
+					t.Fatalf("terminal runtime survived: %v", err)
+				}
+				after, readErr := store.Get(b.ID)
+				if readErr != nil || after.Status != before.Status || after.Metadata["state"] != before.Metadata["state"] {
+					t.Fatalf("terminal record changed: before=%v after=%v err=%v", before, after, readErr)
+				}
+			})
+		}
 	}
 }
 

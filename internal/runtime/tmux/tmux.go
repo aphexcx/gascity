@@ -531,9 +531,11 @@ func wrapError(err error, stderr string, args []string) error {
 		// ErrNoServer so idempotent-teardown callers are unaffected.
 		return ErrNoCurrentTarget
 	}
+	// Only missing sockets and refused connections to dead sockets establish
+	// absence. Permission errors and unexpected exits leave server state unknown.
 	if strings.Contains(stderr, "no server running") ||
-		strings.Contains(stderr, "error connecting to") ||
-		strings.Contains(stderr, "server exited unexpectedly") {
+		(strings.Contains(stderr, "error connecting to") &&
+			(strings.HasSuffix(stderr, "(No such file or directory)") || strings.HasSuffix(stderr, "(Connection refused)"))) {
 		return ErrNoServer
 	}
 	if strings.Contains(stderr, "duplicate session") {

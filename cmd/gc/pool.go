@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -582,6 +583,13 @@ func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr 
 func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
 	cityName, st string, sp runtime.Provider,
 ) []string {
+	names, _ := discoverPoolInstancesChecked(agentName, agentDir, sp0, a, cityName, st, sp)
+	return names
+}
+
+func discoverPoolInstancesChecked(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
+	cityName, st string, sp runtime.Provider,
+) ([]string, error) {
 	isUnlimited := sp0.Max < 0
 	if !isUnlimited {
 		if a.UsesCanonicalSingletonPoolIdentity() {
@@ -599,7 +607,7 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 			}
 			names = append(names, qn)
 		}
-		return names
+		return names, nil
 	}
 
 	// Unlimited pool: discover running instances via session prefix.
@@ -614,9 +622,10 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	}
 	// Build the session name prefix to match against running sessions.
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, st)
-	running, err := sp.ListRunning("")
+	backends := listSessionBackendsWithAbsenceCheck(sp)
+	running, err := runtime.MergeBackendListResults(backends...)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var names []string
 	for _, sn := range running {
@@ -635,22 +644,23 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 			names = append(names, qn)
 		}
 	}
-	return names
+	return names, nil
 }
 
-func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) []string {
+func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) ([]string, error) {
 	if a == nil {
-		return nil
+		return nil, nil
 	}
 	canonical := a.QualifiedName()
 	names := []string{canonical}
 	if sp == nil {
-		return names
+		return names, nil
 	}
 	prefix := agent.SessionNameFor(cityName, canonical+"-", st)
-	running, err := sp.ListRunning("")
+	backends := listSessionBackendsWithAbsenceCheck(sp)
+	running, err := runtime.MergeBackendListResults(backends...)
 	if err != nil {
-		return names
+		return names, err
 	}
 	templatePrefix := agent.SessionNameFor(cityName, "", st)
 	stale := make([]string, 0, len(running))
@@ -671,7 +681,25 @@ func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st strin
 		stale = append(stale, qn)
 	}
 	sort.Strings(stale)
-	return append(names, stale...)
+	return append(names, stale...), nil
+}
+
+// listSessionBackendsWithAbsenceCheck confirms each absent backend with a fresh
+// whole-backend listing. A missing individual name cannot prove server absence:
+// a server may have returned with other sessions since the first observation.
+func listSessionBackendsWithAbsenceCheck(sp runtime.Provider) []runtime.BackendListResult {
+	backends := runtime.ListBackendSessions("runtime", sp, "")
+	for i, backend := range backends {
+		if len(backend.Names) != 0 || !runtime.IsRuntimeServerAbsent(backend.Err) {
+			continue
+		}
+		names, err := backend.Provider.ListRunning("")
+		if len(names) == 0 && runtime.IsRuntimeServerAbsent(err) {
+			err = nil
+		}
+		backends[i].Names, backends[i].Err = names, err
+	}
+	return backends
 }
 
 func resolvePoolSessionRefs(
@@ -683,6 +711,15 @@ func resolvePoolSessionRefs(
 	sp runtime.Provider,
 	stderr io.Writer,
 ) []poolSessionRef {
+	refs, _ := resolvePoolSessionRefsChecked(store, cfg, agentName, agentDir, sp0, a, cityName, sessionTemplate, sp, stderr)
+	return refs
+}
+
+func resolvePoolSessionRefsChecked(
+	store beads.Store, cfg *config.City, agentName, agentDir string,
+	sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string,
+	sp runtime.Provider, stderr io.Writer,
+) ([]poolSessionRef, error) {
 	template := agentName
 	if a != nil {
 		template = a.QualifiedName()
@@ -713,8 +750,11 @@ func resolvePoolSessionRefs(
 			})
 		}
 	}
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
-		sessionName := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
+	instances, discoverErr := discoverPoolInstancesChecked(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
+	lookupErr := errors.Join(err, discoverErr)
+	for _, qualifiedInstance := range instances {
+		sessionName, err := lookupSessionNameOrLegacyChecked(store, cityName, qualifiedInstance, sessionTemplate)
+		lookupErr = errors.Join(lookupErr, err)
 		if sessionName == "" || seenSessions[sessionName] {
 			continue
 		}
@@ -724,7 +764,7 @@ func resolvePoolSessionRefs(
 			sessionName:       sessionName,
 		})
 	}
-	return refs
+	return refs, lookupErr
 }
 
 func selectRunningPoolSessionRefs(store beads.Store, sp runtime.Provider, cfg *config.City, refs []poolSessionRef) ([]poolSessionRef, error) {

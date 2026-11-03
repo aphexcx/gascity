@@ -9,9 +9,80 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+func TestShutdownOwnershipDistinguishesTmuxAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		err    error
+		absent bool
+	}{
+		{name: "owned", output: "GC_CITY_PATH=/cities/test\nGC_SESSION_ID=session-1"},
+		{name: "session absent", err: ErrSessionNotFound, absent: true},
+		{name: "server absent", err: ErrNoServer, absent: true},
+		{name: "unreadable", err: errors.New("metadata unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := NewSeamBackedWithConfig(Config{SocketName: "shutdown-test"}).(*seamBackedProvider)
+			sp.tm.exec = &fakeExecutor{out: tc.output, err: tc.err}
+			owner, ok := any(sp).(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				t.Fatal("tmux shutdown ownership must expose typed absence")
+			}
+			city, id, err := owner.SessionOwnership("manual-runtime")
+			if errors.Is(err, runtime.ErrSessionNotFound) != tc.absent {
+				t.Fatalf("ownership error=%v, want explicit absence=%v", err, tc.absent)
+			}
+			if tc.err == nil && (err != nil || city != "/cities/test" || id != "session-1") {
+				t.Fatalf("city=%q id=%q error=%v", city, id, err)
+			}
+			if tc.err != nil && !tc.absent && !errors.Is(err, tc.err) {
+				t.Fatalf("ownership error=%v, want retained metadata failure", err)
+			}
+		})
+	}
+}
+
+func TestSuspendedShutdownRetainsTmuxKillFailureAfterProbeFailure(t *testing.T) {
+	wantErr := errors.New("tmux probe and kill unavailable")
+	exec := &fakeExecutor{fn: func(args []string) (string, error) {
+		for _, arg := range args {
+			if arg == "list-sessions" {
+				return "manual-runtime", nil
+			}
+		}
+		return "", wantErr
+	}}
+	sp := NewSeamBackedWithConfig(Config{SocketName: "shutdown-test"}).(*seamBackedProvider)
+	sp.tm.exec = exec
+	if sp.IsRunning("manual-runtime") {
+		t.Fatal("failed probe must report false liveness")
+	}
+	names, err := sp.ListRunning("")
+	if err != nil || len(names) != 1 || names[0] != "manual-runtime" {
+		t.Fatalf("session must remain listed: names=%v error=%v", names, err)
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "manual-runtime", "state": "suspended"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = session.NewManagerWithOptions(store, sp).SuspendForShutdown(b.ID)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("shutdown error=%v, want failed kill despite false liveness", err)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil || after.Metadata["state"] != "suspended" {
+		t.Fatalf("state changed: %+v error=%v", after, err)
+	}
+}
 
 func TestBuildLaunchCommandUnsetsColorKillersForInteractiveExecutables(t *testing.T) {
 	for _, tc := range []struct {

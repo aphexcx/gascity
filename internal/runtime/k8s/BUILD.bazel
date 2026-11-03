@@ -58,7 +58,9 @@ go_test(
     embed = [":k8s"],
     deps = [
         "//internal/bazeltest",
+        "//internal/beads",
         "//internal/runtime",
+        "//internal/session",
         "//internal/shellquote",
         "//internal/testenv",
         "@io_k8s_api//core/v1:core",

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -371,25 +372,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	st := cfg.Workspace.SessionTemplate
-	var sessionNames []string
-	desired := make(map[string]bool, len(cfg.Agents))
-	for _, a := range cfg.Agents {
-		sp0 := scaleParamsFor(&a)
-		qn := a.QualifiedName()
-		if !a.SupportsInstanceExpansion() {
-			// Non-expanding template.
-			sn := lookupSessionNameOrLegacy(sessStore, cityName, qn, st)
-			sessionNames = append(sessionNames, sn)
-			desired[sn] = true
-		} else {
-			// Pool agent: resolve runtime session names from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(sessStore, cfg, a.Name, a.Dir, sp0, &a, cityName, st, sp, stderr) {
-				sessionNames = append(sessionNames, ref.sessionName)
-				desired[ref.sessionName] = true
-			}
-		}
-	}
+	sessionNames, desired, manualTargets, desiredErr := resolveStopSessionNames(sessStore, cfg, cityPath, cityName, sp, stderr)
 	recorder := events.Discard
 	if fr, err := newFileEventsRecorder(
 		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
@@ -402,13 +385,26 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		graceTimeout = 0
 	}
 
-	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	// Keep one dependency graph and grace window while retaining the backend
+	// that proved each manual session's identity, even after routing changes.
+	stopProvider := providerForManualStopTargets(sp, manualTargets)
+	code := doStopWithoutSuccess(sessionNames, stopProvider, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	if desiredErr != nil {
+		code = 1
+	}
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
+	orphansStopped := stopOrphans(cityPath, sp, desired, desiredErr, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
+	if !orphansStopped {
+		code = 1
+	}
+	if err := verifyStopSurvivors(cityPath, cityName, sp); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		code = 1
+	}
 
-	teardownServerForStop(sp, stderr, "gc stop")
+	teardownEmptyServerForStop(cityName, sp, stderr)
 
 	// Stop the bead store's backing service LAST, and only here. The order
 	// this function runs in is load-bearing for a provider-owned proxied city:
@@ -431,6 +427,97 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	}
 
 	return code
+}
+
+// verifyStopSurvivors prevents skipped, filtered, or incomplete sweeps from
+// reporting success while a city-owned session survives on an eligible backend.
+func verifyStopSurvivors(cityPath, cityName string, sp runtime.Provider) error {
+	deadline := time.Now().Add(stopPerTargetTimeoutDefault)
+	for {
+		survivors, err := listStopSurvivors(cityPath, cityName, sp)
+		if !survivors || !time.Now().Before(deadline) {
+			return err
+		}
+		// Stop may acknowledge teardown before the runtime disappears. Use the
+		// existing per-target bound even when --force skips the interrupt grace.
+		time.Sleep(min(500*time.Millisecond, time.Until(deadline)))
+	}
+}
+
+func listStopSurvivors(cityPath, cityName string, sp runtime.Provider) (bool, error) {
+	var result error
+	var survivors bool
+	for _, leaf := range stopCleanupProviders(sp) {
+		scoped, ok := leaf.(interface{ IsCityScoped(string) bool })
+		if ok && !scoped.IsCityScoped(cityName) {
+			continue
+		}
+		backends := listSessionBackendsWithAbsenceCheck(leaf)
+		if _, err := runtime.MergeBackendListResults(backends...); err != nil {
+			result = errors.Join(result, fmt.Errorf("verifying surviving sessions: %w", err))
+			continue
+		}
+		for _, backend := range backends {
+			for _, name := range backend.Names {
+				ownerCity, _, err := stopSessionOwnership(backend.Provider, name)
+				if runtime.IsSessionNotFound(err) {
+					continue
+				}
+				if err != nil {
+					result = errors.Join(result, fmt.Errorf("verifying surviving session %q: %w", name, err))
+				} else if ownerCity != "" && filepath.Clean(ownerCity) == filepath.Clean(cityPath) {
+					survivors = true
+					result = errors.Join(result, fmt.Errorf("city-owned session %q remains after shutdown", name))
+				}
+			}
+		}
+	}
+	return survivors, result
+}
+
+// teardownEmptyServerForStop keeps the final server kill from undoing an
+// orphan refusal or killing a foreign session preserved by the classifier.
+func teardownEmptyServerForStop(cityName string, sp runtime.Provider, stderr io.Writer) {
+	for _, backend := range stopCleanupProviders(sp) {
+		teardownEmptyBackendForStop(cityName, backend, stderr)
+	}
+}
+
+// stopCleanupProviders exposes independent backends before any runtime I/O,
+// so an unknown remote scope cannot authorize cleanup or hide a scoped server.
+func stopCleanupProviders(sp runtime.Provider) []runtime.Provider {
+	if composite, ok := sp.(interface{ BackendProviders() []runtime.Provider }); ok {
+		var leaves []runtime.Provider
+		for _, backend := range composite.BackendProviders() {
+			leaves = append(leaves, stopCleanupProviders(backend)...)
+		}
+		return leaves
+	}
+	return []runtime.Provider{sp}
+}
+
+func teardownEmptyBackendForStop(cityName string, sp runtime.Provider, stderr io.Writer) {
+	if _, ok := sp.(runtime.ServerLifecycleProvider); !ok {
+		return
+	}
+	scoped, ok := sp.(interface{ IsCityScoped(string) bool })
+	if !ok || !scoped.IsCityScoped(cityName) {
+		fmt.Fprintln(stderr, "gc stop: server teardown skipped: runtime cannot confirm a city-scoped socket") //nolint:errcheck // best-effort stderr
+		return
+	}
+	backends := runtime.ListBackendSessions("runtime", sp, "")
+	names, err := runtime.MergeBackendListResults(backends...)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc stop: server teardown skipped: %s\n", strings.ReplaceAll(err.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if len(names) > 0 {
+		fmt.Fprintf(stderr, "gc stop: server teardown skipped: %d session(s) remain\n", len(names)) //nolint:errcheck // best-effort stderr
+		return
+	}
+	for _, backend := range backends {
+		teardownServerForStop(backend.Provider, stderr, "gc stop")
+	}
 }
 
 // teardownServerForStop terminates a provider's shared server after every
@@ -567,29 +654,141 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 	fmt.Fprintf(stderr, "gc stop: stopped city despite invalid config: %v\n", err) //nolint:errcheck // best-effort stderr
 }
 
-// stopOrphans stops sessions that are not in the desired set. Used by gc stop
-// to clean up orphans after stopping config agents. With per-city socket
-// isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
+// resolveStopSessionNames preserves the configured stop's best-effort targets
+// while retaining lookup failures that make orphan cleanup unsafe.
+func resolveStopSessionNames(store beads.Store, cfg *config.City, cityPath, cityName string, sp runtime.Provider, stderr io.Writer) ([]string, map[string]bool, []runtime.BackendListResult, error) {
+	st := cfg.Workspace.SessionTemplate
+	var names []string
+	desired := make(map[string]bool, len(cfg.Agents))
+	var resolveErr error
+	var manualTargets []runtime.BackendListResult
+	if store == nil {
+		resolveErr = errors.New("session store unavailable")
+	}
+	for _, a := range cfg.Agents {
+		if !a.SupportsInstanceExpansion() {
+			sn, err := lookupSessionNameOrLegacyChecked(store, cityName, a.QualifiedName(), st)
+			resolveErr = errors.Join(resolveErr, err)
+			names = append(names, sn)
+			desired[sn] = true
+		} else {
+			refs, err := resolvePoolSessionRefsChecked(store, cfg, a.Name, a.Dir, scaleParamsFor(&a), &a, cityName, st, sp, stderr)
+			resolveErr = errors.Join(resolveErr, err)
+			for _, ref := range refs {
+				names = append(names, ref.sessionName)
+				desired[ref.sessionName] = true
+			}
+		}
+	}
+	if store != nil {
+		var err error
+		manualTargets, err = resolveManualStopSessionTargets(store, cfg, cityPath, sp)
+		resolveErr = errors.Join(resolveErr, err)
+		for _, target := range manualTargets {
+			for _, sn := range target.Names {
+				if !desired[sn] {
+					names = append(names, sn)
+					desired[sn] = true
+				}
+			}
+		}
+	}
+	return names, desired, manualTargets, resolveErr
+}
+
+// stopOrphans stops this city's classified orphans after configured agents.
+// A failed safety check refuses the whole sweep and fails the command.
+func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, desiredErr error, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
-) {
-	running, err := sp.ListRunning("")
-	partialList := runtime.IsPartialListError(err)
-	if err != nil && !partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+) bool {
+	if desiredErr != nil {
+		fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: partial desired session set: %s\n", strings.ReplaceAll(desiredErr.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
+		return false
 	}
-	if partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+	if len(desired) == 0 {
+		// No classification baseline: the caller verifies remaining ownership.
+		fmt.Fprintln(stderr, "gc stop: orphan sweep skipped: empty desired session set") //nolint:errcheck // best-effort stderr
+		return true
 	}
-	var orphans []string
-	for _, name := range running {
-		if desired[name] {
+	cityName := loadedCityName(cfg, cityPath)
+	var backends []runtime.BackendListResult
+	var ownedBackends []runtime.BackendListResult
+	for _, leaf := range stopCleanupProviders(sp) {
+		scoped, ok := leaf.(interface{ IsCityScoped(string) bool })
+		if !ok {
+			if _, owned := leaf.(interface {
+				SessionOwnership(string) (string, string, error)
+			}); !owned {
+				fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: runtime cannot confirm a city-scoped socket or host ownership for backend %T\n", leaf) //nolint:errcheck // best-effort stderr
+				continue
+			}
+			candidates, err := ownedOrphanStopTargets(leaf, cityPath, desired)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: %s\n", strings.ReplaceAll(err.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
+				return false
+			}
+			ownedBackends = append(ownedBackends, candidates...)
 			continue
 		}
-		orphans = append(orphans, name)
+		if !scoped.IsCityScoped(cityName) {
+			fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: runtime cannot confirm a city-scoped socket for backend %T\n", leaf) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if len(cfg.Agents) == 0 {
+			continue // persisted manual targets do not provide a name-shape baseline
+		}
+		check := doctor.NewOrphanSessionsCheck(cfg, cityName, cfg.Workspace.SessionTemplate, stopOrphanListingProvider{leaf})
+		candidates, err := check.CleanupCandidates(&doctor.CheckContext{CityPath: cityPath}, desired)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: %s\n", strings.ReplaceAll(err.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		backends = append(backends, candidates...)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	var targets []stopTarget
+	for _, backend := range backends {
+		targets = append(targets, stopTargetsForNames(backend.Names, cfg, sessFront.Store().Store, stderr)...)
+	}
+	for _, backend := range ownedBackends {
+		// Persisted targets were handled above. An orphan's ownership ID can
+		// refer to a deleted bead; use the runtime worker with its verified
+		// owner instead of trying to reconstruct that missing session.
+		for _, target := range stopTargetsForNames(backend.Names, cfg, nil, stderr) {
+			target.runtimeOnly = true
+			targets = append(targets, target)
+		}
+	}
+	seen := make(map[string]bool, len(targets))
+	unique := targets[:0]
+	for _, target := range targets {
+		if runtimeOnly, exists := seen[target.name]; exists {
+			if runtimeOnly || target.runtimeOnly {
+				fmt.Fprintf(stderr, "gc stop: orphan sweep refused: multiple backends claim runtime %q\n", target.name) //nolint:errcheck // best-effort stderr
+				return false
+			}
+			continue // scoped copies share a lifecycle target and retain every owner
+		}
+		seen[target.name] = target.runtimeOnly
+		target.order = len(unique)
+		unique = append(unique, target)
+	}
+	provider := providerForManualStopTargets(sp, append(backends, ownedBackends...))
+	return gracefulStopTargets(unique, provider, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
+}
+
+// stopOrphanListingProvider confirms absence independently on each leaf while
+// retaining the doctor's socket-scope check and original owning providers.
+type stopOrphanListingProvider struct{ runtime.Provider }
+
+// IsCityScoped retains the original leaf's socket-scope policy.
+func (p stopOrphanListingProvider) IsCityScoped(city string) bool {
+	scoped, ok := p.Provider.(interface{ IsCityScoped(string) bool })
+	return ok && scoped.IsCityScoped(city)
+}
+
+// ListRunningBackends confirms absent servers independently for each leaf.
+func (p stopOrphanListingProvider) ListRunningBackends(string) []runtime.BackendListResult {
+	return listSessionBackendsWithAbsenceCheck(p.Provider)
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -679,9 +878,13 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
+	code := 0
 	visible := map[string]bool{}
 	if sp != nil {
-		names, err := sp.ListRunning("")
+		names, err := runtime.MergeBackendListResults(listSessionBackendsWithAbsenceCheck(sp)...)
+		if err != nil {
+			code = 1
+		}
 		partialList := runtime.IsPartialListError(err)
 		if err != nil && !partialList {
 			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -710,6 +913,11 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 			running = append(running, sn)
 		}
 	}
-	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
-	return 0
+	if !gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr) {
+		code = 1
+	}
+	if manual, ok := sp.(*manualStopProvider); ok && manual.shutdownError() != nil {
+		return 1
+	}
+	return code
 }

@@ -106,6 +106,7 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 	err := p.Start(context.Background(), name, runtime.Config{
 		Command: fakeACPShellCommand(),
 		WorkDir: t.TempDir(),
+		Env:     map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "session-1"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -114,6 +115,48 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 
 	if !p.IsRunning(name) {
 		t.Error("IsRunning = false after Start, want true")
+	}
+	reader := NewSeamBackedWithDir(p.dir, Config{})
+	owner, ok := reader.(interface {
+		SessionOwnership(string) (string, string, error)
+	})
+	if !ok {
+		t.Fatal("ACP constructor does not expose durable session ownership")
+	}
+	city, id, err := owner.SessionOwnership(name)
+	if err != nil || city != "/cities/test" || id != "session-1" {
+		t.Fatalf("ownership city=%q id=%q err=%v", city, id, err)
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if city, id, err := owner.SessionOwnership(name); err != nil || city != "" || id != "" {
+		t.Fatalf("ownership survived stop: city=%q id=%q err=%v", city, id, err)
+	}
+}
+
+func TestSessionOwnershipRejectsMalformedRecord(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("test-session", sessionOwnershipMetaKey, "{"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.SessionOwnership("test-session"); err == nil {
+		t.Fatal("malformed ownership was accepted")
+	}
+}
+
+func TestStartRejectsUnwritableOwnership(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	if err := os.Mkdir(p.metaPath(name, sessionOwnershipMetaKey), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := p.Start(context.Background(), name, runtime.Config{Command: "unused"})
+	if err == nil || !strings.Contains(err.Error(), "publishing session ownership") {
+		t.Fatalf("Start error=%v, want ownership publication failure before spawn", err)
+	}
+	if p.IsRunning(name) {
+		t.Fatal("failed ownership publication left a running session")
 	}
 }
 

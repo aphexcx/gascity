@@ -78,19 +78,18 @@ var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relau
 // phrasings that predate the sentinel (tmux/subprocess providers may
 // still return raw strings). Callers that treat a missing session as
 // benign (e.g. bulk Stop) use this helper so the semantics live in one
-// place.
+// place. Every cause of a joined error must report absence.
 func IsSessionGone(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrSessionNotFound) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "session not found") ||
-		strings.Contains(msg, "not running") ||
-		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no tmux server running")
+	return allSessionErrorCausesMatch(err, func(cause error) bool {
+		if errors.Is(cause, ErrSessionNotFound) {
+			return true
+		}
+		msg := cause.Error()
+		return strings.Contains(msg, "session not found") ||
+			strings.Contains(msg, "not running") ||
+			strings.Contains(msg, "not found") ||
+			strings.Contains(msg, "no tmux server running")
+	})
 }
 
 // ContentBlock represents a content element in a message.

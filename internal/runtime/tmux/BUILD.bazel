@@ -101,10 +101,12 @@ go_test(
     ),
     embed = [":tmux"],
     deps = [
+        "//internal/beads",
         "//internal/citylayout",
         "//internal/runtime",
         "//internal/runtime/lanectx",
         "//internal/runtime/proctable",
+        "//internal/session",
         "//internal/sessionlog",
         "//internal/shellquote",
         "//internal/testenv",

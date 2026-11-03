@@ -154,6 +154,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
 			delete(p.workDirs, name)
+			p.cleanupMeta(name)
 		}
 		p.mu.Unlock()
 	}
@@ -174,6 +175,21 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if command == "" {
 		clearSentinel()
 		return fmt.Errorf("acp provider requires a command")
+	}
+
+	// Publish ownership before the process and control socket become visible.
+	// Keep the sentinel lock through the atomic write so a stopped startup
+	// cannot overwrite a replacement session's identity.
+	p.mu.Lock()
+	if p.conns[name] != sentinel {
+		p.mu.Unlock()
+		return fmt.Errorf("session %q was stopped during startup", name)
+	}
+	ownershipErr := p.publishSessionOwnership(name, cfg.Env)
+	p.mu.Unlock()
+	if ownershipErr != nil {
+		clearSentinel()
+		return fmt.Errorf("publishing session ownership for %q: %w", name, ownershipErr)
 	}
 
 	cmd := exec.Command("sh", "-c", command)
@@ -691,6 +707,35 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+const sessionOwnershipMetaKey = "gc_session_owner"
+
+type sessionOwnership struct {
+	CityPath  string `json:"city_path"`
+	SessionID string `json:"session_id"`
+}
+
+func (p *Provider) publishSessionOwnership(name string, env map[string]string) error {
+	data, err := json.Marshal(sessionOwnership{CityPath: env["GC_CITY_PATH"], SessionID: env["GC_SESSION_ID"]})
+	if err != nil {
+		return err
+	}
+	return p.SetMeta(name, sessionOwnershipMetaKey, string(data))
+}
+
+// SessionOwnership returns the host city path and session ID persisted at Start.
+// A missing record is unknown ownership; malformed or unreadable data is an error.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	data, err := p.GetMeta(name, sessionOwnershipMetaKey)
+	if err != nil || data == "" {
+		return "", "", err
+	}
+	var owner sessionOwnership
+	if err := json.Unmarshal([]byte(data), &owner); err != nil {
+		return "", "", fmt.Errorf("decoding ownership for %q: %w", name, err)
+	}
+	return owner.CityPath, owner.SessionID, nil
 }
 
 // RemoveMeta removes a metadata sidecar file.

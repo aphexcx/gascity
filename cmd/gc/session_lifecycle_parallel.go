@@ -643,6 +643,8 @@ type stopTarget struct {
 	order       int
 	resolved    bool
 	poolManaged bool
+	// runtimeOnly targets carry verified ownership without a persisted session.
+	runtimeOnly bool
 }
 
 // lifecycleCorrelationID returns the identifier subscribers use to
@@ -3834,6 +3836,9 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 		if sessionBeads, err := loadSessionBeads(store); err == nil {
 			for _, bead := range sessionBeads {
 				name := bead.Metadata["session_name"]
+				if name == "" {
+					name = sessionNameFromBeadID(bead.ID)
+				}
 				template := normalizedSessionTemplate(bead, cfg)
 				if name != "" && template != "" {
 					sessionTemplates[name] = template
@@ -3854,7 +3859,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 						subject = name
 					}
 					sessionSubjects[name] = subject
-					if isPoolManagedSessionBead(bead) {
+					if isPoolManagedSessionBead(bead) && !isManualSessionBeadForAgent(bead, findAgentByTemplate(cfg, template)) {
 						sessionPoolManaged[name] = true
 					}
 				}
@@ -3943,7 +3948,7 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 	}
 	merged := make([]stopTarget, 0, len(targets))
 	for _, target := range targets {
-		if hydratedTarget, ok := byName[target.name]; ok {
+		if hydratedTarget, ok := byName[target.name]; ok && !target.runtimeOnly {
 			if strings.TrimSpace(target.sessionID) == "" {
 				target.sessionID = hydratedTarget.sessionID
 			}
@@ -3969,6 +3974,9 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 }
 
 func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	if target.runtimeOnly {
+		store = nil
+	}
 	targetID := strings.TrimSpace(target.sessionID)
 	if targetID == "" {
 		targetID = strings.TrimSpace(target.name)
@@ -3991,7 +3999,9 @@ func cityStopSessionMarked(store beads.Store, sessionID string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(b.Metadata["sleep_reason"]) == string(sessionpkg.SleepReasonCityStop)
+	view := sessionpkg.ProjectLifecycle(sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata))
+	return (view.BaseState == sessionpkg.BaseStateActive || view.BaseState == sessionpkg.BaseStateAsleep) &&
+		strings.TrimSpace(b.Metadata["sleep_reason"]) == string(sessionpkg.SleepReasonCityStop)
 }
 
 func markCityStopSessionAsAsleep(sessFront *sessionpkg.Store, sessionID string, stderr io.Writer) {
@@ -4023,6 +4033,14 @@ func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads
 }
 
 func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) int {
+	sent, _ := interruptTargetsWithStopResults(targets, cfg, store, sp, stderr, shouldStop)
+	return sent
+}
+
+// interruptTargetsWithStopResults retains completed pool teardowns so the
+// graceful shutdown's exited pass does not kill the same session again.
+func interruptTargetsWithStopResults(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer, shouldStop func() bool) (int, map[string]bool) {
+	stopped := make(map[string]bool)
 	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
@@ -4047,6 +4065,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 			outcome := result.outcome
 			if result.err == nil && outcome == "success" {
 				outcome = "stopped_pool_managed"
+				stopped[result.target.name] = true
 			}
 			logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, outcome, result.started, result.finished, result.err)
 		}
@@ -4055,15 +4074,19 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 
 	sent := 0
 	if len(interruptable) == 0 {
-		return sent
+		return sent, stopped
 	}
 	waveStarted := time.Now()
 	results := executeTargetWaveUntil(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), interruptPerTargetTimeout(cfg), shouldStop, func(target stopTarget) error {
+		targetStore := store
+		if target.runtimeOnly {
+			targetStore = nil
+		}
 		targetID := strings.TrimSpace(target.sessionID)
 		if targetID == "" {
 			targetID = strings.TrimSpace(target.name)
 		}
-		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
+		return workerInterruptSessionTargetWithConfig("", targetStore, sp, cfg, targetID)
 	})
 	for _, result := range results {
 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
@@ -4072,7 +4095,7 @@ func interruptTargetsBoundedWithForceSignal(targets []stopTarget, cfg *config.Ci
 		}
 	}
 	logLifecycleWave(stderr, "interrupt", 0, waveStarted, len(interruptable))
-	return sent
+	return sent, stopped
 }
 
 func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
@@ -4089,6 +4112,20 @@ func stopTargetsBounded(
 	stdout, stderr io.Writer,
 ) int {
 	targets = hydrateStopTargets(targets, cfg, store, stderr)
+	// Unknown templates retain the serial fallback without discarding the
+	// dependency graph for targets that still resolve in current configuration.
+	var unresolved, resolved []stopTarget
+	for _, target := range targets {
+		if target.resolved {
+			resolved = append(resolved, target)
+		} else {
+			unresolved = append(unresolved, target)
+		}
+	}
+	if len(unresolved) > 0 && len(resolved) > 0 {
+		stopped := stopTargetsBounded(unresolved, cfg, store, sp, rec, actor, stdout, stderr)
+		return stopped + stopTargetsBounded(resolved, cfg, store, sp, rec, actor, stdout, stderr)
+	}
 	for _, target := range targets {
 		if !target.resolved {
 			if cfg != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,13 +106,14 @@ type fakeK8sOps struct {
 	calls []fakeCall
 
 	// Configurable behaviors.
-	execOutput map[string]string                              // pod+cmd key → stdout
-	execErr    map[string]error                               // pod+cmd key → error
-	execFunc   func(pod string, cmd []string) (string, error) // dynamic override, checked first
-	createErr  error
-	deleteErr  error
-	getErr     error
-	listErr    error
+	execOutput     map[string]string                              // pod+cmd key → stdout
+	execErr        map[string]error                               // pod+cmd key → error
+	execFunc       func(pod string, cmd []string) (string, error) // dynamic override, checked first
+	createErr      error
+	deleteErr      error
+	gracefulDelete bool // retain terminating pods until their requested grace expires
+	getErr         error
+	listErr        error
 }
 
 type fakeCall struct {
@@ -157,10 +159,18 @@ func (f *fakeK8sOps) getPod(_ context.Context, name string) (*corev1.Pod, error)
 	return p.DeepCopy(), nil
 }
 
-func (f *fakeK8sOps) deletePod(_ context.Context, name string, _ int64) error {
+func (f *fakeK8sOps) deletePod(_ context.Context, name string, grace int64) error {
 	f.record("deletePod", name, nil)
 	if f.deleteErr != nil {
 		return f.deleteErr
+	}
+	if pod := f.pods[name]; f.gracefulDelete && pod != nil {
+		if pod.DeletionTimestamp == nil {
+			now := metav1.Now()
+			pod.DeletionTimestamp = &now
+			pod.DeletionGracePeriodSeconds = &grace
+		}
+		return nil
 	}
 	delete(f.pods, name)
 	return nil
@@ -175,6 +185,11 @@ func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector 
 	// Parse label selector to filter pods.
 	var result []corev1.Pod
 	for _, p := range f.pods {
+		if f.gracefulDelete && p.DeletionTimestamp != nil && p.DeletionGracePeriodSeconds != nil &&
+			!time.Now().Before(p.DeletionTimestamp.Add(time.Duration(*p.DeletionGracePeriodSeconds)*time.Second)) {
+			delete(f.pods, p.Name)
+			continue
+		}
 		if matchesSelector(p, selector) && matchesFieldSelector(p, fieldSelector) {
 			result = append(result, *p.DeepCopy())
 		}

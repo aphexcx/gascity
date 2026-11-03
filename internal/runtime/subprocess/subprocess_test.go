@@ -30,6 +30,184 @@ func newTestProvider(t *testing.T) *Provider {
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
+func TestGetMetaOwnershipExitAndReplacement(t *testing.T) {
+	testOwnershipExitAndReplacement(t, newTestProvider(t), false)
+}
+
+func TestSessionOwnershipExitAndReplacement(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		label := "default"
+		if fallback {
+			label = "fallback"
+		}
+		t.Run(label, func(t *testing.T) {
+			p := newTestProvider(t)
+			if fallback {
+				p = NewProviderWithDir(filepath.Join(shortTempDir(t), strings.Repeat("long", 30)))
+			}
+			if fallback && p.socketDir() == p.dir {
+				t.Fatal("long provider directory did not select the fallback socket location")
+			}
+			testOwnershipExitAndReplacement(t, p, true)
+		})
+	}
+}
+
+func readTestOwnership(t *testing.T, p runtime.Provider, name string, paired bool) (string, string, error) {
+	t.Helper()
+	if paired {
+		reader, ok := p.(interface {
+			SessionOwnership(string) (string, string, error)
+		})
+		if !ok {
+			t.Fatalf("%T does not expose SessionOwnership", p)
+		}
+		return reader.SessionOwnership(name)
+	}
+	city, err := p.GetMeta(name, "GC_CITY_PATH")
+	if err != nil {
+		return "", "", err
+	}
+	id, err := p.GetMeta(name, "GC_SESSION_ID")
+	return city, id, err
+}
+
+func testOwnershipExitAndReplacement(t *testing.T, p *Provider, paired bool) {
+	t.Helper()
+	const name = "owned-process"
+	if err := p.Start(context.Background(), name, runtime.Config{Command: "exec sleep 300", Env: map[string]string{
+		"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "original",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	artifacts := []string{p.sockPath(name), p.sockNamePath(name), p.metaPath(name, "GC_CITY_PATH"), p.metaPath(name, "GC_SESSION_ID")}
+	for _, path := range artifacts {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("live subprocess artifact %s missing: %v", path, err)
+		}
+	}
+	readers := map[string]runtime.Provider{"raw": p, "seams": seamBack(p), "cross-process": NewProviderWithDir(p.dir)}
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || city != "/cities/test" || id != "original" {
+			t.Fatalf("%s live ownership = %q, %q, %v", label, city, id, err)
+		}
+	}
+	p.mu.Lock()
+	done := p.procs[name].done
+	p.mu.Unlock()
+	if err := p.Interrupt(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("subprocess did not exit after interrupt")
+	}
+	for _, path := range artifacts {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("exited subprocess artifact %s remains: %v", path, err)
+		}
+	}
+	for label, reader := range readers {
+		if paired {
+			city, id, err := readTestOwnership(t, reader, name, true)
+			if city != "" || id != "" || !runtime.IsSessionNotFound(err) {
+				t.Errorf("%s exited ownership = %q, %q, %v, want typed absence", label, city, id, err)
+			}
+			continue
+		}
+		for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID"} {
+			_, err := reader.GetMeta(name, key)
+			if !runtime.IsSessionNotFound(err) {
+				t.Errorf("%s exited %s error = %v, want typed absence", label, key, err)
+			}
+		}
+	}
+	replacement := NewProviderWithDir(p.dir)
+	if err := replacement.Start(context.Background(), name, runtime.Config{Command: "exec sleep 300", Env: map[string]string{
+		"GC_CITY_PATH": "/cities/foreign", "GC_SESSION_ID": "replacement",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = replacement.Stop(name) })
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || city != "/cities/foreign" || id != "replacement" {
+			t.Errorf("%s replacement ownership = %q, %q, %v", label, city, id, err)
+		}
+	}
+	if err := replacement.RemoveMeta(name, "GC_SESSION_ID"); err != nil {
+		t.Fatal(err)
+	}
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || id != "" || (paired && city != "") {
+			t.Errorf("%s live missing metadata must leave ownership unknown: %q, %q, %v", label, city, id, err)
+		}
+	}
+}
+
+func TestGetMetaMissingOwnershipDuringReplacementProbe(t *testing.T) {
+	testMissingOwnershipDuringReplacementProbe(t, false)
+}
+
+func TestSessionOwnershipMissingDuringReplacementProbe(t *testing.T) {
+	testMissingOwnershipDuringReplacementProbe(t, true)
+}
+
+func testMissingOwnershipDuringReplacementProbe(t *testing.T, paired bool) {
+	t.Helper()
+	p := newTestProvider(t)
+	const name = "replaced-during-read"
+	if paired {
+		// Assert the extension and initial absence before starting the socket handler.
+		if _, _, err := readTestOwnership(t, p, name, true); !runtime.IsSessionNotFound(err) {
+			t.Fatalf("initial ownership error = %v, want typed absence", err)
+		}
+	}
+	listener := listenControlSocket(t, p.sockPath(name))
+	completed := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			completed <- err
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		line, err := bufio.NewReader(conn).ReadString('\n')
+		if err == nil && line != "ping\n" {
+			err = errors.New("expected an absence probe")
+		}
+		if err == nil {
+			// GetMeta has already observed the deleted ownership sidecar.
+			// Install a foreign replacement before its socket probe completes.
+			err = p.SetMeta(name, "GC_SESSION_ID", "foreign-replacement")
+		}
+		if err == nil {
+			_, err = conn.Write([]byte("ok\n"))
+		}
+		completed <- err
+	}()
+	var city, id string
+	var err error
+	if paired {
+		city, id, err = readTestOwnership(t, p, name, true)
+	} else {
+		id, err = p.GetMeta(name, "GC_SESSION_ID")
+	}
+	if err != nil || id != "" || city != "" {
+		t.Fatalf("replacement probe must leave missing ownership unverified: id=%q err=%v", id, err)
+	}
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	if id, err := p.GetMeta(name, "GC_SESSION_ID"); err != nil || id != "foreign-replacement" {
+		t.Fatalf("next read must see the replacement: id=%q err=%v", id, err)
+	}
+}
+
 func requirePrivateSocketDirectory(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Lstat(path)
@@ -1006,7 +1184,7 @@ func startRejectingControlSocket(t *testing.T, path string) <-chan string {
 	return startRecordingControlSocket(t, path, "nope\n", 1)
 }
 
-func startRecordingControlSocket(t *testing.T, path, response string, commandBuffer int) <-chan string {
+func listenControlSocket(t *testing.T, path string) net.Listener {
 	t.Helper()
 	lis, err := net.Listen("unix", path)
 	if err != nil {
@@ -1017,7 +1195,12 @@ func startRecordingControlSocket(t *testing.T, path, response string, commandBuf
 		_ = os.Remove(path)
 		_ = os.Remove(filepath.Dir(path))
 	})
+	return lis
+}
 
+func startRecordingControlSocket(t *testing.T, path, response string, commandBuffer int) <-chan string {
+	t.Helper()
+	lis := listenControlSocket(t, path)
 	gotCommand := make(chan string, commandBuffer)
 	go func() {
 		for {
