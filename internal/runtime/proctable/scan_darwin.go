@@ -24,6 +24,10 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	return scanBySessionID(id)
+}
+
+func scanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	records, err := psRecords()
 	if err != nil {
 		return []runtime.LiveRuntime{}, err

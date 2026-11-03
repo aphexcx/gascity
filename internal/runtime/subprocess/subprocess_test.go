@@ -34,6 +34,56 @@ func TestGetMetaOwnershipExitAndReplacement(t *testing.T) {
 	testOwnershipExitAndReplacement(t, newTestProvider(t), false)
 }
 
+func TestSessionOwnershipProcessLookup(t *testing.T) {
+	scanErr := errors.New("process table unavailable")
+	for _, tc := range []struct {
+		name    string
+		present bool
+		err     error
+	}{
+		{name: "absent"},
+		{name: "surviving child", present: true},
+		{name: "uncertain", err: scanErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "persisted-child"
+			for key, value := range map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "child-session"} {
+				if err := p.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.ops.hasSessionProcess = func(id string) (bool, error) {
+				if id != "child-session" {
+					t.Errorf("process lookup used session ID %q", id)
+				}
+				// The potentially slow lookup must not hold the process lock.
+				if !p.mu.TryLock() {
+					t.Error("process lookup held the provider lock")
+				} else {
+					p.mu.Unlock()
+				}
+				return tc.present, tc.err
+			}
+			city, id, err := readTestOwnership(t, seamBack(p), name, true)
+			switch {
+			case tc.err != nil:
+				if !errors.Is(err, tc.err) || runtime.IsSessionNotFound(err) || city != "" || id != "" {
+					t.Fatalf("uncertain process lookup = %q, %q, %v", city, id, err)
+				}
+			case tc.present:
+				if err != nil || city != "/cities/test" || id != "child-session" {
+					t.Fatalf("surviving child ownership = %q, %q, %v", city, id, err)
+				}
+			default:
+				if !runtime.IsSessionNotFound(err) || city != "" || id != "" {
+					t.Fatalf("absent child ownership = %q, %q, %v", city, id, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionOwnershipExitAndReplacement(t *testing.T) {
 	for _, fallback := range []bool{false, true} {
 		label := "default"

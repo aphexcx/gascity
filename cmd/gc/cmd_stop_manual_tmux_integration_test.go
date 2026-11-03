@@ -24,16 +24,29 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+func TestCmdStopSubprocessChildHelper(t *testing.T) {
+	ready := os.Getenv("GASCITY_STOP_CHILD_READY")
+	if ready == "" {
+		t.Skip("subprocess child helper")
+	}
+	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The parent reaps this fixture through its original provider handle.
+	<-time.NewTimer(time.Hour).C
+}
+
 func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name, origin, missing string
-		force, live           bool
+		force, live, child    bool
 	}{
 		{name: "stale manual forced", origin: "manual", force: true},
 		{name: "stale manual graceful", origin: "manual"},
 		{name: "stale named forced", origin: "named", force: true},
 		{name: "stale named graceful", origin: "named"},
 		{name: "live socket", origin: "manual", force: true, live: true},
+		{name: "child without socket", origin: "manual", force: true, child: true},
 		{name: "partial city", origin: "manual", force: true, missing: "GC_SESSION_ID"},
 		{name: "partial session", origin: "manual", force: true, missing: "GC_CITY_PATH"},
 	} {
@@ -63,6 +76,39 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 			}
 			dir := testutil.ShortTempDir(t, "gc-stop-")
 			sp := subprocess.NewSeamBackedWithDir(dir)
+			if tc.child {
+				executable, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				ready := filepath.Join(dir, "child-ready")
+				owner := sp
+				if err := owner.Start(context.Background(), name, runtime.Config{
+					Command: "exec " + shellQuotePath(executable) + " -test.run=^TestCmdStopSubprocessChildHelper$",
+					Env:     map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID, "GASCITY_STOP_CHILD_READY": ready},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := owner.Stop(name); err != nil {
+						t.Errorf("reaping test child: %v", err)
+					}
+				})
+				waitForNonEmptyFileContent(t, ready, testutil.ExecRaceTimeout)
+				// Reproduce the lost controller's observable state: a detached
+				// child, no reachable socket, and a fresh provider with no map.
+				sockets, err := filepath.Glob(filepath.Join(dir, "*.sock"))
+				if err != nil || len(sockets) != 1 {
+					t.Fatalf("child control sockets = %v, %v", sockets, err)
+				}
+				if err := os.Remove(sockets[0]); err != nil {
+					t.Fatal(err)
+				}
+				if !owner.IsRunning(name) {
+					t.Fatal("child exited before its socket was lost")
+				}
+				sp = subprocess.NewSeamBackedWithDir(dir)
+			}
 			for key, value := range map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID} {
 				if key != tc.missing {
 					if err := sp.SetMeta(name, key, value); err != nil {
@@ -106,12 +152,12 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				started := time.Now()
 				code := cmdStopBody(cityDir, cfg, tc.force, &stdout, &stderr)
 				t.Logf("attempt=%d exit=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
-				if tc.live || tc.missing != "" {
+				if tc.live || tc.child || tc.missing != "" {
 					if code != 1 || strings.Contains(stdout.String(), "City stopped.") {
 						t.Errorf("unresolved identity must fail closed: exit=%d", code)
 					}
-					if tc.live && (time.Since(started) < stopPerTargetTimeoutDefault || !strings.Contains(stderr.String(), "remains after shutdown")) {
-						t.Error("live socket must survive until the shutdown bound")
+					if (tc.live || tc.child) && (time.Since(started) < stopPerTargetTimeoutDefault || !strings.Contains(stderr.String(), "remains after shutdown")) {
+						t.Error("live runtime must survive until the shutdown bound")
 					}
 					if tc.missing != "" && !strings.Contains(stderr.String(), "incomplete ownership") {
 						t.Error("partial sidecar must report incomplete ownership")

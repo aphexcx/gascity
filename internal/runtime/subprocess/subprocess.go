@@ -47,7 +47,8 @@ type Provider struct {
 }
 
 type providerOps struct {
-	start func(*exec.Cmd) error
+	start             func(*exec.Cmd) error
+	hasSessionProcess func(string) (bool, error)
 }
 
 const (
@@ -105,7 +106,8 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
-			start: (*exec.Cmd).Start,
+			start:             (*exec.Cmd).Start,
+			hasSessionProcess: proctable.HasSessionProcess,
 		},
 	}
 }
@@ -434,11 +436,30 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 }
 
 // SessionOwnership reads the persisted city and session identity together.
-// A complete sidecar is stale when neither a tracked process nor a control
-// socket remains. Partial metadata always leaves ownership unknown.
+// A complete sidecar is stale only after both the control socket and the
+// session's processes are absent. Partial metadata leaves ownership unknown.
 func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	city, id, err := p.sessionOwnershipLocked(name)
+	p.mu.Unlock()
+	if runtime.IsSessionNotFound(err) && city != "" && id != "" {
+		// The controller hosts the socket, but its detached child can outlive
+		// it. Scan outside p.mu so process reaping and Start remain unblocked.
+		present, scanErr := p.ops.hasSessionProcess(id)
+		if scanErr != nil {
+			return "", "", fmt.Errorf("checking subprocess %q session processes: %w", name, scanErr)
+		}
+		if present {
+			return city, id, nil
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return city, id, nil
+}
+
+func (p *Provider) sessionOwnershipLocked(name string) (string, string, error) {
 	city, cityErr := os.ReadFile(p.metaPath(name, "GC_CITY_PATH"))
 	id, idErr := os.ReadFile(p.metaPath(name, "GC_SESSION_ID"))
 	for _, err := range []error{cityErr, idErr} {
@@ -452,10 +473,7 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	if cityErr != nil || idErr != nil || len(city) == 0 || len(id) == 0 {
 		return "", "", nil
 	}
-	if err := p.missingOwnershipLocked(name); err != nil {
-		return "", "", err
-	}
-	return string(city), string(id), nil
+	return string(city), string(id), p.missingOwnershipLocked(name)
 }
 
 // missingOwnershipLocked distinguishes unknown ownership from confirmed absence.
