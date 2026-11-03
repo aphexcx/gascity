@@ -722,6 +722,33 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	}
 }
 
+func TestPendingPodRetainsShutdownIdentity(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	pod, err := buildPod("pending-session", runtime.Config{Env: map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "session-1"}}, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = corev1.PodPending
+	fake.pods[pod.Name] = pod
+	rt, tp := p.Seams()
+	sp := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: p}
+	names, err := sp.ListRunning("")
+	if err != nil || len(names) != 0 || sp.IsRunning("pending-session") {
+		t.Fatalf("pending pod should not be running: names=%v error=%v", names, err)
+	}
+	city, id, err := sp.SessionOwnership("pending-session")
+	if err != nil || city != "/cities/test" || id != "session-1" {
+		t.Fatalf("pending identity=%q/%q error=%v", city, id, err)
+	}
+	if err := sp.Stop("pending-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fake.pods[pod.Name]; exists {
+		t.Fatal("pending pod survived stop")
+	}
+}
+
 func TestSessionOwnershipRefusesUnverifiablePods(t *testing.T) {
 	for _, scenario := range []string{"missing record", "missing annotations", "conflicting owner", "name collision", "listing error"} {
 		t.Run(scenario, func(t *testing.T) {

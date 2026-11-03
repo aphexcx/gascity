@@ -752,7 +752,23 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 	}
 	var targets []stopTarget
 	for _, backend := range backends {
-		targets = append(targets, stopTargetsForNames(backend.Names, cfg, sessFront.Store().Store, stderr)...)
+		for _, target := range stopTargetsForNames(backend.Names, cfg, sessFront.Store().Store, stderr) {
+			if target.sessionID == "" {
+				id, err := backend.Provider.GetMeta(target.name, "GC_SESSION_ID")
+				if err == nil && strings.TrimSpace(id) != "" {
+					_, err = sessFront.Store().Get(strings.TrimSpace(id))
+					if stopSessionRecordAbsent(err) {
+						target.runtimeOnly = true
+						err = nil
+					}
+				}
+				if err != nil {
+					fmt.Fprintf(stderr, "gc stop: orphan sweep refused: resolving runtime %q session record: %v\n", target.name, err) //nolint:errcheck // best-effort stderr
+					return false
+				}
+			}
+			targets = append(targets, target)
+		}
 	}
 	for _, backend := range ownedBackends {
 		// Persisted targets were handled above. An orphan's ownership ID can
@@ -780,6 +796,25 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 	provider := providerForManualStopTargets(sp, append(backends, ownedBackends...))
 	stopped := gracefulStopTargets(unique, provider, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
 	return stopped && ownershipResolved
+}
+
+// stopSessionRecordAbsent accepts only a single wrapped not-found sentinel.
+// Collisions and joined errors cannot prove that runtime-only teardown is safe.
+func stopSessionRecordAbsent(err error) bool {
+	if errors.Is(err, beads.ErrIDCollision) {
+		return false
+	}
+	for err != nil {
+		if _, joined := err.(interface{ Unwrap() []error }); joined {
+			return false
+		}
+		next := errors.Unwrap(err)
+		if next == nil {
+			return errors.Is(err, beads.ErrNotFound)
+		}
+		err = next
+	}
+	return false
 }
 
 // stopOrphanListingProvider confirms absence independently on each leaf while
@@ -903,6 +938,13 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 			if name = strings.TrimSpace(name); name != "" {
 				visible[name] = true
 			}
+		}
+	}
+	// Discovery verified these artifacts even if their provider does not count
+	// them as running. Retain them for teardown and its ownership recheck.
+	if manual, ok := sp.(*manualStopProvider); ok {
+		for name := range manual.owners {
+			visible[name] = true
 		}
 	}
 	var running []string

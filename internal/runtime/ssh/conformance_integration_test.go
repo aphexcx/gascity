@@ -3,6 +3,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,6 +113,40 @@ func buildSSHConformanceFixture(t *testing.T) Endpoint {
 	})
 
 	return Endpoint{User: "conformance", Host: "fixture"}
+}
+
+func TestSSHUnmanagedSessionOverShellRunner(t *testing.T) {
+	p := NewProvider(sshConformanceEndpoint(t))
+	if _, code, err := p.tmux(context.Background(), "operator", "new-session", "-d", "-s", "operator", "sleep 300"); err != nil || code != 0 {
+		t.Fatalf("starting isolated operator session: code=%d error=%v", code, err)
+	}
+	t.Cleanup(func() {
+		if err := p.Stop("operator"); err != nil {
+			t.Errorf("stopping isolated operator session: %v", err)
+		}
+	})
+	shared, ok := any(p).(interface{ IsUnmanagedSession(string) (bool, error) })
+	if !ok {
+		t.Fatal("SSH provider does not distinguish unmanaged sessions")
+	}
+	unmanaged, err := shared.IsUnmanagedSession("operator")
+	if err != nil || !unmanaged || !p.IsRunning("operator") {
+		t.Fatalf("operator session unmanaged=%v error=%v", unmanaged, err)
+	}
+	if err := p.SetMeta("operator", "GC_SESSION_ID", "partial-gc-identity"); err != nil {
+		t.Fatal(err)
+	}
+	if unmanaged, err := shared.IsUnmanagedSession("operator"); err != nil || unmanaged {
+		t.Fatalf("partial GC identity unmanaged=%v error=%v", unmanaged, err)
+	}
+}
+
+func TestSSHSessionOwnershipReadsTmuxStderr(t *testing.T) {
+	p := NewProvider(sshConformanceEndpoint(t))
+	_, _, err := p.SessionOwnership("missing-session")
+	if !runtime.IsSessionNotFound(err) {
+		t.Fatalf("real tmux absence on stderr = %v, want session not found", err)
+	}
 }
 
 // TestSSHConformance proves internal/runtime/ssh.NewSeamBacked — the

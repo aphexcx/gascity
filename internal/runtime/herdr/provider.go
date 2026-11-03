@@ -1072,6 +1072,19 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	return "", "", nil
 }
 
+// IsUnmanagedSession identifies foreign registry agents with no GC sidecar.
+// Any existing sidecar, including a partial identity or binding, stays unknown.
+func (p *Provider) IsUnmanagedSession(name string) (bool, error) {
+	_, err := os.Stat(filepath.Join(p.metaDir, sanitize(name)))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading herdr %q sidecar: %w", name, err)
+	}
+	return false, nil
+}
+
 // RemoveMeta deletes a per-session metadata value from the sidecar store.
 // Idempotent.
 func (p *Provider) RemoveMeta(name, key string) error {

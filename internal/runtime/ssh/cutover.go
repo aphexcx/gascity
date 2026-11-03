@@ -35,6 +35,11 @@ func (s *seamBackedProvider) SessionOwnership(name string) (string, string, erro
 	return s.raw.SessionOwnership(name)
 }
 
+// IsUnmanagedSession preserves shared-server identity checks through the adapter.
+func (s *seamBackedProvider) IsUnmanagedSession(name string) (bool, error) {
+	return s.raw.IsUnmanagedSession(name)
+}
+
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)

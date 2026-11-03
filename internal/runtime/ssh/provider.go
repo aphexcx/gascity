@@ -472,17 +472,44 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	if city != "" && id != "" {
 		return city, id, nil
 	}
-	out, code, err := p.tmux(context.Background(), name, "has-session", "-t", name)
+	_, stderr, code, err := p.conn.run.run(context.Background(), p.conn.ep, []string{"tmux", "has-session", "-t", name}, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("probing ssh session %q ownership: %w", name, err)
 	}
-	if code == 1 && (strings.Contains(out, "can't find session:") || strings.Contains(out, "no server running on") || strings.Contains(out, "No such file or directory")) {
+	diagnostic := strings.TrimSpace(string(stderr))
+	if tmuxSessionAbsent(code, diagnostic) {
 		return "", "", runtime.ErrSessionNotFound
 	}
 	if code != 0 {
-		return "", "", fmt.Errorf("probing ssh session %q ownership: tmux exited %d: %s", name, code, strings.TrimSpace(out))
+		return "", "", fmt.Errorf("probing ssh session %q ownership: tmux exited %d: %s", name, code, diagnostic)
 	}
 	return "", "", nil
+}
+
+// IsUnmanagedSession identifies sessions on the shared server with no GC
+// environment markers. Partial and explicitly unset markers remain unknown.
+func (p *Provider) IsUnmanagedSession(name string) (bool, error) {
+	out, stderr, code, err := p.conn.run.run(context.Background(), p.conn.ep, []string{"tmux", "show-environment", "-t", name}, nil)
+	if err != nil {
+		return false, fmt.Errorf("reading ssh session %q environment: %w", name, err)
+	}
+	diagnostic := strings.TrimSpace(string(stderr))
+	if tmuxSessionAbsent(code, diagnostic) {
+		return false, runtime.ErrSessionNotFound
+	}
+	if code != 0 {
+		return false, fmt.Errorf("reading ssh session %q environment: tmux exited %d: %s", name, code, diagnostic)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimPrefix(line, "-"), "GC_") {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func tmuxSessionAbsent(code int, diagnostic string) bool {
+	return code == 1 && (strings.Contains(diagnostic, "can't find session:") || strings.Contains(diagnostic, "no server running on") || strings.Contains(diagnostic, "No such file or directory"))
 }
 
 // RemoveMeta removes a key from the tmux session environment.

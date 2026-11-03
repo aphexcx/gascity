@@ -8,6 +8,37 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestUnmanagedSession(t *testing.T) {
+	for _, mode := range []string{"operator", "city only", "binding only", "unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			p := New("gctest-unmanaged", t.TempDir(), t.TempDir(), 0, 0)
+			switch mode {
+			case "city only":
+				if err := p.SetMeta("session", "GC_CITY_PATH", "/city"); err != nil {
+					t.Fatal(err)
+				}
+			case "binding only":
+				if err := p.SetMeta("session", metaBoundPane, "pane-1"); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				p.metaDir = filepath.Join(p.metaDir, "not-a-directory")
+				if err := os.WriteFile(p.metaDir, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			shared, ok := any(p).(interface{ IsUnmanagedSession(string) (bool, error) })
+			if !ok {
+				t.Fatal("shared herdr provider does not distinguish unmanaged sessions")
+			}
+			unmanaged, err := shared.IsUnmanagedSession("session")
+			if unmanaged != (mode == "operator") || (err != nil) != (mode == "unreadable") {
+				t.Fatalf("unmanaged=%v error=%v", unmanaged, err)
+			}
+		})
+	}
+}
+
 func TestSessionOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		name, city, id              string

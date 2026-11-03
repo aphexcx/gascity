@@ -195,6 +195,11 @@ func verifyManualStopOwnership(sp runtime.Provider, info session.Info, cityPath,
 				absent = runtime.IsSessionNotFound(ownerErr) && !listed
 			} else if backend.Err != nil || listed || backend.Provider.IsRunning(info.SessionName) {
 				othersClear = false
+			} else if owner, ok := backend.Provider.(interface {
+				SessionOwnership(string) (string, string, error)
+			}); ok {
+				_, _, ownerErr := owner.SessionOwnership(info.SessionName)
+				othersClear = othersClear && runtime.IsSessionNotFound(ownerErr)
 			}
 		}
 		if absent && othersClear {
@@ -206,7 +211,19 @@ func verifyManualStopOwnership(sp runtime.Provider, info session.Info, cityPath,
 	for _, backend := range backends {
 		listed := slices.Contains(backend.Names, info.SessionName)
 		if !discovered[backend.Label] && !listed && !backend.Provider.IsRunning(info.SessionName) {
-			continue
+			owner, ok := backend.Provider.(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				continue
+			}
+			_, _, err := owner.SessionOwnership(info.SessionName)
+			if runtime.IsSessionNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("%w: preserving manual runtime %q: cannot verify backend %q: %s", runtime.ErrRuntimeUnavailable, info.SessionName, backend.Label, err.Error())
+			}
 		}
 		if !discovered[backend.Label] {
 			return fmt.Errorf("preserving manual runtime %q: new backend %q claims the name", info.SessionName, backend.Label)
@@ -437,9 +454,8 @@ func resolveManualStopSessionTargets(store beads.Store, cfg *config.City, cityPa
 func manualStopSessionBackends(info session.Info, cityPath string, backends []runtime.BackendListResult) ([]int, error) {
 	var owners []int
 	for i, backend := range backends {
-		if !slices.Contains(backend.Names, info.SessionName) && !backend.Provider.IsRunning(info.SessionName) {
-			continue
-		}
+		// Persisted identities can outlive running/listed state (for example,
+		// a Pending pod). Only the ownership probe can confirm their absence.
 		ownerCity, ownerID, err := stopSessionOwnership(backend.Provider, info.SessionName)
 		if runtime.IsSessionNotFound(err) {
 			// Listings and boolean liveness may be cached. The ownership read
@@ -448,6 +464,31 @@ func manualStopSessionBackends(info session.Info, cityPath string, backends []ru
 		}
 		if err != nil {
 			return nil, fmt.Errorf("reading manual session %q ownership (%s): %w", info.ID, backend.Label, err)
+		}
+		if ownerCity == "" || ownerID == "" {
+			if shared, ok := backend.Provider.(interface {
+				IsUnmanagedSession(string) (bool, error)
+			}); ok {
+				unmanaged, err := shared.IsUnmanagedSession(info.SessionName)
+				if runtime.IsSessionNotFound(err) {
+					continue
+				}
+				if err != nil {
+					return nil, fmt.Errorf("reading manual session %q runtime identity (%s): %w", info.ID, backend.Label, err)
+				}
+				if unmanaged {
+					return nil, fmt.Errorf("persisted manual session %q runtime %q has no ownership record (%s)", info.ID, info.SessionName, backend.Label)
+				}
+			}
+			if slices.Contains(backend.Names, info.SessionName) || backend.Provider.IsRunning(info.SessionName) {
+				return nil, nil // the orphan sweep reports visible unknown owners
+			}
+			if _, ok := backend.Provider.(interface {
+				SessionOwnership(string) (string, string, error)
+			}); ok {
+				return nil, fmt.Errorf("manual session %q runtime %q has incomplete ownership (%s)", info.ID, info.SessionName, backend.Label)
+			}
+			continue // legacy metadata reads cannot distinguish missing keys from absence
 		}
 		// A persisted name can be reused by another city or another session.
 		// Every backend holding it must agree before routing an explicit stop.
@@ -504,6 +545,20 @@ func ownedOrphanStopTargets(sp runtime.Provider, cityPath string, desired map[st
 				continue
 			}
 			if cityPath == "" || ownerCity == "" || ownerID == "" {
+				if shared, ok := backend.Provider.(interface {
+					IsUnmanagedSession(string) (bool, error)
+				}); ok {
+					unmanaged, err := shared.IsUnmanagedSession(name)
+					if runtime.IsSessionNotFound(err) {
+						continue
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("reading orphan runtime %q identity (%s): %w", name, backend.Label, err)
+					}
+					if unmanaged {
+						continue
+					}
+				}
 				unknown = append(unknown, name)
 				continue
 			}

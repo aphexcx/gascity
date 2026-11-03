@@ -484,8 +484,9 @@ func TestManualStopRevalidatesOwnershipBeforeMutation(t *testing.T) {
 }
 
 func TestManualStopReportsOwnershipChangeDuringGrace(t *testing.T) {
-	for _, ambiguousAtDiscovery := range []bool{false, true} {
-		t.Run(map[bool]string{false: "new foreign backend", true: "two owned backends"}[ambiguousAtDiscovery], func(t *testing.T) {
+	for _, mode := range []string{"new foreign backend", "two owned backends", "new pending backend"} {
+		t.Run(mode, func(t *testing.T) {
+			ambiguousAtDiscovery := mode == "two owned backends"
 			store := beads.NewMemStore()
 			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
 				"session_origin": "manual", "session_name": "manual-runtime", "state": "suspended",
@@ -498,7 +499,11 @@ func TestManualStopReportsOwnershipChangeDuringGrace(t *testing.T) {
 			if ambiguousAtDiscovery {
 				startStopTestSession(t, other, "manual-runtime", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
 			}
-			source := hybrid.New(owner, other, func(string) bool { return false })
+			var otherProvider runtime.Provider = other
+			if mode == "new pending backend" {
+				otherProvider = &stopUnlistedRuntimeProvider{Fake: other, hidden: true}
+			}
+			source := hybrid.New(owner, otherProvider, func(string) bool { return false })
 			cfg := &config.City{}
 			targets, err := resolveManualStopSessionTargets(store, cfg, "/cities/test", source)
 			if err != nil {
@@ -537,6 +542,18 @@ func (*stopFalseLivenessProvider) IsRunning(string) bool { return false }
 type stopUnlistedRuntimeProvider struct {
 	*runtime.Fake
 	hidden bool
+}
+
+func (p *stopUnlistedRuntimeProvider) SessionOwnership(name string) (string, string, error) {
+	if !p.Fake.IsRunning(name) {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	city, err := p.GetMeta(name, "GC_CITY_PATH")
+	if err != nil {
+		return "", "", err
+	}
+	id, err := p.GetMeta(name, "GC_SESSION_ID")
+	return city, id, err
 }
 
 func (p *stopUnlistedRuntimeProvider) IsRunning(name string) bool {

@@ -191,6 +191,9 @@ var _ interface {
 } = (*k8s.Provider)(nil)
 
 func (p *ownedStopLeaf) SessionOwnership(name string) (string, string, error) {
+	if !p.IsRunning(name) {
+		return "", "", runtime.ErrSessionNotFound
+	}
 	city, err := p.GetMeta(name, "GC_CITY_PATH")
 	if err != nil {
 		return "", "", err
@@ -204,6 +207,59 @@ func (p *ownedStopLeaf) ListRunning(prefix string) ([]string, error) {
 		return nil, p.listErr
 	}
 	return p.Fake.ListRunning(prefix)
+}
+
+type sharedStopLeaf struct {
+	*ownedStopLeaf
+	unmanaged map[string]bool
+	err       error
+}
+
+func (p *sharedStopLeaf) IsUnmanagedSession(name string) (bool, error) {
+	return p.unmanaged[name], p.err
+}
+
+func TestStopOrphansPreservesUnmanagedSessions(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			sp := &sharedStopLeaf{ownedStopLeaf: &ownedStopLeaf{Fake: runtime.NewFake()}, unmanaged: map[string]bool{"operator": true}}
+			startStopTestSession(t, sp.Fake, "operator", nil)
+			startStopTestSession(t, sp.Fake, "owned-orphan", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "deleted"})
+			if partial {
+				startStopTestSession(t, sp.Fake, "partial", map[string]string{"GC_CITY_PATH": "/cities/test"})
+			}
+			var stdout, stderr lockedBuffer
+			stopped := stopOrphans("/cities/test", sp, nil, nil, &config.City{}, sessionFrontDoor(beads.NewMemStore()), 0, events.Discard, &stdout, &stderr)
+			if stopped == partial || sp.IsRunning("owned-orphan") || !sp.IsRunning("operator") || sp.CountCalls("Stop", "operator") != 0 || strings.Contains(stderr.String(), "operator") {
+				t.Fatalf("stopped=%v stdout=%q stderr=%q", stopped, stdout.String(), stderr.String())
+			}
+			if partial && (!sp.IsRunning("partial") || !strings.Contains(stderr.String(), "partial")) {
+				t.Fatal("partially identified session must be reported and retained")
+			}
+		})
+	}
+	t.Run("unreadable identity", func(t *testing.T) {
+		wantErr := errors.New("shared identity unavailable")
+		sp := &sharedStopLeaf{ownedStopLeaf: &ownedStopLeaf{Fake: runtime.NewFake()}, err: wantErr}
+		startStopTestSession(t, sp.Fake, "operator", nil)
+		targets, _, err := ownedOrphanStopTargets(sp, "/cities/test", nil)
+		if !errors.Is(err, wantErr) || len(targets) != 0 {
+			t.Fatalf("unreadable shared identity: targets=%v error=%v", targets, err)
+		}
+	})
+}
+
+func TestManualStopDoesNotTreatPersistedSessionAsUnmanaged(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_origin": "manual", "session_name": "persisted"}}); err != nil {
+		t.Fatal(err)
+	}
+	sp := &sharedStopLeaf{ownedStopLeaf: &ownedStopLeaf{Fake: runtime.NewFake()}, unmanaged: map[string]bool{"persisted": true}}
+	startStopTestSession(t, sp.Fake, "persisted", nil)
+	targets, err := resolveManualStopSessionTargets(store, &config.City{}, "/cities/test", sp)
+	if err == nil || len(targets) != 0 {
+		t.Fatalf("persisted session with missing runtime identity must be reported: targets=%v error=%v", targets, err)
+	}
 }
 
 func TestCmdStopReportsUnownedSessions(t *testing.T) {
@@ -646,7 +702,7 @@ func (p *terminatingStopLeaf) SessionOwnership(name string) (string, string, err
 	if !slices.Contains(names, name) {
 		return "", "", runtime.ErrSessionNotFound
 	}
-	return p.ownedStopLeaf.SessionOwnership(name)
+	return stopSessionOwnership(p.Fake, name)
 }
 
 func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
@@ -858,6 +914,53 @@ func testCmdStopBodyRefusedOrphanSweepFails(t *testing.T) {
 		if !sp.IsRunning(name) || sp.CountCalls("Stop", name) != 0 {
 			t.Errorf("refused sweep touched %s", name)
 		}
+	}
+}
+
+func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
+	for _, mode := range []string{"owned", "unowned", "delete refused"} {
+		t.Run(mode, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"}}
+			writeStopLifecycleCityConfig(t, cityDir, cfg)
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				"session_origin": "manual", "session_name": "pending-runtime", "state": "active",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Pending Kubernetes pods retain identity but are absent from both
+			// ListRunning and IsRunning. No controller is started in this city.
+			sp := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: true}
+			env := map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID}
+			if mode == "unowned" {
+				env = nil
+			}
+			startStopTestSession(t, sp.Fake, "pending-runtime", env)
+			if mode == "delete refused" {
+				sp.StopErrors["pending-runtime"] = errors.New("pending pod deletion refused")
+			}
+			oldFactory := sessionProviderForStopCity
+			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+			overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+			var stdout, stderr lockedBuffer
+			code := cmdStopBody(cityDir, cfg, true, &stdout, &stderr)
+			wantFailure := mode != "owned"
+			if (code != 0) != wantFailure || sp.Fake.IsRunning("pending-runtime") != wantFailure {
+				t.Fatalf("code=%d artifact=%v stderr=%q; want failure=%v", code, sp.Fake.IsRunning("pending-runtime"), stderr.String(), wantFailure)
+			}
+			if mode == "unowned" && (sp.CountCalls("Stop", "pending-runtime") != 0 || !strings.Contains(stderr.String(), "ownership")) {
+				t.Fatalf("unowned artifact must be reported and untouched: stderr=%q", stderr.String())
+			}
+			if mode == "delete refused" && !strings.Contains(stderr.String(), "pending pod deletion refused") {
+				t.Fatalf("deletion failure lost: %q", stderr.String())
+			}
+		})
 	}
 }
 

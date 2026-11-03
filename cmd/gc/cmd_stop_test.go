@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -61,6 +62,60 @@ func (p scopedStopOrphanProvider) GetMeta(name, key string) (string, error) {
 		return "", fmt.Errorf("ownership unavailable")
 	}
 	return p.Provider.GetMeta(name, key)
+}
+
+type stopOrphanLookupStore struct {
+	beads.Store
+	id  string
+	err error
+}
+
+func (s stopOrphanLookupStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && s.err != nil {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+func TestStopScopedOrphanBeadLookup(t *testing.T) {
+	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				"session_name": "test-stale", "state": "active", "session_origin": "manual",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "live" {
+				if err := store.Delete(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookup := stopOrphanLookupStore{Store: store, id: b.ID}
+			switch mode {
+			case "transient":
+				lookup.err = errors.New("store unavailable")
+			case "collision":
+				lookup.err = beads.ErrIDCollision
+			case "mixed absence":
+				lookup.err = errors.Join(beads.ErrNotFound, errors.New("store unavailable"))
+			}
+			sp := runtime.NewFake()
+			startStopTestSession(t, sp, "test-stale", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
+			provider := scopedStopOrphanProvider{Provider: sp}
+			cfg := &config.City{Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"}, Agents: []config.Agent{{Name: "worker"}}}
+			var stdout, stderr lockedBuffer
+			stopped := stopOrphans("/cities/test", provider, map[string]bool{"test-worker": true}, nil, cfg, sessionFrontDoor(lookup), 0, events.Discard, &stdout, &stderr)
+			wantStop := mode == "deleted" || mode == "live"
+			if stopped != wantStop || sp.IsRunning("test-stale") == wantStop {
+				t.Fatalf("stopped=%v running=%v stderr=%q; want stopped=%v", stopped, sp.IsRunning("test-stale"), stderr.String(), wantStop)
+			}
+			if !wantStop && (sp.CountCalls("Stop", "test-stale") != 0 || !strings.Contains(stderr.String(), strings.Split(lookup.err.Error(), "\n")[0])) {
+				t.Fatalf("lookup failure must be reported without teardown: %q", stderr.String())
+			}
+		})
+	}
 }
 
 func TestStopOrphansCityOwnership(t *testing.T) {

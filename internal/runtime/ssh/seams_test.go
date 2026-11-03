@@ -9,15 +9,44 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestSeamsUnmanagedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		code      int
+		want      bool
+	}{
+		{name: "operator", env: "TERM=xterm\n", want: true},
+		{name: "city only", env: "GC_CITY_PATH=/city\n"},
+		{name: "id only", env: "GC_SESSION_ID=gc-1\n"},
+		{name: "legacy marker", env: "GC_SESSION=worker\n"},
+		{name: "unset marker", env: "-GC_SESSION_ID\n"},
+		{name: "unreadable", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewSeamBacked(Endpoint{Host: "box"})
+			p.(*seamBackedProvider).raw.conn.run = &fakeRunner{out: []byte(tc.env), code: tc.code}
+			shared, ok := p.(interface{ IsUnmanagedSession(string) (bool, error) })
+			if !ok {
+				t.Fatal("shared SSH provider does not distinguish unmanaged sessions")
+			}
+			unmanaged, err := shared.IsUnmanagedSession("session")
+			if unmanaged != tc.want || (err != nil) != (tc.code != 0) {
+				t.Fatalf("unmanaged=%v error=%v; want unmanaged=%v", unmanaged, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSeamsSessionOwnership(t *testing.T) {
 	for _, tc := range []struct {
-		name, city, id                       string
-		absent, transportError, probeRefused bool
+		name, city, id                                   string
+		absent, transportError, probeRefused, stdoutOnly bool
 	}{
 		{name: "owned", city: "/city", id: "gc-1"},
 		{name: "missing city", id: "gc-1"},
 		{name: "missing id", city: "/city"},
 		{name: "absent", absent: true},
+		{name: "stdout diagnostic is not absence", stdoutOnly: true},
 		{name: "transport failure", transportError: true},
 		{name: "probe refused", probeRefused: true},
 	} {
@@ -34,14 +63,19 @@ func TestSeamsSessionOwnership(t *testing.T) {
 					}
 					return []byte(fmt.Sprintf("%s=%s\n", key, value)), 0, nil
 				}
-				if isTmux("has-session")(argv) && tc.absent {
+				if isTmux("has-session")(argv) && tc.stdoutOnly {
 					return []byte("can't find session: session"), 1, nil
 				}
-				if isTmux("has-session")(argv) && tc.probeRefused {
-					return []byte("permission denied"), 1, nil
+				if isTmux("has-session")(argv) && (tc.absent || tc.probeRefused) {
+					return nil, 1, nil
 				}
 				return nil, 0, nil
 			}}
+			if tc.absent {
+				f.stderr = []byte("can't find session: session")
+			} else if tc.probeRefused {
+				f.stderr = []byte("permission denied")
+			}
 			p := NewSeamBacked(Endpoint{User: "u", Host: "box"})
 			p.(*seamBackedProvider).raw.conn.run = f
 			owner, ok := p.(interface {
@@ -52,7 +86,7 @@ func TestSeamsSessionOwnership(t *testing.T) {
 			}
 			city, id, err := owner.SessionOwnership("session")
 			switch {
-			case tc.transportError || tc.probeRefused:
+			case tc.transportError || tc.probeRefused || tc.stdoutOnly:
 				if err == nil || runtime.IsSessionNotFound(err) {
 					t.Fatalf("transport failure = %v", err)
 				}
