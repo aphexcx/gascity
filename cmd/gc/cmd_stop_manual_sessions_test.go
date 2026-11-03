@@ -413,7 +413,7 @@ func TestManualStopSessionOwnership(t *testing.T) {
 			{Provider: owned, Names: []string{info.SessionName}},
 			{Provider: foreign, Names: []string{info.SessionName}},
 		})
-		if len(got) != 0 || err != nil {
+		if len(got) != 0 || err == nil {
 			t.Fatalf("owned=%v err=%v; a conflicting runtime must veto the target", got, err)
 		}
 	})

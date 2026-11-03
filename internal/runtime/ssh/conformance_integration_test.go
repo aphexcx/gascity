@@ -141,6 +141,39 @@ func TestSSHUnmanagedSessionOverShellRunner(t *testing.T) {
 	}
 }
 
+func TestSSHMissingSessionDoesNotMatchPrefixSibling(t *testing.T) {
+	p := NewProvider(sshConformanceEndpoint(t))
+	if _, code, err := p.tmux(context.Background(), "manual-other", "new-session", "-d", "-s", "manual-other", "sleep 300"); err != nil || code != 0 {
+		t.Fatalf("starting isolated operator session: code=%d error=%v", code, err)
+	}
+	t.Cleanup(func() {
+		if err := p.Stop("manual-other"); err != nil {
+			t.Errorf("stopping isolated operator session: %v", err)
+		}
+	})
+	if err := p.SetMeta("manual-other", "TEST_OWNER", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := p.GetMeta("manual", "TEST_OWNER"); err != nil || value != "" {
+		t.Errorf("missing session borrowed sibling metadata: value=%q error=%v", value, err)
+	}
+	if p.IsRunning("manual") {
+		t.Error("missing session borrowed sibling liveness")
+	}
+	if _, _, err := p.SessionOwnership("manual"); !runtime.IsSessionNotFound(err) {
+		t.Errorf("missing session ownership=%v, want confirmed absence", err)
+	}
+	if unmanaged, err := p.IsUnmanagedSession("manual"); !runtime.IsSessionNotFound(err) || unmanaged {
+		t.Errorf("missing session unmanaged=%v error=%v, want confirmed absence", unmanaged, err)
+	}
+	if err := p.Stop("manual"); err != nil {
+		t.Fatal(err)
+	}
+	if !p.IsRunning("manual-other") {
+		t.Fatal("stopping missing session killed prefix-sharing operator session")
+	}
+}
+
 func TestSSHSessionOwnershipReadsTmuxStderr(t *testing.T) {
 	p := NewProvider(sshConformanceEndpoint(t))
 	_, _, err := p.SessionOwnership("missing-session")

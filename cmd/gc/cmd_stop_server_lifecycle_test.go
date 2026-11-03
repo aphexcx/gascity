@@ -1014,6 +1014,59 @@ func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
 	}
 }
 
+func TestCmdStopReportsPendingManualBackendConflict(t *testing.T) {
+	for _, identity := range []string{"owned", "unknown", "foreign"} {
+		for _, pendingFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/pending-first=%v", identity, pendingFirst), func(t *testing.T) {
+				cityDir := t.TempDir()
+				cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"}}
+				writeStopLifecycleCityConfig(t, cityDir, cfg)
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+					"session_origin": "manual", "session_name": "pending-runtime", "state": "active",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				pending := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: true}
+				env := map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID}
+				switch identity {
+				case "unknown":
+					env = nil
+				case "foreign":
+					env["GC_CITY_PATH"] = t.TempDir()
+				}
+				startStopTestSession(t, pending.Fake, "pending-runtime", env)
+				foreign := &ownedStopLeaf{Fake: runtime.NewFake()}
+				startStopTestSession(t, foreign.Fake, "pending-runtime", map[string]string{
+					"GC_CITY_PATH": t.TempDir(), "GC_SESSION_ID": "foreign-session",
+				})
+				provider := auto.New(foreign, pending)
+				if pendingFirst {
+					provider = auto.New(pending, foreign)
+				}
+				oldFactory := sessionProviderForStopCity
+				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return provider, nil }
+				overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+				var stdout, stderr lockedBuffer
+				code := cmdStopBody(cityDir, cfg, true, &stdout, &stderr)
+				if code != 1 || strings.Contains(stdout.String(), "City stopped.") || !strings.Contains(stderr.String(), "pending-runtime") {
+					t.Fatalf("hidden conflicting artifact must be reported: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				for _, leaf := range []*runtime.Fake{pending.Fake, foreign.Fake} {
+					if !leaf.IsRunning("pending-runtime") || leaf.CountCalls("Stop", "pending-runtime") != 0 {
+						t.Fatal("ambiguous runtime was stopped")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestCmdStopBodyManualDiscoveryOutcome(t *testing.T) {
 	for _, mode := range []string{"absent sibling", "unreadable owner", "unverified owner", "healthy terminal"} {
 		t.Run(mode, func(t *testing.T) {

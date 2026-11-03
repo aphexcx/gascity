@@ -453,6 +453,7 @@ func resolveManualStopSessionTargets(store beads.Store, cfg *config.City, cityPa
 
 func manualStopSessionBackends(info session.Info, cityPath string, backends []runtime.BackendListResult) ([]int, error) {
 	var owners []int
+	var ownershipErr, conflictErr error
 	for i, backend := range backends {
 		// Persisted identities can outlive running/listed state (for example,
 		// a Pending pod). Only the ownership probe can confirm their absence.
@@ -463,7 +464,8 @@ func manualStopSessionBackends(info session.Info, cityPath string, backends []ru
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading manual session %q ownership (%s): %w", info.ID, backend.Label, err)
+			ownershipErr = errors.Join(ownershipErr, fmt.Errorf("reading manual session %q runtime %q ownership (%s): %w", info.ID, info.SessionName, backend.Label, err))
+			continue
 		}
 		if ownerCity == "" || ownerID == "" {
 			if shared, ok := backend.Provider.(interface {
@@ -474,28 +476,44 @@ func manualStopSessionBackends(info session.Info, cityPath string, backends []ru
 					continue
 				}
 				if err != nil {
-					return nil, fmt.Errorf("reading manual session %q runtime identity (%s): %w", info.ID, backend.Label, err)
+					ownershipErr = errors.Join(ownershipErr, fmt.Errorf("reading manual session %q runtime %q identity (%s): %w", info.ID, info.SessionName, backend.Label, err))
+					continue
 				}
 				if unmanaged {
-					return nil, fmt.Errorf("persisted manual session %q runtime %q has no ownership record (%s)", info.ID, info.SessionName, backend.Label)
+					ownershipErr = errors.Join(ownershipErr, fmt.Errorf("persisted manual session %q runtime %q has no ownership record (%s)", info.ID, info.SessionName, backend.Label))
+					continue
 				}
 			}
 			if slices.Contains(backend.Names, info.SessionName) || backend.Provider.IsRunning(info.SessionName) {
-				return nil, nil // the orphan sweep reports visible unknown owners
+				conflictErr = errors.Join(conflictErr, fmt.Errorf("manual session %q runtime %q has incomplete ownership (%s)", info.ID, info.SessionName, backend.Label))
+				continue // the orphan sweep reports visible unknown owners
 			}
 			if _, ok := backend.Provider.(interface {
 				SessionOwnership(string) (string, string, error)
 			}); ok {
-				return nil, fmt.Errorf("manual session %q runtime %q has incomplete ownership (%s)", info.ID, info.SessionName, backend.Label)
+				ownershipErr = errors.Join(ownershipErr, fmt.Errorf("manual session %q runtime %q has incomplete ownership (%s)", info.ID, info.SessionName, backend.Label))
 			}
 			continue // legacy metadata reads cannot distinguish missing keys from absence
 		}
 		// A persisted name can be reused by another city or another session.
 		// Every backend holding it must agree before routing an explicit stop.
 		if cityPath == "" || ownerCity == "" || filepath.Clean(ownerCity) != filepath.Clean(cityPath) || ownerID != info.ID {
-			return nil, nil
+			err := fmt.Errorf("manual session %q runtime %q has conflicting ownership (%s)", info.ID, info.SessionName, backend.Label)
+			conflictErr = errors.Join(conflictErr, err)
+			if !slices.Contains(backend.Names, info.SessionName) && !backend.Provider.IsRunning(info.SessionName) {
+				ownershipErr = errors.Join(ownershipErr, err)
+			}
+			continue
 		}
 		owners = append(owners, i)
+	}
+	// Inspect every leaf before deciding: a visible foreign session cannot
+	// hide an owned or unreadable Pending artifact on another backend.
+	if len(owners) > 0 {
+		ownershipErr = errors.Join(ownershipErr, conflictErr)
+	}
+	if ownershipErr != nil {
+		return nil, ownershipErr
 	}
 	return owners, nil
 }
