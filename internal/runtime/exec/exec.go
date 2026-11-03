@@ -721,6 +721,23 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return p.run(nil, "get-meta", name, key)
 }
 
+// SessionOwnership reads the script's host ownership metadata. Unsupported or
+// missing metadata stays unknown unless is-running explicitly confirms absence.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
+	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
+	if err := errors.Join(cityErr, idErr); err != nil {
+		return "", "", fmt.Errorf("reading exec runtime %q ownership: %w", name, err)
+	}
+	if city != "" && id != "" {
+		return city, id, nil
+	}
+	if occupied, definite := p.boxOccupancy(name); definite && !occupied {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	return "", "", nil
+}
+
 // RemoveMeta removes a metadata key: script remove-meta <name> <key>
 func (p *Provider) RemoveMeta(name, key string) error {
 	_, err := p.run(nil, "remove-meta", name, key)

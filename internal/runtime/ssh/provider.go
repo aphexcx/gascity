@@ -460,6 +460,31 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return "", nil
 }
 
+// SessionOwnership reads host ownership from the remote tmux environment.
+// Missing metadata stays unknown while the session exists; a failed connection
+// must never be mistaken for a confirmed absence.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
+	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
+	if err := errors.Join(cityErr, idErr); err != nil {
+		return "", "", fmt.Errorf("reading ssh session %q ownership: %w", name, err)
+	}
+	if city != "" && id != "" {
+		return city, id, nil
+	}
+	out, code, err := p.tmux(context.Background(), name, "has-session", "-t", name)
+	if err != nil {
+		return "", "", fmt.Errorf("probing ssh session %q ownership: %w", name, err)
+	}
+	if code == 1 && (strings.Contains(out, "can't find session:") || strings.Contains(out, "no server running on") || strings.Contains(out, "No such file or directory")) {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	if code != 0 {
+		return "", "", fmt.Errorf("probing ssh session %q ownership: tmux exited %d: %s", name, code, strings.TrimSpace(out))
+	}
+	return "", "", nil
+}
+
 // RemoveMeta removes a key from the tmux session environment.
 func (p *Provider) RemoveMeta(name, key string) error {
 	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", name, "-u", key)

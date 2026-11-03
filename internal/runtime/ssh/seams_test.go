@@ -3,10 +3,75 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestSeamsSessionOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name, city, id                       string
+		absent, transportError, probeRefused bool
+	}{
+		{name: "owned", city: "/city", id: "gc-1"},
+		{name: "missing city", id: "gc-1"},
+		{name: "missing id", city: "/city"},
+		{name: "absent", absent: true},
+		{name: "transport failure", transportError: true},
+		{name: "probe refused", probeRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+				if tc.transportError {
+					return nil, -1, errors.New("connection lost")
+				}
+				if isTmux("show-environment")(argv) {
+					key := argv[len(argv)-1]
+					value := map[string]string{"GC_CITY_PATH": tc.city, "GC_SESSION_ID": tc.id}[key]
+					if value == "" {
+						return nil, 1, nil
+					}
+					return []byte(fmt.Sprintf("%s=%s\n", key, value)), 0, nil
+				}
+				if isTmux("has-session")(argv) && tc.absent {
+					return []byte("can't find session: session"), 1, nil
+				}
+				if isTmux("has-session")(argv) && tc.probeRefused {
+					return []byte("permission denied"), 1, nil
+				}
+				return nil, 0, nil
+			}}
+			p := NewSeamBacked(Endpoint{User: "u", Host: "box"})
+			p.(*seamBackedProvider).raw.conn.run = f
+			owner, ok := p.(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				t.Fatal("registered ssh provider does not expose ownership")
+			}
+			city, id, err := owner.SessionOwnership("session")
+			switch {
+			case tc.transportError || tc.probeRefused:
+				if err == nil || runtime.IsSessionNotFound(err) {
+					t.Fatalf("transport failure = %v", err)
+				}
+			case tc.absent:
+				if !runtime.IsSessionNotFound(err) {
+					t.Fatalf("absence = %v", err)
+				}
+			default:
+				wantCity, wantID := tc.city, tc.id
+				if wantCity == "" || wantID == "" {
+					wantCity, wantID = "", ""
+				}
+				if city != wantCity || id != wantID || err != nil {
+					t.Fatalf("ownership = %q, %q, %v; want %q, %q", city, id, err, wantCity, wantID)
+				}
+			}
+		})
+	}
+}
 
 // TestSeamsSshExecAndOpen proves Place.Exec delegates over the ssh connection
 // (preserving the (output, code, err) contract) and Runtime.Open reflects tmux

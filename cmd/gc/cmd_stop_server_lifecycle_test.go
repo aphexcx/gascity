@@ -206,6 +206,82 @@ func (p *ownedStopLeaf) ListRunning(prefix string) ([]string, error) {
 	return p.Fake.ListRunning(prefix)
 }
 
+func TestCmdStopReportsUnownedSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		force, emptyConfig, allOwned bool
+	}{
+		{name: "forced upgrade", force: true},
+		{name: "graceful upgrade"},
+		{name: "empty configuration", force: true, emptyConfig: true},
+		{name: "forced owned", force: true, allOwned: true},
+		{name: "graceful owned", allOwned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cityDir := t.TempDir()
+				cfg := &config.City{
+					Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"},
+					Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
+					Daemon: config.DaemonConfig{ShutdownTimeout: "0s"},
+				}
+				if tc.emptyConfig {
+					cfg.Agents = nil
+				}
+				writeStopLifecycleCityConfig(t, cityDir, cfg)
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+					"session_origin": "manual", "session_name": "legacy-manual", "state": "active",
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				sp := &ownedStopLeaf{Fake: runtime.NewFake()}
+				startStopTestSession(t, sp.Fake, "removed-gc-9", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "deleted-bead"})
+				startStopTestSession(t, sp.Fake, "foreign-runtime", map[string]string{"GC_CITY_PATH": cityDir + "-foreign", "GC_SESSION_ID": "foreign-id"})
+				if !tc.emptyConfig {
+					startStopTestSession(t, sp.Fake, "worker", nil)
+				}
+				if !tc.allOwned {
+					startStopTestSession(t, sp.Fake, "legacy-manual", nil)
+					startStopTestSession(t, sp.Fake, "legacy-orphan-gc-9", nil)
+				}
+				oldFactory := sessionProviderForStopCity
+				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+				overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+				var stdout, stderr lockedBuffer
+				code := cmdStopBody(cityDir, cfg, tc.force, &stdout, &stderr)
+				t.Logf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				if (code == 0) != tc.allOwned || strings.Contains(stdout.String(), "City stopped.") != tc.allOwned {
+					t.Error("unresolved ownership produced the wrong stop result")
+				}
+				if sp.CountCalls("Stop", "removed-gc-9") != 1 || sp.IsRunning("removed-gc-9") || sp.IsRunning("worker") {
+					t.Error("owned or configured session was not stopped once")
+				}
+				if sp.CountCalls("Stop", "foreign-runtime") != 0 || !sp.IsRunning("foreign-runtime") || strings.Contains(stderr.String(), "foreign-runtime") {
+					t.Error("foreign session was stopped or named")
+				}
+				if !tc.allOwned {
+					if strings.Count(stderr.String(), "carry no ownership record") != 1 {
+						t.Error("expected one unresolved-ownership line for the leaf")
+					}
+					if !strings.Contains(stderr.String(), "gc session kill ID-OR-ALIAS") || strings.Contains(stderr.String(), "gc stop SESSION") {
+						t.Error("ownership diagnostic must name the session command, not the city stop command")
+					}
+					for _, name := range []string{"legacy-manual", "legacy-orphan-gc-9"} {
+						if !sp.IsRunning(name) || sp.CountCalls("Stop", name) != 0 || !strings.Contains(stderr.String(), name) {
+							t.Errorf("unowned session %s was stopped or not named", name)
+						}
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestStopOrphansIncludesOwnedUnscopedLeaves(t *testing.T) {
 	for _, kind := range []string{"acp", "kubernetes"} {
 		for _, failList := range []bool{false, true} {
@@ -528,6 +604,15 @@ type terminatingStopLeaf struct {
 	mu          sync.Mutex
 	delay       time.Duration
 	terminating map[string]time.Time
+	keepProcess bool
+}
+
+func (p *terminatingStopLeaf) IsRunning(name string) bool {
+	if p.keepProcess {
+		names, _ := p.ListRunning("")
+		return slices.Contains(names, name)
+	}
+	return p.Fake.IsRunning(name)
 }
 
 func (p *terminatingStopLeaf) Stop(name string) error {
@@ -566,19 +651,26 @@ func (p *terminatingStopLeaf) SessionOwnership(name string) (string, string, err
 
 func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		force bool
-		delay time.Duration
+		name              string
+		force             bool
+		delay             time.Duration
+		pool, keepProcess bool
 	}{
-		{"forced", true, 3 * time.Second},
-		{"graceful", false, 3 * time.Second},
-		{"survivor", true, -1},
-		{"synchronous", true, 0},
+		{name: "forced", force: true, delay: 3 * time.Second},
+		{name: "graceful", delay: 3 * time.Second},
+		{name: "survivor", force: true, delay: -1},
+		{name: "synchronous", force: true},
+		{name: "pool process gone", delay: 5 * time.Second, pool: true},
+		{name: "pool process alive", delay: 5 * time.Second, pool: true, keepProcess: true},
+		{name: "pool survivor", delay: -1, pool: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				oldBound := stopPerTargetTimeoutDefault
 				stopPerTargetTimeoutDefault = 4 * time.Second
+				if tc.pool {
+					stopPerTargetTimeoutDefault = oldBound
+				}
 				t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
 				cityDir := t.TempDir()
 				cfg := &config.City{
@@ -586,20 +678,34 @@ func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
 					Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
 					Daemon: config.DaemonConfig{ShutdownTimeout: "1s"},
 				}
+				if tc.pool {
+					cfg.Agents[0].MaxActiveSessions = intPtr(2)
+				}
 				writeStopLifecycleCityConfig(t, cityDir, cfg)
 				store, err := openCityStoreAt(cityDir)
 				if err != nil {
 					t.Fatal(err)
 				}
-				b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				metadata := map[string]string{
 					"session_origin": "manual", "session_name": "persisted-runtime", "state": "active",
-				}})
+				}
+				if tc.pool {
+					metadata["session_origin"], metadata["template"], metadata["pool_slot"] = "ephemeral", "worker", "1"
+				}
+				b, err := store.Create(beads.Bead{Type: "session", Labels: []string{"gc:session"}, Metadata: metadata})
 				if err != nil {
 					t.Fatal(err)
 				}
 				local := &lifecycleOrderProvider{Fake: runtime.NewFake()}
 				remote := &terminatingStopLeaf{ownedStopLeaf: &ownedStopLeaf{Fake: runtime.NewFake()}, delay: tc.delay, terminating: make(map[string]time.Time)}
+				remote.keepProcess = tc.keepProcess
 				startStopTestSession(t, remote.Fake, "persisted-runtime", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID})
+				if tc.pool {
+					_, desired, _, err := resolveStopSessionNames(store, cfg, cityDir, "test", remote, io.Discard)
+					if err != nil || !desired["persisted-runtime"] {
+						t.Fatalf("pool target not discovered: %v %v", desired, err)
+					}
+				}
 				startStopTestSession(t, remote.Fake, "foreign-runtime", map[string]string{"GC_CITY_PATH": cityDir + "-foreign", "GC_SESSION_ID": "foreign-record"})
 				sp := hybrid.New(local, remote, func(string) bool { return true })
 				oldFactory := sessionProviderForStopCity
@@ -613,6 +719,9 @@ func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
 				wantWait := tc.delay
 				if wantFailure {
 					wantWait = stopPerTargetTimeoutDefault
+					if tc.pool {
+						wantWait += time.Second
+					}
 				}
 				t.Logf("code=%d teardown elapsed=%s stdout=%q stderr=%q", code, elapsed, stdout.String(), stderr.String())
 				if (code != 0) != wantFailure || strings.Contains(stdout.String(), "City stopped.") == wantFailure {
@@ -620,6 +729,9 @@ func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
 				}
 				if elapsed != wantWait {
 					t.Errorf("teardown wait = %s, want %s", elapsed, wantWait)
+				}
+				if tc.pool && remote.CountCalls("Stop", "persisted-runtime") != 1 {
+					t.Errorf("pool stop count = %d; want one", remote.CountCalls("Stop", "persisted-runtime"))
 				}
 				if wantFailure && !strings.Contains(stderr.String(), `city-owned session "persisted-runtime" remains after shutdown`) {
 					t.Error("survivor was not named")

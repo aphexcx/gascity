@@ -480,23 +480,31 @@ func stopSessionOwnership(sp runtime.Provider, name string) (string, string, err
 // ownedOrphanStopTargets discovers leaves without a shared server scope, such
 // as ACP and Kubernetes. Both host city and session ID must be explicit; name
 // shape alone never authorizes cleanup on these backends.
-func ownedOrphanStopTargets(sp runtime.Provider, cityPath string, desired map[string]bool) ([]runtime.BackendListResult, error) {
+func ownedOrphanStopTargets(sp runtime.Provider, cityPath string, desired map[string]bool) ([]runtime.BackendListResult, []string, error) {
 	backends := listSessionBackendsWithAbsenceCheck(sp)
 	if _, err := runtime.MergeBackendListResults(backends...); err != nil {
-		return nil, fmt.Errorf("listing orphan runtimes: %w", err)
+		return nil, nil, fmt.Errorf("listing orphan runtimes: %w", err)
 	}
 	var targets []runtime.BackendListResult
+	var unknown []string
 	for _, backend := range backends {
 		for _, name := range backend.Names {
+			if desired[name] {
+				continue
+			}
 			ownerCity, ownerID, err := stopSessionOwnership(backend.Provider, name)
 			if runtime.IsSessionNotFound(err) {
 				// A listed runtime can disappear before its ownership read.
 				continue
 			}
 			if err != nil {
-				return nil, fmt.Errorf("reading orphan runtime %q ownership (%s): %w", name, backend.Label, err)
+				return nil, nil, fmt.Errorf("reading orphan runtime %q ownership (%s): %w", name, backend.Label, err)
 			}
-			if desired[name] || cityPath == "" || ownerCity == "" || ownerID == "" || filepath.Clean(ownerCity) != filepath.Clean(cityPath) {
+			if ownerCity != "" && cityPath != "" && filepath.Clean(ownerCity) != filepath.Clean(cityPath) {
+				continue
+			}
+			if cityPath == "" || ownerCity == "" || ownerID == "" {
+				unknown = append(unknown, name)
 				continue
 			}
 			provider := backend.Provider
@@ -505,7 +513,7 @@ func ownedOrphanStopTargets(sp runtime.Provider, cityPath string, desired map[st
 			}); ok {
 				provider, err = binder.BindForShutdown(name, cityPath, ownerID)
 				if err != nil {
-					return nil, fmt.Errorf("binding orphan runtime %q: %w", name, err)
+					return nil, nil, fmt.Errorf("binding orphan runtime %q: %w", name, err)
 				}
 			}
 			info := session.Info{ID: ownerID, SessionName: name}
@@ -515,5 +523,6 @@ func ownedOrphanStopTargets(sp runtime.Provider, cityPath string, desired map[st
 			targets = append(targets, runtime.BackendListResult{Label: backend.Label, Provider: verified, Names: []string{name}})
 		}
 	}
-	return targets, nil
+	slices.Sort(unknown)
+	return targets, slices.Compact(unknown), nil
 }

@@ -1128,7 +1128,7 @@ func gracefulStopTargets(
 		} else {
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
-		if !running {
+		if !running || completedStops[name] {
 			target, ok := targetByName[name]
 			if !ok {
 				target = stopTarget{name: name}

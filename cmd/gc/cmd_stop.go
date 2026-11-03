@@ -705,14 +705,10 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 		fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: partial desired session set: %s\n", strings.ReplaceAll(desiredErr.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
 		return false
 	}
-	if len(desired) == 0 {
-		// No classification baseline: the caller verifies remaining ownership.
-		fmt.Fprintln(stderr, "gc stop: orphan sweep skipped: empty desired session set") //nolint:errcheck // best-effort stderr
-		return true
-	}
 	cityName := loadedCityName(cfg, cityPath)
 	var backends []runtime.BackendListResult
 	var ownedBackends []runtime.BackendListResult
+	ownershipResolved := true
 	for _, leaf := range stopCleanupProviders(sp) {
 		scoped, ok := leaf.(interface{ IsCityScoped(string) bool })
 		if !ok {
@@ -722,12 +718,21 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 				fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: runtime cannot confirm a city-scoped socket or host ownership for backend %T\n", leaf) //nolint:errcheck // best-effort stderr
 				continue
 			}
-			candidates, err := ownedOrphanStopTargets(leaf, cityPath, desired)
+			candidates, unknown, err := ownedOrphanStopTargets(leaf, cityPath, desired)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc stop: orphan sweep skipped: %s\n", strings.ReplaceAll(err.Error(), "\n", "; ")) //nolint:errcheck // best-effort stderr
 				return false
 			}
 			ownedBackends = append(ownedBackends, candidates...)
+			if len(unknown) > 0 {
+				fmt.Fprintf(stderr, "gc stop: %d session(s) on %T carry no ownership record (started before this gc or by another city): %s; inspect with gc doctor; after verifying ownership, use gc session kill ID-OR-ALIAS for persisted sessions or the runtime provider for orphans\n", len(unknown), leaf, strings.Join(unknown, ", ")) //nolint:errcheck // best-effort stderr
+				ownershipResolved = false
+			}
+			continue
+		}
+		if len(desired) == 0 {
+			// Scoped classification needs a configured name-shape baseline.
+			fmt.Fprintln(stderr, "gc stop: orphan sweep skipped: empty desired session set") //nolint:errcheck // best-effort stderr
 			continue
 		}
 		if !scoped.IsCityScoped(cityName) {
@@ -773,7 +778,8 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 		unique = append(unique, target)
 	}
 	provider := providerForManualStopTargets(sp, append(backends, ownedBackends...))
-	return gracefulStopTargets(unique, provider, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
+	stopped := gracefulStopTargets(unique, provider, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
+	return stopped && ownershipResolved
 }
 
 // stopOrphanListingProvider confirms absence independently on each leaf while
