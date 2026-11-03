@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -399,7 +400,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	if !orphansStopped {
 		code = 1
 	}
-	if err := verifyStopSurvivors(cityPath, cityName, sp); err != nil {
+	if err := verifyStopSurvivors(cityPath, cityName, sp, manualTargets); err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		code = 1
 	}
@@ -431,10 +432,16 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 
 // verifyStopSurvivors prevents skipped, filtered, or incomplete sweeps from
 // reporting success while a city-owned session survives on an eligible backend.
-func verifyStopSurvivors(cityPath, cityName string, sp runtime.Provider) error {
+func verifyStopSurvivors(cityPath, cityName string, sp runtime.Provider, retained []runtime.BackendListResult) error {
+	retainedNames := make(map[string]bool)
+	for _, target := range retained {
+		for _, name := range target.Names {
+			retainedNames[name] = true
+		}
+	}
 	deadline := time.Now().Add(stopPerTargetTimeoutDefault)
 	for {
-		survivors, err := listStopSurvivors(cityPath, cityName, sp)
+		survivors, err := listStopSurvivors(cityPath, cityName, sp, retainedNames)
 		if !survivors || !time.Now().Before(deadline) {
 			return err
 		}
@@ -444,7 +451,7 @@ func verifyStopSurvivors(cityPath, cityName string, sp runtime.Provider) error {
 	}
 }
 
-func listStopSurvivors(cityPath, cityName string, sp runtime.Provider) (bool, error) {
+func listStopSurvivors(cityPath, cityName string, sp runtime.Provider, retained map[string]bool) (bool, error) {
 	var result error
 	var survivors bool
 	for _, leaf := range stopCleanupProviders(sp) {
@@ -458,16 +465,31 @@ func listStopSurvivors(cityPath, cityName string, sp runtime.Provider) (bool, er
 			continue
 		}
 		for _, backend := range backends {
-			for _, name := range backend.Names {
+			names := slices.Clone(backend.Names)
+			if _, ok := backend.Provider.(interface {
+				SessionOwnership(string) (string, string, error)
+			}); ok {
+				// Native ownership probes see artifacts (including Pending pods)
+				// until deletion completes, even after liveness/listing omit them.
+				for name := range retained {
+					if !slices.Contains(names, name) {
+						names = append(names, name)
+					}
+				}
+			}
+			for _, name := range names {
 				ownerCity, _, err := stopSessionOwnership(backend.Provider, name)
 				if runtime.IsSessionNotFound(err) {
 					continue
 				}
-				if err != nil {
+				switch {
+				case err != nil:
 					result = errors.Join(result, fmt.Errorf("verifying surviving session %q: %w", name, err))
-				} else if ownerCity != "" && filepath.Clean(ownerCity) == filepath.Clean(cityPath) {
+				case ownerCity != "" && filepath.Clean(ownerCity) == filepath.Clean(cityPath):
 					survivors = true
 					result = errors.Join(result, fmt.Errorf("city-owned session %q remains after shutdown", name))
+				case retained[name]:
+					result = errors.Join(result, fmt.Errorf("cannot confirm deletion of session %q: ownership changed or is missing", name))
 				}
 			}
 		}
@@ -751,14 +773,25 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 		backends = append(backends, candidates...)
 	}
 	var targets []stopTarget
+	var scopedTargets []runtime.BackendListResult
 	for _, backend := range backends {
 		for _, target := range stopTargetsForNames(backend.Names, cfg, sessFront.Store().Store, stderr) {
+			provider := backend.Provider
 			if target.sessionID == "" {
-				id, err := backend.Provider.GetMeta(target.name, "GC_SESSION_ID")
+				ownerCity, id, err := stopSessionOwnership(backend.Provider, target.name)
+				if runtime.IsSessionNotFound(err) {
+					continue
+				}
+				if err == nil && ownerCity != "" && (cityPath == "" || filepath.Clean(ownerCity) != filepath.Clean(cityPath)) {
+					err = fmt.Errorf("runtime ownership changed to another city")
+				}
 				if err == nil && strings.TrimSpace(id) != "" {
 					_, err = sessFront.Store().Get(strings.TrimSpace(id))
 					if stopSessionRecordAbsent(err) {
 						target.runtimeOnly = true
+						provider = &verifiedManualStopBackend{Provider: backend.Provider, verify: func() error {
+							return verifyScopedOrphanStopOwnership(backend.Provider, target.name, ownerCity, id)
+						}}
 						err = nil
 					}
 				}
@@ -768,6 +801,7 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 				}
 			}
 			targets = append(targets, target)
+			scopedTargets = append(scopedTargets, runtime.BackendListResult{Label: backend.Label, Provider: provider, Names: []string{target.name}})
 		}
 	}
 	for _, backend := range ownedBackends {
@@ -793,7 +827,7 @@ func stopOrphans(cityPath string, sp runtime.Provider, desired map[string]bool, 
 		target.order = len(unique)
 		unique = append(unique, target)
 	}
-	provider := providerForManualStopTargets(sp, append(backends, ownedBackends...))
+	provider := providerForManualStopTargets(sp, append(scopedTargets, ownedBackends...))
 	stopped := gracefulStopTargets(unique, provider, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
 	return stopped && ownershipResolved
 }

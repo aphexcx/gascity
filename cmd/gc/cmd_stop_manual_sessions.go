@@ -500,6 +500,17 @@ func manualStopSessionBackends(info session.Info, cityPath string, backends []ru
 	return owners, nil
 }
 
+func verifyScopedOrphanStopOwnership(sp runtime.Provider, name, expectedCity, expectedID string) error {
+	city, id, err := stopSessionOwnership(sp, name)
+	if err != nil {
+		return fmt.Errorf("verifying scoped orphan %q ownership: %w", name, err)
+	}
+	if (city == "") != (expectedCity == "") || filepath.Clean(city) != filepath.Clean(expectedCity) || id != expectedID {
+		return fmt.Errorf("preserving scoped orphan %q: ownership changed or is missing", name)
+	}
+	return nil
+}
+
 func stopSessionOwnership(sp runtime.Provider, name string) (string, string, error) {
 	if owner, ok := sp.(interface {
 		SessionOwnership(string) (string, string, error)

@@ -705,6 +705,56 @@ func (p *terminatingStopLeaf) SessionOwnership(name string) (string, string, err
 	return stopSessionOwnership(p.Fake, name)
 }
 
+type pendingTerminatingStopLeaf struct{ *terminatingStopLeaf }
+
+func (*pendingTerminatingStopLeaf) IsRunning(string) bool { return false }
+
+func (p *pendingTerminatingStopLeaf) ListRunning(prefix string) ([]string, error) {
+	_, err := p.terminatingStopLeaf.ListRunning(prefix)
+	return nil, err
+}
+
+func TestCmdStopWaitsForPendingArtifactDeletion(t *testing.T) {
+	for _, delay := range []time.Duration{3 * time.Second, -1} {
+		t.Run(delay.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				oldBound := stopPerTargetTimeoutDefault
+				stopPerTargetTimeoutDefault = 4 * time.Second
+				t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
+				cityDir := t.TempDir()
+				cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"}}
+				writeStopLifecycleCityConfig(t, cityDir, cfg)
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_origin": "manual", "session_name": "pending", "state": "active"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				sp := &pendingTerminatingStopLeaf{&terminatingStopLeaf{ownedStopLeaf: &ownedStopLeaf{Fake: runtime.NewFake()}, delay: delay, terminating: make(map[string]time.Time)}}
+				startStopTestSession(t, sp.Fake, "pending", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID})
+				oldFactory := sessionProviderForStopCity
+				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+				overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+				var stdout, stderr lockedBuffer
+				code := cmdStopBody(cityDir, cfg, true, &stdout, &stderr)
+				wantWait := delay
+				if delay < 0 {
+					wantWait = stopPerTargetTimeoutDefault
+				}
+				if elapsed := time.Since(sp.terminating["pending"]); elapsed != wantWait || (code != 0) != (delay < 0) {
+					t.Fatalf("pending teardown code=%d elapsed=%s want=%s stdout=%q stderr=%q", code, elapsed, wantWait, stdout.String(), stderr.String())
+				}
+				if delay < 0 && (!strings.Contains(stderr.String(), "pending") || strings.Contains(stdout.String(), "City stopped.")) {
+					t.Fatal("pending artifact with a finalizer was not reported")
+				}
+			})
+		})
+	}
+}
+
 func TestCmdStopWaitsForAcceptedTeardown(t *testing.T) {
 	for _, tc := range []struct {
 		name              string

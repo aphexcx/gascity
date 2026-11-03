@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -66,15 +67,70 @@ func (p scopedStopOrphanProvider) GetMeta(name, key string) (string, error) {
 
 type stopOrphanLookupStore struct {
 	beads.Store
-	id  string
-	err error
+	id    string
+	err   error
+	onGet func()
 }
 
 func (s stopOrphanLookupStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && s.onGet != nil {
+		s.onGet()
+	}
 	if id == s.id && s.err != nil {
 		return beads.Bead{}, s.err
 	}
 	return s.Store.Get(id)
+}
+
+type replacingScopedStopProvider struct {
+	scopedStopOrphanProvider
+	onInterrupt func()
+}
+
+func (p replacingScopedStopProvider) Interrupt(name string) error {
+	if err := p.Provider.Interrupt(name); err != nil {
+		return err
+	}
+	if p.onInterrupt != nil {
+		p.onInterrupt()
+	}
+	return nil
+}
+
+func TestStopScopedOrphanRevalidatesReplacement(t *testing.T) {
+	for _, mode := range []string{"before interrupt", "session changed during grace", "city changed during grace"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sp := runtime.NewFake()
+				startStopTestSession(t, sp, "test-stale", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "deleted"})
+				replace := func() {
+					key, value := "GC_SESSION_ID", "replacement"
+					if mode == "city changed during grace" {
+						key, value = "GC_CITY_PATH", "/cities/foreign"
+					}
+					if err := sp.SetMeta("test-stale", key, value); err != nil {
+						t.Error(err)
+					}
+				}
+				provider := replacingScopedStopProvider{scopedStopOrphanProvider: scopedStopOrphanProvider{Provider: sp}}
+				store := stopOrphanLookupStore{Store: beads.NewMemStore(), id: "deleted"}
+				if mode == "before interrupt" {
+					store.onGet = replace
+				} else {
+					provider.onInterrupt = replace
+				}
+				cfg := &config.City{Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"}, Agents: []config.Agent{{Name: "worker"}}}
+				var stdout, stderr lockedBuffer
+				stopped := stopOrphans("/cities/test", provider, map[string]bool{"test-worker": true}, nil, cfg, sessionFrontDoor(store), time.Second, events.Discard, &stdout, &stderr)
+				if stopped || !sp.IsRunning("test-stale") || sp.CountCalls("Stop", "test-stale") != 0 || !strings.Contains(stderr.String(), "ownership") {
+					t.Fatalf("replacement was not preserved: stopped=%v stdout=%q stderr=%q", stopped, stdout.String(), stderr.String())
+				}
+				if mode == "before interrupt" && sp.CountCalls("Interrupt", "test-stale") != 0 {
+					t.Fatal("replacement was interrupted")
+				}
+			})
+		})
+	}
 }
 
 func TestStopScopedOrphanBeadLookup(t *testing.T) {
