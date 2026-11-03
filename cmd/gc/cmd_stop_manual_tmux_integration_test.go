@@ -38,8 +38,8 @@ func TestCmdStopSubprocessChildHelper(t *testing.T) {
 
 func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name, origin, missing string
-		force, live, child    bool
+		name, origin, missing      string
+		force, live, child, opaque bool
 	}{
 		{name: "stale manual forced", origin: "manual", force: true},
 		{name: "stale manual graceful", origin: "manual"},
@@ -47,6 +47,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 		{name: "stale named graceful", origin: "named"},
 		{name: "live socket", origin: "manual", force: true, live: true},
 		{name: "child without socket", origin: "manual", force: true, child: true},
+		{name: "opaque child without socket", origin: "manual", force: true, child: true, opaque: true},
 		{name: "partial city", origin: "manual", force: true, missing: "GC_SESSION_ID"},
 		{name: "partial session", origin: "manual", force: true, missing: "GC_CITY_PATH"},
 	} {
@@ -82,9 +83,13 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 					t.Fatal(err)
 				}
 				ready := filepath.Join(dir, "child-ready")
+				command := "exec " + shellQuotePath(executable) + " -test.run=^TestCmdStopSubprocessChildHelper$"
+				if tc.opaque {
+					command = "exec /bin/sleep 300"
+				}
 				owner := sp
 				if err := owner.Start(context.Background(), name, runtime.Config{
-					Command: "exec " + shellQuotePath(executable) + " -test.run=^TestCmdStopSubprocessChildHelper$",
+					Command: command,
 					Env:     map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID, "GASCITY_STOP_CHILD_READY": ready},
 				}); err != nil {
 					t.Fatal(err)
@@ -94,7 +99,9 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						t.Errorf("reaping test child: %v", err)
 					}
 				})
-				waitForNonEmptyFileContent(t, ready, testutil.ExecRaceTimeout)
+				if !tc.opaque {
+					waitForNonEmptyFileContent(t, ready, testutil.ExecRaceTimeout)
+				}
 				// Reproduce the lost controller's observable state: a detached
 				// child, no reachable socket, and a fresh provider with no map.
 				sockets, err := filepath.Glob(filepath.Join(dir, "*.sock"))
