@@ -725,11 +725,27 @@ func (p *Provider) publishSessionOwnership(name string, env map[string]string) e
 }
 
 // SessionOwnership returns the host city path and session ID persisted at Start.
-// A missing record is unknown ownership; malformed or unreadable data is an error.
+// Missing identity remains unknown while a connection or socket artifact exists.
+// With no record or runtime artifact it reports runtime.ErrSessionNotFound.
 func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	data, err := p.GetMeta(name, sessionOwnershipMetaKey)
-	if err != nil || data == "" {
+	if err != nil {
 		return "", "", err
+	}
+	if data == "" {
+		if _, tracked := p.conns[name]; tracked {
+			return "", "", nil
+		}
+		for _, path := range []string{p.metaPath(name, sessionOwnershipMetaKey), p.sockPath(name), p.legacySockPath(name)} {
+			if _, err := os.Lstat(path); err == nil {
+				return "", "", nil
+			} else if !os.IsNotExist(err) {
+				return "", "", fmt.Errorf("probing ACP session %q ownership: %w", name, err)
+			}
+		}
+		return "", "", runtime.ErrSessionNotFound
 	}
 	var owner sessionOwnership
 	if err := json.Unmarshal([]byte(data), &owner); err != nil {

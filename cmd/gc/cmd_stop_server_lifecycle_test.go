@@ -1014,6 +1014,35 @@ func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
 	}
 }
 
+func TestCmdStopManualWithEmptyACPSibling(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"}}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+		"session_origin": "manual", "session_name": "manual-runtime", "state": "active",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &ownedStopLeaf{Fake: runtime.NewFake()}
+	startStopTestSession(t, local.Fake, "manual-runtime", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID})
+	provider := auto.New(local, acp.NewSeamBackedWithDir(t.TempDir(), acp.Config{}))
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return provider, nil }
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+	for range 2 {
+		var stdout, stderr lockedBuffer
+		if code := cmdStopBody(cityDir, cfg, true, &stdout, &stderr); code != 0 || local.IsRunning("manual-runtime") {
+			t.Fatalf("stop with empty ACP sibling: code=%d running=%v stderr=%q", code, local.IsRunning("manual-runtime"), stderr.String())
+		}
+	}
+}
+
 func TestCmdStopReportsPendingManualBackendConflict(t *testing.T) {
 	for _, identity := range []string{"owned", "unknown", "foreign"} {
 		for _, pendingFirst := range []bool{false, true} {

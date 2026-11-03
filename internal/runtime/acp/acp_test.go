@@ -130,8 +130,50 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 	if err := p.Stop(name); err != nil {
 		t.Fatal(err)
 	}
-	if city, id, err := owner.SessionOwnership(name); err != nil || city != "" || id != "" {
+	if city, id, err := owner.SessionOwnership(name); !runtime.IsSessionNotFound(err) || city != "" || id != "" {
 		t.Fatalf("ownership survived stop: city=%q id=%q err=%v", city, id, err)
+	}
+	if err := reader.Stop(name); err != nil {
+		t.Fatalf("repeating stop through the seam: %v", err)
+	}
+	if _, _, err := owner.SessionOwnership(name); !runtime.IsSessionNotFound(err) {
+		t.Fatalf("ownership after repeated stop=%v, want confirmed absence", err)
+	}
+}
+
+func TestSessionOwnershipDistinguishesAbsentFromUnknown(t *testing.T) {
+	for _, state := range []string{"absent", "tracked", "socket", "legacy socket", "empty record", "unreadable record"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			name := testName()
+			switch state {
+			case "tracked":
+				p.conns[name] = &sessionConn{}
+			case "socket", "legacy socket":
+				path := p.sockPath(name)
+				if state == "legacy socket" {
+					path = p.legacySockPath(name)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "empty record":
+				if err := p.SetMeta(name, sessionOwnershipMetaKey, ""); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable record":
+				if err := os.Mkdir(p.metaPath(name, sessionOwnershipMetaKey), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			city, id, err := p.SessionOwnership(name)
+			if city != "" || id != "" || runtime.IsSessionNotFound(err) != (state == "absent") {
+				t.Fatalf("ownership city=%q id=%q error=%v, state=%s", city, id, err, state)
+			}
+			if state == "unreadable record" && err == nil {
+				t.Fatal("unreadable ownership must remain an error")
+			}
+		})
 	}
 }
 
