@@ -117,6 +117,21 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `IdleWaitProvider`
 - `ImmediateNudgeProvider`
 
+Shutdown verification also recognizes the optional
+`ShutdownComplete(name string) (bool, error)` provider method. For a retained,
+city-owned name omitted by `ListRunning`, `true, nil` confirms that runtime
+teardown finished even if the provider preserves the session's record. An
+error prevents success; `false, nil` keeps the name in the survivor wait.
+Listed sessions remain survivors, and the existing contrary-ownership and
+missing-ownership checks still apply.
+
+T3 bridge exposes this method through its production seam adapter. It uses
+the same session-status classification as `ListRunning`, preserves snapshot
+errors, and refuses completion during recent-start grace. Stopped threads
+and their ownership metadata remain intact. Exec and Kubernetes do not
+implement the method: exec survivors still wait, and an unlisted Pending
+pod remains a survivor until its ownership probe confirms deletion.
+
 ### Providers
 
 - **tmux**: Primary interactive runtime in

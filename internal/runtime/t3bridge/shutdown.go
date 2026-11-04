@@ -15,6 +15,17 @@ type shutdownProvider struct {
 	threadID  string
 }
 
+// ShutdownComplete reports runtime teardown without requiring preserved thread
+// history or its ownership metadata to disappear. Snapshot uncertainty remains
+// an error, and a recent start cannot confirm completion.
+func (p *Provider) ShutdownComplete(name string) (bool, error) {
+	if p.withinRecentStart(name) {
+		return false, nil
+	}
+	liveness, err := p.ObserveLivenessWithError(name, nil)
+	return err == nil && !liveness.Running, err
+}
+
 // BindForShutdown verifies ownership and pins the native thread used by all
 // subsequent shutdown mutations. Each mutation fetches a fresh snapshot.
 func (p *Provider) BindForShutdown(name, cityPath, sessionID string) (runtime.Provider, error) {

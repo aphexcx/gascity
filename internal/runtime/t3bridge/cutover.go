@@ -52,6 +52,11 @@ func (s *seamBackedProvider) SessionOwnership(name string) (string, string, erro
 	return s.raw.SessionOwnership(name)
 }
 
+// ShutdownComplete distinguishes stopped runtime state from preserved history.
+func (s *seamBackedProvider) ShutdownComplete(name string) (bool, error) {
+	return s.raw.ShutdownComplete(name)
+}
+
 // StopForShutdown stops the thread while preserving its history and worktree.
 func (s *seamBackedProvider) StopForShutdown(name string) error {
 	return s.raw.StopForShutdown(name)

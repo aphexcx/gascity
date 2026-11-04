@@ -203,6 +203,50 @@ func (p configuredStopBindingProvider) BindForShutdown(string, string, string) (
 	return p, nil
 }
 
+type shutdownCompleteStopProvider struct {
+	*stopUnlistedRuntimeProvider
+	complete bool
+	err      error
+	calls    int
+}
+
+func (p *shutdownCompleteStopProvider) ShutdownComplete(string) (bool, error) {
+	p.calls++
+	return p.complete, p.err
+}
+
+func TestStopSurvivorCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		city      string
+		listed    bool
+		complete  bool
+		err       error
+		wantWait  bool
+		wantError string
+		wantCalls int
+	}{
+		{name: "preserved history", city: "/cities/test", complete: true, wantCalls: 1},
+		{name: "incomplete", city: "/cities/test", wantWait: true, wantError: "remains after shutdown", wantCalls: 1},
+		{name: "read error", city: "/cities/test", complete: true, err: errors.New("snapshot unavailable"), wantError: "snapshot unavailable", wantCalls: 1},
+		{name: "listed survivor", city: "/cities/test", listed: true, complete: true, wantWait: true, wantError: "remains after shutdown"},
+		{name: "foreign history", city: "/cities/other", complete: true, wantError: "ownership changed or is missing"},
+		{name: "metadata free history", complete: true, wantWait: true, wantError: "ownership changed or is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &shutdownCompleteStopProvider{
+				stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: !tc.listed},
+				complete:                    tc.complete, err: tc.err,
+			}
+			startStopTestSession(t, sp.Fake, "worker", map[string]string{"GC_CITY_PATH": tc.city})
+			wait, err := listStopSurvivors("/cities/test", "test", sp, map[string]bool{"worker": true})
+			if wait != tc.wantWait || (err != nil) != (tc.wantError != "") || (err != nil && !strings.Contains(err.Error(), tc.wantError)) || sp.calls != tc.wantCalls {
+				t.Fatalf("wait=%v err=%v completion calls=%d; want wait=%v error=%q calls=%d", wait, err, sp.calls, tc.wantWait, tc.wantError, tc.wantCalls)
+			}
+		})
+	}
+}
+
 func TestConfiguredStopBackendSelection(t *testing.T) {
 	for _, conflict := range []string{"none", "at binding", "after binding", "unlisted at binding", "unlisted after binding"} {
 		t.Run(conflict, func(t *testing.T) {

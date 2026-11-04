@@ -488,6 +488,19 @@ func listStopSurvivors(cityPath, cityName string, sp runtime.Provider, retained 
 				case err != nil:
 					result = errors.Join(result, fmt.Errorf("verifying surviving session %q: %w", name, err))
 				case ownerCity != "" && filepath.Clean(ownerCity) == filepath.Clean(cityPath):
+					if completion, ok := backend.Provider.(interface{ ShutdownComplete(string) (bool, error) }); ok && !slices.Contains(backend.Names, name) {
+						// Some runtimes preserve owned records after teardown. Only
+						// their explicit completion read can distinguish that history
+						// from an unlisted artifact still awaiting deletion.
+						complete, err := completion.ShutdownComplete(name)
+						if err != nil {
+							result = errors.Join(result, fmt.Errorf("verifying shutdown completion of session %q: %w", name, err))
+							continue
+						}
+						if complete {
+							continue
+						}
+					}
 					survivors = true
 					result = errors.Join(result, fmt.Errorf("city-owned session %q remains after shutdown", name))
 					if diagnostic, ok := backend.Provider.(interface{ ShutdownDiagnostic(string) error }); ok {
