@@ -216,14 +216,13 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 	}, nil
 }
 
-// configuredStopBackend retains the cleanup obligation once cancellation is
-// dispatched, even when the script exits before reporting an error or completion.
+// configuredStopBackend retains the cleanup obligation after a successful
+// binding, including when the script exits before cancellation is dispatched.
 type configuredStopBackend struct {
 	*verifiedManualStopBackend
-	verifyCleanup   func() error
-	stopMu          sync.Mutex
-	cancelRequested atomic.Bool
-	stopped         atomic.Bool
+	verifyCleanup func() error
+	stopMu        sync.Mutex
+	stopped       atomic.Bool
 }
 
 // Stop rechecks the original binding and completes its teardown at most once.
@@ -234,9 +233,7 @@ func (p *configuredStopBackend) Stop(name string) error {
 		return nil
 	}
 	backend := *p.verifiedManualStopBackend
-	if p.cancelRequested.Load() {
-		backend.verify = p.verifyCleanup
-	}
+	backend.verify = p.verifyCleanup
 	if err := backend.Stop(name); err != nil {
 		return err
 	}
@@ -244,8 +241,8 @@ func (p *configuredStopBackend) Stop(name string) error {
 	return nil
 }
 
-// Interrupt retains cleanup before dispatch, without blocking stop escalation
-// on a cancellation call that may outlive the interrupt-wave deadline.
+// Interrupt rechecks liveness without blocking stop escalation on a
+// cancellation call that may outlive the interrupt-wave deadline.
 func (p *configuredStopBackend) Interrupt(name string) error {
 	if err := p.verify(); err != nil {
 		return err
@@ -253,11 +250,10 @@ func (p *configuredStopBackend) Interrupt(name string) error {
 	if p.stopped.Load() {
 		return runtime.ErrSessionNotFound
 	}
-	p.cancelRequested.Store(true)
 	return p.Provider.Interrupt(name)
 }
 
-// SendKeys retains cleanup before dispatching soft or fallback cancellation.
+// SendKeys rechecks liveness before dispatching soft or fallback cancellation.
 func (p *configuredStopBackend) SendKeys(name string, keys ...string) error {
 	if err := p.verify(); err != nil {
 		return err
@@ -265,6 +261,5 @@ func (p *configuredStopBackend) SendKeys(name string, keys ...string) error {
 	if p.stopped.Load() {
 		return runtime.ErrSessionNotFound
 	}
-	p.cancelRequested.Store(true)
 	return p.Provider.SendKeys(name, keys...)
 }

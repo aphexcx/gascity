@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -31,6 +32,50 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+// spontaneousExitStopProvider keeps the binding's listing live, then removes
+// the liveness marker on the next listing, before any cancellation dispatch.
+type spontaneousExitStopProvider struct {
+	runtime.Provider
+	mu            sync.Mutex
+	binding       bool
+	bindingListed bool
+	exit          func() error
+}
+
+func (p *spontaneousExitStopProvider) SessionOwnership(name string) (string, string, error) {
+	return p.Provider.(interface {
+		SessionOwnership(string) (string, string, error)
+	}).SessionOwnership(name)
+}
+
+func (p *spontaneousExitStopProvider) BindForShutdown(name, cityPath, id string) (runtime.Provider, error) {
+	bound, err := p.Provider.(interface {
+		BindForShutdown(string, string, string) (runtime.Provider, error)
+	}).BindForShutdown(name, cityPath, id)
+	if err == nil {
+		p.mu.Lock()
+		p.binding = true
+		p.mu.Unlock()
+	}
+	return bound, err
+}
+
+func (p *spontaneousExitStopProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.bindingListed && p.exit != nil {
+		if err := p.exit(); err != nil {
+			return nil, err
+		}
+		p.exit = nil
+	}
+	names, err := p.Provider.ListRunning(prefix)
+	if p.binding && err == nil {
+		p.bindingListed = true
+	}
+	return names, err
+}
+
 func TestCmdStopExecWithoutOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		teardown   string
@@ -41,6 +86,7 @@ func TestCmdStopExecWithoutOwnership(t *testing.T) {
 		{teardown: "immediate", retainBead: true},
 		{teardown: "interrupt-exit"},
 		{teardown: "interrupt-exit-error"},
+		{teardown: "spontaneous-exit"},
 		{teardown: "delayed"},
 		{teardown: "incomplete"},
 		{teardown: "immediate", retainBead: true, provider: "composed"},
@@ -71,7 +117,7 @@ start) : > "$0.running"; : > "$0.artifact" ;;
 stop)
   printf 'stop\n' >> "$0.calls"
   case "$(cat "$0.teardown")" in
-    immediate|interrupt-exit|interrupt-exit-error) rm -f "$0.running" "$0.artifact" ;;
+    immediate|interrupt-exit|interrupt-exit-error|spontaneous-exit) rm -f "$0.running" "$0.artifact" ;;
   esac
   echo 0 > "$0.polls"
   ;;
@@ -93,7 +139,10 @@ list-running)
   fi
   if [ -f "$0.running" ]; then echo worker; fi
   ;;
-get-meta) if [ -f "$0.$3" ]; then cat "$0.$3"; fi ;;
+get-meta)
+  if [ "$(cat "$0.teardown")" = spontaneous-exit ]; then exit 2; fi
+  if [ -f "$0.$3" ]; then cat "$0.$3"; fi
+  ;;
 set-meta) cat > "$0.$3" ;;
 *) exit 2 ;;
 esac
@@ -134,6 +183,11 @@ esac
 					id = b.ID
 				}
 				sp := execruntime.NewSeamBacked(script)
+				if teardown == "spontaneous-exit" {
+					sp = &spontaneousExitStopProvider{Provider: sp, exit: func() error {
+						return os.Remove(script + ".running")
+					}}
+				}
 				if err := sp.Start(context.Background(), "worker", runtime.Config{Env: map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": id}}); err != nil {
 					t.Fatal(err)
 				}
@@ -171,7 +225,7 @@ esac
 					if code != 0 || sp.IsRunning("worker") || !strings.Contains(stdout.String(), "City stopped.") {
 						t.Fatalf("attempt %d: code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
 					}
-					if strings.HasPrefix(teardown, "interrupt-exit") {
+					if strings.HasPrefix(teardown, "interrupt-exit") || teardown == "spontaneous-exit" {
 						if _, err := os.Stat(script + ".artifact"); !errors.Is(err, os.ErrNotExist) {
 							t.Fatalf("attempt %d: cleanup artifact remains after successful stop: %v", attempt, err)
 						}
@@ -181,7 +235,8 @@ esac
 					return // The in-tree demo has no operation log; absence is asserted above.
 				}
 				calls, err := os.ReadFile(script + ".calls")
-				if err != nil || strings.Count(string(calls), "stop\n") != 1 || (!force && !strings.Contains(string(calls), "interrupt\n")) {
+				wantInterrupt := !force && teardown != "spontaneous-exit"
+				if err != nil || strings.Count(string(calls), "stop\n") != 1 || strings.Contains(string(calls), "interrupt\n") != wantInterrupt {
 					t.Fatalf("shutdown calls = %q, err=%v", calls, err)
 				}
 			})

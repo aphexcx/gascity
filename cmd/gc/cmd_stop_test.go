@@ -309,19 +309,27 @@ func (p *configuredStopCleanupProvider) Interrupt(name string) error {
 }
 
 func TestConfiguredStopCleanup(t *testing.T) {
-	for _, mode := range []string{"interrupted", "keys", "already absent", "interrupt failed", "sibling appeared", "unlisted sibling appeared", "record appeared", "already stopped"} {
+	for _, mode := range []string{"interrupted", "keys", "absent at binding", "spontaneous exit", "interrupt failed", "sibling appeared", "unlisted sibling appeared", "record appeared", "spontaneous sibling appeared", "spontaneous unlisted sibling appeared", "spontaneous record appeared", "already stopped"} {
 		t.Run(mode, func(t *testing.T) {
 			primary := &configuredStopCleanupProvider{stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake()}}
-			sibling := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: mode == "unlisted sibling appeared"}
-			startStopTestSession(t, primary.Fake, "worker", nil)
+			sibling := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: strings.Contains(mode, "unlisted sibling")}
+			if mode != "absent at binding" {
+				startStopTestSession(t, primary.Fake, "worker", nil)
+			}
 			store := beads.NewMemStore()
 			_, binding, err := bindConfiguredStopTarget(stopTarget{name: "worker", resolved: true}, store, auto.New(primary, sibling), "runtime/default", primary)
+			if mode == "absent at binding" {
+				if !runtime.IsSessionNotFound(err) || binding.Provider != nil || primary.CountCalls("Stop", "worker") != 0 {
+					t.Fatalf("absent session authorized cleanup: binding=%v err=%v", binding, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			bound := binding.Provider
 			switch mode {
-			case "already absent":
+			case "spontaneous exit", "spontaneous sibling appeared", "spontaneous unlisted sibling appeared", "spontaneous record appeared":
 			case "already stopped":
 				primary.StopLeavesRunning["worker"] = true
 				if err := bound.Stop("worker"); err != nil {
@@ -348,20 +356,17 @@ func TestConfiguredStopCleanup(t *testing.T) {
 			if strings.HasSuffix(mode, "sibling appeared") {
 				startStopTestSession(t, sibling.Fake, "worker", nil)
 			}
-			if mode == "record appeared" {
+			if strings.HasSuffix(mode, "record appeared") {
 				if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "worker", "state": "active"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			before := primary.CountCalls("Stop", "worker")
 			err = bound.Stop("worker")
-			wantCleanup := mode == "interrupted" || mode == "keys" || mode == "interrupt failed"
+			wantCleanup := mode == "interrupted" || mode == "keys" || mode == "interrupt failed" || mode == "spontaneous exit"
 			wantSuccess := wantCleanup || mode == "already stopped"
 			if (err == nil) != wantSuccess {
 				t.Errorf("cleanup error = %v, want success=%v", err, wantSuccess)
-			}
-			if mode == "already absent" && !runtime.IsSessionNotFound(err) {
-				t.Errorf("untouched absent session: %v, want not found", err)
 			}
 			if wantCleanup {
 				before++
