@@ -64,9 +64,9 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 }
 
 // carrier drives the named session's tmux over the connection. The in-box tmux
-// target is the session name itself (one host, many named sessions).
+// target uses exact matching so an absent name cannot select a prefix sibling.
 func (p *Provider) carrier(name string) runtime.Carrier {
-	return runtime.NewTmuxCarrier(p.conn, name)
+	return runtime.NewTmuxCarrier(p.conn, "="+name)
 }
 
 // tmux runs a tmux subcommand over the connection and returns trimmed stdout,
@@ -331,7 +331,7 @@ func (p *Provider) requiresPostStartLiveness(cfg runtime.Config) bool {
 // error would let the seam adapter drop tracking while the remote tmux session
 // and the agent inside it keep running untracked, leaking the remote box.
 func (p *Provider) Stop(name string) error {
-	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", name); err != nil {
+	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", "="+name); err != nil {
 		return fmt.Errorf("ssh stop %q: %w", name, err)
 	}
 	return nil
@@ -339,7 +339,7 @@ func (p *Provider) Stop(name string) error {
 
 // hasSession reports whether the tmux session exists, using the given context.
 func (p *Provider) hasSession(ctx context.Context, name string) bool {
-	_, code, err := p.tmux(ctx, name, "has-session", "-t", name)
+	_, code, err := p.tmux(ctx, name, "has-session", "-t", "="+name)
 	return err == nil && code == 0
 }
 
@@ -446,7 +446,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 
 // GetMeta retrieves a value from the tmux session environment ("" if unset).
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", name, key)
+	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", "="+name, key)
 	if err != nil || code != 0 {
 		return "", nil
 	}
@@ -458,6 +458,58 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 		return val, nil
 	}
 	return "", nil
+}
+
+// SessionOwnership reads host ownership from the remote tmux environment.
+// Missing metadata stays unknown while the session exists; a failed connection
+// must never be mistaken for a confirmed absence.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
+	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
+	if err := errors.Join(cityErr, idErr); err != nil {
+		return "", "", fmt.Errorf("reading ssh session %q ownership: %w", name, err)
+	}
+	if city != "" && id != "" {
+		return city, id, nil
+	}
+	_, stderr, code, err := p.conn.run.run(context.Background(), p.conn.ep, []string{"tmux", "has-session", "-t", "=" + name}, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("probing ssh session %q ownership: %w", name, err)
+	}
+	diagnostic := strings.TrimSpace(string(stderr))
+	if tmuxSessionAbsent(code, diagnostic) {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	if code != 0 {
+		return "", "", fmt.Errorf("probing ssh session %q ownership: tmux exited %d: %s", name, code, diagnostic)
+	}
+	return "", "", nil
+}
+
+// IsUnmanagedSession identifies sessions on the shared server with no GC
+// environment markers. Partial and explicitly unset markers remain unknown.
+func (p *Provider) IsUnmanagedSession(name string) (bool, error) {
+	out, stderr, code, err := p.conn.run.run(context.Background(), p.conn.ep, []string{"tmux", "show-environment", "-t", "=" + name}, nil)
+	if err != nil {
+		return false, fmt.Errorf("reading ssh session %q environment: %w", name, err)
+	}
+	diagnostic := strings.TrimSpace(string(stderr))
+	if tmuxSessionAbsent(code, diagnostic) {
+		return false, runtime.ErrSessionNotFound
+	}
+	if code != 0 {
+		return false, fmt.Errorf("reading ssh session %q environment: tmux exited %d: %s", name, code, diagnostic)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimPrefix(line, "-"), "GC_") {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func tmuxSessionAbsent(code int, diagnostic string) bool {
+	return code == 1 && (strings.Contains(diagnostic, "can't find session:") || strings.Contains(diagnostic, "no such session:") || strings.Contains(diagnostic, "no server running on") || strings.Contains(diagnostic, "No such file or directory"))
 }
 
 // RemoveMeta removes a key from the tmux session environment.

@@ -1047,6 +1047,44 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return string(b), nil
 }
 
+// SessionOwnership reads the persisted host ownership. Missing identity leaves
+// ownership unknown unless herdr confirms the session is absent.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
+	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
+	if err := errors.Join(cityErr, idErr); err != nil {
+		return "", "", fmt.Errorf("reading herdr %q ownership: %w", name, err)
+	}
+	if city != "" && id != "" {
+		return city, id, nil
+	}
+	ops := p.lookupOps(context.Background(), name)
+	// Ownership discovery must not reap an unproven session or its binding.
+	ops.reapPane = func(string) {}
+	ops.clearBinding = func() {}
+	pane, running, err := resolveBinding(ops)
+	if err != nil {
+		return "", "", fmt.Errorf("probing herdr %q ownership: %w", name, err)
+	}
+	if !running && pane == "" {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	return "", "", nil
+}
+
+// IsUnmanagedSession identifies foreign registry agents with no GC sidecar.
+// Any existing sidecar, including a partial identity or binding, stays unknown.
+func (p *Provider) IsUnmanagedSession(name string) (bool, error) {
+	_, err := os.Stat(filepath.Join(p.metaDir, sanitize(name)))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading herdr %q sidecar: %w", name, err)
+	}
+	return false, nil
+}
+
 // RemoveMeta deletes a per-session metadata value from the sidecar store.
 // Idempotent.
 func (p *Provider) RemoveMeta(name, key string) error {

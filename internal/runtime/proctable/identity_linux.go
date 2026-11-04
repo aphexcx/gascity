@@ -40,5 +40,9 @@ func processIdentityWithReader(pid int, readFile func(string) ([]byte, error)) (
 	if !ok || startTime == "" {
 		return "", fmt.Errorf("process identity for PID %d is empty", pid)
 	}
-	return startTime, nil
+	boot, err := readFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", fmt.Errorf("reading process boot identity: %w", err)
+	}
+	return bootQualifiedIdentity(string(boot), startTime)
 }

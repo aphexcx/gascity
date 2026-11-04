@@ -21,6 +21,8 @@ import (
 const (
 	podManagedDoltHost = "dolt.gc.svc.cluster.local"
 	podManagedDoltPort = "3307"
+	podOwnerCityPath   = "gc-owner-city-path"
+	podOwnerSessionID  = "gc-owner-session-id"
 
 	// podWorkspaceRoot is the pod-side projection of the city root. It is the
 	// only directory guaranteed to exist when the container starts — it is the
@@ -350,6 +352,8 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			},
 			Annotations: map[string]string{
 				"gc-session-name": name,
+				podOwnerCityPath:  cfg.Env["GC_CITY_PATH"],
+				podOwnerSessionID: cfg.Env["GC_SESSION_ID"],
 			},
 		},
 		Spec: corev1.PodSpec{

@@ -37,6 +37,63 @@ esac
 `, metaDir, metaDir, metaDir, metaDir)
 }
 
+func TestSeamsSessionOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name, city, id, running string
+		metaExit                int
+		wantAbsent, wantError   bool
+	}{
+		{name: "owned", city: "/city", id: "gc-1", running: "true"},
+		{name: "missing city", id: "gc-1", running: "true"},
+		{name: "missing id", city: "/city", running: "true"},
+		{name: "unsupported metadata", metaExit: 2, running: "true"},
+		{name: "unsupported liveness", metaExit: 2},
+		{name: "absent", running: "false", wantAbsent: true},
+		{name: "metadata failure", metaExit: 1, running: "true", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := writeScript(t, t.TempDir(), fmt.Sprintf(`
+case "$1" in
+get-meta)
+  case "$3" in
+  GC_CITY_PATH) printf '%%s' %q ;;
+  GC_SESSION_ID) printf '%%s' %q ;;
+  esac
+  exit %d ;;
+is-running) printf '%%s' %q ;;
+*) exit 2 ;;
+esac
+`, tc.city, tc.id, tc.metaExit, tc.running))
+			owner, ok := NewSeamBacked(script).(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				t.Fatal("registered exec provider does not expose ownership")
+			}
+			city, id, err := owner.SessionOwnership("session")
+			if tc.wantError {
+				if err == nil || runtime.IsSessionNotFound(err) {
+					t.Fatalf("metadata failure = %v", err)
+				}
+				return
+			}
+			if tc.wantAbsent {
+				if !runtime.IsSessionNotFound(err) {
+					t.Fatalf("absence = %v", err)
+				}
+				return
+			}
+			wantCity, wantID := tc.city, tc.id
+			if wantCity == "" || wantID == "" {
+				wantCity, wantID = "", ""
+			}
+			if city != wantCity || id != wantID || err != nil {
+				t.Fatalf("ownership = %q, %q, %v; want %q, %q", city, id, err, wantCity, wantID)
+			}
+		})
+	}
+}
+
 // TestSeamsExecSupported proves the first REAL seam capability: Place.Exec runs
 // the command in the box over the live exec op, returns its output and exit code,
 // and PlaceCapabilities/TransportCapabilities reflect the handshake.

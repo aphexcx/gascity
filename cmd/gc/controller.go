@@ -1021,6 +1021,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// Individual failures, including lifecycle refusals and timeouts, are written
+// to stderr.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1043,14 +1046,28 @@ func gracefulStopAllWithForceSignal(
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
 ) {
-	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
-		// Immediate kill (no grace period).
-		stopTargetsBounded(stopTargetsForNames(names, cfg, store.Store, stderr), cfg, store.Store, sp, rec, "gc", stdout, stderr)
-		return
-	}
 	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
+	gracefulStopTargets(targets, sp, timeout, rec, cfg, store, stdout, stderr, forceStopRequested)
+}
+
+func gracefulStopTargets(
+	targets []stopTarget,
+	sp runtime.Provider,
+	timeout time.Duration,
+	rec events.Recorder,
+	cfg *config.City,
+	store beads.SessionStore,
+	stdout, stderr io.Writer,
+	forceStopRequested func() bool,
+) bool {
+	if timeout <= 0 || len(targets) == 0 || stopForceRequested(forceStopRequested) {
+		// Immediate kill (no grace period).
+		return stopTargetsBounded(targets, cfg, store.Store, sp, rec, "gc", stdout, stderr) == len(targets)
+	}
+	names := make([]string, 0, len(targets))
 	targetByName := make(map[string]stopTarget, len(targets))
 	for _, target := range targets {
+		names = append(names, target.name)
 		targetByName[target.name] = target
 	}
 
@@ -1060,7 +1077,7 @@ func gracefulStopAllWithForceSignal(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store.Store, sp, stderr, forceStopRequested)
+	sent, completedStops := interruptTargetsWithStopResults(targets, cfg, store.Store, sp, stderr, forceStopRequested)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
@@ -1101,6 +1118,7 @@ func gracefulStopAllWithForceSignal(
 	}
 
 	// Pass 2: kill survivors.
+	succeeded := true
 	var survivors []string
 	runningSet, listed := runningSessionSet(sp, names)
 	for _, name := range names {
@@ -1110,9 +1128,20 @@ func gracefulStopAllWithForceSignal(
 		} else {
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
-		if !running {
-			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
-				fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+		if !running || completedStops[name] {
+			target, ok := targetByName[name]
+			if !ok {
+				target = stopTarget{name: name}
+			}
+			if !completedStops[name] {
+				results := executeTargetWave([]stopTarget{target}, 1, stopPerTargetTimeoutDefault, func(target stopTarget) error {
+					return stopTargetThroughWorkerBoundary(target, store.Store, sp, cfg)
+				})
+				if err := results[0].err; err != nil {
+					fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+					succeeded = false
+					continue
+				}
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
@@ -1145,7 +1174,9 @@ func gracefulStopAllWithForceSignal(
 		}
 		survivors = append(survivors, name)
 	}
-	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store.Store, sp, rec, "gc", stdout, stderr)
+	survivorTargets := filterStopTargets(targets, survivors)
+	stopped := stopTargetsBounded(survivorTargets, cfg, store.Store, sp, rec, "gc", stdout, stderr)
+	return succeeded && stopped == len(survivorTargets)
 }
 
 func stopForceRequested(forceStopRequested func() bool) bool {

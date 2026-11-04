@@ -371,8 +371,8 @@ func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
 		t.Fatalf("Nudge: %v", err)
 	}
 	want := [][]string{
-		{"tmux", "send-keys", "-t", "sess-7", "-l", "hi"},
-		{"tmux", "send-keys", "-t", "sess-7", "Enter"},
+		{"tmux", "send-keys", "-t", "=sess-7", "-l", "hi"},
+		{"tmux", "send-keys", "-t", "=sess-7", "Enter"},
 	}
 	if len(f.calls) != 2 {
 		t.Fatalf("calls = %v, want 2", f.calls)
@@ -866,7 +866,7 @@ func TestProvider_StartSendsInitialNudgeWhenAlive(t *testing.T) {
 	if len(nudges) != 2 {
 		t.Fatalf("expected 2 send-keys (type + Enter) for the initial nudge, got %v", nudges)
 	}
-	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "s", "-l", "hello"}) {
+	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "=s", "-l", "hello"}) {
 		t.Errorf("initial nudge type = %v", nudges[0])
 	}
 }

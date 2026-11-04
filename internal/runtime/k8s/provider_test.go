@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -250,6 +251,43 @@ func TestStop(t *testing.T) {
 	if _, exists := fake.pods["gc-test-agent"]; exists {
 		t.Error("pod still exists after Stop")
 	}
+}
+
+func TestStopAcceptedDeletionRemainsListedUntilGraceExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fake := newFakeK8sOps()
+		fake.gracefulDelete = true
+		p := newProviderWithOps(fake)
+		const name = "owned-session"
+		addRunningPodWithAnnotation(fake, name, name, name)
+		pod := fake.pods[name]
+		pod.Annotations[podOwnerCityPath] = "/cities/test"
+		pod.Annotations[podOwnerSessionID] = "session-1"
+		if err := p.Stop(name); err != nil {
+			t.Fatal(err)
+		}
+		if pod.DeletionTimestamp == nil || pod.DeletionGracePeriodSeconds == nil || *pod.DeletionGracePeriodSeconds != 5 || pod.Status.Phase != corev1.PodRunning {
+			t.Fatal("accepted deletion must retain a Running pod with five-second grace")
+		}
+		names, err := p.ListRunning("")
+		city, id, ownerErr := p.SessionOwnership(name)
+		if err != nil || len(names) != 1 || names[0] != name || ownerErr != nil || city != "/cities/test" || id != "session-1" {
+			t.Fatalf("terminating pod: names=%v err=%v ownership=%q,%q,%v", names, err, city, id, ownerErr)
+		}
+		// The pod remains Running after its tmux process has exited.
+		fake.execErr[execKey(name, []string{"tmux", "has-session", "-t", tmuxSession})] = errors.New("tmux exited")
+		if p.ProcessAlive(name, []string{"worker"}) || p.IsRunning(name) {
+			t.Fatal("terminating pod with exited tmux must not report a live process")
+		}
+		graceExpired := time.NewTimer(time.Duration(*pod.DeletionGracePeriodSeconds) * time.Second)
+		<-graceExpired.C // The fake clock advances to the accepted deletion's deadline.
+		names, err = p.ListRunning("")
+		_, _, ownerErr = p.SessionOwnership(name)
+		if err != nil || len(names) != 0 || !runtime.IsSessionNotFound(ownerErr) {
+			t.Fatalf("completed deletion: names=%v err=%v ownership error=%v", names, err, ownerErr)
+		}
+		t.Log("accepted deletion stays listed and owned for 5s; completed deletion reports typed absence")
+	})
 }
 
 func TestListRunning(t *testing.T) {
@@ -638,8 +676,10 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 		Command:      "claude --settings .gc/settings.json",
 		ProcessNames: []string{"claude"},
 		Env: map[string]string{
-			"GC_AGENT": "mayor",
-			"GC_CITY":  "/workspace",
+			"GC_AGENT":      "worker",
+			"GC_CITY":       "/workspace",
+			"GC_CITY_PATH":  "/cities/test",
+			"GC_SESSION_ID": "session-1",
 		},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
@@ -662,6 +702,89 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	}
 	if pod.Annotations["gc-session-name"] != "gc-test-agent" {
 		t.Errorf("annotation gc-session-name = %q, want gc-test-agent", pod.Annotations["gc-session-name"])
+	}
+	rt, tp := p.Seams()
+	reader := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: p}
+	owner, ok := any(reader).(interface {
+		SessionOwnership(string) (string, string, error)
+	})
+	if !ok {
+		t.Fatal("Kubernetes constructor does not expose host session ownership")
+	}
+	city, id, err := owner.SessionOwnership("gc-test-agent")
+	if err != nil || city != "/cities/test" || id != "session-1" {
+		t.Fatalf("ownership city=%q id=%q err=%v", city, id, err)
+	}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "GC_CITY_PATH" && env.Value != "/workspace" {
+			t.Errorf("pod path projection changed: %q", env.Value)
+		}
+	}
+}
+
+func TestPendingPodRetainsShutdownIdentity(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	pod, err := buildPod("pending-session", runtime.Config{Env: map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "session-1"}}, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = corev1.PodPending
+	fake.pods[pod.Name] = pod
+	rt, tp := p.Seams()
+	sp := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: p}
+	names, err := sp.ListRunning("")
+	if err != nil || len(names) != 0 || sp.IsRunning("pending-session") {
+		t.Fatalf("pending pod should not be running: names=%v error=%v", names, err)
+	}
+	city, id, err := sp.SessionOwnership("pending-session")
+	if err != nil || city != "/cities/test" || id != "session-1" {
+		t.Fatalf("pending identity=%q/%q error=%v", city, id, err)
+	}
+	if err := sp.Stop("pending-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := fake.pods[pod.Name]; exists {
+		t.Fatal("pending pod survived stop")
+	}
+}
+
+func TestSessionOwnershipRefusesUnverifiablePods(t *testing.T) {
+	for _, scenario := range []string{"missing record", "missing annotations", "conflicting owner", "name collision", "listing error"} {
+		t.Run(scenario, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			pod, err := buildPod("test-session", runtime.Config{Env: map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "session-1"}}, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.pods[pod.Name] = pod
+			switch scenario {
+			case "missing record":
+				delete(fake.pods, pod.Name)
+			case "missing annotations":
+				delete(pod.Annotations, podOwnerCityPath)
+				delete(pod.Annotations, podOwnerSessionID)
+			case "conflicting owner", "name collision":
+				duplicate := pod.DeepCopy()
+				duplicate.Name += "-duplicate"
+				if scenario == "conflicting owner" {
+					duplicate.Annotations[podOwnerSessionID] = "session-2"
+				} else {
+					duplicate.Annotations["gc-session-name"] = "other-session"
+				}
+				fake.pods[duplicate.Name] = duplicate
+			case "listing error":
+				fake.listErr = errors.New("API unavailable")
+			}
+			city, id, err := p.SessionOwnership("test-session")
+			if city != "" || id != "" || ((err == nil) != (scenario == "missing annotations")) {
+				t.Fatalf("city=%q id=%q err=%v; want unknown ownership", city, id, err)
+			}
+			if scenario == "listing error" && !errors.Is(err, fake.listErr) {
+				t.Fatalf("listing error was not preserved: %v", err)
+			}
+		})
 	}
 }
 

@@ -909,36 +909,33 @@ func normalizedSessionTemplateInfo(i sessionpkg.Info, cfg *config.City) string {
 // beads with an agent_name field matching the query. If no agent_name match
 // is found, falls back to template/common_name matching.
 func findSessionNameByTemplate(store beads.Store, template string) string {
+	name, _ := findSessionNameByTemplateChecked(store, template)
+	return name
+}
+
+func findSessionNameByTemplateChecked(store beads.Store, template string) (string, error) {
 	template = strings.TrimSpace(template)
 	if store == nil || template == "" {
-		return ""
+		return "", nil
 	}
-	if sn := findSessionNameByMetadata(store, "agent_name", template, true); sn != "" {
-		return sn
+	var lookupErr error
+	for _, key := range []string{"agent_name", "", "template", "common_name"} {
+		var items []beads.Bead
+		var err error
+		if key == "" {
+			items, err = store.List(beads.ListQuery{Label: "agent:" + template})
+		} else {
+			items, err = sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: template})
+		}
+		if err != nil {
+			lookupErr = errors.Join(lookupErr, fmt.Errorf("looking up session for %q: %w", template, err))
+			continue
+		}
+		if sn := chooseSessionNameForTemplate(store, items, key == "agent_name" || key == "", key, template, template); sn != "" {
+			return sn, lookupErr
+		}
 	}
-	if sn := findSessionNameByAgentLabel(store, template); sn != "" {
-		return sn
-	}
-	if sn := findSessionNameByMetadata(store, "template", template, false); sn != "" {
-		return sn
-	}
-	return findSessionNameByMetadata(store, "common_name", template, false)
-}
-
-func findSessionNameByAgentLabel(store beads.Store, template string) string {
-	items, err := store.List(beads.ListQuery{Label: "agent:" + template})
-	if err != nil {
-		return ""
-	}
-	return chooseSessionNameForTemplate(store, items, true, "", "", template)
-}
-
-func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
-	if err != nil {
-		return ""
-	}
-	return chooseSessionNameForTemplate(store, items, agentNameMatch, key, value, value)
+	return "", lookupErr
 }
 
 func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNameMatch bool, key, value, queryTemplate string) string {
@@ -1003,10 +1000,16 @@ func lookupSessionName(store beads.Store, qualifiedName string) (string, bool) {
 // name. Tries the bead store first; falls back to the legacy SessionNameFor
 // function if no bead is found.
 func lookupSessionNameOrLegacy(store beads.Store, cityName, qualifiedName, sessionTemplate string) string {
-	if sn, ok := lookupSessionName(store, qualifiedName); ok {
-		return sn
+	name, _ := lookupSessionNameOrLegacyChecked(store, cityName, qualifiedName, sessionTemplate)
+	return name
+}
+
+func lookupSessionNameOrLegacyChecked(store beads.Store, cityName, qualifiedName, sessionTemplate string) (string, error) {
+	sn, err := findSessionNameByTemplateChecked(store, qualifiedName)
+	if sn != "" {
+		return sn, err
 	}
-	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
+	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate), err
 }
 
 // lookupPoolSessionNames returns bead-backed session names for pool instances

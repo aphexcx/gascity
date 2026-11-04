@@ -75,6 +75,18 @@ func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...s
 // runWithContext executes the script using the given parent context with
 // the specified timeout, optionally piping stdinData to its stdin.
 func (p *Provider) runWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
+	out, err := p.runStrictWithContext(parent, dur, stdinData, args...)
+	if errors.Is(err, errUnsupportedOperation) {
+		return "", nil
+	}
+	return out, err
+}
+
+var errUnsupportedOperation = errors.New("operation unsupported")
+
+// runStrictWithContext preserves unsupported-operation failures for callers
+// that must distinguish an unknown result from a successful empty response.
+func (p *Provider) runStrictWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
@@ -111,6 +123,10 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// Neither result claims physical signal-delivery ordering.
 	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		return "", fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), errUnsupportedOperation)
 	}
 	return "", p.runError(err, stderr.String(), args)
 }
@@ -719,6 +735,23 @@ func (p *Provider) SetMeta(name, key, value string) error {
 // Returns ("", nil) if stdout is empty.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	return p.run(nil, "get-meta", name, key)
+}
+
+// SessionOwnership reads the script's host ownership metadata. Unsupported or
+// missing metadata stays unknown unless is-running explicitly confirms absence.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
+	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
+	if err := errors.Join(cityErr, idErr); err != nil {
+		return "", "", fmt.Errorf("reading exec runtime %q ownership: %w", name, err)
+	}
+	if city != "" && id != "" {
+		return city, id, nil
+	}
+	if occupied, definite := p.boxOccupancy(name); definite && !occupied {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	return "", "", nil
 }
 
 // RemoveMeta removes a metadata key: script remove-meta <name> <key>

@@ -3,6 +3,7 @@
 package proctable
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,13 @@ import (
 // There is no liveScanGuard (that guard protects the orphan sweep in
 // ScanBySessionID, not this read-only snapshot) and no root filtering.
 func snapshotProcesses() ([]ProcessRecord, error) {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return nil, fmt.Errorf("reading process boot identity: %w", err)
+	}
+	if _, err := bootQualifiedIdentity(string(boot), "0"); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
@@ -28,6 +36,10 @@ func snapshotProcesses() ([]ProcessRecord, error) {
 		ppid, pgid, startTime, ok, err := readProcStatIdentity(filepath.Join("/proc", e.Name(), "stat"))
 		if err != nil || !ok {
 			continue
+		}
+		startTime, err = bootQualifiedIdentity(string(boot), startTime)
+		if err != nil {
+			return nil, err
 		}
 		comm, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
 		if err != nil {

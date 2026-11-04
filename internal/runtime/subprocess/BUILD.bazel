@@ -4,6 +4,7 @@ go_library(
     name = "subprocess",
     srcs = [
         "cutover.go",
+        "process_identity.go",
         "seams.go",
         "subprocess.go",
     ],
@@ -26,6 +27,7 @@ go_test(
     embed = [":subprocess"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/proctable",
         "//internal/testenv",
         "//internal/testutil",
     ],

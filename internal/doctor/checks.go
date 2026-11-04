@@ -650,14 +650,8 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 		return err
 	}
 	scan, err := c.orphanSessions(ctx)
-	if runtime.IsPartialListError(err) {
-		return fmt.Errorf("listing sessions partially failed: %w", err)
-	}
-	if err != nil {
+	if err := orphanCleanupScanError(scan, err); err != nil {
 		return err
-	}
-	if len(scan.unreadable) > 0 {
-		return fmt.Errorf("refusing orphan cleanup: incomplete ownership metadata: %w", errors.Join(scan.unreadable...))
 	}
 	var failures []error
 	for _, orphan := range scan.orphans {

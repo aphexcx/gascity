@@ -46,3 +46,23 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
 	return s.raw.GetLastActivity(name)
 }
+
+// SessionOwnership exposes startup ownership from the bridge thread metadata.
+func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
+	return s.raw.SessionOwnership(name)
+}
+
+// ShutdownComplete distinguishes stopped runtime state from preserved history.
+func (s *seamBackedProvider) ShutdownComplete(name string) (bool, error) {
+	return s.raw.ShutdownComplete(name)
+}
+
+// StopForShutdown stops the thread while preserving its history and worktree.
+func (s *seamBackedProvider) StopForShutdown(name string) error {
+	return s.raw.StopForShutdown(name)
+}
+
+// BindForShutdown retains the verified thread identity across graceful shutdown.
+func (s *seamBackedProvider) BindForShutdown(name, cityPath, sessionID string) (runtime.Provider, error) {
+	return s.raw.BindForShutdown(name, cityPath, sessionID)
+}

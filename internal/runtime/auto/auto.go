@@ -50,6 +50,21 @@ func New(defaultSP, acpSP runtime.Provider) *Provider {
 	}
 }
 
+// IsCityScoped reports whether both backends confirm ownership by this city.
+// An unknown or unscoped backend prevents destructive composite cleanup.
+func (p *Provider) IsCityScoped(cityName string) bool {
+	defaultScope, defaultOK := p.defaultSP.(interface{ IsCityScoped(string) bool })
+	acpScope, acpOK := p.acpSP.(interface{ IsCityScoped(string) bool })
+	defaultScoped := defaultOK && defaultScope.IsCityScoped(cityName)
+	acpScoped := acpOK && acpScope.IsCityScoped(cityName)
+	return defaultScoped && acpScoped
+}
+
+// BackendProviders returns the backends without querying their runtimes.
+func (p *Provider) BackendProviders() []runtime.Provider {
+	return []runtime.Provider{p.defaultSP, p.acpSP}
+}
+
 // RouteACP registers a session name to use the ACP backend.
 // Must be called before Start for that session.
 func (p *Provider) RouteACP(name string) {

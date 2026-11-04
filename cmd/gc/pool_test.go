@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -25,6 +26,7 @@ type partialListPoolProvider struct {
 	*runtime.Fake
 	listErr   error
 	listNames []string
+	nextList  *runtime.BackendListResult
 }
 
 func (p *partialListPoolProvider) ListRunning(prefix string) ([]string, error) {
@@ -32,7 +34,12 @@ func (p *partialListPoolProvider) ListRunning(prefix string) ([]string, error) {
 	if names == nil {
 		names, _ = p.Fake.ListRunning(prefix)
 	}
-	return names, p.listErr
+	err := p.listErr
+	if p.nextList != nil {
+		p.listNames, p.listErr = p.nextList.Names, p.nextList.Err
+		p.nextList = nil
+	}
+	return names, err
 }
 
 func TestEvaluatePoolSuccess(t *testing.T) {
@@ -408,6 +415,56 @@ func TestDiscoverPoolInstancesUnlimitedFailsClosedOnPartialResults(t *testing.T)
 	instances := discoverPoolInstances("worker", "myrig", pool, nil, "city", "", sp)
 	if len(instances) != 0 {
 		t.Fatalf("len = %d, want fail-closed empty result on partial list (instances: %v)", len(instances), instances)
+	}
+}
+
+func TestDiscoverPoolInstancesCheckedBackendAbsence(t *testing.T) {
+	absent := &runtime.PartialListError{Err: errors.New("no tmux server running"), ServerAbsent: true}
+	uncertain := errors.New("listing unavailable")
+	for _, canonical := range []bool{false, true} {
+		for _, mode := range []string{"absent", "absent sibling", "uncertain", "mixed errors", "contradictory names", "unconfirmed absence", "server returns"} {
+			t.Run(fmt.Sprintf("canonical=%v/%s", canonical, mode), func(t *testing.T) {
+				gone := &partialListPoolProvider{Fake: runtime.NewFake(), listErr: absent}
+				var sp runtime.Provider = gone
+				switch mode {
+				case "absent sibling":
+					live := runtime.NewFake()
+					startStopTestSession(t, live, "worker-2", nil)
+					sp = auto.New(gone, live)
+				case "uncertain":
+					gone.listErr = uncertain
+				case "mixed errors":
+					gone.listErr = errors.Join(absent, uncertain)
+				case "contradictory names":
+					gone.listNames = []string{"worker-2"}
+				case "unconfirmed absence":
+					gone.nextList = &runtime.BackendListResult{Err: uncertain}
+				case "server returns":
+					gone.nextList = &runtime.BackendListResult{Names: []string{"worker-2"}}
+				}
+				a := &config.Agent{Name: "worker"}
+				if canonical {
+					a.MaxActiveSessions, a.ScaleCheck = intPtr(1), "echo 1"
+				}
+				names, err := discoverPoolInstancesChecked(a.Name, "", scaleParamsFor(a), a, "test", "", sp)
+				wantFailure := mode != "absent" && mode != "absent sibling" && mode != "server returns"
+				if (err != nil) != wantFailure {
+					t.Fatalf("names=%v error=%v; want failure=%v", names, err, wantFailure)
+				}
+				if !wantFailure {
+					var want []string
+					if canonical {
+						want = append(want, "worker")
+					}
+					if mode == "absent sibling" || mode == "server returns" {
+						want = append(want, "worker-2")
+					}
+					if !reflect.DeepEqual(names, want) {
+						t.Errorf("names=%v want=%v", names, want)
+					}
+				}
+			})
+		}
 	}
 }
 

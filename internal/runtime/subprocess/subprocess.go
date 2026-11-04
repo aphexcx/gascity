@@ -5,11 +5,13 @@
 // provider — useful for CI, testing, and environments where tmux is
 // unavailable.
 //
-// Process tracking uses two layers:
+// Process tracking uses three layers:
 //   - In-memory: for the same gc process (Start followed by Stop/IsRunning)
 //   - Unix sockets: for cross-process persistence (gc start → gc stop).
 //     Each session gets a per-session unix socket (<name>.sock) that serves
 //     as both proof of liveness and control channel (stop/interrupt/ping).
+//   - Durable kernel identity: the child's PID and start token remain usable
+//     for discovery and fenced teardown after the control socket is lost.
 //
 // Limitations compared to tmux:
 //   - No interactive attach (Attach always returns an error)
@@ -47,7 +49,10 @@ type Provider struct {
 }
 
 type providerOps struct {
-	start func(*exec.Cmd) error
+	start           func(*exec.Cmd) error
+	processIdentity func(int) (string, error)
+	signal          func(int, syscall.Signal) error
+	beforeCleanup   func()
 }
 
 const (
@@ -62,6 +67,7 @@ type sessionConn struct {
 	cmd      *exec.Cmd
 	done     chan struct{} // closed when process exits
 	listener net.Listener  // unix socket listener
+	identity *processIdentity
 }
 
 // Compile-time check.
@@ -105,7 +111,9 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
-			start: (*exec.Cmd).Start,
+			start:           (*exec.Cmd).Start,
+			processIdentity: proctable.ProcessIdentity,
+			signal:          syscall.Kill,
 		},
 	}
 }
@@ -129,6 +137,11 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	// Check socket for cross-process case.
 	if p.socketAliveAt(name, euid) {
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	}
+	if live, err := p.processRunning(name); err != nil {
+		return err
+	} else if live {
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
@@ -203,36 +216,50 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	_ = nullFile.Close()
 
-	// Create control socket for cross-process discovery.
 	done := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
+	var lis net.Listener
+	var generation *processIdentity
+	err = runtime.WithProviderStateDirLock(p.dir, func() error {
+		if p.socketAlive(name) {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		if live, err := p.processRunning(name); err != nil {
+			return err
+		} else if live {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		if err := p.persistStartProcessMetadata(name, cfg.Env, cmd.Process.Pid); err != nil {
+			return err
+		}
+		var err error
+		generation, err = p.readProcessIdentity(name)
+		if err == nil {
+			lis, err = p.startControlSocket(name, cmd, done, socketDir, euid)
+		}
+		if err != nil {
+			p.clearSessionMeta(name)
+		}
+		return err
+	})
 	if err != nil {
-		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearWorkDir()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
-	}
-	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		clearWorkDir()
-		return fmt.Errorf("storing metadata for %q: %w", name, err)
+		return fmt.Errorf("publishing session %q: %w", name, err)
 	}
 
 	go func() {
 		_ = cmd.Wait()
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		// Clean up socket before signaling done so ListRunning
 		// never sees a stale socket after Stop returns.
 		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		p.clearSessionMeta(name)
+		_ = p.cleanupProcessGeneration(name, generation)
 		close(done)
 	}()
 
-	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
+	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis, identity: generation}
 	return nil
 }
 
@@ -250,6 +277,9 @@ func envWithoutKey(env []string, key string) []string {
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
 func (p *Provider) Stop(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
@@ -260,10 +290,12 @@ func (p *Provider) Stop(name string) error {
 
 	// Try in-memory process first.
 	if ok {
-		if !sc.alive() {
-			return nil
+		if sc.alive() {
+			if err := terminateSessionConn(sc); err != nil {
+				return err
+			}
 		}
-		return terminateSessionConn(sc)
+		return p.stopProcessGeneration(name, sc.identity)
 	}
 
 	// Fall back to socket (cross-process case: gc stop after gc start).
@@ -273,6 +305,9 @@ func (p *Provider) Stop(name string) error {
 // Interrupt sends SIGINT to the named session's process.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
@@ -297,12 +332,16 @@ func (p *Provider) IsRunning(name string) bool {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 
-	if ok {
-		return sc.alive()
+	if ok && sc.alive() {
+		return true
 	}
 
 	// Fall back to socket liveness check.
-	return p.socketAliveAt(name, euid)
+	if p.socketAliveAt(name, euid) {
+		return true
+	}
+	live, _ := p.processRunning(name)
+	return live
 }
 
 // IsAttached always returns false — subprocess has no terminal concept.
@@ -406,6 +445,10 @@ func (p *Provider) Peek(_ string, _ int) (string, error) {
 // upgrading from an older binary keeps its 0644 files otherwise, which is
 // exactly the host that already has credentials on disk.
 func (p *Provider) SetMeta(name, key, value string) error {
+	return runtime.WithProviderStateDirLock(p.dir, func() error { return p.setMetaLocked(name, key, value) })
+}
+
+func (p *Provider) setMetaLocked(name, key, value string) error {
 	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
 		return err
 	}
@@ -413,11 +456,17 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
-// Returns ("", nil) if the key is not set.
+// It returns ("", nil) for an unset key, or ErrSessionNotFound when an
+// ownership key is missing and the process is confirmed absent.
 func (p *Provider) GetMeta(name, key string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	data, err := os.ReadFile(p.metaPath(name, key))
 	if err != nil {
 		if os.IsNotExist(err) {
+			if key == "GC_CITY_PATH" || key == "GC_SESSION_ID" {
+				return "", p.missingOwnershipLocked(name)
+			}
 			return "", nil
 		}
 		return "", err
@@ -425,13 +474,66 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return string(data), nil
 }
 
+// SessionOwnership reads the persisted city and session identity together.
+// Missing metadata leaves ownership unknown unless the process is confirmed absent.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	city, cityErr := os.ReadFile(p.metaPath(name, "GC_CITY_PATH"))
+	id, idErr := os.ReadFile(p.metaPath(name, "GC_SESSION_ID"))
+	for _, err := range []error{cityErr, idErr} {
+		if err != nil && !os.IsNotExist(err) {
+			return "", "", fmt.Errorf("reading subprocess %q ownership: %w", name, err)
+		}
+	}
+	if cityErr != nil || idErr != nil {
+		if cityErr == nil || idErr == nil {
+			return "", "", nil
+		}
+		return "", "", p.missingOwnershipLocked(name)
+	}
+	if len(city) == 0 || len(id) == 0 {
+		return string(city), string(id), nil
+	}
+	if err := p.recordedOwnership(name); err != nil {
+		return "", "", err
+	}
+	return string(city), string(id), nil
+}
+
+// missingOwnershipLocked distinguishes unknown ownership from confirmed absence.
+// The caller holds p.mu and must not reread metadata after the socket probe:
+// another provider can publish a replacement while that probe is in flight.
+func (p *Provider) missingOwnershipLocked(name string) error {
+	for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID", processIdentityMetaKey} {
+		if _, err := os.Lstat(p.metaPath(name, key)); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	sc := p.procs[name]
+	if sc == nil || !sc.alive() {
+		// A replacement can live in another provider instance.
+		if err := p.sendSocketCommand(name, "ping", 500*time.Millisecond); err != nil {
+			if isUnavailableSocketError(err) {
+				return runtime.ErrSessionNotFound
+			}
+			return fmt.Errorf("reading subprocess %q ownership: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // RemoveMeta removes a metadata sidecar file.
 func (p *Provider) RemoveMeta(name, key string) error {
-	err := os.Remove(p.metaPath(name, key))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		err := os.Remove(p.metaPath(name, key))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 // persistStartMetadata seeds the session's sidecar from its environment so that
@@ -446,10 +548,21 @@ func (p *Provider) persistStartMetadata(name string, env map[string]string) erro
 	seed, _ := runtime.SplitEnvForMetaSeed(env)
 	p.clearSessionMeta(name)
 	for key, value := range seed {
-		if err := p.SetMeta(name, key, value); err != nil {
+		if err := p.setMetaLocked(name, key, value); err != nil {
 			p.clearSessionMeta(name)
 			return err
 		}
+	}
+	return nil
+}
+
+func (p *Provider) persistStartProcessMetadata(name string, env map[string]string, pid int) error {
+	if err := p.persistStartMetadata(name, env); err != nil {
+		return err
+	}
+	if err := p.persistProcessIdentity(name, pid); err != nil {
+		p.clearSessionMeta(name)
+		return err
 	}
 	return nil
 }
@@ -523,7 +636,8 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			}
 		}
 	}
-	return names, nil
+	recorded, err := p.listRecordedProcesses(prefix, seen)
+	return append(names, recorded...), err
 }
 
 func (p *Provider) metaPath(name, key string) string {
@@ -710,6 +824,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 		_ = os.Remove(namePath)
 		return nil, err
 	}
+	lis.(*net.UnixListener).SetUnlinkOnClose(false)
 	go func() {
 		for {
 			conn, err := lis.Accept()
@@ -826,16 +941,21 @@ func (p *Provider) stopBySocket(name string) error {
 }
 
 func (p *Provider) stopBySocketAt(name string, euid int) error {
-	err := p.sendSocketCommandAt(name, "stop", 7*time.Second, euid)
+	record, err := p.readProcessIdentity(name)
+	if err != nil {
+		return err
+	}
+	err = p.sendSocketCommandAt(name, "stop", 7*time.Second, euid)
 	if err != nil {
 		if isUnavailableSocketError(err) {
-			// Socket doesn't exist or can't connect — session is dead (idempotent).
-			// Clean up stale socket file if it exists.
-			return p.removeSocketArtifactsAt(name, p.socketDirForEUID(euid), euid)
+			return p.stopProcessGeneration(name, record)
 		}
 		return err
 	}
-	return nil
+	if record == nil || p.socketAliveAt(name, euid) {
+		return nil
+	}
+	return p.stopProcessGeneration(name, record)
 }
 
 func isUnavailableSocketError(err error) bool {

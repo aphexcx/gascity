@@ -30,6 +30,16 @@ func NewSeamBacked(ep Endpoint) runtime.Provider {
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
+// SessionOwnership preserves host ownership through the seam adapter.
+func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
+	return s.raw.SessionOwnership(name)
+}
+
+// IsUnmanagedSession preserves shared-server identity checks through the adapter.
+func (s *seamBackedProvider) IsUnmanagedSession(name string) (bool, error) {
+	return s.raw.IsUnmanagedSession(name)
+}
+
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)

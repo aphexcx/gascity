@@ -114,14 +114,14 @@ func parsePort(s string) (int, error) {
 }
 
 // runner runs a remote command over the connection and returns its standard
-// output and exit code. stdin, when non-nil, is fed to the remote command
+// output, standard error, and exit code. stdin, when non-nil, is fed to the remote command
 // (used to ship a setup script to a remote sh). It is the transport seam: the
 // default shells the ssh client; a future ControlMaster / x/crypto/ssh backend
 // can replace it, and tests inject a fake. Such a backend MUST deliver stdin to
 // the specific remote command invocation (per call), not a shared channel, so
 // the execScript contract holds.
 type runner interface {
-	run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) (stdout []byte, code int, err error)
+	run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) (stdout, stderr []byte, code int, err error)
 }
 
 // Conn is an SSH connection to a box. It implements [runtime.ExecProvider], so
@@ -149,13 +149,15 @@ func (c *Conn) Exec(ctx context.Context, _ string, argv []string) ([]byte, int, 
 	if len(argv) == 0 {
 		return nil, -1, fmt.Errorf("ssh %s: empty argv", c.ep.target())
 	}
-	return c.run.run(ctx, c.ep, argv, nil)
+	out, _, code, err := c.run.run(ctx, c.ep, argv, nil)
+	return out, code, err
 }
 
 // execScript runs `sh` on the box with script piped to its stdin, shipping a
 // local setup script to the remote shell (mirroring the k8s exec-stdin path).
 func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, error) {
-	return c.run.run(ctx, c.ep, []string{"sh"}, script)
+	out, _, code, err := c.run.run(ctx, c.ep, []string{"sh"}, script)
+	return out, code, err
 }
 
 // shellRunner runs commands by shelling the ssh client. This is the v0
@@ -163,7 +165,7 @@ func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, erro
 // it behind [runner] without changing the carrier-facing contract.
 type shellRunner struct{}
 
-func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
+func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, []byte, int, error) {
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
@@ -176,7 +178,7 @@ func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, st
 	if err := cmd.Run(); err != nil {
 		// Context cancellation/timeout is a transport failure, not a command exit.
 		if ctx.Err() != nil {
-			return nil, -1, fmt.Errorf("ssh %s: %w", ep.target(), ctx.Err())
+			return nil, nil, -1, fmt.Errorf("ssh %s: %w", ep.target(), ctx.Err())
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -192,18 +194,18 @@ func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, st
 				if msg == "" {
 					msg = "connection failed (ssh exit 255)"
 				}
-				return nil, -1, fmt.Errorf("ssh %s: %s", ep.target(), msg)
+				return nil, nil, -1, fmt.Errorf("ssh %s: %s", ep.target(), msg)
 			}
 			// A non-zero (non-255) exit is the remote command's own result.
-			return stdout.Bytes(), code, nil
+			return stdout.Bytes(), stderr.Bytes(), code, nil
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, -1, fmt.Errorf("ssh %s: %s", ep.target(), msg)
+		return nil, nil, -1, fmt.Errorf("ssh %s: %s", ep.target(), msg)
 	}
-	return stdout.Bytes(), 0, nil
+	return stdout.Bytes(), stderr.Bytes(), 0, nil
 }
 
 // sshArgs builds the ssh client argv to run remoteArgv on ep. Option parsing

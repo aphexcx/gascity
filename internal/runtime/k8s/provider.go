@@ -573,6 +573,25 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	return nil
 }
 
+// SessionOwnership returns host ownership from pod annotations, before paths
+// are projected into the container. Missing annotations mean unknown ownership.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	pods, err := p.ops.listPods(context.Background(), "gc-session="+SanitizeLabel(name), "")
+	if err != nil {
+		return "", "", fmt.Errorf("reading ownership for %q: %w", name, err)
+	}
+	if len(pods) == 0 {
+		return "", "", fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+	}
+	cityPath, sessionID := pods[0].Annotations[podOwnerCityPath], pods[0].Annotations[podOwnerSessionID]
+	for _, pod := range pods {
+		if pod.Annotations["gc-session-name"] != name || pod.Annotations[podOwnerCityPath] != cityPath || pod.Annotations[podOwnerSessionID] != sessionID {
+			return "", "", fmt.Errorf("conflicting pod ownership for %q", name)
+		}
+	}
+	return cityPath, sessionID, nil
+}
+
 // GetMeta retrieves a metadata value from the tmux environment.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	ctx := context.Background()

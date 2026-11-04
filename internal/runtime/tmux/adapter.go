@@ -842,6 +842,23 @@ func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
 	return p.tm.GetAllEnvironment(name)
 }
 
+// SessionOwnership reads live ownership and distinguishes confirmed session or
+// server absence from an unreadable environment at the runtime boundary.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	env, err := p.GetAllEnvironment("=" + name)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return "", "", runtime.ErrSessionNotFound
+	}
+	if err != nil {
+		// show-environment's missing-session wording varies by tmux version.
+		// HasSession uses an exact target and supplies independent absence proof.
+		if alive, probeErr := p.tm.HasSession(name); probeErr == nil && !alive {
+			return "", "", runtime.ErrSessionNotFound
+		}
+	}
+	return env["GC_CITY_PATH"], env["GC_SESSION_ID"], err
+}
+
 // SessionRoster returns attributes for every session currently known to
 // tmux, satisfying [runtime.SessionRosterProvider]. Delegates to
 // [Tmux.SessionRoster].

@@ -88,6 +88,40 @@ func IsRuntimeServerAbsent(err error) bool {
 	return ok && target.ServerAbsent
 }
 
+// IsSessionNotFound reports whether every cause of err positively identifies
+// an absent session. A missing fallback cannot hide a sibling backend failure.
+// Unlike IsSessionGone, this requires typed absence rather than legacy wording.
+func IsSessionNotFound(err error) bool {
+	return allSessionErrorCausesMatch(err, func(cause error) bool {
+		return errors.Is(cause, ErrSessionNotFound)
+	})
+}
+
+// allSessionErrorCausesMatch applies an absence policy to each leaf before a
+// composite provider or a caller may discard a wrapped or joined stop error.
+func allSessionErrorCausesMatch(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	switch wrapped := err.(type) { //nolint:errorlint // inspect each immediate cause before matching a sentinel
+	case interface{ Unwrap() []error }:
+		causes := wrapped.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !allSessionErrorCausesMatch(cause, match) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return allSessionErrorCausesMatch(wrapped.Unwrap(), match)
+	default:
+		return match(err)
+	}
+}
+
 // IsPartialListError reports whether err represents a degraded-but-usable
 // ListRunning result from one or more failed backends.
 func IsPartialListError(err error) bool {

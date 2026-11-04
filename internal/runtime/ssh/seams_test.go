@@ -3,10 +3,109 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestSeamsUnmanagedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		code      int
+		want      bool
+	}{
+		{name: "operator", env: "TERM=xterm\n", want: true},
+		{name: "city only", env: "GC_CITY_PATH=/city\n"},
+		{name: "id only", env: "GC_SESSION_ID=gc-1\n"},
+		{name: "legacy marker", env: "GC_SESSION=worker\n"},
+		{name: "unset marker", env: "-GC_SESSION_ID\n"},
+		{name: "unreadable", code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewSeamBacked(Endpoint{Host: "box"})
+			p.(*seamBackedProvider).raw.conn.run = &fakeRunner{out: []byte(tc.env), code: tc.code}
+			shared, ok := p.(interface{ IsUnmanagedSession(string) (bool, error) })
+			if !ok {
+				t.Fatal("shared SSH provider does not distinguish unmanaged sessions")
+			}
+			unmanaged, err := shared.IsUnmanagedSession("session")
+			if unmanaged != tc.want || (err != nil) != (tc.code != 0) {
+				t.Fatalf("unmanaged=%v error=%v; want unmanaged=%v", unmanaged, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSeamsSessionOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name, city, id                                   string
+		absent, transportError, probeRefused, stdoutOnly bool
+	}{
+		{name: "owned", city: "/city", id: "gc-1"},
+		{name: "missing city", id: "gc-1"},
+		{name: "missing id", city: "/city"},
+		{name: "absent", absent: true},
+		{name: "stdout diagnostic is not absence", stdoutOnly: true},
+		{name: "transport failure", transportError: true},
+		{name: "probe refused", probeRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+				if tc.transportError {
+					return nil, -1, errors.New("connection lost")
+				}
+				if isTmux("show-environment")(argv) {
+					key := argv[len(argv)-1]
+					value := map[string]string{"GC_CITY_PATH": tc.city, "GC_SESSION_ID": tc.id}[key]
+					if value == "" {
+						return nil, 1, nil
+					}
+					return []byte(fmt.Sprintf("%s=%s\n", key, value)), 0, nil
+				}
+				if isTmux("has-session")(argv) && tc.stdoutOnly {
+					return []byte("can't find session: session"), 1, nil
+				}
+				if isTmux("has-session")(argv) && (tc.absent || tc.probeRefused) {
+					return nil, 1, nil
+				}
+				return nil, 0, nil
+			}}
+			if tc.absent {
+				f.stderr = []byte("can't find session: session")
+			} else if tc.probeRefused {
+				f.stderr = []byte("permission denied")
+			}
+			p := NewSeamBacked(Endpoint{User: "u", Host: "box"})
+			p.(*seamBackedProvider).raw.conn.run = f
+			owner, ok := p.(interface {
+				SessionOwnership(string) (string, string, error)
+			})
+			if !ok {
+				t.Fatal("registered ssh provider does not expose ownership")
+			}
+			city, id, err := owner.SessionOwnership("session")
+			switch {
+			case tc.transportError || tc.probeRefused || tc.stdoutOnly:
+				if err == nil || runtime.IsSessionNotFound(err) {
+					t.Fatalf("transport failure = %v", err)
+				}
+			case tc.absent:
+				if !runtime.IsSessionNotFound(err) {
+					t.Fatalf("absence = %v", err)
+				}
+			default:
+				wantCity, wantID := tc.city, tc.id
+				if wantCity == "" || wantID == "" {
+					wantCity, wantID = "", ""
+				}
+				if city != wantCity || id != wantID || err != nil {
+					t.Fatalf("ownership = %q, %q, %v; want %q, %q", city, id, err, wantCity, wantID)
+				}
+			}
+		})
+	}
+}
 
 // TestSeamsSshExecAndOpen proves Place.Exec delegates over the ssh connection
 // (preserving the (output, code, err) contract) and Runtime.Open reflects tmux

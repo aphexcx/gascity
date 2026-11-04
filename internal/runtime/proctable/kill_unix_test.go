@@ -113,7 +113,7 @@ func TestKillByPIDAlreadyGoneIsSuccess(t *testing.T) {
 
 // startKillTestProcess owns the isolated group and bounded cleanup shared by
 // the already-gone test and the Darwin process-table integration proof.
-func startKillTestProcess(t *testing.T, name string, args []string, configure func(*exec.Cmd)) (*exec.Cmd, <-chan struct{}) {
+func startKillTestProcess(t *testing.T, name string, args []string, configure func(*exec.Cmd)) (*exec.Cmd, <-chan struct{}) { //nolint:unparam // configure is non-nil in the Darwin integration proof.
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

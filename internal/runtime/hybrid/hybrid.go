@@ -38,6 +38,21 @@ func New(local, remote runtime.Provider, isRemote func(string) bool) *Provider {
 	return &Provider{local: local, remote: remote, isRemote: isRemote}
 }
 
+// IsCityScoped reports whether both backends confirm ownership by this city.
+// An unknown or unscoped backend prevents destructive composite cleanup.
+func (p *Provider) IsCityScoped(cityName string) bool {
+	localScope, localOK := p.local.(interface{ IsCityScoped(string) bool })
+	remoteScope, remoteOK := p.remote.(interface{ IsCityScoped(string) bool })
+	localScoped := localOK && localScope.IsCityScoped(cityName)
+	remoteScoped := remoteOK && remoteScope.IsCityScoped(cityName)
+	return localScoped && remoteScoped
+}
+
+// BackendProviders returns the backends without querying their runtimes.
+func (p *Provider) BackendProviders() []runtime.Provider {
+	return []runtime.Provider{p.local, p.remote}
+}
+
 func (p *Provider) route(name string) runtime.Provider {
 	if p.isRemote(name) {
 		return p.remote

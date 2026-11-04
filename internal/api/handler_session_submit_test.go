@@ -162,40 +162,48 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 }
 
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
-	fs := newSessionFakeState(t)
-	h := newTestCityHandler(t, fs)
+	for _, state := range []string{"active", "suspended"} {
+		t.Run(state, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
-		Metadata: map[string]string{"pool_managed": "true"},
-	}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
+				Metadata: map[string]string{"pool_managed": "true", "state": state},
+			}); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil)
-	h.ServeHTTP(rec, req)
+			rec := httptest.NewRecorder()
+			req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil)
+			h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	var sawEscape, sawInterrupt bool
-	for _, call := range fs.sp.Calls {
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
-			sawEscape = true
-		}
-		if call.Method == "Interrupt" && call.Name == info.SessionName {
-			sawInterrupt = true
-		}
-	}
-	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape)", fs.sp.Calls)
-	}
-	if sawInterrupt {
-		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			var sawEscape, sawInterrupt bool
+			for _, call := range fs.sp.Calls {
+				if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+					sawEscape = true
+				}
+				if call.Method == "Interrupt" && call.Name == info.SessionName {
+					sawInterrupt = true
+				}
+			}
+			if !sawEscape {
+				t.Fatalf("calls = %#v, want SendKeys(Escape)", fs.sp.Calls)
+			}
+			if sawInterrupt {
+				t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
+			}
+			after, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil || after.Metadata["state"] != state || !fs.sp.IsRunning(info.SessionName) || fs.sp.CountCalls("Stop", info.SessionName) != 0 {
+				t.Fatalf("stop-turn must preserve runtime and state %q: state=%q error=%v", state, after.Metadata["state"], err)
+			}
+		})
 	}
 }

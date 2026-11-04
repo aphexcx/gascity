@@ -6210,7 +6210,7 @@ func TestStopWaveOrder_HandlesUnknownTemplateWithoutSerialFallback(t *testing.T)
 	}
 }
 
-func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T) {
+func TestStopTargetsBounded_PreservesDependenciesWhenTemplateUnresolved(t *testing.T) {
 	sp := newGatedStopProvider()
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -6235,11 +6235,11 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 	}()
 
 	first := sp.waitForStops(t, 1)
-	if !containsAll(first, "db") {
-		t.Fatalf("first serial stop = %v, want db", first)
+	if !containsAll(first, "custom") {
+		t.Fatalf("unresolved stop = %v, want custom", first)
 	}
 	sp.ensureNoFurtherStop(t)
-	sp.release("db")
+	sp.release("custom")
 
 	second := sp.waitForStops(t, 1)
 	if !containsAll(second, "worker") {
@@ -6249,10 +6249,10 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 	sp.release("worker")
 
 	third := sp.waitForStops(t, 1)
-	if !containsAll(third, "custom") {
-		t.Fatalf("third serial stop = %v, want custom", third)
+	if !containsAll(third, "db") {
+		t.Fatalf("dependency stop = %v, want db after worker", third)
 	}
-	sp.release("custom")
+	sp.release("db")
 
 	select {
 	case stopped := <-done:

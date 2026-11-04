@@ -10,13 +10,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -36,6 +40,214 @@ func newTestProvider(t *testing.T) *Provider {
 		NudgeBusyTimeout:  2 * time.Second,
 		OutputBufferLines: 100,
 	})
+}
+
+func listenTestSocket(path string) (net.Listener, error) {
+	return net.Listen("unix", path)
+}
+
+func TestCleanupSerializesReplacementPublication(t *testing.T) {
+	p := newTestProvider(t)
+	replacementProvider := NewProviderWithDir(p.dir, p.cfg)
+	const name = "serialized-replacement"
+	const original = `{"name":"serialized-replacement","pid":42,"start":"old"}`
+	const replacement = `{"name":"serialized-replacement","pid":43,"start":"new"}`
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	finished := make(chan error, 1)
+	p.ops.signal = func(int, syscall.Signal) error { return syscall.ESRCH }
+	var listener net.Listener
+	p.ops.beforeCleanup = func() {
+		// This is the final compare/delete boundary. A second process's
+		// independent directory descriptor must be excluded here.
+		other, err := os.Open(p.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close() //nolint:errcheck
+		if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			t.Fatalf("publication was not excluded at deletion: %v", err)
+		}
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			finished <- runtime.WithProviderStateDirLock(p.dir, func() error {
+				if err := replacementProvider.setMetaLocked(name, sessionOwnershipMetaKey, replacement); err != nil {
+					return err
+				}
+				var err error
+				listener, err = listenTestSocket(p.sockPath(name))
+				return err
+			})
+		}()
+		<-started
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("replacement publication remained locked")
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got, err := p.GetMeta(name, sessionOwnershipMetaKey); err != nil || got != replacement {
+		t.Fatalf("replacement metadata = %q, %v", got, err)
+	}
+	conn, err := net.DialTimeout("unix", listener.Addr().String(), testutil.ExecRaceTimeout)
+	if err != nil {
+		t.Fatalf("replacement socket was deleted: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestStopRefusesPartialOwnershipBeforeSignals(t *testing.T) {
+	for _, missing := range []string{"city", "session"} {
+		t.Run(missing, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "partial-stop"
+			city, id := "/test-city", "session-id"
+			if missing == "city" {
+				city = ""
+			} else {
+				id = ""
+			}
+			raw, err := json.Marshal(sessionOwnership{CityPath: city, SessionID: id, Name: name, PID: 42, Start: "start"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMeta(name, sessionOwnershipMetaKey, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				return "start", nil
+			}
+			p.ops.signal = func(int, syscall.Signal) error { signals++; return nil }
+			if err := p.Stop(name); err == nil || !strings.Contains(err.Error(), "incomplete ownership") {
+				t.Errorf("Stop = %v, want incomplete-ownership refusal", err)
+			}
+			if signals != 0 {
+				t.Fatalf("partial ownership received %d destructive signals", signals)
+			}
+		})
+	}
+}
+
+func TestPersistedProcessIdentity(t *testing.T) {
+	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "detached"
+			record := `{"city_path":"/city","session_id":"session","name":"detached","pid":42,"start":"original"}`
+			if state == "legacy" {
+				record = `{"city_path":"/city","session_id":"session"}`
+			}
+			if state == "malformed" {
+				record = "{"
+			}
+			if state == "invalid" {
+				record = `{"city_path":"/city","session_id":"session","name":"detached","pid":1,"start":"original"}`
+			}
+			if state == "partial" {
+				record = `{"city_path":"/city","session_id":"session","name":"detached","pid":42}`
+			}
+			if err := p.SetMeta(name, sessionOwnershipMetaKey, record); err != nil {
+				t.Fatal(err)
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if state == "gone" || signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				if state == "reused" {
+					return "replacement", nil
+				}
+				if state == "denied" {
+					return "", syscall.EPERM
+				}
+				return "original", nil
+			}
+			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid == -42 && sig == 0 {
+					return syscall.ESRCH
+				}
+				if pid != -42 || sig != syscall.SIGTERM {
+					t.Fatalf("signal(%d, %v)", pid, sig)
+				}
+				signals++
+				return nil
+			}
+			city, id, err := p.SessionOwnership(name)
+			bad := state == "denied" || state == "malformed" || state == "invalid" || state == "partial"
+			gone := state == "gone" || state == "reused"
+			if gone != runtime.IsSessionNotFound(err) || (bad && err == nil) {
+				t.Fatalf("ownership %q %q %v", city, id, err)
+			}
+			if !gone && !bad && (city != "/city" || id != "session") {
+				t.Fatal("lost owner")
+			}
+			if got := p.IsRunning(name); got != (state == "live") {
+				t.Fatalf("IsRunning = %v", got)
+			}
+			names, err := p.ListRunning("")
+			if bad != (err != nil) || (len(names) == 1) != (state == "live") {
+				t.Fatalf("ListRunning = %v, %v", names, err)
+			}
+			if raw, _ := p.GetMeta(name, sessionOwnershipMetaKey); raw != record {
+				t.Fatal("read changed metadata")
+			}
+			if err := p.Stop(name); (err != nil) != bad {
+				t.Fatalf("Stop = %v", err)
+			}
+			if (signals == 1) != (state == "live") {
+				t.Fatalf("signals = %d", signals)
+			}
+			if state == "legacy" {
+				raw, _ := p.GetMeta(name, sessionOwnershipMetaKey)
+				if raw != record {
+					t.Fatal("legacy ownership deleted")
+				}
+			}
+		})
+	}
+}
+
+func TestStartProcessIdentityFailure(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", syscall.EPERM }
+	if err := p.Start(context.Background(), "failed", runtime.Config{Command: fakeACPShellCommand()}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	if p.IsRunning("failed") {
+		t.Fatal("failed start left a child")
+	}
+	if raw, _ := p.GetMeta("failed", sessionOwnershipMetaKey); raw != "" {
+		t.Fatal("failed start left identity")
+	}
+}
+
+func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("legacy", sessionOwnershipMetaKey, `{"city_path":"/city","session_id":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(context.Background(), "legacy", runtime.Config{Command: fakeACPShellCommand(), Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("legacy") })
+	record, err := p.readProcessOwnership("legacy")
+	if err != nil || record == nil || record.Start == "" || record.SessionID != "new" {
+		t.Fatalf("restart identity = %+v, %v", record, err)
+	}
 }
 
 var testCounter atomic.Int64
@@ -106,6 +318,7 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 	err := p.Start(context.Background(), name, runtime.Config{
 		Command: fakeACPShellCommand(),
 		WorkDir: t.TempDir(),
+		Env:     map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "session-1"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -114,6 +327,90 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 
 	if !p.IsRunning(name) {
 		t.Error("IsRunning = false after Start, want true")
+	}
+	reader := NewSeamBackedWithDir(p.dir, Config{})
+	owner, ok := reader.(interface {
+		SessionOwnership(string) (string, string, error)
+	})
+	if !ok {
+		t.Fatal("ACP constructor does not expose durable session ownership")
+	}
+	city, id, err := owner.SessionOwnership(name)
+	if err != nil || city != "/cities/test" || id != "session-1" {
+		t.Fatalf("ownership city=%q id=%q err=%v", city, id, err)
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if city, id, err := owner.SessionOwnership(name); !runtime.IsSessionNotFound(err) || city != "" || id != "" {
+		t.Fatalf("ownership survived stop: city=%q id=%q err=%v", city, id, err)
+	}
+	if err := reader.Stop(name); err != nil {
+		t.Fatalf("repeating stop through the seam: %v", err)
+	}
+	if _, _, err := owner.SessionOwnership(name); !runtime.IsSessionNotFound(err) {
+		t.Fatalf("ownership after repeated stop=%v, want confirmed absence", err)
+	}
+}
+
+func TestSessionOwnershipDistinguishesAbsentFromUnknown(t *testing.T) {
+	for _, state := range []string{"absent", "tracked", "socket", "legacy socket", "empty record", "unreadable record"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			name := testName()
+			switch state {
+			case "tracked":
+				p.conns[name] = &sessionConn{}
+			case "socket", "legacy socket":
+				path := p.sockPath(name)
+				if state == "legacy socket" {
+					path = p.legacySockPath(name)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "empty record":
+				if err := p.SetMeta(name, sessionOwnershipMetaKey, ""); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable record":
+				if err := os.Mkdir(p.metaPath(name, sessionOwnershipMetaKey), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			city, id, err := p.SessionOwnership(name)
+			if city != "" || id != "" || runtime.IsSessionNotFound(err) != (state == "absent") {
+				t.Fatalf("ownership city=%q id=%q error=%v, state=%s", city, id, err, state)
+			}
+			if state == "unreadable record" && err == nil {
+				t.Fatal("unreadable ownership must remain an error")
+			}
+		})
+	}
+}
+
+func TestSessionOwnershipRejectsMalformedRecord(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("test-session", sessionOwnershipMetaKey, "{"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := p.SessionOwnership("test-session"); err == nil {
+		t.Fatal("malformed ownership was accepted")
+	}
+}
+
+func TestStartRejectsUnwritableOwnership(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	if err := os.Mkdir(p.metaPath(name, sessionOwnershipMetaKey), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := p.Start(context.Background(), name, runtime.Config{Command: "unused"})
+	if err == nil || !strings.Contains(err.Error(), "session ownership") {
+		t.Fatalf("Start error=%v, want ownership publication failure before spawn", err)
+	}
+	if p.IsRunning(name) {
+		t.Fatal("failed ownership publication left a running session")
 	}
 }
 
@@ -270,6 +567,129 @@ func TestStop_Idempotent(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Stop("never-started"); err != nil {
 		t.Errorf("Stop on never-started session: %v", err)
+	}
+}
+
+func TestStopTrackedLeaderlessGroup(t *testing.T) {
+	for _, exitedBeforeStop := range []bool{false, true} {
+		for _, drain := range []bool{false, true} {
+			t.Run(fmt.Sprintf("exited=%v/drain=%v", exitedBeforeStop, drain), func(t *testing.T) {
+				p := newTestProvider(t)
+				name := testName()
+				pidPath := filepath.Join(t.TempDir(), "child-pid")
+				command := strings.Replace(fakeACPShellCommand(), "import sys, json", `import sys, json, os, signal
+ready_r, ready_w = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(ready_r)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGUSR1, lambda *_: os._exit(0))
+    os.write(ready_w, b"1")
+    os.close(ready_w)
+    while True:
+        signal.pause()
+os.close(ready_w)
+assert os.read(ready_r, 1) == b"1"
+os.close(ready_r)
+with open(os.environ["GASCITY_ACP_DRAIN_PID"], "w") as marker:
+    marker.write(str(child_pid))`, 1)
+				if err := p.Start(context.Background(), name, runtime.Config{Command: command, Env: map[string]string{
+					"GC_CITY_PATH": "/test-city", "GC_SESSION_ID": name, "GASCITY_ACP_DRAIN_PID": pidPath,
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(pidPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				childPID, err := strconv.Atoi(string(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				childStart, err := proctable.ProcessIdentity(childPID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					live, err := proctable.ProcessIdentityMatches(childPID, childStart, proctable.ProcessIdentity)
+					if err != nil {
+						t.Error(err)
+					} else if live {
+						if err := syscall.Kill(childPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+							t.Error(err)
+						}
+					}
+					if err := p.Stop(name); err != nil {
+						t.Error(err)
+					}
+				})
+				p.mu.Lock()
+				sc := p.conns[name]
+				p.mu.Unlock()
+				if exitedBeforeStop {
+					if err := sc.stdin.Close(); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-sc.done:
+					case <-time.After(testutil.ExecRaceTimeout):
+						t.Fatal("ACP leader did not exit")
+					}
+				}
+				var mu sync.Mutex
+				var firstGone time.Time
+				goneReads, signals := 0, 0
+				released := false
+				p.ops.processIdentity = func(pid int) (string, error) {
+					identity, err := proctable.ProcessIdentity(pid)
+					if !drain || !errors.Is(err, proctable.ErrProcessGone) {
+						return identity, err
+					}
+					mu.Lock()
+					goneReads++
+					if firstGone.IsZero() {
+						firstGone = time.Now()
+					}
+					release := !released && goneReads >= 3 && time.Since(firstGone) >= 20*time.Millisecond
+					if release {
+						released = true
+					}
+					mu.Unlock()
+					if release {
+						if err := syscall.Kill(childPID, syscall.SIGUSR1); err != nil {
+							return "", fmt.Errorf("releasing ready descendant: %w", err)
+						}
+					}
+					return identity, err
+				}
+				p.ops.signal = func(pid int, sig syscall.Signal) error {
+					if sig == 0 {
+						return syscall.Kill(pid, sig)
+					}
+					signals++
+					return nil
+				}
+				check := func(t *testing.T) {
+					started := time.Now()
+					err := p.Stop(name)
+					if (err == nil) != drain || signals != 0 {
+						t.Fatalf("tracked stop: err=%v signals=%d drain=%v", err, signals, drain)
+					}
+					if !drain && time.Since(started) != runtime.ManagedProcessStopGrace {
+						t.Fatalf("survivor grace = %s, want %s", time.Since(started), runtime.ManagedProcessStopGrace)
+					}
+					owner, err := p.readProcessOwnership(name)
+					if err != nil || (owner == nil) != drain {
+						t.Fatalf("ownership after stop = %+v, %v; drain=%v", owner, err, drain)
+					}
+				}
+				if drain {
+					check(t)
+				} else {
+					synctest.Test(t, check)
+				}
+			})
+		}
 	}
 }
 
@@ -980,7 +1400,7 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	lis, err := net.Listen("unix", p.sockPath(name))
+	lis, err := listenTestSocket(p.sockPath(name))
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -1325,5 +1745,55 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
+	}
+}
+
+func TestLegacyLiveSocketCleanup(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "legacy-live"
+	if err := p.Start(context.Background(), name, runtime.Config{Command: fakeACPShellCommand(), Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "session"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"city_path":"/city","session_id":"session"}`); err != nil {
+		t.Fatal(err)
+	}
+	peer := NewProviderWithDir(p.dir, Config{})
+	if err := peer.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := peer.SessionOwnership(name); !runtime.IsSessionNotFound(err) {
+		t.Fatalf("acknowledged legacy shutdown retained ownership: %v", err)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "replacement-socket"
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"name":"replacement-socket","pid":42,"start":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return syscall.ESRCH
+		}
+		signaled = true
+		if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
+			return err
+		}
+		return os.WriteFile(p.sockPath(name), []byte("replacement"), 0o600)
+	}
+	if err := p.Stop(name); err == nil {
+		t.Error("replacement during teardown must refuse cleanup")
+	}
+	if data, err := os.ReadFile(p.sockPath(name)); err != nil || string(data) != "replacement" {
+		t.Fatalf("replacement socket artifact changed: %q, %v", data, err)
 	}
 }

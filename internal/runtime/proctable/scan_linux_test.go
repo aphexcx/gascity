@@ -70,6 +70,39 @@ func TestProcessIdentityDistinguishesGoneFromUnreadable(t *testing.T) {
 	}
 }
 
+func TestProcessIdentityReadsBootID(t *testing.T) {
+	const stat = "42 (cmd) S 11 12 13 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 98765 0"
+	for _, boot := range []string{"boot-a", "boot-b", ""} {
+		identity, err := processIdentityWithReader(42, func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/42/stat":
+				return []byte(stat), nil
+			case "/proc/sys/kernel/random/boot_id":
+				return []byte(boot + "\n"), nil
+			default:
+				t.Fatalf("unexpected read: %s", path)
+				return nil, nil
+			}
+		})
+		if boot == "" {
+			if err == nil {
+				t.Fatal("empty boot ID accepted")
+			}
+		} else if err != nil || identity != boot+":98765" {
+			t.Fatalf("boot-qualified identity = %q, %v", identity, err)
+		}
+	}
+	_, err := processIdentityWithReader(42, func(path string) ([]byte, error) {
+		if path == "/proc/42/stat" {
+			return []byte(stat), nil
+		}
+		return nil, syscall.EPERM
+	})
+	if !errors.Is(err, syscall.EPERM) || errors.Is(err, ErrProcessGone) {
+		t.Fatalf("boot identity uncertainty = %v", err)
+	}
+}
+
 func TestParseProcStatIdentityCarriesParentGroupAndStart(t *testing.T) {
 	// The suffix begins at field 3 (state), so suffix index 19 is Linux
 	// /proc/<pid>/stat field 22 (starttime); the trailing 0 is field 23.

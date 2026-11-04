@@ -10,7 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	execerr "k8s.io/client-go/util/exec"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // hasSessionAlive marks the in-box tmux session as present so IsRunning is true.
@@ -292,4 +294,36 @@ func TestSeamsK8sStopSurfacesTransportFailure(t *testing.T) {
 			t.Fatalf("seam Stop on a genuine NotFound = %v; want nil (idempotent: session gone)", err)
 		}
 	})
+}
+
+func TestSuspendedShutdownRetainsK8sDeletionFailureAfterProbeFailure(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	fake.setExecResult("s", []string{"tmux", "has-session", "-t", tmuxSession}, "", errors.New("probe unavailable"))
+	fake.deleteErr = errors.New("pod deletion refused")
+	sp := runtime.NewProviderFromSeams(p.Seams())
+	if sp.IsRunning("s") {
+		t.Fatal("failed tmux probe must report false liveness")
+	}
+	names, err := sp.ListRunning("")
+	if err != nil || len(names) != 1 || names[0] != "s" {
+		t.Fatalf("running pod must remain listed: names=%v error=%v", names, err)
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "s", "state": "suspended"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = session.NewManagerWithOptions(store, sp).SuspendForShutdown(b.ID)
+	if !errors.Is(err, fake.deleteErr) {
+		t.Fatalf("shutdown error=%v, want failed deletion despite false liveness", err)
+	}
+	if _, exists := fake.pods["s"]; !exists {
+		t.Fatal("failed deletion must leave the pod present")
+	}
+	after, err := store.Get(b.ID)
+	if err != nil || after.Metadata["state"] != "suspended" {
+		t.Fatalf("state changed: %+v error=%v", after, err)
+	}
 }

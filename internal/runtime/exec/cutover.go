@@ -37,6 +37,16 @@ func NewSeamBacked(script string) runtime.Provider {
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
+// SessionOwnership preserves host ownership through the seam adapter.
+func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
+	return s.raw.SessionOwnership(name)
+}
+
+// BindForShutdown retains script ownership checks through the seam adapter.
+func (s *seamBackedProvider) BindForShutdown(name, cityPath, sessionID string) (runtime.Provider, error) {
+	return s.raw.BindForShutdown(name, cityPath, sessionID)
+}
+
 // DismissKnownDialogs implements [runtime.DialogProvider] (non-seam passthrough).
 func (s *seamBackedProvider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	return s.raw.DismissKnownDialogs(ctx, name, timeout)

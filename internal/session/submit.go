@@ -273,7 +273,7 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 }
 
 func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
-	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
+	if !m.sp.IsRunning(sessName) {
 		return nil
 	}
 	if usesSoftEscapeInterrupt(b) {

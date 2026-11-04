@@ -4,19 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -24,6 +28,762 @@ type recordingStopProvider struct {
 	*runtime.Fake
 	stops      chan string
 	interrupts chan string
+}
+
+type scopedStopOrphanProvider struct {
+	runtime.Provider
+	unreadable string
+	unscoped   bool
+	listErr    error
+}
+
+func startStopTestSession(t *testing.T, sp *runtime.Fake, name string, env map[string]string) {
+	t.Helper()
+	if err := sp.Start(context.Background(), name, runtime.Config{Env: env}); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range env {
+		if err := sp.SetMeta(name, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func (p scopedStopOrphanProvider) IsCityScoped(string) bool { return !p.unscoped }
+
+func (p scopedStopOrphanProvider) ListRunning(prefix string) ([]string, error) {
+	names, err := p.Provider.ListRunning(prefix)
+	if p.listErr != nil {
+		return names, p.listErr
+	}
+	return names, err
+}
+
+func (p scopedStopOrphanProvider) GetMeta(name, key string) (string, error) {
+	if name == p.unreadable {
+		return "", fmt.Errorf("ownership unavailable")
+	}
+	return p.Provider.GetMeta(name, key)
+}
+
+type stopOrphanLookupStore struct {
+	beads.Store
+	id    string
+	err   error
+	onGet func()
+}
+
+func (s stopOrphanLookupStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && s.onGet != nil {
+		s.onGet()
+	}
+	if id == s.id && s.err != nil {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+type replacingScopedStopProvider struct {
+	scopedStopOrphanProvider
+	onInterrupt func()
+}
+
+func (p replacingScopedStopProvider) Interrupt(name string) error {
+	if err := p.Provider.Interrupt(name); err != nil {
+		return err
+	}
+	if p.onInterrupt != nil {
+		p.onInterrupt()
+	}
+	return nil
+}
+
+func TestStopScopedOrphanRevalidatesReplacement(t *testing.T) {
+	for _, mode := range []string{"before interrupt", "session changed during grace", "city changed during grace"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sp := runtime.NewFake()
+				startStopTestSession(t, sp, "test-stale", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "deleted"})
+				replace := func() {
+					key, value := "GC_SESSION_ID", "replacement"
+					if mode == "city changed during grace" {
+						key, value = "GC_CITY_PATH", "/cities/foreign"
+					}
+					if err := sp.SetMeta("test-stale", key, value); err != nil {
+						t.Error(err)
+					}
+				}
+				provider := replacingScopedStopProvider{scopedStopOrphanProvider: scopedStopOrphanProvider{Provider: sp}}
+				store := stopOrphanLookupStore{Store: beads.NewMemStore(), id: "deleted"}
+				if mode == "before interrupt" {
+					store.onGet = replace
+				} else {
+					provider.onInterrupt = replace
+				}
+				cfg := &config.City{Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"}, Agents: []config.Agent{{Name: "worker"}}}
+				var stdout, stderr lockedBuffer
+				stopped := stopOrphans("/cities/test", provider, map[string]bool{"test-worker": true}, nil, cfg, sessionFrontDoor(store), time.Second, events.Discard, &stdout, &stderr)
+				if stopped || !sp.IsRunning("test-stale") || sp.CountCalls("Stop", "test-stale") != 0 || !strings.Contains(stderr.String(), "ownership") {
+					t.Fatalf("replacement was not preserved: stopped=%v stdout=%q stderr=%q", stopped, stdout.String(), stderr.String())
+				}
+				if mode == "before interrupt" && sp.CountCalls("Interrupt", "test-stale") != 0 {
+					t.Fatal("replacement was interrupted")
+				}
+			})
+		})
+	}
+}
+
+type stopRepairFailureStore struct {
+	beads.Store
+}
+
+func (s stopRepairFailureStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Type != nil {
+		return errors.New("repair persistence unavailable")
+	}
+	return s.Store.Update(id, opts)
+}
+
+func TestStopRepairableSession(t *testing.T) {
+	for _, failRepair := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repair_failure=%v", failRepair), func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
+				"session_name": "test-worker", "state": "active",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			empty := ""
+			if err := mem.Update(b.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+				t.Fatal(err)
+			}
+			var store beads.Store = mem
+			if failRepair {
+				store = stopRepairFailureStore{Store: mem}
+			}
+			var logs lockedBuffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			sp := runtime.NewFake()
+			startStopTestSession(t, sp, "test-worker", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker", sessionID: b.ID}}, store, sp)
+			provider := providerForManualStopTargets(sp, bindings)
+			if err != nil || len(targets) != 1 || targets[0].runtimeOnly {
+				t.Fatalf("repairable session excluded: targets=%v err=%v", targets, err)
+			}
+			if err := stopTargetThroughWorkerBoundary(targets[0], store, provider, &config.City{}); err != nil {
+				t.Fatal(err)
+			}
+			if sp.IsRunning("test-worker") || sp.CountCalls("Stop", "test-worker") != 1 {
+				t.Fatal("verified repairable session was not stopped")
+			}
+			got, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failRepair {
+				if got.Type != "" || !strings.Contains(logs.String(), "repair persistence unavailable") || !strings.Contains(logs.String(), b.ID) {
+					t.Fatalf("failed repair was not retained and reported: type=%q logs=%q", got.Type, logs.String())
+				}
+			} else if got.Type != sessionpkg.BeadType {
+				t.Fatalf("type = %q, want repaired session", got.Type)
+			}
+		})
+	}
+}
+
+type configuredStopBindingProvider struct {
+	*runtime.Fake
+}
+
+func (p configuredStopBindingProvider) BindForShutdown(string, string, string) (runtime.Provider, error) {
+	return p, nil
+}
+
+type shutdownCompleteStopProvider struct {
+	*stopUnlistedRuntimeProvider
+	complete bool
+	err      error
+	calls    int
+}
+
+func (p *shutdownCompleteStopProvider) ShutdownComplete(string) (bool, error) {
+	p.calls++
+	return p.complete, p.err
+}
+
+func TestStopSurvivorCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		city      string
+		listed    bool
+		complete  bool
+		err       error
+		wantWait  bool
+		wantError string
+		wantCalls int
+	}{
+		{name: "preserved history", city: "/cities/test", complete: true, wantCalls: 1},
+		{name: "incomplete", city: "/cities/test", wantWait: true, wantError: "remains after shutdown", wantCalls: 1},
+		{name: "read error", city: "/cities/test", complete: true, err: errors.New("snapshot unavailable"), wantError: "snapshot unavailable", wantCalls: 1},
+		{name: "listed survivor", city: "/cities/test", listed: true, complete: true, wantWait: true, wantError: "remains after shutdown"},
+		{name: "foreign history", city: "/cities/other", complete: true, wantError: "ownership changed or is missing"},
+		{name: "metadata free history", complete: true, wantWait: true, wantError: "ownership changed or is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &shutdownCompleteStopProvider{
+				stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: !tc.listed},
+				complete:                    tc.complete, err: tc.err,
+			}
+			startStopTestSession(t, sp.Fake, "worker", map[string]string{"GC_CITY_PATH": tc.city})
+			wait, err := listStopSurvivors("/cities/test", "test", sp, map[string]bool{"worker": true})
+			if wait != tc.wantWait || (err != nil) != (tc.wantError != "") || (err != nil && !strings.Contains(err.Error(), tc.wantError)) || sp.calls != tc.wantCalls {
+				t.Fatalf("wait=%v err=%v completion calls=%d; want wait=%v error=%q calls=%d", wait, err, sp.calls, tc.wantWait, tc.wantError, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestConfiguredStopBackendSelection(t *testing.T) {
+	for _, conflict := range []string{"none", "at binding", "after binding", "unlisted at binding", "unlisted after binding"} {
+		t.Run(conflict, func(t *testing.T) {
+			primary := configuredStopBindingProvider{runtime.NewFake()}
+			other := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: strings.HasPrefix(conflict, "unlisted")}
+			startStopTestSession(t, primary.Fake, "worker", nil)
+			if strings.HasSuffix(conflict, "at binding") {
+				startStopTestSession(t, other.Fake, "worker", nil)
+			}
+			sp := auto.New(primary, other)
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/city", []stopTarget{{name: "worker", resolved: true}}, beads.NewMemStore(), sp)
+			if strings.HasSuffix(conflict, "at binding") {
+				if err == nil || len(targets) != 0 {
+					t.Fatalf("conflicting listing authorized: targets=%v err=%v", targets, err)
+				}
+				return
+			}
+			if err != nil || len(targets) != 1 {
+				t.Fatalf("sole listing backend refused: targets=%v err=%v", targets, err)
+			}
+			if strings.HasSuffix(conflict, "after binding") {
+				startStopTestSession(t, other.Fake, "worker", nil)
+			}
+			bound := providerForManualStopTargets(sp, bindings)
+			for name, mutate := range map[string]func() error{
+				"Interrupt": func() error { return bound.Interrupt("worker") },
+				"SendKeys":  func() error { return bound.SendKeys("worker", "C-c") },
+			} {
+				if err := mutate(); (err == nil) != (conflict == "none") {
+					t.Errorf("%s error = %v, conflict=%s", name, err, conflict)
+				}
+				if conflict != "none" && primary.CountCalls(name, "worker") != 0 {
+					t.Errorf("%s reached a conflicting backend", name)
+				}
+			}
+			if err := bound.Stop("worker"); (err == nil) != (conflict == "none") {
+				t.Errorf("Stop error = %v, conflict=%s", err, conflict)
+			}
+			if primary.IsRunning("worker") != (conflict != "none") || other.CountCalls("Stop", "worker") != 0 {
+				t.Fatal("shutdown did not preserve the selected backend boundary")
+			}
+		})
+	}
+}
+
+type configuredStopCleanupProvider struct {
+	*stopUnlistedRuntimeProvider
+	interruptErr error
+	onInterrupt  func()
+}
+
+func (p *configuredStopCleanupProvider) Interrupt(name string) error {
+	if p.onInterrupt != nil {
+		p.onInterrupt()
+	}
+	if p.interruptErr != nil {
+		return p.interruptErr
+	}
+	return p.Fake.Interrupt(name)
+}
+
+func TestConfiguredStopCleanup(t *testing.T) {
+	for _, mode := range []string{"interrupted", "keys", "absent at binding", "spontaneous exit", "interrupt failed", "sibling appeared", "unlisted sibling appeared", "record appeared", "spontaneous sibling appeared", "spontaneous unlisted sibling appeared", "spontaneous record appeared", "already stopped"} {
+		t.Run(mode, func(t *testing.T) {
+			primary := &configuredStopCleanupProvider{stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake()}}
+			sibling := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: strings.Contains(mode, "unlisted sibling")}
+			if mode != "absent at binding" {
+				startStopTestSession(t, primary.Fake, "worker", nil)
+			}
+			store := beads.NewMemStore()
+			_, binding, err := bindConfiguredStopTarget(stopTarget{name: "worker", resolved: true}, store, auto.New(primary, sibling), "runtime/default", primary)
+			if mode == "absent at binding" {
+				if !runtime.IsSessionNotFound(err) || binding.Provider != nil || primary.CountCalls("Stop", "worker") != 0 {
+					t.Fatalf("absent session authorized cleanup: binding=%v err=%v", binding, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound := binding.Provider
+			switch mode {
+			case "spontaneous exit", "spontaneous sibling appeared", "spontaneous unlisted sibling appeared", "spontaneous record appeared":
+			case "already stopped":
+				primary.StopLeavesRunning["worker"] = true
+				if err := bound.Stop("worker"); err != nil {
+					t.Fatal(err)
+				}
+			case "keys":
+				if err := bound.SendKeys("worker", "C-c"); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if mode == "interrupt failed" {
+					primary.interruptErr = errors.New("interrupt failed")
+				}
+				if err := bound.Interrupt("worker"); !errors.Is(err, primary.interruptErr) {
+					t.Fatalf("interrupt: %v", err)
+				}
+			}
+			if mode != "already stopped" {
+				// Simulate exit independently of the bound cleanup operation.
+				if err := primary.Stop("worker"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasSuffix(mode, "sibling appeared") {
+				startStopTestSession(t, sibling.Fake, "worker", nil)
+			}
+			if strings.HasSuffix(mode, "record appeared") {
+				if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "worker", "state": "active"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := primary.CountCalls("Stop", "worker")
+			err = bound.Stop("worker")
+			wantCleanup := mode == "interrupted" || mode == "keys" || mode == "interrupt failed" || mode == "spontaneous exit"
+			wantSuccess := wantCleanup || mode == "already stopped"
+			if (err == nil) != wantSuccess {
+				t.Errorf("cleanup error = %v, want success=%v", err, wantSuccess)
+			}
+			if wantCleanup {
+				before++
+				if err := bound.Stop("worker"); err != nil {
+					t.Errorf("repeat cleanup: %v", err)
+				}
+			}
+			if got := primary.CountCalls("Stop", "worker"); got != before || sibling.CountCalls("Stop", "worker") != 0 {
+				t.Fatalf("cleanup calls = %d, want %d; sibling must remain untouched", got, before)
+			}
+		})
+	}
+}
+
+func TestConfiguredStopEscalatesBlockedInterrupt(t *testing.T) {
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var stopped chan struct{}
+	primary := &configuredStopCleanupProvider{
+		stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake()},
+		onInterrupt: func() {
+			close(started)
+			<-release
+		},
+	}
+	startStopTestSession(t, primary.Fake, "worker", nil)
+	_, binding, err := bindConfiguredStopTarget(stopTarget{name: "worker", resolved: true}, beads.NewMemStore(), primary, "runtime", primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer close(done)
+		if err := binding.Provider.Interrupt("worker"); err != nil {
+			t.Errorf("interrupt: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		close(release)
+		awaitClose(t, done, "released interrupt")
+		if stopped != nil {
+			awaitClose(t, stopped, "escalated stop")
+		}
+	})
+	awaitClose(t, started, "interrupt dispatch")
+	// The target budget is the behavior under test: escalation must finish
+	// while the earlier, timed-out cancellation remains blocked in provider I/O.
+	stopped = make(chan struct{})
+	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, time.Second, func(target stopTarget) error {
+		defer close(stopped)
+		return binding.Provider.Stop(target.name)
+	})
+	if results[0].err != nil || primary.IsRunning("worker") || primary.CountCalls("Stop", "worker") != 1 {
+		t.Fatalf("escalation blocked by cancellation: err=%v calls=%d", results[0].err, primary.CountCalls("Stop", "worker"))
+	}
+}
+
+func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
+	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed", "resolved", "resolved unknown", "resolved conflict", "resolved replacement", "resolved deleted"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "test-worker", "state": "active"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained := mode == "live" || (strings.HasPrefix(mode, "resolved") && mode != "resolved deleted")
+			if !retained {
+				if err := store.Delete(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookup := &stopOrphanLookupStore{Store: store, id: b.ID}
+			switch mode {
+			case "transient":
+				lookup.err = errors.New("store unavailable")
+			case "collision":
+				lookup.err = beads.ErrIDCollision
+			case "mixed absence":
+				lookup.err = errors.Join(beads.ErrNotFound, errors.New("store unavailable"))
+			}
+			sp := runtime.NewFake()
+			env := map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID}
+			if mode == "unknown" || mode == "resolved unknown" {
+				env = nil
+			}
+			if mode == "resolved conflict" {
+				env["GC_SESSION_ID"] = "another-session"
+			}
+			startStopTestSession(t, sp, "test-worker", env)
+			target := stopTarget{name: "test-worker"}
+			if strings.HasPrefix(mode, "resolved") {
+				target.sessionID = b.ID
+			}
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{target}, lookup, sp)
+			provider := providerForManualStopTargets(sp, bindings)
+			refuse := mode == "transient" || mode == "collision" || mode == "mixed absence" || mode == "unknown" || mode == "resolved unknown" || mode == "resolved conflict"
+			if refuse {
+				if err == nil || len(targets) != 0 || sp.CountCalls("Stop", "test-worker") != 0 {
+					t.Fatalf("unsafe target selected: targets=%v err=%v", targets, err)
+				}
+				return
+			}
+			if err != nil || len(targets) != 1 || targets[0].runtimeOnly != !retained {
+				t.Fatalf("targets=%v err=%v", targets, err)
+			}
+			if mode == "replacement" || mode == "resolved replacement" {
+				if err := sp.SetMeta("test-worker", "GC_CITY_PATH", "/cities/foreign"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "lookup changed" {
+				lookup.err = errors.New("store unavailable after selection")
+			}
+			if mode == "resolved deleted" {
+				err = stopTargetThroughWorkerBoundary(targets[0], lookup, provider, &config.City{})
+			} else {
+				err = provider.Stop("test-worker")
+			}
+			if mode == "replacement" || mode == "resolved replacement" || mode == "lookup changed" {
+				if err == nil || !sp.IsRunning("test-worker") || sp.CountCalls("Stop", "test-worker") != 0 {
+					t.Fatalf("ownership/lookup change was not fenced: %v", err)
+				}
+			} else if err != nil || sp.IsRunning("test-worker") {
+				t.Fatalf("verified target not stopped: %v", err)
+			}
+		})
+	}
+}
+
+func TestStopScopedOrphanBeadLookup(t *testing.T) {
+	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				"session_name": "test-stale", "state": "active", "session_origin": "manual",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "live" {
+				if err := store.Delete(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookup := stopOrphanLookupStore{Store: store, id: b.ID}
+			switch mode {
+			case "transient":
+				lookup.err = errors.New("store unavailable")
+			case "collision":
+				lookup.err = beads.ErrIDCollision
+			case "mixed absence":
+				lookup.err = errors.Join(beads.ErrNotFound, errors.New("store unavailable"))
+			}
+			sp := runtime.NewFake()
+			startStopTestSession(t, sp, "test-stale", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
+			provider := scopedStopOrphanProvider{Provider: sp}
+			cfg := &config.City{Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"}, Agents: []config.Agent{{Name: "worker"}}}
+			var stdout, stderr lockedBuffer
+			stopped := stopOrphans("/cities/test", provider, map[string]bool{"test-worker": true}, nil, cfg, sessionFrontDoor(lookup), 0, events.Discard, &stdout, &stderr)
+			wantStop := mode == "deleted" || mode == "live"
+			if stopped != wantStop || sp.IsRunning("test-stale") == wantStop {
+				t.Fatalf("stopped=%v running=%v stderr=%q; want stopped=%v", stopped, sp.IsRunning("test-stale"), stderr.String(), wantStop)
+			}
+			if !wantStop && (sp.CountCalls("Stop", "test-stale") != 0 || !strings.Contains(stderr.String(), strings.Split(lookup.err.Error(), "\n")[0])) {
+				t.Fatalf("lookup failure must be reported without teardown: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestStopOrphansCityOwnership(t *testing.T) {
+	for _, unreadable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unreadable=%v", unreadable), func(t *testing.T) {
+			sp := runtime.NewFake()
+			for _, name := range []string{"test-worker", "test-foreign", "test-stale"} {
+				if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := sp.SetMeta("test-foreign", "GC_CITY_PATH", "/cities/foreign"); err != nil {
+				t.Fatal(err)
+			}
+			provider := scopedStopOrphanProvider{Provider: sp}
+			if unreadable {
+				provider.unreadable = "test-unreadable"
+				if err := sp.Start(context.Background(), provider.unreadable, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"},
+				Agents:    []config.Agent{{Name: "worker"}},
+			}
+			store := beads.NewMemStore()
+			var stdout, stderr bytes.Buffer
+			code := doStopWithoutSuccess([]string{"test-worker"}, provider, cfg, store, 0, events.Discard, &stdout, &stderr)
+			stopOrphans("/cities/test", provider, map[string]bool{"test-worker": true}, nil, cfg, sessionFrontDoor(store), 0, events.Discard, &stdout, &stderr)
+			if code != 0 || sp.IsRunning("test-worker") {
+				t.Errorf("configured stop: code=%d running=%v", code, sp.IsRunning("test-worker"))
+			}
+			if !sp.IsRunning("test-foreign") || sp.CountCalls("Stop", "test-foreign") != 0 {
+				t.Error("foreign city's session was stopped")
+			}
+			if sp.IsRunning("test-stale") != unreadable {
+				t.Errorf("orphan running=%v, want %v", sp.IsRunning("test-stale"), unreadable)
+			}
+			if unreadable {
+				if !sp.IsRunning(provider.unreadable) || !strings.Contains(stderr.String(), "ownership") {
+					t.Errorf("unreadable sweep did not refuse: stderr=%q", stderr.String())
+				}
+			} else if strings.Contains(stderr.String(), "orphan sweep skipped") {
+				t.Errorf("stderr=%q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestStopOrphansRefusesIncompleteScope(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		desired  map[string]bool
+		agents   []config.Agent
+		unscoped bool
+		noScope  bool
+		listErr  error
+		want     string
+	}{
+		{name: "empty desired", want: "empty desired"},
+		{name: "partial desired", desired: map[string]bool{"": true}, want: "partial desired"},
+		{name: "false desired", desired: map[string]bool{"test-worker": false}, want: "partial desired"},
+		{name: "partial config", agents: []config.Agent{{Name: "worker"}, {}}, want: "empty or partial"},
+		{name: "shared socket", unscoped: true, want: "city-scoped socket"},
+		{name: "unknown socket", noScope: true, want: "city-scoped socket"},
+		{name: "partial listing", listErr: &runtime.PartialListError{Err: fmt.Errorf("backend unavailable")}, want: "partially failed"},
+		{name: "failed listing", listErr: fmt.Errorf("listing unavailable"), want: "listing unavailable"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"},
+				Agents:    []config.Agent{{Name: "worker"}},
+			}
+			if tt.agents != nil {
+				cfg.Agents = tt.agents
+			}
+			desired := tt.desired
+			if desired == nil && tt.name != "empty desired" {
+				desired = map[string]bool{"test-worker": true}
+			}
+			var provider runtime.Provider = scopedStopOrphanProvider{Provider: sp, unscoped: tt.unscoped, listErr: tt.listErr}
+			if tt.noScope {
+				provider = sp
+			}
+			var stderr bytes.Buffer
+			stopOrphans("/cities/test", provider, desired, nil, cfg, sessionFrontDoor(beads.NewMemStore()), 0, events.Discard, io.Discard, &stderr)
+			if !sp.IsRunning("test-stale") || sp.CountCalls("Stop", "test-stale") != 0 {
+				t.Fatal("unsafe sweep stopped an orphan")
+			}
+			if !strings.Contains(stderr.String(), tt.want) || strings.Count(stderr.String(), "\n") != 1 {
+				t.Errorf("stderr=%q, want one refusal line containing %q", stderr.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestStopOrphansUsesOwningBackendAndExactDesired(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	for _, sp := range []*runtime.Fake{local, remote} {
+		if err := sp.Start(context.Background(), "test-stale", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := local.SetMeta("test-stale", "GC_CITY_PATH", "/cities/foreign"); err != nil {
+		t.Fatal(err)
+	}
+	// A configured template does not protect a stale runtime absent from desired.
+	if err := remote.SetMeta("test-stale", "GC_TEMPLATE", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Start(context.Background(), "test-pool-ci-live", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	provider := auto.New(scopedStopOrphanProvider{Provider: local}, scopedStopOrphanProvider{Provider: remote})
+	cfg := &config.City{Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"}, Agents: []config.Agent{{Name: "worker"}}}
+	var stderr bytes.Buffer
+	stopOrphans("/cities/test", provider, map[string]bool{"test-pool-ci-live": true}, nil, cfg, sessionFrontDoor(beads.NewMemStore()), 0, events.Discard, io.Discard, &stderr)
+	if !local.IsRunning("test-stale") || local.CountCalls("Stop", "test-stale") != 0 {
+		t.Fatal("foreign session on default backend was stopped")
+	}
+	if remote.IsRunning("test-stale") || remote.CountCalls("Stop", "test-stale") != 1 {
+		t.Fatalf("owning backend was not stopped: stderr=%q", stderr.String())
+	}
+	if !remote.IsRunning("test-pool-ci-live") {
+		t.Fatal("exact desired pool session was stopped")
+	}
+}
+
+type stopLookupErrorStore struct{ beads.Store }
+
+func (stopLookupErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, fmt.Errorf("session lookup unavailable")
+}
+
+func TestResolveStopSessionNamesManualRecords(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	for _, b := range []beads.Bead{
+		{Type: "session", Metadata: map[string]string{"session_origin": "manual", "session_name": "custom-runtime", "alias": "sky"}},
+		{Type: "session", Metadata: map[string]string{"manual_session": "true", "session_name": "worker-1"}},
+		{Type: "session", Metadata: map[string]string{"session_origin": "ephemeral", "template": "worker", "session_name": "legacy-manual"}},
+		{Type: "session", Status: "closed", Metadata: map[string]string{"session_origin": "manual", "session_name": "closed-runtime"}},
+		{Type: "session", Metadata: map[string]string{"session_origin": "manual", "session_name": "failed-runtime", "state": string(sessionpkg.StateFailedCreate)}},
+	} {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status == "closed" {
+			if err := store.Close(created.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		startStopTestSession(t, sp, b.Metadata["session_name"], map[string]string{
+			"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": created.ID,
+		})
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(2)}}}
+	names, desired, _, err := resolveStopSessionNames(store, cfg, "/cities/test", "test", sp, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	for _, name := range names {
+		counts[name]++
+	}
+	for _, name := range []string{"worker-1", "worker-2", "custom-runtime", "legacy-manual", "closed-runtime", "failed-runtime"} {
+		if counts[name] != 1 || !desired[name] {
+			t.Errorf("target %q: count=%d desired=%v", name, counts[name], desired[name])
+		}
+	}
+	if len(names) != 6 || len(desired) != 6 {
+		t.Errorf("names=%v desired=%v; owned terminal runtimes must also be targets", names, desired)
+	}
+}
+
+func TestResolveStopSessionNamesRetainsManualLookupError(t *testing.T) {
+	// With no configured agents, this can only fail on the manual-session read.
+	_, _, _, err := resolveStopSessionNames(stopLookupErrorStore{beads.NewMemStore()}, &config.City{}, "/cities/test", "test", runtime.NewFake(), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "listing manual sessions") {
+		t.Fatalf("error=%v, want manual session lookup failure", err)
+	}
+}
+
+func TestStopManualSessionRefusesReusedRuntime(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+		"session_origin": "manual", "session_name": "custom-runtime", "alias": "sky",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	startStopTestSession(t, sp, "custom-runtime", map[string]string{
+		"GC_CITY_PATH": "/cities/foreign", "GC_SESSION_ID": "foreign-record",
+	})
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(2)}}}
+	names, desired, _, err := resolveStopSessionNames(store, cfg, "/cities/test", "test", sp, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doStopWithoutSuccess(names, sp, cfg, store, 0, events.Discard, io.Discard, io.Discard)
+	if desired["custom-runtime"] || !sp.IsRunning("custom-runtime") || sp.CountCalls("Stop", "custom-runtime") != 0 {
+		t.Errorf("foreign runtime stopped through stale manual record: desired=%v running=%v", desired, sp.IsRunning("custom-runtime"))
+	}
+}
+
+func TestStopOrphansRefusesFailedDesiredResolution(t *testing.T) {
+	for _, max := range []int{1, 2, -1} {
+		t.Run(fmt.Sprintf("max=%d", max), func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &max}}}
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			provider := scopedStopOrphanProvider{Provider: sp}
+			store := stopLookupErrorStore{beads.NewMemStore()}
+			names, desired, _, err := resolveStopSessionNames(store, cfg, "/cities/test", "test", provider, io.Discard)
+			if err == nil || len(names) == 0 || len(desired) == 0 {
+				t.Fatalf("resolution names=%v desired=%v err=%v; want fallback names with error", names, desired, err)
+			}
+			var stderr bytes.Buffer
+			listsBeforeSweep := sp.CountCalls("ListRunning", "")
+			stopOrphans("/cities/test", provider, desired, err, cfg, sessionFrontDoor(store), 0, events.Discard, io.Discard, &stderr)
+			if sp.CountCalls("ListRunning", "") != listsBeforeSweep || !strings.Contains(stderr.String(), "partial desired session set") || strings.Count(stderr.String(), "\n") != 1 {
+				t.Fatalf("failed resolution did not refuse: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestStopOrphansRetainsPoolDiscoveryFailure(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	sp := runtime.NewFake()
+	provider := scopedStopOrphanProvider{Provider: sp, listErr: fmt.Errorf("pool listing unavailable")}
+	store := beads.NewMemStore()
+	_, desired, _, err := resolveStopSessionNames(store, cfg, "/cities/test", "test", provider, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "pool listing unavailable") {
+		t.Fatalf("resolve error=%v, want pool listing failure", err)
+	}
+	// A recovered listing must not authorize cleanup from the earlier partial set.
+	provider.listErr = nil
+	var stderr bytes.Buffer
+	listsBeforeSweep := sp.CountCalls("ListRunning", "")
+	stopOrphans("/cities/test", provider, desired, err, cfg, sessionFrontDoor(store), 0, events.Discard, io.Discard, &stderr)
+	if !strings.Contains(stderr.String(), "partial desired session set") || sp.CountCalls("ListRunning", "") != listsBeforeSweep {
+		t.Fatalf("sweep did not retain resolution failure: %q", stderr.String())
+	}
 }
 
 func newRecordingStopProvider() *recordingStopProvider {
@@ -167,7 +927,7 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 		Beads:     config.BeadsConfig{Provider: "file"},
 		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
 		Agents: []config.Agent{
-			{Name: "worker", StartCommand: "sleep 1"},
+			{Name: "worker", StartCommand: "sleep 1", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	data, err := cfg.Marshal()
@@ -180,9 +940,7 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 
 	sp := newHangingProvider()
 	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
-	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
+	startStopTestSession(t, sp.Fake, sessionName, map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "deleted-worker-bead"})
 
 	// cmdStop's wall-clock cap returns 1 while its worker is still blocked in
 	// hangingProvider.Stop. The worker eventually calls back into

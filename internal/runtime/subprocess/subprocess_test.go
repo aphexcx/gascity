@@ -3,6 +3,7 @@ package subprocess
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -28,6 +30,517 @@ func shortTempDir(t *testing.T) string {
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
+}
+
+func checkTestProcessCleanup(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	p.mu.Lock()
+	sc := p.procs[name]
+	p.mu.Unlock()
+	if sc == nil {
+		t.Fatal("missing test process")
+	}
+	t.Cleanup(func() {
+		if err := p.Stop(name); err != nil {
+			t.Errorf("Stop(%q) during cleanup: %v", name, err)
+			// Reap this fixture even when the cleanup assertion fails.
+			if err := sc.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Errorf("killing test child: %v", err)
+			}
+		}
+		select {
+		case <-sc.done:
+		case <-time.After(testutil.ExecRaceTimeout):
+			t.Fatal("test child was not reaped")
+		}
+		live, err := proctable.ProcessIdentityMatches(sc.identity.PID, sc.identity.Start, proctable.ProcessIdentity)
+		if err != nil || live {
+			t.Errorf("test child remains in process table: pid=%d live=%v err=%v", sc.identity.PID, live, err)
+		}
+	})
+}
+
+func listenTestSocket(path string) (net.Listener, error) {
+	return net.Listen("unix", path)
+}
+
+func TestCleanupSerializesReplacementPublication(t *testing.T) {
+	p := newTestProvider(t)
+	replacementProvider := NewProviderWithDir(p.dir)
+	const name = "serialized-replacement"
+	const original = `{"name":"serialized-replacement","pid":42,"start":"old"}`
+	const replacement = `{"name":"serialized-replacement","pid":43,"start":"new"}`
+	if err := p.SetMeta(name, processIdentityMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	finished := make(chan error, 1)
+	p.ops.signal = func(int, syscall.Signal) error { return syscall.ESRCH }
+	var listener net.Listener
+	p.ops.beforeCleanup = func() {
+		// This is the final compare/delete boundary. A second process's
+		// independent directory descriptor must be excluded here.
+		other, err := os.Open(p.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close() //nolint:errcheck
+		if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			t.Fatalf("publication was not excluded at deletion: %v", err)
+		}
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			finished <- runtime.WithProviderStateDirLock(p.dir, func() error {
+				if err := replacementProvider.setMetaLocked(name, processIdentityMetaKey, replacement); err != nil {
+					return err
+				}
+				var err error
+				listener, err = listenTestSocket(p.sockPath(name))
+				return err
+			})
+		}()
+		<-started
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("replacement publication remained locked")
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got, err := p.GetMeta(name, processIdentityMetaKey); err != nil || got != replacement {
+		t.Fatalf("replacement metadata = %q, %v", got, err)
+	}
+	conn, err := net.DialTimeout("unix", listener.Addr().String(), testutil.ExecRaceTimeout)
+	if err != nil {
+		t.Fatalf("replacement socket was deleted: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestStopRefusesPartialOwnershipBeforeSignals(t *testing.T) {
+	for _, missing := range []string{"city", "session"} {
+		t.Run(missing, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "partial-stop"
+			city, id := "/test-city", "session-id"
+			if missing == "city" {
+				city = ""
+			} else {
+				id = ""
+			}
+			if err := p.SetMeta(name, "GC_CITY_PATH", city); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMeta(name, "GC_SESSION_ID", id); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(processIdentity{Name: name, PID: 42, Start: "start"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMeta(name, processIdentityMetaKey, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				return "start", nil
+			}
+			p.ops.signal = func(int, syscall.Signal) error { signals++; return nil }
+			if err := p.Stop(name); err == nil || !strings.Contains(err.Error(), "incomplete ownership") {
+				t.Errorf("Stop = %v, want incomplete-ownership refusal", err)
+			}
+			if signals != 0 {
+				t.Fatalf("partial ownership received %d destructive signals", signals)
+			}
+		})
+	}
+}
+
+func TestPersistedProcessIdentity(t *testing.T) {
+	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "detached"
+			for key, value := range map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "session"} {
+				if err := p.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			record := `{"name":"detached","pid":42,"start":"original"}`
+			if state == "malformed" {
+				record = "{"
+			}
+			if state == "invalid" {
+				record = `{"name":"detached","pid":1,"start":"original"}`
+			}
+			if state == "partial" {
+				record = `{"name":"detached","pid":42}`
+			}
+			if state != "legacy" {
+				if err := p.SetMeta(name, "gc_process_identity", record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if state == "gone" || signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				if state == "reused" {
+					return "replacement", nil
+				}
+				if state == "denied" {
+					return "", syscall.EPERM
+				}
+				return "original", nil
+			}
+			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid == -42 && sig == 0 {
+					return syscall.ESRCH
+				}
+				if pid != -42 || sig != syscall.SIGTERM {
+					t.Fatalf("signal(%d, %v)", pid, sig)
+				}
+				signals++
+				return nil
+			}
+			city, id, err := p.SessionOwnership(name)
+			bad := state == "denied" || state == "malformed" || state == "invalid" || state == "partial"
+			gone := state == "gone" || state == "reused"
+			if gone != runtime.IsSessionNotFound(err) || (bad && err == nil) {
+				t.Fatalf("ownership %q %q %v", city, id, err)
+			}
+			if !gone && !bad && (city != "/city" || id != "session") {
+				t.Fatal("lost owner")
+			}
+			if got := p.IsRunning(name); got != (state == "live") {
+				t.Fatalf("IsRunning = %v", got)
+			}
+			names, err := p.ListRunning("")
+			if bad != (err != nil) || (len(names) == 1) != (state == "live") {
+				t.Fatalf("ListRunning = %v, %v", names, err)
+			}
+			if state != "legacy" {
+				raw, _ := p.GetMeta(name, "gc_process_identity")
+				if raw != record {
+					t.Fatal("read changed metadata")
+				}
+			}
+			if err := p.Stop(name); (err != nil) != bad {
+				t.Fatalf("Stop = %v", err)
+			}
+			if (signals == 1) != (state == "live") {
+				t.Fatalf("signals = %d", signals)
+			}
+			if state == "legacy" {
+				raw, _ := p.GetMeta(name, "GC_CITY_PATH")
+				if raw != "/city" {
+					t.Fatal("legacy ownership deleted")
+				}
+			}
+		})
+	}
+}
+
+func TestStartProcessIdentityFailure(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", syscall.EPERM }
+	if err := p.Start(context.Background(), "failed", runtime.Config{Command: "exec sleep 300"}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	if p.IsRunning("failed") {
+		t.Fatal("failed start left a child")
+	}
+	if raw, _ := p.GetMeta("failed", "gc_process_identity"); raw != "" {
+		t.Fatal("failed start left identity")
+	}
+}
+
+func TestStartIdentityRollbackKillsDescendant(t *testing.T) {
+	p := newTestProvider(t)
+	ready, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ready.Close(); _ = writer.Close() })
+	if err := ready.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.start = func(cmd *exec.Cmd) error {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, writer)
+		return cmd.Start()
+	}
+	var descendant int
+	var identity string
+	p.ops.processIdentity = func(int) (string, error) {
+		line, err := bufio.NewReader(ready).ReadString('\n')
+		if err != nil {
+			t.Fatalf("descendant readiness: %v", err)
+		}
+		descendant, err = strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || descendant <= 1 {
+			t.Fatalf("descendant PID: %q, %v", line, err)
+		}
+		identity, err = proctable.ProcessIdentity(descendant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "", syscall.EPERM
+	}
+	if err := p.Start(context.Background(), "rollback", runtime.Config{Command: "sleep 300 & printf '%s\\n' \"$!\" >&3; wait"}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(descendant, syscall.SIGKILL) })
+	waitForKernelProcessGone(t, descendant, identity)
+}
+
+// waitForKernelProcessGone owns polling at the kernel process/reaper boundary,
+// which has no completion channel for an orphaned descendant.
+func waitForKernelProcessGone(t *testing.T, pid int, identity string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, err := proctable.ProcessIdentity(pid)
+		if errors.Is(err, proctable.ErrProcessGone) || (err == nil && identity != "" && current != identity) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("descendant %d remains: identity=%q error=%v", pid, current, err)
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestStartProcessIdentityGone(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	if err := p.Start(context.Background(), "exiting", runtime.Config{Command: "exec sleep 300"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("exiting") })
+	raw, err := p.GetMeta("exiting", "gc_process_identity")
+	var record struct {
+		PID   int
+		Start string
+	}
+	if err != nil || json.Unmarshal([]byte(raw), &record) != nil || record.PID <= 1 || record.Start != "" {
+		t.Fatalf("exiting identity = %q, %v", raw, err)
+	}
+}
+
+func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("legacy", "GC_CITY_PATH", "/city"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetMeta("legacy", "GC_SESSION_ID", "old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(context.Background(), "legacy", runtime.Config{Command: "exec sleep 300", Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("legacy") })
+	record, err := p.readProcessIdentity("legacy")
+	if err != nil || record == nil || record.Start == "" {
+		t.Fatalf("restart identity = %+v, %v", record, err)
+	}
+}
+
+func TestGetMetaOwnershipExitAndReplacement(t *testing.T) {
+	testOwnershipExitAndReplacement(t, newTestProvider(t), false)
+}
+
+func TestSessionOwnershipExitAndReplacement(t *testing.T) {
+	for _, fallback := range []bool{false, true} {
+		label := "default"
+		if fallback {
+			label = "fallback"
+		}
+		t.Run(label, func(t *testing.T) {
+			p := newTestProvider(t)
+			if fallback {
+				p = NewProviderWithDir(filepath.Join(shortTempDir(t), strings.Repeat("long", 30)))
+			}
+			if fallback && p.socketDir() == p.dir {
+				t.Fatal("long provider directory did not select the fallback socket location")
+			}
+			testOwnershipExitAndReplacement(t, p, true)
+		})
+	}
+}
+
+func readTestOwnership(t *testing.T, p runtime.Provider, name string, paired bool) (string, string, error) {
+	t.Helper()
+	if paired {
+		reader, ok := p.(interface {
+			SessionOwnership(string) (string, string, error)
+		})
+		if !ok {
+			t.Fatalf("%T does not expose SessionOwnership", p)
+		}
+		return reader.SessionOwnership(name)
+	}
+	city, err := p.GetMeta(name, "GC_CITY_PATH")
+	if err != nil {
+		return "", "", err
+	}
+	id, err := p.GetMeta(name, "GC_SESSION_ID")
+	return city, id, err
+}
+
+func testOwnershipExitAndReplacement(t *testing.T, p *Provider, paired bool) {
+	t.Helper()
+	const name = "owned-process"
+	if err := p.Start(context.Background(), name, runtime.Config{Command: "exec sleep 300", Env: map[string]string{
+		"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": "original",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	checkTestProcessCleanup(t, p, name)
+	artifacts := []string{p.sockPath(name), p.sockNamePath(name), p.metaPath(name, "GC_CITY_PATH"), p.metaPath(name, "GC_SESSION_ID")}
+	for _, path := range artifacts {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("live subprocess artifact %s missing: %v", path, err)
+		}
+	}
+	readers := map[string]runtime.Provider{"raw": p, "seams": seamBack(p), "cross-process": NewProviderWithDir(p.dir)}
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || city != "/cities/test" || id != "original" {
+			t.Fatalf("%s live ownership = %q, %q, %v", label, city, id, err)
+		}
+	}
+	p.mu.Lock()
+	done := p.procs[name].done
+	p.mu.Unlock()
+	if err := p.Interrupt(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("subprocess did not exit after interrupt")
+	}
+	for _, path := range artifacts {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("exited subprocess artifact %s remains: %v", path, err)
+		}
+	}
+	for label, reader := range readers {
+		if paired {
+			city, id, err := readTestOwnership(t, reader, name, true)
+			if city != "" || id != "" || !runtime.IsSessionNotFound(err) {
+				t.Errorf("%s exited ownership = %q, %q, %v, want typed absence", label, city, id, err)
+			}
+			continue
+		}
+		for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID"} {
+			_, err := reader.GetMeta(name, key)
+			if !runtime.IsSessionNotFound(err) {
+				t.Errorf("%s exited %s error = %v, want typed absence", label, key, err)
+			}
+		}
+	}
+	replacement := NewProviderWithDir(p.dir)
+	if err := replacement.Start(context.Background(), name, runtime.Config{Command: "exec sleep 300", Env: map[string]string{
+		"GC_CITY_PATH": "/cities/foreign", "GC_SESSION_ID": "replacement",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	checkTestProcessCleanup(t, replacement, name)
+	t.Cleanup(func() {
+		if err := replacement.SetMeta(name, "GC_SESSION_ID", "replacement"); err != nil {
+			t.Errorf("restoring replacement ownership for cleanup: %v", err)
+		}
+	})
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || city != "/cities/foreign" || id != "replacement" {
+			t.Errorf("%s replacement ownership = %q, %q, %v", label, city, id, err)
+		}
+	}
+	if err := replacement.RemoveMeta(name, "GC_SESSION_ID"); err != nil {
+		t.Fatal(err)
+	}
+	for label, reader := range readers {
+		city, id, err := readTestOwnership(t, reader, name, paired)
+		if err != nil || id != "" || (paired && city != "") {
+			t.Errorf("%s live missing metadata must leave ownership unknown: %q, %q, %v", label, city, id, err)
+		}
+	}
+}
+
+func TestGetMetaMissingOwnershipDuringReplacementProbe(t *testing.T) {
+	testMissingOwnershipDuringReplacementProbe(t, false)
+}
+
+func TestSessionOwnershipMissingDuringReplacementProbe(t *testing.T) {
+	testMissingOwnershipDuringReplacementProbe(t, true)
+}
+
+func testMissingOwnershipDuringReplacementProbe(t *testing.T, paired bool) {
+	t.Helper()
+	p := newTestProvider(t)
+	const name = "replaced-during-read"
+	if paired {
+		// Assert the extension and initial absence before starting the socket handler.
+		if _, _, err := readTestOwnership(t, p, name, true); !runtime.IsSessionNotFound(err) {
+			t.Fatalf("initial ownership error = %v, want typed absence", err)
+		}
+	}
+	listener := listenControlSocket(t, p.sockPath(name))
+	completed := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			completed <- err
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		line, err := bufio.NewReader(conn).ReadString('\n')
+		if err == nil && line != "ping\n" {
+			err = errors.New("expected an absence probe")
+		}
+		if err == nil {
+			// GetMeta has already observed the deleted ownership sidecar.
+			// Install a foreign replacement before its socket probe completes.
+			err = p.SetMeta(name, "GC_SESSION_ID", "foreign-replacement")
+		}
+		if err == nil {
+			_, err = conn.Write([]byte("ok\n"))
+		}
+		completed <- err
+	}()
+	var city, id string
+	var err error
+	if paired {
+		city, id, err = readTestOwnership(t, p, name, true)
+	} else {
+		id, err = p.GetMeta(name, "GC_SESSION_ID")
+	}
+	if err != nil || id != "" || city != "" {
+		t.Fatalf("replacement probe must leave missing ownership unverified: id=%q err=%v", id, err)
+	}
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+	if id, err := p.GetMeta(name, "GC_SESSION_ID"); err != nil || id != "foreign-replacement" {
+		t.Fatalf("next read must see the replacement: id=%q err=%v", id, err)
+	}
 }
 
 func requirePrivateSocketDirectory(t *testing.T, path string) {
@@ -104,8 +617,9 @@ func TestStartCreatesProcess(t *testing.T) {
 func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "meta-start", runtime.Config{
-		Command: "sleep 3600",
+		Command: "exec sleep 3600",
 		Env: map[string]string{
+			"GC_CITY_PATH":      "/cities/test",
 			"GC_SESSION_ID":     "bead-123",
 			"GC_INSTANCE_TOKEN": "token-456",
 			"GC_TEMPLATE":       "worker",
@@ -114,9 +628,10 @@ func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer p.Stop("meta-start") //nolint:errcheck
+	checkTestProcessCleanup(t, p, "meta-start")
 
 	for key, want := range map[string]string{
+		"GC_CITY_PATH":      "/cities/test",
 		"GC_SESSION_ID":     "bead-123",
 		"GC_INSTANCE_TOKEN": "token-456",
 		"GC_TEMPLATE":       "worker",
@@ -603,14 +1118,7 @@ func TestStopKillsProcessGroupDescendants(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(childPID, syscall.Signal(0)); err != nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
+	waitForKernelProcessGone(t, childPID, "")
 }
 
 func TestStopIdempotent(t *testing.T) {
@@ -1006,9 +1514,9 @@ func startRejectingControlSocket(t *testing.T, path string) <-chan string {
 	return startRecordingControlSocket(t, path, "nope\n", 1)
 }
 
-func startRecordingControlSocket(t *testing.T, path, response string, commandBuffer int) <-chan string {
+func listenControlSocket(t *testing.T, path string) net.Listener {
 	t.Helper()
-	lis, err := net.Listen("unix", path)
+	lis, err := listenTestSocket(path)
 	if err != nil {
 		t.Fatalf("Listen %q: %v", path, err)
 	}
@@ -1017,7 +1525,12 @@ func startRecordingControlSocket(t *testing.T, path, response string, commandBuf
 		_ = os.Remove(path)
 		_ = os.Remove(filepath.Dir(path))
 	})
+	return lis
+}
 
+func startRecordingControlSocket(t *testing.T, path, response string, commandBuffer int) <-chan string {
+	t.Helper()
+	lis := listenControlSocket(t, path)
 	gotCommand := make(chan string, commandBuffer)
 	go func() {
 		for {
@@ -1251,5 +1764,36 @@ func TestListRunningViaSocket(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ListRunning('') = %v, want 3 results", all)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "replacement-socket"
+	if err := p.SetMeta(name, processIdentityMetaKey, `{"name":"replacement-socket","pid":42,"start":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return syscall.ESRCH
+		}
+		signaled = true
+		if err := p.SetMeta(name, processIdentityMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
+			return err
+		}
+		return os.WriteFile(p.sockPath(name), []byte("replacement"), 0o600)
+	}
+	if err := p.Stop(name); err == nil {
+		t.Error("replacement during teardown must refuse cleanup")
+	}
+	if data, err := os.ReadFile(p.sockPath(name)); err != nil || string(data) != "replacement" {
+		t.Fatalf("replacement socket artifact changed: %q, %v", data, err)
 	}
 }

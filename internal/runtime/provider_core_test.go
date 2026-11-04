@@ -2,8 +2,55 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
+
+func TestIsSessionNotFoundRequiresEveryCause(t *testing.T) {
+	failure := errors.New("stop refused")
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"typed absence", ErrSessionNotFound, true},
+		{"legacy wording", errors.New("session not found"), false},
+		{"wrapped absence", fmt.Errorf("backend: %w", ErrSessionNotFound), true},
+		{"all absent", errors.Join(ErrSessionNotFound, fmt.Errorf("fallback: %w", ErrSessionNotFound)), true},
+		{"mixed", errors.Join(failure, ErrSessionNotFound), false},
+		{"nested mixed", fmt.Errorf("backend: %w", errors.Join(ErrSessionNotFound, errors.Join(failure, ErrSessionNotFound))), false},
+		{"multiple wrapped causes", fmt.Errorf("primary: %w; fallback: %w", failure, ErrSessionNotFound), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsSessionNotFound(tc.err); got != tc.want {
+				t.Fatalf("IsSessionNotFound(%v)=%v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeBackendStopErrorsRetainsNestedFailure(t *testing.T) {
+	failure := errors.New("live backend refused stop")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"joined", errors.Join(failure, ErrSessionNotFound)},
+		{"wrapped", fmt.Errorf("nested provider: %w", errors.Join(failure, ErrSessionNotFound))},
+		{"legacy absence", errors.Join(failure, errors.New("session not found"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := MergeBackendStopErrors(BackendError{Label: "primary", Err: tc.err}, BackendError{Label: "fallback", Err: ErrSessionNotFound})
+			if !errors.Is(err, failure) {
+				t.Fatalf("nested backend failure was suppressed: %v", err)
+			}
+		})
+	}
+	if err := MergeBackendStopErrors(BackendError{Err: errors.Join(ErrSessionNotFound, errors.New("session not found"))}); err != nil {
+		t.Fatalf("all-absent legacy composition must remain idempotent: %v", err)
+	}
+}
 
 func TestMergeBackendListResultsReturnsBestEffortResultsOnPartialFailure(t *testing.T) {
 	t.Parallel()

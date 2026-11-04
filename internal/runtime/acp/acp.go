@@ -21,6 +21,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
@@ -65,6 +66,7 @@ type Provider struct {
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
 	activityWrite func(path string, data []byte) error // test seam
+	ops           providerOps
 }
 
 // Compile-time check.
@@ -102,6 +104,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		ops:      providerOps{processIdentity: proctable.ProcessIdentity, signal: syscall.Kill},
 	}
 }
 
@@ -131,6 +134,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
+	if live, err := p.processRunning(name); err != nil {
+		p.mu.Unlock()
+		return fmt.Errorf("preparing session ownership for %q: %w", name, err)
+	} else if live {
+		p.mu.Unlock()
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	}
 
 	// Reserve the name with a sentinel so concurrent Start calls for the
 	// same name are rejected while we perform the slow handshake outside
@@ -148,12 +158,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	p.mu.Unlock()
 
+	var generation *sessionOwnership
 	// clearSentinel removes the reservation on failure.
 	clearSentinel := func() {
 		p.mu.Lock()
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
 			delete(p.workDirs, name)
+			_ = p.cleanupProcessGeneration(name, generation)
 		}
 		p.mu.Unlock()
 	}
@@ -245,17 +257,48 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
 
-	// Create control socket for cross-process discovery.
+	// Persist the kernel identity before exposing the control channel. The
+	// startup reservation must still belong to this child at publication.
 	processDone := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, processDone)
-	if err != nil {
+	var lis net.Listener
+	p.mu.Lock()
+	var ownershipErr error
+	if p.conns[name] != sentinel {
+		ownershipErr = fmt.Errorf("session %q was stopped during startup", name)
+	} else {
+		ownershipErr = runtime.WithProviderStateDirLock(p.dir, func() error {
+			if p.socketAlive(name) {
+				return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+			}
+			if live, err := p.processRunning(name); err != nil {
+				return err
+			} else if live {
+				return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+			}
+			if err := p.publishProcessOwnership(name, cfg.Env, cmd.Process.Pid); err != nil {
+				return err
+			}
+			var err error
+			generation, err = p.readProcessOwnership(name)
+			if err == nil {
+				lis, err = p.startControlSocket(name, cmd, processDone)
+			}
+			if err != nil {
+				p.cleanupMeta(name)
+			}
+			return err
+		})
+	}
+	p.mu.Unlock()
+	if ownershipErr != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearSentinel()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
+		return fmt.Errorf("publishing session ownership for %q: %w", name, ownershipErr)
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.ownership = generation
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -277,9 +320,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		<-sc.readDone
 		sc.drainPending()
 		sc.closeActivityPublisher()
-		lis.Close()                 //nolint:errcheck
-		os.Remove(p.sockPath(name)) //nolint:errcheck
-		_ = os.Remove(p.sockNamePath(name))
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		lis.Close() //nolint:errcheck
+		_ = p.cleanupProcessGeneration(name, generation)
 		close(processDone)
 	}()
 
@@ -327,7 +371,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
 			delete(p.workDirs, name)
-			p.cleanupMeta(name)
+			_ = p.cleanupProcessGeneration(name, generation)
 		}
 		p.mu.Unlock()
 		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
@@ -348,7 +392,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		if p.conns[name] == sentinel {
 			delete(p.conns, name)
 			delete(p.workDirs, name)
-			p.cleanupMeta(name)
+			_ = p.cleanupProcessGeneration(name, generation)
 		}
 		p.mu.Unlock()
 		return fmt.Errorf("starting activity publication for %q: %w", name, err)
@@ -365,7 +409,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		<-sc.done
 		p.mu.Lock()
 		if _, replaced := p.conns[name]; !replaced {
-			p.cleanupMeta(name)
+			_ = p.cleanupProcessGeneration(name, generation)
 		}
 		p.mu.Unlock()
 		return fmt.Errorf("session %q was stopped during startup", name)
@@ -452,6 +496,9 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
 func (p *Provider) Stop(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	if ok {
@@ -461,8 +508,7 @@ func (p *Provider) Stop(name string) error {
 
 	if ok {
 		if !sc.alive() {
-			p.cleanupMeta(name)
-			return nil
+			return p.stopProcessGeneration(name, sc.ownership)
 		}
 		// Guard against sentinel sessionConn (nil cmd/stdin during handshake).
 		// Signal the in-progress handshake to abort via the cancel func.
@@ -475,24 +521,21 @@ func (p *Provider) Stop(name string) error {
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc)
 		if err == nil || runtime.IsSessionGone(err) {
-			p.cleanupMeta(name)
-			return nil
+			return p.stopProcessGeneration(name, sc.ownership)
 		}
 		return err
 	}
 
 	// Fall back to socket (cross-process case).
-	err := p.stopBySocket(name)
-	if err == nil || runtime.IsSessionGone(err) {
-		p.cleanupMeta(name)
-		return nil
-	}
-	return err
+	return p.stopBySocket(name)
 }
 
 // Interrupt sends SIGINT to the named session's process.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
@@ -515,10 +558,14 @@ func (p *Provider) IsRunning(name string) bool {
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 
-	if ok {
-		return sc.alive()
+	if ok && sc.alive() {
+		return true
 	}
-	return p.socketAlive(name)
+	if p.socketAlive(name) {
+		return true
+	}
+	live, _ := p.processRunning(name)
+	return live
 }
 
 // IsAttached always returns false — ACP sessions have no terminal.
@@ -674,6 +721,10 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // write rather than trusted from construction: a squatted directory is not
 // something a constructor can report.
 func (p *Provider) SetMeta(name, key, value string) error {
+	return runtime.WithProviderStateDirLock(p.dir, func() error { return p.setMetaLocked(name, key, value) })
+}
+
+func (p *Provider) setMetaLocked(name, key, value string) error {
 	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
 		return err
 	}
@@ -693,13 +744,77 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	return string(data), nil
 }
 
+const sessionOwnershipMetaKey = "gc_session_owner"
+
+type sessionOwnership struct {
+	CityPath  string `json:"city_path"`
+	SessionID string `json:"session_id"`
+	Name      string `json:"name,omitempty"`
+	PID       int    `json:"pid,omitempty"`
+	Start     string `json:"start"`
+}
+
+// SessionOwnership returns the host city path and session ID persisted at Start.
+// Missing identity remains unknown while a connection or socket artifact exists.
+// With no record or runtime artifact it reports runtime.ErrSessionNotFound.
+func (p *Provider) SessionOwnership(name string) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	data, err := p.GetMeta(name, sessionOwnershipMetaKey)
+	if err != nil {
+		return "", "", err
+	}
+	if data == "" {
+		if _, tracked := p.conns[name]; tracked {
+			return "", "", nil
+		}
+		for _, path := range []string{p.metaPath(name, sessionOwnershipMetaKey), p.sockPath(name), p.legacySockPath(name)} {
+			if _, err := os.Lstat(path); err == nil {
+				return "", "", nil
+			} else if !os.IsNotExist(err) {
+				return "", "", fmt.Errorf("probing ACP session %q ownership: %w", name, err)
+			}
+		}
+		return "", "", runtime.ErrSessionNotFound
+	}
+	var owner sessionOwnership
+	if err := json.Unmarshal([]byte(data), &owner); err != nil {
+		return "", "", fmt.Errorf("decoding ownership for %q: %w", name, err)
+	}
+	if owner.CityPath != "" && owner.SessionID != "" {
+		if sc := p.conns[name]; sc != nil && sc.alive() {
+			return owner.CityPath, owner.SessionID, nil
+		}
+		if err := p.sendSocketCommand(name, "ping", 500*time.Millisecond); err != nil {
+			if !isUnavailableSocketError(err) {
+				return "", "", err
+			}
+			if err := validateProcessOwnership(name, owner); err != nil {
+				return "", "", err
+			}
+			if owner.PID != 0 {
+				live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal)
+				if err != nil {
+					return "", "", err
+				}
+				if !live {
+					return "", "", runtime.ErrSessionNotFound
+				}
+			}
+		}
+	}
+	return owner.CityPath, owner.SessionID, nil
+}
+
 // RemoveMeta removes a metadata sidecar file.
 func (p *Provider) RemoveMeta(name, key string) error {
-	err := os.Remove(p.metaPath(name, key))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		err := os.Remove(p.metaPath(name, key))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 // lastActivityMetaKey names the sidecar holding the durable last-activity
@@ -809,6 +924,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		return nil, err
 	}
 	var names []string
+	seen := make(map[string]bool)
 	for _, e := range entries {
 		n := e.Name()
 		if !strings.HasSuffix(n, ".sock") {
@@ -820,9 +936,11 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 		if p.socketAlive(sn) {
 			names = append(names, sn)
+			seen[sn] = true
 		}
 	}
-	return names, nil
+	recorded, err := p.listRecordedProcesses(prefix, seen)
+	return append(names, recorded...), err
 }
 
 func (p *Provider) metaPath(name, key string) string {
@@ -891,6 +1009,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 		os.Remove(namePath) //nolint:errcheck
 		return nil, err
 	}
+	lis.(*net.UnixListener).SetUnlinkOnClose(false)
 	go func() {
 		for {
 			conn, err := lis.Accept()
@@ -983,14 +1102,22 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 
 // stopBySocket connects to a session's control socket and asks it to stop.
 func (p *Provider) stopBySocket(name string) error {
-	err := p.sendSocketCommand(name, "stop", 7*time.Second)
+	owner, err := p.readProcessOwnership(name)
+	if err != nil {
+		return err
+	}
+	err = p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
 		if isUnavailableSocketError(err) {
-			os.Remove(p.sockPath(name)) //nolint:errcheck
-			_ = os.Remove(p.sockNamePath(name))
-			return nil
+			return p.stopProcessGeneration(name, owner)
 		}
 		return err
+	}
+	if !p.socketAlive(name) {
+		if owner != nil && owner.PID == 0 {
+			return p.cleanupProcessGeneration(name, owner)
+		}
+		return p.stopProcessGeneration(name, owner)
 	}
 	return nil
 }
