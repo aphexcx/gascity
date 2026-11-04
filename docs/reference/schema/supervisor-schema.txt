@@ -84,11 +84,19 @@
         },
         "read_auth_verify_key": {
           "type": "string",
-          "description": "ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list.\nIt is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids\nmust be disjoint from the primary read keys; it may use the hardened write\nkey's kid because read grants have the separate gc-city-read audience."
+          "description": "ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list.\nIt is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids\nmust be disjoint from the primary read keys; it may use the hardened write\nkey's kid because read grants have the separate gc-city-read audience.\nUse gc-write-mint --aud gc-city-read with a read request binding to mint a\nread grant; the gc context grant_command currently supplies write grants only."
         },
         "read_auth_required": {
           "type": "boolean",
-          "description": "ReadAuthRequired refuses startup before either listener binds when the\nhardened read key is empty. A configured key always gates reads."
+          "description": "ReadAuthRequired refuses startup before either listener binds when the\nhardened read key and trusted_keys_dir are empty. A configured key always gates reads."
+        },
+        "trusted_keys_dir": {
+          "type": "string",
+          "description": "TrustedKeysDir supplies both hardened verifiers with one \u003ckid\u003e.pub file\nper trusted city. Each regular file contains one standard-base64 32-byte\nEd25519 public key; a trailing newline and lines starting with # are allowed.\nWorld-writable directories/files and symlink files are refused. Inline keys\nare merged; a duplicate kid is an error. Empty disables directory loading.\nAt boot malformed files are reported and valid files load; at least one\nwrite key is required. A failed reload retains the previous complete set.\nAdd a file to register a city, remove it to revoke; run gc supervisor reload\nor wait one interval. Reloads preserve single-use grants across key changes."
+        },
+        "trusted_keys_reload_interval": {
+          "type": "string",
+          "description": "TrustedKeysReloadInterval is the directory refresh interval (default 60s).\nSet \"0\" to disable the timer; explicit supervisor reload still refreshes keys.\nNegative or invalid durations refuse startup. Inline key changes need a restart."
         }
       },
       "additionalProperties": false,

@@ -256,15 +256,22 @@ func (sm *SupervisorMux) Handler() http.Handler {
 // InstallHardenedReadAuth optionally replaces the inherited primary read gate
 // with an independent verifier and refuses reads outside the per-city API.
 func (sm *SupervisorMux) HardenedHandler(writeAuth *citywriteauth.Verifier) http.Handler {
+	if sm.hardenedReadAuth != nil {
+		return sm.hardenedHandlerWithAuth(writeAuth, sm.hardenedReadAuth, true)
+	}
+	return sm.hardenedHandlerWithAuth(writeAuth, sm.readAuth, false)
+}
+
+func (sm *SupervisorMux) hardenedHandlerWithAuth(writeAuth, readAuth *citywriteauth.Verifier, restrictReads bool) http.Handler {
 	if writeAuth == nil {
 		panic("api: HardenedHandler requires a write-auth verifier")
 	}
-	if sm.hardenedReadAuth != nil {
-		return sm.handlerWithAuth(writeAuth, sm.hardenedReadAuth, func(next http.Handler) http.Handler {
+	if restrictReads {
+		return sm.handlerWithAuth(writeAuth, readAuth, func(next http.Handler) http.Handler {
 			return hardenedListenerGuard(hardenedReadScopeGuard(next))
 		})
 	}
-	return sm.handlerWithAuth(writeAuth, sm.readAuth, hardenedListenerGuard)
+	return sm.handlerWithAuth(writeAuth, readAuth, hardenedListenerGuard)
 }
 
 // handlerWithAuth builds the full middleware chain around the mux with the

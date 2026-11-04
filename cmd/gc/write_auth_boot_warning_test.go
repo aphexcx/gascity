@@ -9,22 +9,34 @@ import (
 )
 
 func TestWarnHardenedReadPlane(t *testing.T) {
-	for _, readKey := range []string{"", "   ", "read:validated-key"} {
-		t.Run(readKey, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, readKey, dir string
+		warn               bool
+	}{
+		{"unconfigured", "", "", true},
+		{"blank", "   ", "", true},
+		{"inline", "read:validated-key", "", false},
+		{"directory", "", "/trusted", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var cfg supervisor.Config
 			cfg.Supervisor.Hardened = supervisor.HardenedListener{
-				Bind:               "0.0.0.0",
+				Bind:               "127.0.0.1",
 				Port:               9443,
 				WriteAuthVerifyKey: "write:validated-key",
-				ReadAuthVerifyKey:  readKey,
+				ReadAuthVerifyKey:  tc.readKey,
+				TrustedKeysDir:     tc.dir,
 			}
-			var got, want bytes.Buffer
+			var got bytes.Buffer
 			warnHardenedReadPlane(&got, cfg.Supervisor.Hardened.Bind, cfg)
-			if strings.TrimSpace(readKey) == "" {
-				warnUnauthenticatedReadPlane(&want, cfg.Supervisor.Hardened.Bind, true, false)
-			}
-			if got.String() != want.String() {
-				t.Errorf("hardened read warning = %q, want %q", got.String(), want.String())
+			if tc.warn {
+				for _, want := range []string{"READ plane is UNAUTHENTICATED", "127.0.0.1:9443", "grant-gated", "read_auth_verify_key", "trusted_keys_dir"} {
+					if !strings.Contains(got.String(), want) {
+						t.Errorf("warning missing %q: %s", want, &got)
+					}
+				}
+			} else if got.Len() != 0 {
+				t.Errorf("unexpected warning: %s", &got)
 			}
 		})
 	}
