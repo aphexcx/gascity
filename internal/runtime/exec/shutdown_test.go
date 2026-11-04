@@ -81,6 +81,67 @@ esac
 	}
 }
 
+func TestShutdownBindingUnsupportedMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		initial, current string
+		allow            bool
+	}{
+		{initial: "unsupported", current: "unsupported", allow: true},
+		{initial: "unsupported", current: "empty"},
+		{initial: "unsupported", current: "owned"},
+		{initial: "unsupported", current: "error"},
+		{initial: "unsupported", current: "mixed"},
+		{initial: "empty", current: "unsupported"},
+		{initial: "owned", current: "unsupported"},
+	} {
+		t.Run(tc.initial+"_to_"+tc.current, func(t *testing.T) {
+			script := writeScript(t, t.TempDir(), `
+case "$1" in
+get-meta)
+  case "$(cat "$0.mode")" in
+    unsupported) exit 2 ;;
+    empty) ;;
+    owned) if [ "$3" = GC_CITY_PATH ]; then echo /city; else echo original; fi ;;
+    error) exit 1 ;;
+    mixed) if [ "$3" = GC_CITY_PATH ]; then exit 2; fi ;;
+  esac ;;
+stop|interrupt|send-keys) echo "$1" >> "$0.calls" ;;
+*) exit 2 ;;
+esac
+`)
+			setMode := func(mode string) {
+				t.Helper()
+				if err := os.WriteFile(script+".mode", []byte(mode), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setMode(tc.initial)
+			bound, err := NewProvider(script).BindForShutdown("worker", "/city", "original")
+			if err != nil {
+				t.Fatal(err)
+			}
+			setMode(tc.current)
+			for name, mutate := range map[string]func() error{
+				"stop":      func() error { return bound.Stop("worker") },
+				"interrupt": func() error { return bound.Interrupt("worker") },
+				"send keys": func() error { return bound.SendKeys("worker", "C-c") },
+			} {
+				if err := mutate(); (err == nil) != tc.allow {
+					t.Errorf("%s error = %v, allow=%v", name, err, tc.allow)
+				}
+			}
+			calls, err := os.ReadFile(script + ".calls")
+			if tc.allow {
+				if err != nil || len(calls) == 0 {
+					t.Fatalf("no shutdown operations: %q, %v", calls, err)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("changed metadata support reached script: %q, %v", calls, err)
+			}
+		})
+	}
+}
+
 func TestShutdownBindingRejectsOwnershipReadErrors(t *testing.T) {
 	for _, code := range []int{1, 2} {
 		for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID"} {

@@ -35,15 +35,18 @@ func TestCmdStopExecWithoutOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		teardown   string
 		retainBead bool
+		provider   string
 	}{
 		{teardown: "immediate"},
 		{teardown: "immediate", retainBead: true},
 		{teardown: "delayed"},
 		{teardown: "incomplete"},
+		{teardown: "immediate", retainBead: true, provider: "composed"},
+		{teardown: "immediate", retainBead: true, provider: "minimal"},
 	} {
 		teardown, retainBead := tc.teardown, tc.retainBead
 		for _, force := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/bead=%v/force=%v", teardown, retainBead, force), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/bead=%v/force=%v", teardown, tc.provider, retainBead, force), func(t *testing.T) {
 				if teardown == "incomplete" {
 					oldBound := stopPerTargetTimeoutDefault
 					stopPerTargetTimeoutDefault = 100 * time.Millisecond
@@ -86,6 +89,18 @@ esac
 					Session: config.SessionConfig{Provider: "exec:" + script}, Daemon: config.DaemonConfig{ShutdownTimeout: "1ns"},
 					Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}},
 				}
+				if tc.provider == "minimal" {
+					var err error
+					script, err = filepath.Abs(filepath.Join("..", "..", "contrib", "openclaw-bridge", "demo", "agent-exec.sh"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("DEMO_AGENT_STATE", t.TempDir())
+					cfg.Session.Provider = "exec:" + script
+				}
+				if tc.provider == "composed" {
+					cfg.Agents = append(cfg.Agents, config.Agent{Name: "helper", Session: "acp"})
+				}
 				writeStopLifecycleCityConfig(t, cityDir, cfg)
 				store, err := openCityStoreAt(cityDir)
 				if err != nil {
@@ -113,6 +128,16 @@ esac
 				oldFactory := sessionProviderForStopCity
 				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+				if tc.provider == "composed" {
+					sessionProviderForStopCity = newSessionProviderForCity
+					composed, err := sessionProviderForStopCity(cfg, cityDir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if backends := runtime.ListBackendSessions("runtime", composed, ""); len(backends) != 2 {
+						t.Fatalf("production composition has %d backends, want exec and ACP", len(backends))
+					}
+				}
 				for attempt := 0; attempt < 2; attempt++ {
 					var stdout, stderr bytes.Buffer
 					started := time.Now()
@@ -129,6 +154,9 @@ esac
 					if code != 0 || sp.IsRunning("worker") || !strings.Contains(stdout.String(), "City stopped.") {
 						t.Fatalf("attempt %d: code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
 					}
+				}
+				if tc.provider == "minimal" {
+					return // The in-tree demo has no operation log; absence is asserted above.
 				}
 				calls, err := os.ReadFile(script + ".calls")
 				if err != nil || strings.Count(string(calls), "stop\n") != 1 || (!force && !strings.Contains(string(calls), "interrupt\n")) {

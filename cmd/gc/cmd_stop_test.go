@@ -195,6 +195,59 @@ func TestStopRepairableSession(t *testing.T) {
 	}
 }
 
+type configuredStopBindingProvider struct {
+	*runtime.Fake
+}
+
+func (p configuredStopBindingProvider) BindForShutdown(string, string, string) (runtime.Provider, error) {
+	return p, nil
+}
+
+func TestConfiguredStopBackendSelection(t *testing.T) {
+	for _, conflict := range []string{"none", "at binding", "after binding", "unlisted at binding", "unlisted after binding"} {
+		t.Run(conflict, func(t *testing.T) {
+			primary := configuredStopBindingProvider{runtime.NewFake()}
+			other := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: strings.HasPrefix(conflict, "unlisted")}
+			startStopTestSession(t, primary.Fake, "worker", nil)
+			if strings.HasSuffix(conflict, "at binding") {
+				startStopTestSession(t, other.Fake, "worker", nil)
+			}
+			sp := auto.New(primary, other)
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/city", []stopTarget{{name: "worker", resolved: true}}, beads.NewMemStore(), sp)
+			if strings.HasSuffix(conflict, "at binding") {
+				if err == nil || len(targets) != 0 {
+					t.Fatalf("conflicting listing authorized: targets=%v err=%v", targets, err)
+				}
+				return
+			}
+			if err != nil || len(targets) != 1 {
+				t.Fatalf("sole listing backend refused: targets=%v err=%v", targets, err)
+			}
+			if strings.HasSuffix(conflict, "after binding") {
+				startStopTestSession(t, other.Fake, "worker", nil)
+			}
+			bound := providerForManualStopTargets(sp, bindings)
+			for name, mutate := range map[string]func() error{
+				"Interrupt": func() error { return bound.Interrupt("worker") },
+				"SendKeys":  func() error { return bound.SendKeys("worker", "C-c") },
+			} {
+				if err := mutate(); (err == nil) != (conflict == "none") {
+					t.Errorf("%s error = %v, conflict=%s", name, err, conflict)
+				}
+				if conflict != "none" && primary.CountCalls(name, "worker") != 0 {
+					t.Errorf("%s reached a conflicting backend", name)
+				}
+			}
+			if err := bound.Stop("worker"); (err == nil) != (conflict == "none") {
+				t.Errorf("Stop error = %v, conflict=%s", err, conflict)
+			}
+			if primary.IsRunning("worker") != (conflict != "none") || other.CountCalls("Stop", "worker") != 0 {
+				t.Fatal("shutdown did not preserve the selected backend boundary")
+			}
+		})
+	}
+}
+
 func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
 	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed", "resolved", "resolved unknown", "resolved conflict", "resolved replacement", "resolved deleted"} {
 		t.Run(mode, func(t *testing.T) {

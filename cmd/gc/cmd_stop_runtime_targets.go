@@ -55,7 +55,7 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 			return target, empty, err
 		}
 		if city == "" || ownerID == "" {
-			if city == "" && ownerID == "" && target.resolved && len(backends) == 1 {
+			if city == "" && ownerID == "" && target.resolved {
 				if binder, ok := backend.Provider.(interface {
 					BindForShutdown(string, string, string) (runtime.Provider, error)
 				}); ok {
@@ -151,12 +151,30 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 		if store == nil {
 			return fmt.Errorf("session store unavailable")
 		}
-		current := runtime.ListBackendSessions("runtime", sp, "")
+		current := confirmManualStopBackendAbsence(runtime.ListBackendSessions("runtime", sp, ""), target.name)
 		if _, err := runtime.MergeBackendListResults(current...); err != nil {
 			return err
 		}
-		if len(current) != 1 || current[0].Label != label {
-			return fmt.Errorf("runtime %q backend selection changed during shutdown", target.name)
+		listed := 0
+		for _, backend := range current {
+			if slices.Contains(backend.Names, target.name) {
+				listed++
+				if backend.Label != label || listed > 1 {
+					return fmt.Errorf("runtime %q backend selection changed or conflicts during shutdown", target.name)
+				}
+				continue
+			}
+			// A sibling's empty listing alone does not rule out an unlisted
+			// runtime. Require its exact ownership probe to confirm absence.
+			if _, _, err := stopSessionOwnership(backend.Provider, target.name); !runtime.IsSessionNotFound(err) {
+				if err != nil {
+					return fmt.Errorf("rechecking runtime %q backend %q: %w", target.name, backend.Label, err)
+				}
+				return fmt.Errorf("runtime %q absence is unconfirmed on backend %q", target.name, backend.Label)
+			}
+		}
+		if listed == 0 {
+			return runtime.ErrSessionNotFound
 		}
 		if target.sessionID != "" {
 			record, err := store.Get(target.sessionID)

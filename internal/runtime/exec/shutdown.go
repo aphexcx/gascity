@@ -15,27 +15,33 @@ type shutdownProvider struct {
 	cityPath     string
 	sessionID    string
 	metadataFree bool
+	unsupported  bool
 }
 
 // BindForShutdown binds a configured script runtime by name. Scripts that keep
 // no ownership metadata retain their name-based shutdown contract; partial,
 // foreign, or changed metadata is rejected before every shutdown mutation.
 func (p *Provider) BindForShutdown(name, cityPath, sessionID string) (runtime.Provider, error) {
-	city, id, err := p.shutdownOwnership(name)
+	city, id, unsupported, err := p.shutdownOwnership(name)
 	if err != nil {
 		return nil, fmt.Errorf("reading exec runtime %q shutdown ownership: %w", name, err)
 	}
-	bound := &shutdownProvider{Provider: p, name: name, cityPath: cityPath, sessionID: sessionID, metadataFree: city == "" && id == ""}
+	bound := &shutdownProvider{Provider: p, name: name, cityPath: cityPath, sessionID: sessionID, metadataFree: city == "" && id == "", unsupported: unsupported}
 	if err := bound.verifyOwnership(name, city, id); err != nil {
 		return nil, err
 	}
 	return bound, nil
 }
 
-func (p *Provider) shutdownOwnership(name string) (string, string, error) {
+func (p *Provider) shutdownOwnership(name string) (string, string, bool, error) {
 	city, cityErr := p.runStrictWithContext(context.Background(), p.timeout, nil, "get-meta", name, "GC_CITY_PATH")
 	id, idErr := p.runStrictWithContext(context.Background(), p.timeout, nil, "get-meta", name, "GC_SESSION_ID")
-	return city, id, errors.Join(cityErr, idErr)
+	// get-meta is optional. Only two unsupported reads establish that mode;
+	// mixed responses and ordinary failures remain errors.
+	if errors.Is(cityErr, errUnsupportedOperation) && errors.Is(idErr, errUnsupportedOperation) {
+		return "", "", true, nil
+	}
+	return city, id, false, errors.Join(cityErr, idErr)
 }
 
 func (p *shutdownProvider) verifyOwnership(name, city, id string) error {
@@ -52,9 +58,12 @@ func (p *shutdownProvider) verifyOwnership(name, city, id string) error {
 }
 
 func (p *shutdownProvider) verify(name string) error {
-	city, id, err := p.shutdownOwnership(name)
+	city, id, unsupported, err := p.shutdownOwnership(name)
 	if err != nil {
 		return fmt.Errorf("rechecking exec runtime %q shutdown ownership: %w", name, err)
+	}
+	if unsupported != p.unsupported {
+		return fmt.Errorf("preserving exec runtime %q: shutdown metadata support changed", name)
 	}
 	return p.verifyOwnership(name, city, id)
 }
