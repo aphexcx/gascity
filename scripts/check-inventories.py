@@ -135,6 +135,10 @@ def list_tests(root, package, tagged):
     command = ["go", "test", "-list", "^Test", "-run", "^$", "-count=1"]
     if tagged:
         command += ["-tags", "integration"]
+    if package == "./test/integration":
+        # Listing must work without tmux, gc, or any other runtime executable.
+        # The Go driver still has its normal PATH for compilation and linking.
+        command += ["-exec", "env PATH="]
     output = run(command + [package], root).stdout
     names = {line for line in output.splitlines() if re.fullmatch(r"Test\w+", line)}
     if not names:
