@@ -3,6 +3,7 @@ package subprocess
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -28,6 +30,164 @@ func shortTempDir(t *testing.T) string {
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
+}
+
+func TestPersistedProcessIdentity(t *testing.T) {
+	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "detached"
+			for key, value := range map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "session"} {
+				if err := p.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			record := `{"name":"detached","pid":42,"start":"original"}`
+			if state == "malformed" {
+				record = "{"
+			}
+			if state == "invalid" {
+				record = `{"name":"detached","pid":1,"start":"original"}`
+			}
+			if state == "partial" {
+				record = `{"name":"detached","pid":42}`
+			}
+			if state != "legacy" {
+				if err := p.SetMeta(name, "gc_process_identity", record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if state == "gone" || signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				if state == "reused" {
+					return "replacement", nil
+				}
+				if state == "denied" {
+					return "", syscall.EPERM
+				}
+				return "original", nil
+			}
+			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid != -42 || sig != syscall.SIGTERM {
+					t.Fatalf("signal(%d, %v)", pid, sig)
+				}
+				signals++
+				return nil
+			}
+			city, id, err := p.SessionOwnership(name)
+			bad := state == "denied" || state == "malformed" || state == "invalid" || state == "partial"
+			gone := state == "gone" || state == "reused"
+			if gone != runtime.IsSessionNotFound(err) || (bad && err == nil) {
+				t.Fatalf("ownership %q %q %v", city, id, err)
+			}
+			if !gone && !bad && (city != "/city" || id != "session") {
+				t.Fatal("lost owner")
+			}
+			if got := p.IsRunning(name); got != (state == "live") {
+				t.Fatalf("IsRunning = %v", got)
+			}
+			names, err := p.ListRunning("")
+			if bad != (err != nil) || (len(names) == 1) != (state == "live") {
+				t.Fatalf("ListRunning = %v, %v", names, err)
+			}
+			if state != "legacy" {
+				raw, _ := p.GetMeta(name, "gc_process_identity")
+				if raw != record {
+					t.Fatal("read changed metadata")
+				}
+			}
+			if err := p.Stop(name); (err != nil) != bad {
+				t.Fatalf("Stop = %v", err)
+			}
+			if (signals == 1) != (state == "live") {
+				t.Fatalf("signals = %d", signals)
+			}
+			if state == "legacy" {
+				raw, _ := p.GetMeta(name, "GC_CITY_PATH")
+				if raw != "/city" {
+					t.Fatal("legacy ownership deleted")
+				}
+			}
+		})
+	}
+}
+
+func TestStartProcessIdentityFailure(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", syscall.EPERM }
+	if err := p.Start(context.Background(), "failed", runtime.Config{Command: "exec sleep 300"}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	if p.IsRunning("failed") {
+		t.Fatal("failed start left a child")
+	}
+	if raw, _ := p.GetMeta("failed", "gc_process_identity"); raw != "" {
+		t.Fatal("failed start left identity")
+	}
+}
+
+func TestStartProcessIdentityGone(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	if err := p.Start(context.Background(), "exiting", runtime.Config{Command: "exec sleep 300"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("exiting") })
+	raw, err := p.GetMeta("exiting", "gc_process_identity")
+	var record struct {
+		PID   int
+		Start string
+	}
+	if err != nil || json.Unmarshal([]byte(raw), &record) != nil || record.PID <= 1 || record.Start != "" {
+		t.Fatalf("exiting identity = %q, %v", raw, err)
+	}
+}
+
+func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("legacy", "GC_CITY_PATH", "/city"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetMeta("legacy", "GC_SESSION_ID", "old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(context.Background(), "legacy", runtime.Config{Command: "exec sleep 300", Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("legacy") })
+	record, err := p.readProcessIdentity("legacy")
+	if err != nil || record == nil || record.Start == "" {
+		t.Fatalf("restart identity = %+v, %v", record, err)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacement(t *testing.T) {
+	p := newTestProvider(t)
+	const original = `{"name":"same","pid":42,"start":"old"}`
+	const replacement = `{"name":"same","pid":43,"start":"new"}`
+	if err := p.SetMeta("same", processIdentityMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(int, syscall.Signal) error {
+		signaled = true
+		return p.SetMeta("same", processIdentityMetaKey, replacement)
+	}
+	if err := p.Stop("same"); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := p.GetMeta("same", processIdentityMetaKey); raw != replacement {
+		t.Fatal("removed replacement metadata")
+	}
 }
 
 func TestGetMetaOwnershipExitAndReplacement(t *testing.T) {

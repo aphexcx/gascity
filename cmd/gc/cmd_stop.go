@@ -488,6 +488,9 @@ func listStopSurvivors(cityPath, cityName string, sp runtime.Provider, retained 
 				case ownerCity != "" && filepath.Clean(ownerCity) == filepath.Clean(cityPath):
 					survivors = true
 					result = errors.Join(result, fmt.Errorf("city-owned session %q remains after shutdown", name))
+					if diagnostic, ok := backend.Provider.(interface{ ShutdownDiagnostic(string) error }); ok {
+						result = errors.Join(result, diagnostic.ShutdownDiagnostic(name))
+					}
 				case retained[name]:
 					result = errors.Join(result, fmt.Errorf("cannot confirm deletion of session %q: ownership changed or is missing", name))
 				}

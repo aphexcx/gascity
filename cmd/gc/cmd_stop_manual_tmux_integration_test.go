@@ -104,7 +104,11 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					oldBound := stopPerTargetTimeoutDefault
-					stopPerTargetTimeoutDefault = 100 * time.Millisecond
+					// Only intentional survivors use the shortened bound. Real
+					// children retain the production budget for kernel reaping.
+					if !tc.child {
+						stopPerTargetTimeoutDefault = 100 * time.Millisecond
+					}
 					t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
 					cityDir := t.TempDir()
 					cfg := &config.City{

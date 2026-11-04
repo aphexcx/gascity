@@ -56,3 +56,8 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 func (s *seamBackedProvider) SessionOwnership(name string) (string, string, error) {
 	return s.raw.SessionOwnership(name)
 }
+
+// ShutdownDiagnostic preserves the provider's legacy-record remedy.
+func (s *seamBackedProvider) ShutdownDiagnostic(name string) error {
+	return s.raw.ShutdownDiagnostic(name)
+}

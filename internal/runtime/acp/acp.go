@@ -21,6 +21,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
@@ -65,6 +66,7 @@ type Provider struct {
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
 	activityWrite func(path string, data []byte) error // test seam
+	ops           providerOps
 }
 
 // Compile-time check.
@@ -102,6 +104,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		ops:      providerOps{processIdentity: proctable.ProcessIdentity, signal: syscall.Kill},
 	}
 }
 
@@ -128,6 +131,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Check socket for cross-process case.
 	if p.socketAlive(name) {
+		p.mu.Unlock()
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	}
+	if live, err := p.processRunning(name); err != nil {
+		p.mu.Unlock()
+		return fmt.Errorf("preparing session ownership for %q: %w", name, err)
+	} else if live {
 		p.mu.Unlock()
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
@@ -175,21 +185,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if command == "" {
 		clearSentinel()
 		return fmt.Errorf("acp provider requires a command")
-	}
-
-	// Publish ownership before the process and control socket become visible.
-	// Keep the sentinel lock through the atomic write so a stopped startup
-	// cannot overwrite a replacement session's identity.
-	p.mu.Lock()
-	if p.conns[name] != sentinel {
-		p.mu.Unlock()
-		return fmt.Errorf("session %q was stopped during startup", name)
-	}
-	ownershipErr := p.publishSessionOwnership(name, cfg.Env)
-	p.mu.Unlock()
-	if ownershipErr != nil {
-		clearSentinel()
-		return fmt.Errorf("publishing session ownership for %q: %w", name, ownershipErr)
 	}
 
 	cmd := exec.Command("sh", "-c", command)
@@ -260,6 +255,23 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
+
+	// Persist the kernel identity before exposing the control channel. The
+	// startup reservation must still belong to this child at publication.
+	p.mu.Lock()
+	var ownershipErr error
+	if p.conns[name] != sentinel {
+		ownershipErr = fmt.Errorf("session %q was stopped during startup", name)
+	} else {
+		ownershipErr = p.publishProcessOwnership(name, cfg.Env, cmd.Process.Pid)
+	}
+	p.mu.Unlock()
+	if ownershipErr != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		clearSentinel()
+		return fmt.Errorf("publishing session ownership for %q: %w", name, ownershipErr)
+	}
 
 	// Create control socket for cross-process discovery.
 	processDone := make(chan struct{})
@@ -498,12 +510,7 @@ func (p *Provider) Stop(name string) error {
 	}
 
 	// Fall back to socket (cross-process case).
-	err := p.stopBySocket(name)
-	if err == nil || runtime.IsSessionGone(err) {
-		p.cleanupMeta(name)
-		return nil
-	}
-	return err
+	return p.stopBySocket(name)
 }
 
 // Interrupt sends SIGINT to the named session's process.
@@ -534,7 +541,11 @@ func (p *Provider) IsRunning(name string) bool {
 	if ok {
 		return sc.alive()
 	}
-	return p.socketAlive(name)
+	if p.socketAlive(name) {
+		return true
+	}
+	live, _ := p.processRunning(name)
+	return live
 }
 
 // IsAttached always returns false — ACP sessions have no terminal.
@@ -714,14 +725,9 @@ const sessionOwnershipMetaKey = "gc_session_owner"
 type sessionOwnership struct {
 	CityPath  string `json:"city_path"`
 	SessionID string `json:"session_id"`
-}
-
-func (p *Provider) publishSessionOwnership(name string, env map[string]string) error {
-	data, err := json.Marshal(sessionOwnership{CityPath: env["GC_CITY_PATH"], SessionID: env["GC_SESSION_ID"]})
-	if err != nil {
-		return err
-	}
-	return p.SetMeta(name, sessionOwnershipMetaKey, string(data))
+	Name      string `json:"name,omitempty"`
+	PID       int    `json:"pid,omitempty"`
+	Start     string `json:"start"`
 }
 
 // SessionOwnership returns the host city path and session ID persisted at Start.
@@ -750,6 +756,28 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 	var owner sessionOwnership
 	if err := json.Unmarshal([]byte(data), &owner); err != nil {
 		return "", "", fmt.Errorf("decoding ownership for %q: %w", name, err)
+	}
+	if owner.CityPath != "" && owner.SessionID != "" {
+		if sc := p.conns[name]; sc != nil && sc.alive() {
+			return owner.CityPath, owner.SessionID, nil
+		}
+		if err := p.sendSocketCommand(name, "ping", 500*time.Millisecond); err != nil {
+			if !isUnavailableSocketError(err) {
+				return "", "", err
+			}
+			if err := validateProcessOwnership(name, owner); err != nil {
+				return "", "", err
+			}
+			if owner.PID != 0 {
+				live, err := proctable.ProcessIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+				if err != nil {
+					return "", "", err
+				}
+				if !live {
+					return "", "", runtime.ErrSessionNotFound
+				}
+			}
+		}
 	}
 	return owner.CityPath, owner.SessionID, nil
 }
@@ -870,6 +898,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		return nil, err
 	}
 	var names []string
+	seen := make(map[string]bool)
 	for _, e := range entries {
 		n := e.Name()
 		if !strings.HasSuffix(n, ".sock") {
@@ -881,9 +910,11 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 		if p.socketAlive(sn) {
 			names = append(names, sn)
+			seen[sn] = true
 		}
 	}
-	return names, nil
+	recorded, err := p.listRecordedProcesses(prefix, seen)
+	return append(names, recorded...), err
 }
 
 func (p *Provider) metaPath(name, key string) string {
@@ -1047,11 +1078,17 @@ func (p *Provider) stopBySocket(name string) error {
 	err := p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
 		if isUnavailableSocketError(err) {
+			if err := p.stopRecordedProcess(name); err != nil {
+				return err
+			}
 			os.Remove(p.sockPath(name)) //nolint:errcheck
 			_ = os.Remove(p.sockNamePath(name))
 			return nil
 		}
 		return err
+	}
+	if !p.socketAlive(name) {
+		return p.stopRecordedProcess(name)
 	}
 	return nil
 }

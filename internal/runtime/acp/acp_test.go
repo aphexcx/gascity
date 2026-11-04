@@ -13,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -36,6 +38,137 @@ func newTestProvider(t *testing.T) *Provider {
 		NudgeBusyTimeout:  2 * time.Second,
 		OutputBufferLines: 100,
 	})
+}
+
+func TestPersistedProcessIdentity(t *testing.T) {
+	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
+		t.Run(state, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "detached"
+			record := `{"city_path":"/city","session_id":"session","name":"detached","pid":42,"start":"original"}`
+			if state == "legacy" {
+				record = `{"city_path":"/city","session_id":"session"}`
+			}
+			if state == "malformed" {
+				record = "{"
+			}
+			if state == "invalid" {
+				record = `{"city_path":"/city","session_id":"session","name":"detached","pid":1,"start":"original"}`
+			}
+			if state == "partial" {
+				record = `{"city_path":"/city","session_id":"session","name":"detached","pid":42}`
+			}
+			if err := p.SetMeta(name, sessionOwnershipMetaKey, record); err != nil {
+				t.Fatal(err)
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if state == "gone" || signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				if state == "reused" {
+					return "replacement", nil
+				}
+				if state == "denied" {
+					return "", syscall.EPERM
+				}
+				return "original", nil
+			}
+			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid != -42 || sig != syscall.SIGTERM {
+					t.Fatalf("signal(%d, %v)", pid, sig)
+				}
+				signals++
+				return nil
+			}
+			city, id, err := p.SessionOwnership(name)
+			bad := state == "denied" || state == "malformed" || state == "invalid" || state == "partial"
+			gone := state == "gone" || state == "reused"
+			if gone != runtime.IsSessionNotFound(err) || (bad && err == nil) {
+				t.Fatalf("ownership %q %q %v", city, id, err)
+			}
+			if !gone && !bad && (city != "/city" || id != "session") {
+				t.Fatal("lost owner")
+			}
+			if got := p.IsRunning(name); got != (state == "live") {
+				t.Fatalf("IsRunning = %v", got)
+			}
+			names, err := p.ListRunning("")
+			if bad != (err != nil) || (len(names) == 1) != (state == "live") {
+				t.Fatalf("ListRunning = %v, %v", names, err)
+			}
+			if raw, _ := p.GetMeta(name, sessionOwnershipMetaKey); raw != record {
+				t.Fatal("read changed metadata")
+			}
+			if err := p.Stop(name); (err != nil) != bad {
+				t.Fatalf("Stop = %v", err)
+			}
+			if (signals == 1) != (state == "live") {
+				t.Fatalf("signals = %d", signals)
+			}
+			if state == "legacy" {
+				raw, _ := p.GetMeta(name, sessionOwnershipMetaKey)
+				if raw != record {
+					t.Fatal("legacy ownership deleted")
+				}
+			}
+		})
+	}
+}
+
+func TestStartProcessIdentityFailure(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.processIdentity = func(int) (string, error) { return "", syscall.EPERM }
+	if err := p.Start(context.Background(), "failed", runtime.Config{Command: fakeACPShellCommand()}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	if p.IsRunning("failed") {
+		t.Fatal("failed start left a child")
+	}
+	if raw, _ := p.GetMeta("failed", sessionOwnershipMetaKey); raw != "" {
+		t.Fatal("failed start left identity")
+	}
+}
+
+func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.SetMeta("legacy", sessionOwnershipMetaKey, `{"city_path":"/city","session_id":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Start(context.Background(), "legacy", runtime.Config{Command: fakeACPShellCommand(), Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "new"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop("legacy") })
+	record, err := p.readProcessOwnership("legacy")
+	if err != nil || record == nil || record.Start == "" || record.SessionID != "new" {
+		t.Fatalf("restart identity = %+v, %v", record, err)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacement(t *testing.T) {
+	p := newTestProvider(t)
+	const original = `{"name":"same","pid":42,"start":"old"}`
+	const replacement = `{"name":"same","pid":43,"start":"new"}`
+	if err := p.SetMeta("same", sessionOwnershipMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(int, syscall.Signal) error {
+		signaled = true
+		return p.SetMeta("same", sessionOwnershipMetaKey, replacement)
+	}
+	if err := p.Stop("same"); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := p.GetMeta("same", sessionOwnershipMetaKey); raw != replacement {
+		t.Fatal("removed replacement metadata")
+	}
 }
 
 var testCounter atomic.Int64
@@ -194,7 +327,7 @@ func TestStartRejectsUnwritableOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := p.Start(context.Background(), name, runtime.Config{Command: "unused"})
-	if err == nil || !strings.Contains(err.Error(), "publishing session ownership") {
+	if err == nil || !strings.Contains(err.Error(), "session ownership") {
 		t.Fatalf("Start error=%v, want ownership publication failure before spawn", err)
 	}
 	if p.IsRunning(name) {

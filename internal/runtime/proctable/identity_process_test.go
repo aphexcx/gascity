@@ -2,17 +2,10 @@
 
 package proctable
 
-import (
-	"os/exec"
-	"testing"
-)
+import "testing"
 
 func TestProcessIdentityOpaqueChild(t *testing.T) {
-	cmd := exec.Command("/bin/sleep", "300")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	cmd, _ := startKillTestProcess(t, "/bin/sleep", []string{"300"}, nil)
 	identity, err := ProcessIdentity(cmd.Process.Pid)
 	if err != nil || identity == "" {
 		t.Fatalf("ProcessIdentity: %q, %v", identity, err)
