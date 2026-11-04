@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -20,9 +21,8 @@ type shutdownProvider struct {
 // no ownership metadata retain their name-based shutdown contract; partial,
 // foreign, or changed metadata is rejected before every shutdown mutation.
 func (p *Provider) BindForShutdown(name, cityPath, sessionID string) (runtime.Provider, error) {
-	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
-	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
-	if err := errors.Join(cityErr, idErr); err != nil {
+	city, id, err := p.shutdownOwnership(name)
+	if err != nil {
 		return nil, fmt.Errorf("reading exec runtime %q shutdown ownership: %w", name, err)
 	}
 	bound := &shutdownProvider{Provider: p, name: name, cityPath: cityPath, sessionID: sessionID, metadataFree: city == "" && id == ""}
@@ -30,6 +30,12 @@ func (p *Provider) BindForShutdown(name, cityPath, sessionID string) (runtime.Pr
 		return nil, err
 	}
 	return bound, nil
+}
+
+func (p *Provider) shutdownOwnership(name string) (string, string, error) {
+	city, cityErr := p.runStrictWithContext(context.Background(), p.timeout, nil, "get-meta", name, "GC_CITY_PATH")
+	id, idErr := p.runStrictWithContext(context.Background(), p.timeout, nil, "get-meta", name, "GC_SESSION_ID")
+	return city, id, errors.Join(cityErr, idErr)
 }
 
 func (p *shutdownProvider) verifyOwnership(name, city, id string) error {
@@ -46,9 +52,8 @@ func (p *shutdownProvider) verifyOwnership(name, city, id string) error {
 }
 
 func (p *shutdownProvider) verify(name string) error {
-	city, cityErr := p.GetMeta(name, "GC_CITY_PATH")
-	id, idErr := p.GetMeta(name, "GC_SESSION_ID")
-	if err := errors.Join(cityErr, idErr); err != nil {
+	city, id, err := p.shutdownOwnership(name)
+	if err != nil {
 		return fmt.Errorf("rechecking exec runtime %q shutdown ownership: %w", name, err)
 	}
 	return p.verifyOwnership(name, city, id)

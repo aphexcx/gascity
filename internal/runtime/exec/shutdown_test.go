@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -77,5 +78,55 @@ esac
 `))
 	if _, err := p.BindForShutdown("worker", "/city", "original"); err == nil {
 		t.Fatal("partial metadata accepted as a metadata-free runtime")
+	}
+}
+
+func TestShutdownBindingRejectsOwnershipReadErrors(t *testing.T) {
+	for _, code := range []int{1, 2} {
+		for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID"} {
+			for _, afterBinding := range []bool{false, true} {
+				t.Run(fmt.Sprintf("exit=%d/key=%s/after_binding=%v", code, key, afterBinding), func(t *testing.T) {
+					script := writeScript(t, t.TempDir(), fmt.Sprintf(`
+case "$1" in
+get-meta) if [ -f "$0.reject-$3" ]; then exit %d; fi ;;
+stop|interrupt|send-keys) echo "$1" >> "$0.calls" ;;
+*) exit 2 ;;
+esac
+`, code))
+					rejectRead := func() {
+						t.Helper()
+						if err := os.WriteFile(script+".reject-"+key, nil, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if !afterBinding {
+						rejectRead()
+					}
+					bound, err := NewProvider(script).BindForShutdown("worker", "/city", "original")
+					if !afterBinding {
+						if err == nil {
+							t.Fatal("failed metadata read authorized initial binding")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					rejectRead()
+					for name, mutate := range map[string]func() error{
+						"stop":      func() error { return bound.Stop("worker") },
+						"interrupt": func() error { return bound.Interrupt("worker") },
+						"send keys": func() error { return bound.SendKeys("worker", "C-c") },
+					} {
+						if err := mutate(); err == nil {
+							t.Errorf("%s accepted a failed metadata read", name)
+						}
+					}
+					if calls, err := os.ReadFile(script + ".calls"); !os.IsNotExist(err) {
+						t.Fatalf("unreadable ownership reached script: %q, %v", calls, err)
+					}
+				})
+			}
+		}
 	}
 }

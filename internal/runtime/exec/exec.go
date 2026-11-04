@@ -75,6 +75,18 @@ func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...s
 // runWithContext executes the script using the given parent context with
 // the specified timeout, optionally piping stdinData to its stdin.
 func (p *Provider) runWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
+	out, err := p.runStrictWithContext(parent, dur, stdinData, args...)
+	if errors.Is(err, errUnsupportedOperation) {
+		return "", nil
+	}
+	return out, err
+}
+
+var errUnsupportedOperation = errors.New("operation unsupported")
+
+// runStrictWithContext preserves unsupported-operation failures for callers
+// that must distinguish an unknown result from a successful empty response.
+func (p *Provider) runStrictWithContext(parent context.Context, dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
 
@@ -111,6 +123,10 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// Neither result claims physical signal-delivery ordering.
 	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		return "", fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), errUnsupportedOperation)
 	}
 	return "", p.runError(err, stderr.String(), args)
 }
