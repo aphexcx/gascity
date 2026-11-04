@@ -199,7 +199,7 @@ func TestHardenedKeysTimer(t *testing.T) {
 		go h.Run(ctx)
 		synctest.Wait()
 		writeTrustedKey(t, dir, "two", pub)
-		time.Sleep(time.Second) // Virtual time; no wall-clock wait.
+		<-time.After(time.Second) // Advance virtual time to the first refresh deadline.
 		synctest.Wait()
 		if got := hardenedRead(t, h, priv, "two", "timer"); got != 200 {
 			t.Fatalf("timer did not register new key: %d", got)
