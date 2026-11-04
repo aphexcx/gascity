@@ -1,10 +1,9 @@
 package t3bridge
 
 import (
-	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -53,24 +52,28 @@ func TestSeamBackedShutdownComplete(t *testing.T) {
 	}
 }
 
+type shutdownSnapshotTransport func(*http.Request) (*http.Response, error)
+
+// RoundTrip serves the snapshot through the test's transport callback.
+func (f shutdownSnapshotTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func TestSeamBackedShutdownCompleteStartDuringSnapshot(t *testing.T) {
 	backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	previous := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	http.DefaultTransport = shutdownSnapshotTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/api/orchestration/snapshot" {
-			t.Errorf("unexpected request path %q", r.URL.Path)
-			http.NotFound(w, r)
-			return
+			return nil, errors.New("unexpected request path " + r.URL.Path)
 		}
 		// A start can be recorded while the snapshot RPC is in flight, before
 		// the new thread has materialized in that snapshot.
 		backed.raw.setRecentStart("worker", time.Now())
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{"threads": []interface{}{}}); err != nil {
-			t.Errorf("snapshot response: %v", err)
-		}
-	}))
-	defer server.Close()
-	t.Setenv("T3_WS_URL", "ws"+strings.TrimPrefix(server.URL, "http")+"/ws")
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"threads":[]}`)),
+		}, nil
+	})
 	completion, ok := sp.(interface{ ShutdownComplete(string) (bool, error) })
 	if !ok {
 		t.Fatal("production adapter lacks shutdown completion observation")
