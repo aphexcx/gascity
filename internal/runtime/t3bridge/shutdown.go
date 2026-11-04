@@ -45,7 +45,8 @@ func (p *Provider) ShutdownComplete(name string) (bool, error) {
 			return false, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
 		}
 	}
-	return complete, nil
+	// A start may have been recorded while the snapshot RPC was in flight.
+	return complete && !p.withinRecentStart(name), nil
 }
 
 // BindForShutdown verifies ownership and pins the native thread used by all
