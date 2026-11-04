@@ -81,7 +81,7 @@ func (p *Provider) processRunning(name string) (bool, error) {
 	if err != nil || record == nil {
 		return false, err
 	}
-	return proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+	return proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity, p.ops.signal)
 }
 
 func (p *Provider) persistProcessIdentity(name string, pid int) error {
@@ -129,7 +129,7 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 		if !strings.HasPrefix(record.Name, prefix) || seen[record.Name] {
 			continue
 		}
-		live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+		live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity, p.ops.signal)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +162,7 @@ func (p *Provider) cleanupProcessGeneration(name string, record *processIdentity
 		if *current != *record {
 			return fmt.Errorf("preserving replacement subprocess %q during cleanup", name)
 		}
-		if live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity); err != nil {
+		if live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity, p.ops.signal); err != nil {
 			return err
 		} else if live {
 			return fmt.Errorf("preserving session %q: process group remains", name)
@@ -203,7 +203,7 @@ func (p *Provider) recordedOwnership(name string) error {
 	if recordErr != nil || record == nil {
 		return recordErr
 	}
-	live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+	live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity, p.ops.signal)
 	if err != nil {
 		return err
 	}

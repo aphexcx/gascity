@@ -32,6 +32,34 @@ func newTestProvider(t *testing.T) *Provider {
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
+func checkTestProcessCleanup(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	p.mu.Lock()
+	sc := p.procs[name]
+	p.mu.Unlock()
+	if sc == nil {
+		t.Fatal("missing test process")
+	}
+	t.Cleanup(func() {
+		if err := p.Stop(name); err != nil {
+			t.Errorf("Stop(%q) during cleanup: %v", name, err)
+			// Reap this fixture even when the cleanup assertion fails.
+			if err := sc.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Errorf("killing test child: %v", err)
+			}
+		}
+		select {
+		case <-sc.done:
+		case <-time.After(testutil.ExecRaceTimeout):
+			t.Fatal("test child was not reaped")
+		}
+		live, err := proctable.ProcessIdentityMatches(sc.identity.PID, sc.identity.Start, proctable.ProcessIdentity)
+		if err != nil || live {
+			t.Errorf("test child remains in process table: pid=%d live=%v err=%v", sc.identity.PID, live, err)
+		}
+	})
+}
+
 func listenTestSocket(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
@@ -47,6 +75,7 @@ func TestCleanupSerializesReplacementPublication(t *testing.T) {
 	}
 	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
 	finished := make(chan error, 1)
+	p.ops.signal = func(int, syscall.Signal) error { return syscall.ESRCH }
 	var listener net.Listener
 	p.ops.beforeCleanup = func() {
 		// This is the final compare/delete boundary. A second process's
@@ -176,6 +205,9 @@ func TestPersistedProcessIdentity(t *testing.T) {
 				return "original", nil
 			}
 			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid == -42 && sig == 0 {
+					return syscall.ESRCH
+				}
 				if pid != -42 || sig != syscall.SIGTERM {
 					t.Fatalf("signal(%d, %v)", pid, sig)
 				}
@@ -378,7 +410,7 @@ func testOwnershipExitAndReplacement(t *testing.T, p *Provider, paired bool) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = p.Stop(name) })
+	checkTestProcessCleanup(t, p, name)
 	artifacts := []string{p.sockPath(name), p.sockNamePath(name), p.metaPath(name, "GC_CITY_PATH"), p.metaPath(name, "GC_SESSION_ID")}
 	for _, path := range artifacts {
 		if _, err := os.Lstat(path); err != nil {
@@ -429,7 +461,12 @@ func testOwnershipExitAndReplacement(t *testing.T, p *Provider, paired bool) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = replacement.Stop(name) })
+	checkTestProcessCleanup(t, replacement, name)
+	t.Cleanup(func() {
+		if err := replacement.SetMeta(name, "GC_SESSION_ID", "replacement"); err != nil {
+			t.Errorf("restoring replacement ownership for cleanup: %v", err)
+		}
+	})
 	for label, reader := range readers {
 		city, id, err := readTestOwnership(t, reader, name, paired)
 		if err != nil || city != "/cities/foreign" || id != "replacement" {
@@ -580,8 +617,9 @@ func TestStartCreatesProcess(t *testing.T) {
 func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.Start(context.Background(), "meta-start", runtime.Config{
-		Command: "sleep 3600",
+		Command: "exec sleep 3600",
 		Env: map[string]string{
+			"GC_CITY_PATH":      "/cities/test",
 			"GC_SESSION_ID":     "bead-123",
 			"GC_INSTANCE_TOKEN": "token-456",
 			"GC_TEMPLATE":       "worker",
@@ -590,9 +628,10 @@ func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer p.Stop("meta-start") //nolint:errcheck
+	checkTestProcessCleanup(t, p, "meta-start")
 
 	for key, want := range map[string]string{
+		"GC_CITY_PATH":      "/cities/test",
 		"GC_SESSION_ID":     "bead-123",
 		"GC_INSTANCE_TOKEN": "token-456",
 		"GC_TEMPLATE":       "worker",
@@ -1741,7 +1780,10 @@ func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
 		}
 		return "old", nil
 	}
-	p.ops.signal = func(int, syscall.Signal) error {
+	p.ops.signal = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return syscall.ESRCH
+		}
 		signaled = true
 		if err := p.SetMeta(name, processIdentityMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
 			return err

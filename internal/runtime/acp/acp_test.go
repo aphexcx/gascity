@@ -57,6 +57,7 @@ func TestCleanupSerializesReplacementPublication(t *testing.T) {
 	}
 	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
 	finished := make(chan error, 1)
+	p.ops.signal = func(int, syscall.Signal) error { return syscall.ESRCH }
 	var listener net.Listener
 	p.ops.beforeCleanup = func() {
 		// This is the final compare/delete boundary. A second process's
@@ -176,6 +177,9 @@ func TestPersistedProcessIdentity(t *testing.T) {
 				return "original", nil
 			}
 			p.ops.signal = func(pid int, sig syscall.Signal) error {
+				if pid == -42 && sig == 0 {
+					return syscall.ESRCH
+				}
 				if pid != -42 || sig != syscall.SIGTERM {
 					t.Fatalf("signal(%d, %v)", pid, sig)
 				}
@@ -658,7 +662,13 @@ with open(os.environ["GASCITY_ACP_DRAIN_PID"], "w") as marker:
 					}
 					return identity, err
 				}
-				p.ops.signal = func(int, syscall.Signal) error { signals++; return nil }
+				p.ops.signal = func(pid int, sig syscall.Signal) error {
+					if sig == 0 {
+						return syscall.Kill(pid, sig)
+					}
+					signals++
+					return nil
+				}
 				check := func(t *testing.T) {
 					started := time.Now()
 					err := p.Stop(name)
@@ -1770,7 +1780,10 @@ func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
 		}
 		return "old", nil
 	}
-	p.ops.signal = func(int, syscall.Signal) error {
+	p.ops.signal = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return syscall.ESRCH
+		}
 		signaled = true
 		if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
 			return err

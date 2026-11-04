@@ -36,6 +36,9 @@ func TestTerminateProcessGroupIdentityFence(t *testing.T) {
 					if pid != -42 {
 						t.Fatalf("signal target = %d, want group -42", pid)
 					}
+					if sig == 0 {
+						return syscall.ESRCH
+					}
 					signals = append(signals, sig)
 					if state == "signal-error" {
 						return syscall.EPERM
@@ -67,6 +70,52 @@ func TestTerminateProcessGroupIdentityFence(t *testing.T) {
 	}
 }
 
+func TestProcessGroupIdentityProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		probe   error
+		live    bool
+		wantErr error
+	}{
+		{name: "present", live: true},
+		{name: "absent", probe: syscall.ESRCH},
+		{name: "permission denied", probe: syscall.EPERM, live: true},
+		{name: "probe failure", probe: syscall.EIO, wantErr: syscall.EIO},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := 0
+			live, err := ProcessGroupIdentityMatches(42, "original", func(int) (string, error) {
+				return "", ErrProcessGone
+			}, func(pid int, sig syscall.Signal) error {
+				if pid != -42 || sig != 0 {
+					t.Fatalf("probe = (%d, %v), want (-42, 0)", pid, sig)
+				}
+				probes++
+				return tc.probe
+			})
+			if probes != 1 || live != tc.live || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("probes=%d live=%v err=%v; want one probe, live=%v err=%v", probes, live, err, tc.live, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestTerminateProcessGroupUsesProbe(t *testing.T) {
+	probes := 0
+	err := TerminateProcessGroup(42, "original", func(int) (string, error) {
+		return "", ErrProcessGone
+	}, func(pid int, sig syscall.Signal) error {
+		if pid != -42 || sig != 0 {
+			t.Fatalf("probe = (%d, %v), want (-42, 0)", pid, sig)
+		}
+		probes++
+		return syscall.EIO
+	})
+	if probes != 1 || !errors.Is(err, syscall.EIO) {
+		t.Fatalf("probes=%d err=%v; want one injected probe and its error", probes, err)
+	}
+}
+
 func TestProcessIdentityMatchesInvalidAndEmpty(t *testing.T) {
 	for _, pid := range []int{-1, 0, 1} {
 		if _, err := ProcessIdentityMatches(pid, "start", func(int) (string, error) { t.Fatal("invalid pid read"); return "", nil }); err == nil {
@@ -88,7 +137,10 @@ func TestTerminateProcessGroupMissingLeaderSurvivor(t *testing.T) {
 		started := time.Now()
 		err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
 			return "", ErrProcessGone
-		}, func(int, syscall.Signal) error {
+		}, func(pid int, sig syscall.Signal) error {
+			if sig == 0 {
+				return syscall.Kill(pid, sig)
+			}
 			signals++
 			return nil
 		})
@@ -121,7 +173,10 @@ func TestTerminateProcessGroupWaitsForLeaderlessDrain(t *testing.T) {
 				}
 			}
 			return "", ErrProcessGone
-		}, func(int, syscall.Signal) error {
+		}, func(pid int, sig syscall.Signal) error {
+			if sig == 0 {
+				return syscall.Kill(pid, sig)
+			}
 			signals++
 			return nil
 		})

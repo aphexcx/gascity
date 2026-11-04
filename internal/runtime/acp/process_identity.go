@@ -85,7 +85,7 @@ func (p *Provider) processRunning(name string) (bool, error) {
 	if err != nil || owner == nil || owner.PID == 0 {
 		return false, err
 	}
-	return proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+	return proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal)
 }
 
 func (p *Provider) publishProcessOwnership(name string, env map[string]string, pid int) error {
@@ -139,7 +139,7 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 		if !strings.HasPrefix(owner.Name, prefix) || seen[owner.Name] {
 			continue
 		}
-		live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+		live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +173,7 @@ func (p *Provider) cleanupProcessGeneration(name string, owner *sessionOwnership
 			return fmt.Errorf("preserving replacement ACP session %q during cleanup", name)
 		}
 		if owner.PID != 0 {
-			if live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity); err != nil {
+			if live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal); err != nil {
 				return err
 			} else if live {
 				return fmt.Errorf("preserving session %q: process group remains", name)

@@ -11,8 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// resolveRuntimeOnlyStopTargets verifies every shutdown target's ownership and
-// lets the worker boundary bypass only a confirmed deleted session record.
+// resolveRuntimeOnlyStopTargets verifies every shutdown target's provider
+// binding and session record before crossing the worker boundary.
 func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store beads.Store, sp runtime.Provider) ([]stopTarget, runtime.Provider, error) {
 	var resolved []stopTarget
 	var bindings []runtime.BackendListResult
@@ -55,6 +55,17 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 			return target, empty, err
 		}
 		if city == "" || ownerID == "" {
+			if city == "" && ownerID == "" && target.resolved && len(backends) == 1 {
+				if binder, ok := backend.Provider.(interface {
+					BindForShutdown(string, string, string) (runtime.Provider, error)
+				}); ok {
+					provider, err := binder.BindForShutdown(target.name, cityPath, target.sessionID)
+					if err != nil {
+						return target, empty, err
+					}
+					return bindConfiguredStopTarget(target, store, sp, backend.Label, provider)
+				}
+			}
 			// Legacy metadata reads cannot distinguish an empty backend from
 			// missing ownership. Preserve the manual-stop compatibility rule;
 			// typed ownership providers must positively report absence.
@@ -92,7 +103,7 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 	if err != nil && !target.runtimeOnly {
 		return target, empty, fmt.Errorf("checking session record %q: %w", id, err)
 	}
-	if err == nil && (record.Type != "session" || (record.Metadata["session_name"] != "" && record.Metadata["session_name"] != target.name)) {
+	if err == nil && (!session.IsSessionBeadOrRepairable(record) || (record.Metadata["session_name"] != "" && record.Metadata["session_name"] != target.name)) {
 		return target, empty, fmt.Errorf("session record %q does not identify this runtime", id)
 	}
 	backend := backends[owners[0]]
@@ -130,4 +141,50 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 		return nil
 	}}
 	return target, runtime.BackendListResult{Label: backend.Label, Provider: verified, Names: []string{target.name}}, nil
+}
+
+// bindConfiguredStopTarget retains a provider-authorized name binding when a
+// configured runtime has no ownership metadata. Providers that require an
+// ownership record must refuse that binding themselves.
+func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.Provider, label string, provider runtime.Provider) (stopTarget, runtime.BackendListResult, error) {
+	verify := func() error {
+		if store == nil {
+			return fmt.Errorf("session store unavailable")
+		}
+		current := runtime.ListBackendSessions("runtime", sp, "")
+		if _, err := runtime.MergeBackendListResults(current...); err != nil {
+			return err
+		}
+		if len(current) != 1 || current[0].Label != label {
+			return fmt.Errorf("runtime %q backend selection changed during shutdown", target.name)
+		}
+		if target.sessionID != "" {
+			record, err := store.Get(target.sessionID)
+			if err != nil {
+				return fmt.Errorf("checking configured session %q: %w", target.sessionID, err)
+			}
+			if !session.IsSessionBeadOrRepairable(record) || (record.Metadata["session_name"] != "" && record.Metadata["session_name"] != target.name) {
+				return fmt.Errorf("session record %q does not identify this runtime", target.sessionID)
+			}
+			return nil
+		}
+		records, err := loadSessionBeads(store)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if record.Metadata["session_name"] == target.name {
+				return fmt.Errorf("runtime %q gained a session record during shutdown", target.name)
+			}
+		}
+		return nil
+	}
+	if err := verify(); err != nil {
+		return target, runtime.BackendListResult{}, err
+	}
+	target.runtimeOnly = target.sessionID == ""
+	return target, runtime.BackendListResult{
+		Label: label, Names: []string{target.name},
+		Provider: &verifiedManualStopBackend{Provider: provider, verify: verify},
+	}, nil
 }

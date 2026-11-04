@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -129,6 +130,66 @@ func TestStopScopedOrphanRevalidatesReplacement(t *testing.T) {
 					t.Fatal("replacement was interrupted")
 				}
 			})
+		})
+	}
+}
+
+type stopRepairFailureStore struct {
+	beads.Store
+}
+
+func (s stopRepairFailureStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Type != nil {
+		return errors.New("repair persistence unavailable")
+	}
+	return s.Store.Update(id, opts)
+}
+
+func TestStopRepairableSession(t *testing.T) {
+	for _, failRepair := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repair_failure=%v", failRepair), func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
+				"session_name": "test-worker", "state": "active",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			empty := ""
+			if err := mem.Update(b.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+				t.Fatal(err)
+			}
+			var store beads.Store = mem
+			if failRepair {
+				store = stopRepairFailureStore{Store: mem}
+			}
+			var logs lockedBuffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			sp := runtime.NewFake()
+			startStopTestSession(t, sp, "test-worker", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
+			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker", sessionID: b.ID}}, store, sp)
+			if err != nil || len(targets) != 1 || targets[0].runtimeOnly {
+				t.Fatalf("repairable session excluded: targets=%v err=%v", targets, err)
+			}
+			if err := stopTargetThroughWorkerBoundary(targets[0], store, provider, &config.City{}); err != nil {
+				t.Fatal(err)
+			}
+			if sp.IsRunning("test-worker") || sp.CountCalls("Stop", "test-worker") != 1 {
+				t.Fatal("verified repairable session was not stopped")
+			}
+			got, err := mem.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failRepair {
+				if got.Type != "" || !strings.Contains(logs.String(), "repair persistence unavailable") || !strings.Contains(logs.String(), b.ID) {
+					t.Fatalf("failed repair was not retained and reported: type=%q logs=%q", got.Type, logs.String())
+				}
+			} else if got.Type != sessionpkg.BeadType {
+				t.Fatalf("type = %q, want repaired session", got.Type)
+			}
 		})
 	}
 }

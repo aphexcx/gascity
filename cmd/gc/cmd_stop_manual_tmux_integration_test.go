@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,12 +23,82 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/acp"
+	execruntime "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/subprocess"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
+
+func TestCmdStopExecWithoutOwnership(t *testing.T) {
+	for _, retainBead := range []bool{false, true} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("bead=%v/force=%v", retainBead, force), func(t *testing.T) {
+				cityDir := t.TempDir()
+				script := filepath.Join(t.TempDir(), "runtime")
+				if err := os.WriteFile(script, []byte(`#!/bin/sh
+case "$1" in
+start) : > "$0.running" ;;
+stop) printf 'stop\n' >> "$0.calls"; rm -f "$0.running" ;;
+interrupt) printf 'interrupt\n' >> "$0.calls" ;;
+is-running) if [ -f "$0.running" ]; then echo true; else echo false; fi ;;
+list-running) if [ -f "$0.running" ]; then echo worker; fi ;;
+get-meta) if [ -f "$0.$3" ]; then cat "$0.$3"; fi ;;
+set-meta) cat > "$0.$3" ;;
+*) exit 2 ;;
+esac
+`), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				one := 1
+				cfg := &config.City{
+					Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"},
+					Session: config.SessionConfig{Provider: "exec:" + script}, Daemon: config.DaemonConfig{ShutdownTimeout: "1ns"},
+					Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}},
+				}
+				writeStopLifecycleCityConfig(t, cityDir, cfg)
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id := ""
+				if retainBead {
+					b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+						"session_name": "worker", "template": "worker", "state": "active",
+					}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					id = b.ID
+				}
+				sp := execruntime.NewSeamBacked(script)
+				if err := sp.Start(context.Background(), "worker", runtime.Config{Env: map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": id}}); err != nil {
+					t.Fatal(err)
+				}
+				for _, key := range []string{"GC_CITY_PATH", "GC_SESSION_ID"} {
+					if value, err := sp.GetMeta("worker", key); err != nil || value != "" {
+						t.Fatalf("script unexpectedly persisted %s=%q: %v", key, value, err)
+					}
+				}
+				oldFactory := sessionProviderForStopCity
+				t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+				for attempt := 0; attempt < 2; attempt++ {
+					var stdout, stderr bytes.Buffer
+					code := cmdStopBody(cityDir, cfg, force, &stdout, &stderr)
+					if code != 0 || sp.IsRunning("worker") || !strings.Contains(stdout.String(), "City stopped.") {
+						t.Fatalf("attempt %d: code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
+					}
+				}
+				calls, err := os.ReadFile(script + ".calls")
+				if err != nil || strings.Count(string(calls), "stop\n") != 1 || (!force && !strings.Contains(string(calls), "interrupt\n")) {
+					t.Fatalf("shutdown calls = %q, err=%v", calls, err)
+				}
+			})
+		}
+	}
+}
 
 func TestCmdStopSubprocessChildHelper(t *testing.T) {
 	ready := os.Getenv("GASCITY_STOP_CHILD_READY")

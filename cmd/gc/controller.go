@@ -1022,8 +1022,8 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
 //
-// It reports whether every teardown completed successfully. Individual failures,
-// including lifecycle refusals and timeouts, are written to stderr.
+// Individual failures, including lifecycle refusals and timeouts, are written
+// to stderr.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1032,8 +1032,8 @@ func gracefulStopAll(
 	cfg *config.City,
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
-) bool {
-	return gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+) {
+	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
 }
 
 func gracefulStopAllWithForceSignal(
@@ -1045,9 +1045,9 @@ func gracefulStopAllWithForceSignal(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 	forceStopRequested func() bool,
-) bool {
+) {
 	targets := stopTargetsForNames(names, cfg, store.Store, stderr)
-	return gracefulStopTargets(targets, sp, timeout, rec, cfg, store, stdout, stderr, forceStopRequested)
+	gracefulStopTargets(targets, sp, timeout, rec, cfg, store, stdout, stderr, forceStopRequested)
 }
 
 func gracefulStopTargets(

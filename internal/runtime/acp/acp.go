@@ -793,7 +793,7 @@ func (p *Provider) SessionOwnership(name string) (string, string, error) {
 				return "", "", err
 			}
 			if owner.PID != 0 {
-				live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+				live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal)
 				if err != nil {
 					return "", "", err
 				}

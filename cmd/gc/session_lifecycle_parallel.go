@@ -643,7 +643,7 @@ type stopTarget struct {
 	order       int
 	resolved    bool
 	poolManaged bool
-	// runtimeOnly targets carry verified ownership without a persisted session.
+	// runtimeOnly targets carry a verified provider binding without a persisted session.
 	runtimeOnly bool
 }
 
