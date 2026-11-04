@@ -124,6 +124,7 @@ rest_smoke_tests=(
 # canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
+  TestCmdStopConfiguredT3PreservedHistory
   TestCmdStopExecWithoutOwnership
   TestCmdStopRealSubprocessGracefulManual
   TestCmdStopRealSubprocessRemovedTemplateOrphan
