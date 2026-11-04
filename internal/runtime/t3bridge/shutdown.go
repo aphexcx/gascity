@@ -15,15 +15,37 @@ type shutdownProvider struct {
 	threadID  string
 }
 
-// ShutdownComplete reports runtime teardown without requiring preserved thread
-// history or its ownership metadata to disappear. Snapshot uncertainty remains
-// an error, and a recent start cannot confirm completion.
+// ShutdownComplete reports teardown only when all eligible threads carrying the
+// session name are stopped, without requiring preserved history or ownership to
+// disappear. Snapshot uncertainty remains an error, and a recent start cannot
+// confirm completion.
 func (p *Provider) ShutdownComplete(name string) (bool, error) {
 	if p.withinRecentStart(name) {
 		return false, nil
 	}
-	liveness, err := p.ObserveLivenessWithError(name, nil)
-	return err == nil && !liveness.Running, err
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		return false, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+	}
+	complete := true
+	for _, thread := range snapshotThreads(snapshot) {
+		if !snapshotThreadEligible(thread) || SessionNameFromMetadata(threadCustomMetadata(thread)) != name {
+			continue
+		}
+		if snapshotThreadBinding(thread) == nil {
+			return false, fmt.Errorf("%w: t3bridge snapshot has incomplete binding for %q", runtime.ErrRuntimeUnavailable, name)
+		}
+		status := snapshotThreadSessionStatus(thread)
+		switch classifyT3SessionStatus(status) {
+		case t3SessionStatusLive:
+			complete = false
+		case t3SessionStatusAbsent:
+			// Retain stopped history while checking the remaining threads.
+		default:
+			return false, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
+		}
+	}
+	return complete, nil
 }
 
 // BindForShutdown verifies ownership and pins the native thread used by all

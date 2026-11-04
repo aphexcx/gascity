@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/t3bridge"
@@ -21,16 +22,22 @@ import (
 
 func TestCmdStopConfiguredT3PreservedHistory(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		force bool
-		live  bool
+		name        string
+		force       bool
+		live        bool
+		olderStatus string
+		manual      bool
 	}{
 		{name: "graceful"},
 		{name: "forced", force: true},
 		{name: "live survivor", force: true, live: true},
+		{name: "older live configured", force: true, olderStatus: "running"},
+		{name: "older live manual", force: true, olderStatus: "running", manual: true},
+		{name: "both stopped", force: true, olderStatus: "stopped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.live {
+			wantSurvivor := tc.live || tc.olderStatus == "running"
+			if wantSurvivor {
 				oldBound := stopPerTargetTimeoutDefault
 				stopPerTargetTimeoutDefault = 100 * time.Millisecond
 				t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
@@ -42,19 +49,46 @@ func TestCmdStopConfiguredT3PreservedHistory(t *testing.T) {
 				Session: config.SessionConfig{Provider: "t3bridge"}, Daemon: config.DaemonConfig{ShutdownTimeout: "1ns"},
 				Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}},
 			}
+			if tc.manual {
+				cfg.Agents = nil
+			}
 			writeStopLifecycleCityConfig(t, cityDir, cfg)
+			sessionID := "previous-session"
+			if tc.manual {
+				store, err := openCityStoreAt(cityDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+					"session_origin": "manual", "session_name": "worker", "state": "active",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				sessionID = b.ID
+			}
 			// A configured pool runtime may outlive its session bead. Its thread
 			// remains owned after shutdown, with only the session status changed.
-			env, err := json.Marshal(map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "previous-session"})
+			env, err := json.Marshal(map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": sessionID})
 			if err != nil {
 				t.Fatal(err)
 			}
 			thread := map[string]interface{}{
 				"id": "thread-worker", "projectId": "project-1",
+				"updatedAt":      "2026-02-01T00:00:00Z",
 				"customMetadata": map[string]interface{}{"gc.sessionName": "worker", "gc.sessionEnv": string(env)},
 				"session":        map[string]interface{}{"status": "ready"},
 			}
 			snapshot := map[string]interface{}{"threads": []interface{}{thread}}
+			var older map[string]interface{}
+			if tc.olderStatus != "" {
+				older = map[string]interface{}{
+					"id": "thread-older", "projectId": "project-1", "updatedAt": "2026-01-01T00:00:00Z",
+					"customMetadata": map[string]interface{}{"gc.sessionName": "worker", "gc.sessionEnv": string(env)},
+					"session":        map[string]interface{}{"status": tc.olderStatus},
+				}
+				snapshot["threads"] = []interface{}{older, thread}
+			}
 			var mu sync.Mutex
 			var operations []string
 			upgrader := websocket.Upgrader{}
@@ -136,8 +170,17 @@ func TestCmdStopConfiguredT3PreservedHistory(t *testing.T) {
 			started := time.Now()
 			code := cmdStopBody(cityDir, cfg, tc.force, &stdout, &stderr)
 			elapsed := time.Since(started)
-			if tc.live {
-				if code != 1 || !strings.Contains(stderr.String(), `city-owned session "worker" remains after shutdown`) || elapsed < stopPerTargetTimeoutDefault {
+			if older != nil {
+				mu.Lock()
+				status := older["session"].(map[string]interface{})["status"]
+				mu.Unlock()
+				t.Logf("older thread status=%v after stop: code=%d stdout=%q", status, code, stdout.String())
+				if status != tc.olderStatus {
+					t.Fatalf("older thread status=%v, want preserved %q", status, tc.olderStatus)
+				}
+			}
+			if wantSurvivor {
+				if code != 1 || strings.Contains(stdout.String(), "City stopped.") || !strings.Contains(stderr.String(), `city-owned session "worker" remains after shutdown`) || elapsed < stopPerTargetTimeoutDefault {
 					t.Fatalf("survivor: code=%d elapsed=%s stdout=%q stderr=%q", code, elapsed, stdout.String(), stderr.String())
 				}
 			} else if code != 0 || elapsed >= stopPerTargetTimeoutDefault/2 || !strings.Contains(stdout.String(), "City stopped.") {
@@ -146,7 +189,7 @@ func TestCmdStopConfiguredT3PreservedHistory(t *testing.T) {
 			owner, id, err := sp.(interface {
 				SessionOwnership(string) (string, string, error)
 			}).SessionOwnership("worker")
-			if err != nil || owner != cityDir || id != "previous-session" {
+			if err != nil || owner != cityDir || id != sessionID {
 				t.Fatalf("history ownership changed: city=%q id=%q err=%v", owner, id, err)
 			}
 			mu.Lock()

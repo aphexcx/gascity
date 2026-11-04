@@ -48,3 +48,63 @@ func TestSeamBackedShutdownComplete(t *testing.T) {
 		})
 	}
 }
+
+func TestSeamBackedShutdownCompleteDuplicateThreads(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		status          string
+		state           string
+		deleted         bool
+		malformed       bool
+		otherName       bool
+		newerLive       bool
+		wantComplete    bool
+		wantUnavailable bool
+	}{
+		{name: "older running", status: "running"},
+		{name: "both stopped", status: "stopped", wantComplete: true},
+		{name: "older unknown", status: "future-state", wantUnavailable: true},
+		{name: "older malformed", status: "stopped", malformed: true, wantUnavailable: true},
+		{name: "archived running", status: "running", state: "archived", wantComplete: true},
+		{name: "deleted running", status: "running", deleted: true, wantComplete: true},
+		{name: "other session running", status: "running", otherName: true, wantComplete: true},
+		{name: "live does not mask unknown", status: "future-state", newerLive: true, wantUnavailable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			snapshot := t3SessionStatusSnapshot("worker", t3SessionStatusExpectation{status: "stopped", includeStatus: true})
+			newer := snapshotThreads(snapshot)[0]
+			newer["updatedAt"] = "2026-02-01T00:00:00Z"
+			if tc.newerLive {
+				newer["session"] = map[string]interface{}{"status": "running"}
+			}
+			older := snapshotThreads(t3SessionStatusSnapshot("worker", t3SessionStatusExpectation{
+				status: tc.status, includeStatus: true, malformed: tc.malformed,
+			}))[0]
+			older["id"] = "thread-older"
+			older["updatedAt"] = "2026-01-01T00:00:00Z"
+			for _, thread := range []map[string]interface{}{newer, older} {
+				thread["customMetadata"].(map[string]interface{})["gc.sessionEnv"] = `{"GC_CITY_PATH":"/cities/test","GC_SESSION_ID":"session-1"}`
+			}
+			meta := older["customMetadata"].(map[string]interface{})
+			meta["gc.state"] = tc.state
+			if tc.otherName {
+				meta["gc.sessionName"] = "other"
+			}
+			if tc.deleted {
+				older["deletedAt"] = "2026-02-02T00:00:00Z"
+			}
+			// Put the newest first so a live result cannot hide later uncertainty.
+			snapshot["threads"] = []interface{}{newer, older}
+			backed.raw.cacheSnapshot(snapshot)
+			completion, ok := sp.(interface{ ShutdownComplete(string) (bool, error) })
+			if !ok {
+				t.Fatal("production adapter lacks shutdown completion observation")
+			}
+			complete, err := completion.ShutdownComplete("worker")
+			if complete != tc.wantComplete || (err != nil) != tc.wantUnavailable || errors.Is(err, runtime.ErrRuntimeUnavailable) != tc.wantUnavailable {
+				t.Fatalf("complete=%v err=%v; want complete=%v unavailable=%v", complete, err, tc.wantComplete, tc.wantUnavailable)
+			}
+		})
+	}
+}
