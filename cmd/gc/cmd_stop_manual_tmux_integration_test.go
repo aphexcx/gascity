@@ -40,6 +40,7 @@ func TestCmdStopExecWithoutOwnership(t *testing.T) {
 		{teardown: "immediate"},
 		{teardown: "immediate", retainBead: true},
 		{teardown: "interrupt-exit"},
+		{teardown: "interrupt-exit-error"},
 		{teardown: "delayed"},
 		{teardown: "incomplete"},
 		{teardown: "immediate", retainBead: true, provider: "composed"},
@@ -70,13 +71,16 @@ start) : > "$0.running"; : > "$0.artifact" ;;
 stop)
   printf 'stop\n' >> "$0.calls"
   case "$(cat "$0.teardown")" in
-    immediate|interrupt-exit) rm -f "$0.running" "$0.artifact" ;;
+    immediate|interrupt-exit|interrupt-exit-error) rm -f "$0.running" "$0.artifact" ;;
   esac
   echo 0 > "$0.polls"
   ;;
 interrupt)
   printf 'interrupt\n' >> "$0.calls"
-  if [ "$(cat "$0.teardown")" = interrupt-exit ]; then rm -f "$0.running"; fi
+  case "$(cat "$0.teardown")" in
+    interrupt-exit|interrupt-exit-error) rm -f "$0.running" ;;
+  esac
+  if [ "$(cat "$0.teardown")" = interrupt-exit-error ]; then exit 1; fi
   ;;
 is-running) if [ -f "$0.running" ]; then echo true; else echo false; fi ;;
 list-running)
@@ -167,7 +171,7 @@ esac
 					if code != 0 || sp.IsRunning("worker") || !strings.Contains(stdout.String(), "City stopped.") {
 						t.Fatalf("attempt %d: code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
 					}
-					if teardown == "interrupt-exit" {
+					if strings.HasPrefix(teardown, "interrupt-exit") {
 						if _, err := os.Stat(script + ".artifact"); !errors.Is(err, os.ErrNotExist) {
 							t.Fatalf("attempt %d: cleanup artifact remains after successful stop: %v", attempt, err)
 						}

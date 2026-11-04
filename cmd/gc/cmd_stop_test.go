@@ -295,9 +295,13 @@ func TestConfiguredStopBackendSelection(t *testing.T) {
 type configuredStopCleanupProvider struct {
 	*stopUnlistedRuntimeProvider
 	interruptErr error
+	onInterrupt  func()
 }
 
 func (p *configuredStopCleanupProvider) Interrupt(name string) error {
+	if p.onInterrupt != nil {
+		p.onInterrupt()
+	}
 	if p.interruptErr != nil {
 		return p.interruptErr
 	}
@@ -351,12 +355,12 @@ func TestConfiguredStopCleanup(t *testing.T) {
 			}
 			before := primary.CountCalls("Stop", "worker")
 			err = bound.Stop("worker")
-			wantCleanup := mode == "interrupted" || mode == "keys"
+			wantCleanup := mode == "interrupted" || mode == "keys" || mode == "interrupt failed"
 			wantSuccess := wantCleanup || mode == "already stopped"
 			if (err == nil) != wantSuccess {
 				t.Errorf("cleanup error = %v, want success=%v", err, wantSuccess)
 			}
-			if (mode == "already absent" || mode == "interrupt failed") && !runtime.IsSessionNotFound(err) {
+			if mode == "already absent" && !runtime.IsSessionNotFound(err) {
 				t.Errorf("untouched absent session: %v, want not found", err)
 			}
 			if wantCleanup {
@@ -369,6 +373,47 @@ func TestConfiguredStopCleanup(t *testing.T) {
 				t.Fatalf("cleanup calls = %d, want %d; sibling must remain untouched", got, before)
 			}
 		})
+	}
+}
+
+func TestConfiguredStopEscalatesBlockedInterrupt(t *testing.T) {
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var stopped chan struct{}
+	primary := &configuredStopCleanupProvider{
+		stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake()},
+		onInterrupt: func() {
+			close(started)
+			<-release
+		},
+	}
+	startStopTestSession(t, primary.Fake, "worker", nil)
+	_, binding, err := bindConfiguredStopTarget(stopTarget{name: "worker", resolved: true}, beads.NewMemStore(), primary, "runtime", primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer close(done)
+		if err := binding.Provider.Interrupt("worker"); err != nil {
+			t.Errorf("interrupt: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		close(release)
+		awaitClose(t, done, "released interrupt")
+		if stopped != nil {
+			awaitClose(t, stopped, "escalated stop")
+		}
+	})
+	awaitClose(t, started, "interrupt dispatch")
+	// The target budget is the behavior under test: escalation must finish
+	// while the earlier, timed-out cancellation remains blocked in provider I/O.
+	stopped = make(chan struct{})
+	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, time.Second, func(target stopTarget) error {
+		defer close(stopped)
+		return binding.Provider.Stop(target.name)
+	})
+	if results[0].err != nil || primary.IsRunning("worker") || primary.CountCalls("Stop", "worker") != 1 {
+		t.Fatalf("escalation blocked by cancellation: err=%v calls=%d", results[0].err, primary.CountCalls("Stop", "worker"))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -215,58 +216,55 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 	}, nil
 }
 
-// configuredStopBackend retains the cleanup obligation after a successful
-// cancellation, even when the script no longer reports a live session.
+// configuredStopBackend retains the cleanup obligation once cancellation is
+// dispatched, even when the script exits before reporting an error or completion.
 type configuredStopBackend struct {
 	*verifiedManualStopBackend
-	verifyCleanup func() error
-	mu            sync.Mutex
-	interrupted   bool
-	stopped       bool
+	verifyCleanup   func() error
+	stopMu          sync.Mutex
+	cancelRequested atomic.Bool
+	stopped         atomic.Bool
 }
 
 // Stop rechecks the original binding and completes its teardown at most once.
 func (p *configuredStopBackend) Stop(name string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	if p.stopped.Load() {
 		return nil
 	}
 	backend := *p.verifiedManualStopBackend
-	if p.interrupted {
+	if p.cancelRequested.Load() {
 		backend.verify = p.verifyCleanup
 	}
 	if err := backend.Stop(name); err != nil {
 		return err
 	}
-	p.stopped = true
+	p.stopped.Store(true)
 	return nil
 }
 
-// Interrupt records successful cancellation without treating it as teardown.
+// Interrupt retains cleanup before dispatch, without blocking stop escalation
+// on a cancellation call that may outlive the interrupt-wave deadline.
 func (p *configuredStopBackend) Interrupt(name string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
-		return runtime.ErrSessionNotFound
-	}
-	if err := p.verifiedManualStopBackend.Interrupt(name); err != nil {
+	if err := p.verify(); err != nil {
 		return err
 	}
-	p.interrupted = true
-	return nil
+	if p.stopped.Load() {
+		return runtime.ErrSessionNotFound
+	}
+	p.cancelRequested.Store(true)
+	return p.Provider.Interrupt(name)
 }
 
-// SendKeys retains cleanup after successful soft or fallback cancellation.
+// SendKeys retains cleanup before dispatching soft or fallback cancellation.
 func (p *configuredStopBackend) SendKeys(name string, keys ...string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
-		return runtime.ErrSessionNotFound
-	}
-	if err := p.verifiedManualStopBackend.SendKeys(name, keys...); err != nil {
+	if err := p.verify(); err != nil {
 		return err
 	}
-	p.interrupted = true
-	return nil
+	if p.stopped.Load() {
+		return runtime.ErrSessionNotFound
+	}
+	p.cancelRequested.Store(true)
+	return p.Provider.SendKeys(name, keys...)
 }
