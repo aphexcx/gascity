@@ -103,6 +103,42 @@ func TestCleanupSerializesReplacementPublication(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestStopRefusesPartialOwnershipBeforeSignals(t *testing.T) {
+	for _, missing := range []string{"city", "session"} {
+		t.Run(missing, func(t *testing.T) {
+			p := newTestProvider(t)
+			const name = "partial-stop"
+			city, id := "/test-city", "session-id"
+			if missing == "city" {
+				city = ""
+			} else {
+				id = ""
+			}
+			raw, err := json.Marshal(sessionOwnership{CityPath: city, SessionID: id, Name: name, PID: 42, Start: "start"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.SetMeta(name, sessionOwnershipMetaKey, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+			signals := 0
+			p.ops.processIdentity = func(int) (string, error) {
+				if signals != 0 {
+					return "", proctable.ErrProcessGone
+				}
+				return "start", nil
+			}
+			p.ops.signal = func(int, syscall.Signal) error { signals++; return nil }
+			if err := p.Stop(name); err == nil || !strings.Contains(err.Error(), "incomplete ownership") {
+				t.Errorf("Stop = %v, want incomplete-ownership refusal", err)
+			}
+			if signals != 0 {
+				t.Fatalf("partial ownership received %d destructive signals", signals)
+			}
+		})
+	}
+}
+
 func TestPersistedProcessIdentity(t *testing.T) {
 	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
 		t.Run(state, func(t *testing.T) {
