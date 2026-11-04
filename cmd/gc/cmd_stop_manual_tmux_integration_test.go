@@ -43,6 +43,7 @@ func TestCmdStopExecWithoutOwnership(t *testing.T) {
 		{teardown: "incomplete"},
 		{teardown: "immediate", retainBead: true, provider: "composed"},
 		{teardown: "immediate", retainBead: true, provider: "minimal"},
+		{teardown: "immediate", retainBead: true, provider: "unlisted"},
 	} {
 		teardown, retainBead := tc.teardown, tc.retainBead
 		for _, force := range []bool{false, true} {
@@ -57,6 +58,11 @@ func TestCmdStopExecWithoutOwnership(t *testing.T) {
 				if err := os.WriteFile(script+".teardown", []byte(teardown), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				if tc.provider == "unlisted" {
+					if err := os.WriteFile(script+".no-list", nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := os.WriteFile(script, []byte(`#!/bin/sh
 case "$1" in
 start) : > "$0.running" ;;
@@ -68,6 +74,7 @@ stop)
 interrupt) printf 'interrupt\n' >> "$0.calls" ;;
 is-running) if [ -f "$0.running" ]; then echo true; else echo false; fi ;;
 list-running)
+  if [ -f "$0.no-list" ]; then exit 2; fi
   if [ -f "$0.polls" ] && [ "$(cat "$0.teardown")" = delayed ]; then
     polls=$(cat "$0.polls")
     polls=$((polls + 1))

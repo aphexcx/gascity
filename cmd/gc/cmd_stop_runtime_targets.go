@@ -155,11 +155,13 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 		if _, err := runtime.MergeBackendListResults(current...); err != nil {
 			return err
 		}
-		listed := 0
+		selected := 0
 		for _, backend := range current {
-			if slices.Contains(backend.Names, target.name) {
-				listed++
-				if backend.Label != label || listed > 1 {
+			// Listing is optional for exec scripts. The bound backend may
+			// instead confirm this configured name with its exact liveness probe.
+			if slices.Contains(backend.Names, target.name) || (backend.Label == label && backend.Provider.IsRunning(target.name)) {
+				selected++
+				if backend.Label != label || selected > 1 {
 					return fmt.Errorf("runtime %q backend selection changed or conflicts during shutdown", target.name)
 				}
 				continue
@@ -173,7 +175,7 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 				return fmt.Errorf("runtime %q absence is unconfirmed on backend %q", target.name, backend.Label)
 			}
 		}
-		if listed == 0 {
+		if selected == 0 {
 			return runtime.ErrSessionNotFound
 		}
 		if target.sessionID != "" {
