@@ -19,12 +19,13 @@ const defaultOutputBufferLines = 1000
 
 // sessionConn tracks a running ACP agent process and its JSON-RPC connection.
 type sessionConn struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	done     chan struct{}      // closed when process exits
-	readDone chan struct{}      // closed after buffered stdout is dispatched
-	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
-	listener net.Listener       // control socket for cross-process ops
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	done      chan struct{}      // closed when process exits
+	readDone  chan struct{}      // closed after buffered stdout is dispatched
+	cancel    context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
+	listener  net.Listener       // control socket for cross-process ops
+	ownership *sessionOwnership  // durable generation created with this child
 
 	mu             sync.Mutex
 	sessionID      string

@@ -32,6 +32,69 @@ func newTestProvider(t *testing.T) *Provider {
 	return NewProviderWithDir(filepath.Join(shortTempDir(t), "socks"))
 }
 
+func listenTestSocket(path string) (net.Listener, error) {
+	return net.Listen("unix", path)
+}
+
+func TestCleanupSerializesReplacementPublication(t *testing.T) {
+	p := newTestProvider(t)
+	replacementProvider := NewProviderWithDir(p.dir)
+	const name = "serialized-replacement"
+	const original = `{"name":"serialized-replacement","pid":42,"start":"old"}`
+	const replacement = `{"name":"serialized-replacement","pid":43,"start":"new"}`
+	if err := p.SetMeta(name, processIdentityMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	finished := make(chan error, 1)
+	var listener net.Listener
+	p.ops.beforeCleanup = func() {
+		// This is the final compare/delete boundary. A second process's
+		// independent directory descriptor must be excluded here.
+		other, err := os.Open(p.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close() //nolint:errcheck
+		if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			t.Fatalf("publication was not excluded at deletion: %v", err)
+		}
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			finished <- runtime.WithProviderStateDirLock(p.dir, func() error {
+				if err := replacementProvider.setMetaLocked(name, processIdentityMetaKey, replacement); err != nil {
+					return err
+				}
+				var err error
+				listener, err = listenTestSocket(p.sockPath(name))
+				return err
+			})
+		}()
+		<-started
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("replacement publication remained locked")
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got, err := p.GetMeta(name, processIdentityMetaKey); err != nil || got != replacement {
+		t.Fatalf("replacement metadata = %q, %v", got, err)
+	}
+	conn, err := net.DialTimeout("unix", listener.Addr().String(), testutil.ExecRaceTimeout)
+	if err != nil {
+		t.Fatalf("replacement socket was deleted: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func TestPersistedProcessIdentity(t *testing.T) {
 	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
 		t.Run(state, func(t *testing.T) {
@@ -129,6 +192,65 @@ func TestStartProcessIdentityFailure(t *testing.T) {
 	}
 }
 
+func TestStartIdentityRollbackKillsDescendant(t *testing.T) {
+	p := newTestProvider(t)
+	ready, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ready.Close(); _ = writer.Close() })
+	if err := ready.SetReadDeadline(time.Now().Add(testutil.ExecRaceTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.start = func(cmd *exec.Cmd) error {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, writer)
+		return cmd.Start()
+	}
+	var descendant int
+	var identity string
+	p.ops.processIdentity = func(int) (string, error) {
+		line, err := bufio.NewReader(ready).ReadString('\n')
+		if err != nil {
+			t.Fatalf("descendant readiness: %v", err)
+		}
+		descendant, err = strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || descendant <= 1 {
+			t.Fatalf("descendant PID: %q, %v", line, err)
+		}
+		identity, err = proctable.ProcessIdentity(descendant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "", syscall.EPERM
+	}
+	if err := p.Start(context.Background(), "rollback", runtime.Config{Command: "sleep 300 & printf '%s\\n' \"$!\" >&3; wait"}); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start = %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(descendant, syscall.SIGKILL) })
+	waitForKernelProcessGone(t, descendant, identity)
+}
+
+// waitForKernelProcessGone owns polling at the kernel process/reaper boundary,
+// which has no completion channel for an orphaned descendant.
+func waitForKernelProcessGone(t *testing.T, pid int, identity string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, err := proctable.ProcessIdentity(pid)
+		if errors.Is(err, proctable.ErrProcessGone) || (err == nil && identity != "" && current != identity) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("descendant %d remains: identity=%q error=%v", pid, current, err)
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestStartProcessIdentityGone(t *testing.T) {
 	p := newTestProvider(t)
 	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
@@ -161,32 +283,6 @@ func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
 	record, err := p.readProcessIdentity("legacy")
 	if err != nil || record == nil || record.Start == "" {
 		t.Fatalf("restart identity = %+v, %v", record, err)
-	}
-}
-
-func TestStopRecordedProcessPreservesReplacement(t *testing.T) {
-	p := newTestProvider(t)
-	const original = `{"name":"same","pid":42,"start":"old"}`
-	const replacement = `{"name":"same","pid":43,"start":"new"}`
-	if err := p.SetMeta("same", processIdentityMetaKey, original); err != nil {
-		t.Fatal(err)
-	}
-	signaled := false
-	p.ops.processIdentity = func(int) (string, error) {
-		if signaled {
-			return "", proctable.ErrProcessGone
-		}
-		return "old", nil
-	}
-	p.ops.signal = func(int, syscall.Signal) error {
-		signaled = true
-		return p.SetMeta("same", processIdentityMetaKey, replacement)
-	}
-	if err := p.Stop("same"); err != nil {
-		t.Fatal(err)
-	}
-	if raw, _ := p.GetMeta("same", processIdentityMetaKey); raw != replacement {
-		t.Fatal("removed replacement metadata")
 	}
 }
 
@@ -941,14 +1037,7 @@ func TestStopKillsProcessGroupDescendants(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(childPID, syscall.Signal(0)); err != nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
+	waitForKernelProcessGone(t, childPID, "")
 }
 
 func TestStopIdempotent(t *testing.T) {
@@ -1346,7 +1435,7 @@ func startRejectingControlSocket(t *testing.T, path string) <-chan string {
 
 func listenControlSocket(t *testing.T, path string) net.Listener {
 	t.Helper()
-	lis, err := net.Listen("unix", path)
+	lis, err := listenTestSocket(path)
 	if err != nil {
 		t.Fatalf("Listen %q: %v", path, err)
 	}
@@ -1594,5 +1683,33 @@ func TestListRunningViaSocket(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ListRunning('') = %v, want 3 results", all)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "replacement-socket"
+	if err := p.SetMeta(name, processIdentityMetaKey, `{"name":"replacement-socket","pid":42,"start":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(int, syscall.Signal) error {
+		signaled = true
+		if err := p.SetMeta(name, processIdentityMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
+			return err
+		}
+		return os.WriteFile(p.sockPath(name), []byte("replacement"), 0o600)
+	}
+	if err := p.Stop(name); err == nil {
+		t.Error("replacement during teardown must refuse cleanup")
+	}
+	if data, err := os.ReadFile(p.sockPath(name)); err != nil || string(data) != "replacement" {
+		t.Fatalf("replacement socket artifact changed: %q, %v", data, err)
 	}
 }

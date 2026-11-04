@@ -28,11 +28,37 @@ func ProcessIdentityMatches(pid int, start string, read func(int) (string, error
 	return current == start, nil
 }
 
+// ProcessGroupIdentityMatches also checks for surviving descendants when the
+// recorded leader has exited. A reused leader belongs to a different generation.
+func ProcessGroupIdentityMatches(pid int, start string, read func(int) (string, error)) (bool, error) {
+	if pid <= 1 {
+		return false, fmt.Errorf("invalid recorded process PID %d", pid)
+	}
+	current, err := read(pid)
+	if errors.Is(err, ErrProcessGone) {
+		err = syscall.Kill(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		if err == nil || errors.Is(err, syscall.EPERM) {
+			return true, nil
+		}
+		return false, fmt.Errorf("probing process group %d: %w", pid, err)
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading process identity for PID %d: %w", pid, err)
+	}
+	if current == "" {
+		return false, fmt.Errorf("empty process identity for PID %d", pid)
+	}
+	return current == start, nil
+}
+
 // TerminateProcessGroup stops a recorded group leader with TERM, then KILL after
 // the managed grace. Each signal is fenced by a fresh kernel identity read, and
-// success requires observing the saved identity gone, including after KILL.
+// success requires observing the saved group gone, including after KILL.
 func TerminateProcessGroup(pid int, start string, read func(int) (string, error), signal func(int, syscall.Signal) error) error {
-	if live, err := ProcessIdentityMatches(pid, start, read); err != nil || !live {
+	if live, err := ProcessGroupIdentityMatches(pid, start, read); err != nil || !live {
 		return err
 	}
 	for _, phase := range []struct {
@@ -43,7 +69,13 @@ func TerminateProcessGroup(pid int, start string, read func(int) (string, error)
 		{syscall.SIGKILL, runtime.ManagedProcessReapGrace},
 	} {
 		if live, err := ProcessIdentityMatches(pid, start, read); err != nil || !live {
-			return err
+			if err != nil {
+				return err
+			}
+			if groupLive, err := ProcessGroupIdentityMatches(pid, start, read); err != nil || !groupLive {
+				return err
+			}
+			return fmt.Errorf("process group %d survives without its recorded leader; refusing an unfenced signal", pid)
 		}
 		if err := signal(-pid, phase.signal); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("signaling process group %d: %w", pid, err)
@@ -62,7 +94,7 @@ func waitForProcessIdentityGone(pid int, start string, grace time.Duration, read
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		live, err := ProcessIdentityMatches(pid, start, read)
+		live, err := ProcessGroupIdentityMatches(pid, start, read)
 		if err != nil || !live {
 			return !live, err
 		}

@@ -15,6 +15,25 @@ import (
 
 const processIdentityMetaKey = "gc_process_identity"
 
+func (p *Provider) validateStopOwnership(name string) error {
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		city, cityErr := os.ReadFile(p.metaPath(name, "GC_CITY_PATH"))
+		id, idErr := os.ReadFile(p.metaPath(name, "GC_SESSION_ID"))
+		for _, err := range []error{cityErr, idErr} {
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		if os.IsNotExist(cityErr) && os.IsNotExist(idErr) {
+			return nil
+		}
+		if len(city) == 0 || len(id) == 0 {
+			return fmt.Errorf("preserving session %q: incomplete ownership", name)
+		}
+		return nil
+	})
+}
+
 type processIdentity struct {
 	Name  string `json:"name"`
 	PID   int    `json:"pid"`
@@ -62,7 +81,7 @@ func (p *Provider) processRunning(name string) (bool, error) {
 	if err != nil || record == nil {
 		return false, err
 	}
-	return proctable.ProcessIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+	return proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
 }
 
 func (p *Provider) persistProcessIdentity(name string, pid int) error {
@@ -77,7 +96,7 @@ func (p *Provider) persistProcessIdentity(name string, pid int) error {
 	if err != nil {
 		return err
 	}
-	return p.SetMeta(name, processIdentityMetaKey, string(data))
+	return p.setMetaLocked(name, processIdentityMetaKey, string(data))
 }
 
 func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([]string, error) {
@@ -110,7 +129,7 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 		if !strings.HasPrefix(record.Name, prefix) || seen[record.Name] {
 			continue
 		}
-		live, err := proctable.ProcessIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+		live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
 		if err != nil {
 			return nil, err
 		}
@@ -121,26 +140,46 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 	return names, nil
 }
 
-func (p *Provider) stopRecordedProcess(name string) error {
-	record, err := p.readProcessIdentity(name)
-	if err != nil || record == nil {
-		return err
+func (p *Provider) stopProcessGeneration(name string, record *processIdentity) error {
+	if record == nil {
+		return nil
 	}
 	if err := proctable.TerminateProcessGroup(record.PID, record.Start, p.ops.processIdentity, p.ops.signal); err != nil {
 		return fmt.Errorf("stopping subprocess %q: %w", name, err)
 	}
-	current, err := p.readProcessIdentity(name)
-	if err != nil {
-		return err
+	return p.cleanupProcessGeneration(name, record)
+}
+
+func (p *Provider) cleanupProcessGeneration(name string, record *processIdentity) error {
+	if record == nil {
+		return nil
 	}
-	if current != nil && *current == *record {
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		current, err := p.readProcessIdentity(name)
+		if err != nil || current == nil {
+			return err
+		}
+		if *current != *record {
+			return fmt.Errorf("preserving replacement subprocess %q during cleanup", name)
+		}
+		if live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity); err != nil {
+			return err
+		} else if live {
+			return fmt.Errorf("preserving session %q: process group remains", name)
+		}
+		if p.ops.beforeCleanup != nil {
+			p.ops.beforeCleanup()
+		}
 		p.clearSessionMeta(name)
-	}
-	return nil
+		return p.removeSocketArtifactsAt(name, p.socketDir(), os.Geteuid())
+	})
 }
 
 // ShutdownDiagnostic describes a legacy record whose child cannot be identified.
 func (p *Provider) ShutdownDiagnostic(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	record, err := p.readProcessIdentity(name)
 	if err != nil {
 		return err
@@ -164,7 +203,7 @@ func (p *Provider) recordedOwnership(name string) error {
 	if recordErr != nil || record == nil {
 		return recordErr
 	}
-	live, err := proctable.ProcessIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
+	live, err := proctable.ProcessGroupIdentityMatches(record.PID, record.Start, p.ops.processIdentity)
 	if err != nil {
 		return err
 	}

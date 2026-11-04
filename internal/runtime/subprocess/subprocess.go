@@ -52,6 +52,7 @@ type providerOps struct {
 	start           func(*exec.Cmd) error
 	processIdentity func(int) (string, error)
 	signal          func(int, syscall.Signal) error
+	beforeCleanup   func()
 }
 
 const (
@@ -66,6 +67,7 @@ type sessionConn struct {
 	cmd      *exec.Cmd
 	done     chan struct{} // closed when process exits
 	listener net.Listener  // unix socket listener
+	identity *processIdentity
 }
 
 // Compile-time check.
@@ -214,23 +216,36 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	_ = nullFile.Close()
 
-	// Create control socket for cross-process discovery.
 	done := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
+	var lis net.Listener
+	var generation *processIdentity
+	err = runtime.WithProviderStateDirLock(p.dir, func() error {
+		if p.socketAlive(name) {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		if live, err := p.processRunning(name); err != nil {
+			return err
+		} else if live {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+		}
+		if err := p.persistStartProcessMetadata(name, cfg.Env, cmd.Process.Pid); err != nil {
+			return err
+		}
+		var err error
+		generation, err = p.readProcessIdentity(name)
+		if err == nil {
+			lis, err = p.startControlSocket(name, cmd, done, socketDir, euid)
+		}
+		if err != nil {
+			p.clearSessionMeta(name)
+		}
+		return err
+	})
 	if err != nil {
-		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearWorkDir()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
-	}
-	if err := p.persistStartProcessMetadata(name, cfg.Env, cmd.Process.Pid); err != nil {
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		clearWorkDir()
-		return fmt.Errorf("storing metadata for %q: %w", name, err)
+		return fmt.Errorf("publishing session %q: %w", name, err)
 	}
 
 	go func() {
@@ -240,12 +255,11 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		// Clean up socket before signaling done so ListRunning
 		// never sees a stale socket after Stop returns.
 		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		p.clearSessionMeta(name)
+		_ = p.cleanupProcessGeneration(name, generation)
 		close(done)
 	}()
 
-	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
+	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis, identity: generation}
 	return nil
 }
 
@@ -263,6 +277,9 @@ func envWithoutKey(env []string, key string) []string {
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
 func (p *Provider) Stop(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
@@ -273,10 +290,12 @@ func (p *Provider) Stop(name string) error {
 
 	// Try in-memory process first.
 	if ok {
-		if !sc.alive() {
-			return nil
+		if sc.alive() {
+			if err := terminateSessionConn(sc); err != nil {
+				return err
+			}
 		}
-		return terminateSessionConn(sc)
+		return p.stopProcessGeneration(name, sc.identity)
 	}
 
 	// Fall back to socket (cross-process case: gc stop after gc start).
@@ -286,6 +305,9 @@ func (p *Provider) Stop(name string) error {
 // Interrupt sends SIGINT to the named session's process.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
@@ -310,8 +332,8 @@ func (p *Provider) IsRunning(name string) bool {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 
-	if ok {
-		return sc.alive()
+	if ok && sc.alive() {
+		return true
 	}
 
 	// Fall back to socket liveness check.
@@ -423,6 +445,10 @@ func (p *Provider) Peek(_ string, _ int) (string, error) {
 // upgrading from an older binary keeps its 0644 files otherwise, which is
 // exactly the host that already has credentials on disk.
 func (p *Provider) SetMeta(name, key, value string) error {
+	return runtime.WithProviderStateDirLock(p.dir, func() error { return p.setMetaLocked(name, key, value) })
+}
+
+func (p *Provider) setMetaLocked(name, key, value string) error {
 	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
 		return err
 	}
@@ -501,11 +527,13 @@ func (p *Provider) missingOwnershipLocked(name string) error {
 
 // RemoveMeta removes a metadata sidecar file.
 func (p *Provider) RemoveMeta(name, key string) error {
-	err := os.Remove(p.metaPath(name, key))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		err := os.Remove(p.metaPath(name, key))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 // persistStartMetadata seeds the session's sidecar from its environment so that
@@ -520,7 +548,7 @@ func (p *Provider) persistStartMetadata(name string, env map[string]string) erro
 	seed, _ := runtime.SplitEnvForMetaSeed(env)
 	p.clearSessionMeta(name)
 	for key, value := range seed {
-		if err := p.SetMeta(name, key, value); err != nil {
+		if err := p.setMetaLocked(name, key, value); err != nil {
 			p.clearSessionMeta(name)
 			return err
 		}
@@ -796,6 +824,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 		_ = os.Remove(namePath)
 		return nil, err
 	}
+	lis.(*net.UnixListener).SetUnlinkOnClose(false)
 	go func() {
 		for {
 			conn, err := lis.Accept()
@@ -912,17 +941,21 @@ func (p *Provider) stopBySocket(name string) error {
 }
 
 func (p *Provider) stopBySocketAt(name string, euid int) error {
-	err := p.sendSocketCommandAt(name, "stop", 7*time.Second, euid)
+	record, err := p.readProcessIdentity(name)
+	if err != nil {
+		return err
+	}
+	err = p.sendSocketCommandAt(name, "stop", 7*time.Second, euid)
 	if err != nil {
 		if isUnavailableSocketError(err) {
-			if err := p.stopRecordedProcess(name); err != nil {
-				return err
-			}
-			return p.removeSocketArtifactsAt(name, p.socketDirForEUID(euid), euid)
+			return p.stopProcessGeneration(name, record)
 		}
 		return err
 	}
-	return nil
+	if record == nil || p.socketAliveAt(name, euid) {
+		return nil
+	}
+	return p.stopProcessGeneration(name, record)
 }
 
 func isUnavailableSocketError(err error) bool {

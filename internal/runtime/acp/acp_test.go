@@ -40,6 +40,69 @@ func newTestProvider(t *testing.T) *Provider {
 	})
 }
 
+func listenTestSocket(path string) (net.Listener, error) {
+	return net.Listen("unix", path)
+}
+
+func TestCleanupSerializesReplacementPublication(t *testing.T) {
+	p := newTestProvider(t)
+	replacementProvider := NewProviderWithDir(p.dir, p.cfg)
+	const name = "serialized-replacement"
+	const original = `{"name":"serialized-replacement","pid":42,"start":"old"}`
+	const replacement = `{"name":"serialized-replacement","pid":43,"start":"new"}`
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, original); err != nil {
+		t.Fatal(err)
+	}
+	p.ops.processIdentity = func(int) (string, error) { return "", proctable.ErrProcessGone }
+	finished := make(chan error, 1)
+	var listener net.Listener
+	p.ops.beforeCleanup = func() {
+		// This is the final compare/delete boundary. A second process's
+		// independent directory descriptor must be excluded here.
+		other, err := os.Open(p.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close() //nolint:errcheck
+		if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			t.Fatalf("publication was not excluded at deletion: %v", err)
+		}
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			finished <- runtime.WithProviderStateDirLock(p.dir, func() error {
+				if err := replacementProvider.setMetaLocked(name, sessionOwnershipMetaKey, replacement); err != nil {
+					return err
+				}
+				var err error
+				listener, err = listenTestSocket(p.sockPath(name))
+				return err
+			})
+		}()
+		<-started
+	}
+	if err := p.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("replacement publication remained locked")
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got, err := p.GetMeta(name, sessionOwnershipMetaKey); err != nil || got != replacement {
+		t.Fatalf("replacement metadata = %q, %v", got, err)
+	}
+	conn, err := net.DialTimeout("unix", listener.Addr().String(), testutil.ExecRaceTimeout)
+	if err != nil {
+		t.Fatalf("replacement socket was deleted: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func TestPersistedProcessIdentity(t *testing.T) {
 	for _, state := range []string{"live", "gone", "reused", "denied", "legacy", "malformed", "invalid", "partial"} {
 		t.Run(state, func(t *testing.T) {
@@ -142,32 +205,6 @@ func TestLegacyRestartRecordsProcessIdentity(t *testing.T) {
 	record, err := p.readProcessOwnership("legacy")
 	if err != nil || record == nil || record.Start == "" || record.SessionID != "new" {
 		t.Fatalf("restart identity = %+v, %v", record, err)
-	}
-}
-
-func TestStopRecordedProcessPreservesReplacement(t *testing.T) {
-	p := newTestProvider(t)
-	const original = `{"name":"same","pid":42,"start":"old"}`
-	const replacement = `{"name":"same","pid":43,"start":"new"}`
-	if err := p.SetMeta("same", sessionOwnershipMetaKey, original); err != nil {
-		t.Fatal(err)
-	}
-	signaled := false
-	p.ops.processIdentity = func(int) (string, error) {
-		if signaled {
-			return "", proctable.ErrProcessGone
-		}
-		return "old", nil
-	}
-	p.ops.signal = func(int, syscall.Signal) error {
-		signaled = true
-		return p.SetMeta("same", sessionOwnershipMetaKey, replacement)
-	}
-	if err := p.Stop("same"); err != nil {
-		t.Fatal(err)
-	}
-	if raw, _ := p.GetMeta("same", sessionOwnershipMetaKey); raw != replacement {
-		t.Fatal("removed replacement metadata")
 	}
 }
 
@@ -1198,7 +1235,7 @@ func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	lis, err := net.Listen("unix", p.sockPath(name))
+	lis, err := listenTestSocket(p.sockPath(name))
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -1543,5 +1580,52 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
+	}
+}
+
+func TestLegacyLiveSocketCleanup(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "legacy-live"
+	if err := p.Start(context.Background(), name, runtime.Config{Command: fakeACPShellCommand(), Env: map[string]string{"GC_CITY_PATH": "/city", "GC_SESSION_ID": "session"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"city_path":"/city","session_id":"session"}`); err != nil {
+		t.Fatal(err)
+	}
+	peer := NewProviderWithDir(p.dir, Config{})
+	if err := peer.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := peer.SessionOwnership(name); !runtime.IsSessionNotFound(err) {
+		t.Fatalf("acknowledged legacy shutdown retained ownership: %v", err)
+	}
+}
+
+func TestStopRecordedProcessPreservesReplacementSocket(t *testing.T) {
+	p := newTestProvider(t)
+	const name = "replacement-socket"
+	if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"name":"replacement-socket","pid":42,"start":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	signaled := false
+	p.ops.processIdentity = func(int) (string, error) {
+		if signaled {
+			return "", proctable.ErrProcessGone
+		}
+		return "old", nil
+	}
+	p.ops.signal = func(int, syscall.Signal) error {
+		signaled = true
+		if err := p.SetMeta(name, sessionOwnershipMetaKey, `{"name":"replacement-socket","pid":43,"start":"new"}`); err != nil {
+			return err
+		}
+		return os.WriteFile(p.sockPath(name), []byte("replacement"), 0o600)
+	}
+	if err := p.Stop(name); err == nil {
+		t.Error("replacement during teardown must refuse cleanup")
+	}
+	if data, err := os.ReadFile(p.sockPath(name)); err != nil || string(data) != "replacement" {
+		t.Fatalf("replacement socket artifact changed: %q, %v", data, err)
 	}
 }

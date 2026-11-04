@@ -65,6 +65,12 @@ func TestCmdStopSubprocessChildHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if os.Getenv("GASCITY_STOP_CHILD_DESCENDANT") == "1" {
+		pid := startSigtermIgnoringProcess(t, filepath.Dir(ready))
+		if err := os.WriteFile(ready+".descendant", []byte(strconv.Itoa(pid)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(ready, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +90,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				name, origin, missing      string
 				force, live, child, opaque bool
 				legacy                     bool
+				descendant                 bool
 			}{
 				{name: "stale manual forced", origin: "manual", force: true},
 				{name: "stale manual graceful", origin: "manual"},
@@ -97,16 +104,19 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				{name: "stale desired", origin: "desired", force: true},
 				{name: "desired child", origin: "desired", force: true, child: true},
 				{name: "desired opaque child", origin: "desired", force: true, child: true, opaque: true},
+				{name: "desired partial city", origin: "desired", force: true, child: true, missing: "GC_SESSION_ID"},
+				{name: "desired partial session", origin: "desired", force: true, child: true, missing: "GC_CITY_PATH"},
 				{name: "orphan child", origin: "orphan", force: true, child: true},
 				{name: "orphan opaque child", origin: "orphan", force: true, child: true, opaque: true},
 				{name: "legacy manual", origin: "manual", force: true, legacy: true},
 				{name: "legacy named", origin: "named", legacy: true},
+				{name: "leader exits descendant survives", origin: "manual", force: true, child: true, descendant: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					oldBound := stopPerTargetTimeoutDefault
 					// Only intentional survivors use the shortened bound. Real
 					// children retain the production budget for kernel reaping.
-					if !tc.child {
+					if !tc.child || tc.missing != "" || tc.descendant {
 						stopPerTargetTimeoutDefault = 100 * time.Millisecond
 					}
 					t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
@@ -155,6 +165,8 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						PID   int    `json:"pid"`
 						Start string `json:"start"`
 					}{Name: name, PID: os.Getpid(), Start: "stale-start-token"}
+					var descendantPID int
+					var descendantIdentity string
 					if tc.child {
 						executable, err := os.Executable()
 						if err != nil {
@@ -165,6 +177,9 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						env := map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID, "GASCITY_STOP_CHILD_READY": ready}
 						if tc.opaque {
 							env["GASCITY_STOP_CHILD_OPAQUE"] = "1"
+						}
+						if tc.descendant {
+							env["GASCITY_STOP_CHILD_DESCENDANT"] = "1"
 						}
 						if leaf == "acp" {
 							env["GASCITY_STOP_CHILD_ACP"] = "1"
@@ -177,7 +192,13 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 							t.Fatal(err)
 						}
 						t.Cleanup(func() {
-							if err := owner.Stop(name); err != nil {
+							if tc.missing != "" || tc.descendant {
+								_ = syscall.Kill(-identity.PID, syscall.SIGKILL)
+								if err := waitForProcessGroupExit(identity.PID, testutil.ExecRaceTimeout); err != nil {
+									t.Error(err)
+								}
+							}
+							if err := owner.Stop(name); err != nil && tc.missing == "" {
 								t.Errorf("reaping test child: %v", err)
 							}
 						})
@@ -189,6 +210,17 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						identity.Start, err = proctable.ProcessIdentity(identity.PID)
 						if err != nil {
 							t.Fatal(err)
+						}
+						if tc.descendant {
+							pidText := waitForNonEmptyFileContent(t, ready+".descendant", testutil.ExecRaceTimeout)
+							descendantPID, err = strconv.Atoi(strings.TrimSpace(pidText))
+							if err != nil {
+								t.Fatal(err)
+							}
+							descendantIdentity, err = proctable.ProcessIdentity(descendantPID)
+							if err != nil {
+								t.Fatal(err)
+							}
 						}
 						key := "gc_process_identity"
 						if leaf == "acp" {
@@ -219,6 +251,10 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 					for key, value := range map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID} {
 						if key != tc.missing {
 							if err := sp.SetMeta(name, key, value); err != nil {
+								t.Fatal(err)
+							}
+						} else if tc.child {
+							if err := sp.SetMeta(name, key, ""); err != nil {
 								t.Fatal(err)
 							}
 						}
@@ -290,15 +326,29 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						started := time.Now()
 						code := cmdStopBody(cityDir, cfg, tc.force, &stdout, &stderr)
 						t.Logf("attempt=%d exit=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
-						if tc.live || tc.legacy || tc.missing != "" {
+						if tc.live || tc.legacy || tc.missing != "" || tc.descendant {
 							if code != 1 || strings.Contains(stdout.String(), "City stopped.") {
 								t.Errorf("unresolved identity must fail closed: exit=%d", code)
 							}
 							if (tc.live || tc.legacy) && (time.Since(started) < stopPerTargetTimeoutDefault || !strings.Contains(stderr.String(), "remains after shutdown")) {
 								t.Error("live runtime must survive until the shutdown bound")
 							}
-							if tc.missing != "" && !strings.Contains(stderr.String(), "incomplete ownership") {
+							if tc.missing != "" && !strings.Contains(stderr.String(), "incomplete ownership") &&
+								(tc.origin != "desired" || !strings.Contains(stderr.String(), "carry no ownership record")) {
 								t.Error("partial sidecar must report incomplete ownership")
+							}
+							if tc.missing != "" && tc.child {
+								if current, err := proctable.ProcessIdentity(identity.PID); err != nil || current != identity.Start {
+									t.Errorf("partial identity child was signaled: %q, %v", current, err)
+								}
+							}
+							if tc.descendant {
+								if current, err := proctable.ProcessIdentity(descendantPID); err != nil || current != descendantIdentity {
+									t.Errorf("survivor descendant changed: %q, %v", current, err)
+								}
+								if !sp.IsRunning(name) {
+									t.Error("surviving group disappeared from runtime state")
+								}
 							}
 							if tc.legacy && (!strings.Contains(stderr.String(), name) || !strings.Contains(stderr.String(), "restart")) {
 								t.Error("legacy record must name the session and restart remedy")

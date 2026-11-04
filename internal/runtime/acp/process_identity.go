@@ -9,12 +9,27 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 type providerOps struct {
 	processIdentity func(int) (string, error)
 	signal          func(int, syscall.Signal) error
+	beforeCleanup   func()
+}
+
+func (p *Provider) validateStopOwnership(name string) error {
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		owner, err := p.readProcessOwnership(name)
+		if err != nil {
+			return err
+		}
+		if owner != nil && (owner.CityPath == "") != (owner.SessionID == "") {
+			return fmt.Errorf("preserving session %q: incomplete ownership", name)
+		}
+		return nil
+	})
 }
 
 // UnmarshalJSON accepts legacy ownership without a process identity, but
@@ -70,7 +85,7 @@ func (p *Provider) processRunning(name string) (bool, error) {
 	if err != nil || owner == nil || owner.PID == 0 {
 		return false, err
 	}
-	return proctable.ProcessIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+	return proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
 }
 
 func (p *Provider) publishProcessOwnership(name string, env map[string]string, pid int) error {
@@ -85,7 +100,7 @@ func (p *Provider) publishProcessOwnership(name string, env map[string]string, p
 	if err != nil {
 		return err
 	}
-	return p.SetMeta(name, sessionOwnershipMetaKey, string(data))
+	return p.setMetaLocked(name, sessionOwnershipMetaKey, string(data))
 }
 
 func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([]string, error) {
@@ -124,7 +139,7 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 		if !strings.HasPrefix(owner.Name, prefix) || seen[owner.Name] {
 			continue
 		}
-		live, err := proctable.ProcessIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
+		live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity)
 		if err != nil {
 			return nil, err
 		}
@@ -135,26 +150,53 @@ func (p *Provider) listRecordedProcesses(prefix string, seen map[string]bool) ([
 	return names, nil
 }
 
-func (p *Provider) stopRecordedProcess(name string) error {
-	owner, err := p.readProcessOwnership(name)
-	if err != nil || owner == nil || owner.PID == 0 {
-		return err
+func (p *Provider) stopProcessGeneration(name string, owner *sessionOwnership) error {
+	if owner == nil || owner.PID == 0 {
+		return nil
 	}
 	if err := proctable.TerminateProcessGroup(owner.PID, owner.Start, p.ops.processIdentity, p.ops.signal); err != nil {
 		return fmt.Errorf("stopping ACP session %q: %w", name, err)
 	}
-	current, err := p.readProcessOwnership(name)
-	if err != nil {
-		return err
+	return p.cleanupProcessGeneration(name, owner)
+}
+
+func (p *Provider) cleanupProcessGeneration(name string, owner *sessionOwnership) error {
+	if owner == nil {
+		return nil
 	}
-	if current != nil && *current == *owner {
+	return runtime.WithProviderStateDirLock(p.dir, func() error {
+		current, err := p.readProcessOwnership(name)
+		if err != nil || current == nil {
+			return err
+		}
+		if *current != *owner {
+			return fmt.Errorf("preserving replacement ACP session %q during cleanup", name)
+		}
+		if owner.PID != 0 {
+			if live, err := proctable.ProcessGroupIdentityMatches(owner.PID, owner.Start, p.ops.processIdentity); err != nil {
+				return err
+			} else if live {
+				return fmt.Errorf("preserving session %q: process group remains", name)
+			}
+		}
+		if p.ops.beforeCleanup != nil {
+			p.ops.beforeCleanup()
+		}
 		p.cleanupMeta(name)
-	}
-	return nil
+		for _, path := range []string{p.sockPath(name), p.sockNamePath(name)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ShutdownDiagnostic describes a legacy record whose child cannot be identified.
 func (p *Provider) ShutdownDiagnostic(name string) error {
+	if err := p.validateStopOwnership(name); err != nil {
+		return err
+	}
 	owner, err := p.readProcessOwnership(name)
 	if err != nil {
 		return err

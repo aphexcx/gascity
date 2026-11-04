@@ -80,3 +80,17 @@ func TestProcessIdentityMatchesInvalidAndEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTerminateProcessGroupMissingLeaderSurvivor(t *testing.T) {
+	cmd, _ := startKillTestProcess(t, "sleep", []string{"60"}, nil)
+	signals := 0
+	err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
+		return "", ErrProcessGone
+	}, func(int, syscall.Signal) error {
+		signals++
+		return nil
+	})
+	if err == nil || signals != 0 {
+		t.Fatalf("live group without leader identity: err=%v signals=%d; want refusal without signals", err, signals)
+	}
+}
