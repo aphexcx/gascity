@@ -91,6 +91,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				force, live, child, opaque bool
 				legacy                     bool
 				descendant                 bool
+				retainBead                 bool
 			}{
 				{name: "stale manual forced", origin: "manual", force: true},
 				{name: "stale manual graceful", origin: "manual"},
@@ -107,6 +108,10 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				{name: "desired partial city", origin: "desired", force: true, child: true, missing: "GC_SESSION_ID"},
 				{name: "desired partial session", origin: "desired", force: true, child: true, missing: "GC_CITY_PATH"},
 				{name: "desired no ownership", origin: "desired", force: true, child: true, missing: "both"},
+				{name: "desired bead child", origin: "desired", force: true, child: true, retainBead: true},
+				{name: "desired bead no ownership", origin: "desired", force: true, child: true, retainBead: true, missing: "both"},
+				{name: "desired bead partial city", origin: "desired", force: true, child: true, retainBead: true, missing: "GC_SESSION_ID"},
+				{name: "desired bead partial session", origin: "desired", force: true, child: true, retainBead: true, missing: "GC_CITY_PATH"},
 				{name: "orphan child", origin: "orphan", force: true, child: true},
 				{name: "orphan opaque child", origin: "orphan", force: true, child: true, opaque: true},
 				{name: "legacy manual", origin: "manual", force: true, legacy: true},
@@ -151,7 +156,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if tc.origin == "orphan" || tc.origin == "desired" {
+					if tc.origin == "orphan" || (tc.origin == "desired" && !tc.retainBead) {
 						if err := store.Delete(b.ID); err != nil {
 							t.Fatal(err)
 						}

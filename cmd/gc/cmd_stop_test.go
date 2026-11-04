@@ -134,14 +134,15 @@ func TestStopScopedOrphanRevalidatesReplacement(t *testing.T) {
 }
 
 func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
-	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed"} {
+	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed", "resolved", "resolved unknown", "resolved conflict", "resolved replacement", "resolved deleted"} {
 		t.Run(mode, func(t *testing.T) {
 			store := beads.NewMemStore()
 			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "test-worker", "state": "active"}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode != "live" {
+			retained := mode == "live" || (strings.HasPrefix(mode, "resolved") && mode != "resolved deleted")
+			if !retained {
 				if err := store.Delete(b.ID); err != nil {
 					t.Fatal(err)
 				}
@@ -157,22 +158,29 @@ func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
 			}
 			sp := runtime.NewFake()
 			env := map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID}
-			if mode == "unknown" {
+			if mode == "unknown" || mode == "resolved unknown" {
 				env = nil
 			}
+			if mode == "resolved conflict" {
+				env["GC_SESSION_ID"] = "another-session"
+			}
 			startStopTestSession(t, sp, "test-worker", env)
-			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker"}}, lookup, sp)
-			refuse := mode == "transient" || mode == "collision" || mode == "mixed absence" || mode == "unknown"
+			target := stopTarget{name: "test-worker"}
+			if strings.HasPrefix(mode, "resolved") {
+				target.sessionID = b.ID
+			}
+			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{target}, lookup, sp)
+			refuse := mode == "transient" || mode == "collision" || mode == "mixed absence" || mode == "unknown" || mode == "resolved unknown" || mode == "resolved conflict"
 			if refuse {
 				if err == nil || len(targets) != 0 || sp.CountCalls("Stop", "test-worker") != 0 {
 					t.Fatalf("unsafe target selected: targets=%v err=%v", targets, err)
 				}
 				return
 			}
-			if err != nil || len(targets) != 1 || targets[0].runtimeOnly != (mode != "live") {
+			if err != nil || len(targets) != 1 || targets[0].runtimeOnly != !retained {
 				t.Fatalf("targets=%v err=%v", targets, err)
 			}
-			if mode == "replacement" {
+			if mode == "replacement" || mode == "resolved replacement" {
 				if err := sp.SetMeta("test-worker", "GC_CITY_PATH", "/cities/foreign"); err != nil {
 					t.Fatal(err)
 				}
@@ -180,8 +188,12 @@ func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
 			if mode == "lookup changed" {
 				lookup.err = errors.New("store unavailable after selection")
 			}
-			err = provider.Stop("test-worker")
-			if mode == "replacement" || mode == "lookup changed" {
+			if mode == "resolved deleted" {
+				err = stopTargetThroughWorkerBoundary(targets[0], lookup, provider, &config.City{})
+			} else {
+				err = provider.Stop("test-worker")
+			}
+			if mode == "replacement" || mode == "resolved replacement" || mode == "lookup changed" {
 				if err == nil || !sp.IsRunning("test-worker") || sp.CountCalls("Stop", "test-worker") != 0 {
 					t.Fatalf("ownership/lookup change was not fenced: %v", err)
 				}

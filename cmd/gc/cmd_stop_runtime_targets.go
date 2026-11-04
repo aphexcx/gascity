@@ -11,18 +11,14 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// resolveRuntimeOnlyStopTargets verifies unresolved shutdown targets before
-// allowing the worker boundary to bypass a confirmed deleted session record.
+// resolveRuntimeOnlyStopTargets verifies every shutdown target's ownership and
+// lets the worker boundary bypass only a confirmed deleted session record.
 func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store beads.Store, sp runtime.Provider) ([]stopTarget, runtime.Provider, error) {
 	var resolved []stopTarget
 	var bindings []runtime.BackendListResult
 	var backends []runtime.BackendListResult
 	var result error
 	for _, target := range targets {
-		if target.sessionID != "" {
-			resolved = append(resolved, target)
-			continue
-		}
 		if backends == nil {
 			backends = runtime.ListBackendSessions("runtime", sp, "")
 		}
@@ -43,14 +39,14 @@ func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store 
 func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.Store, sp runtime.Provider, listed []runtime.BackendListResult) (stopTarget, runtime.BackendListResult, error) {
 	var empty runtime.BackendListResult
 	backends := confirmManualStopBackendAbsence(listed, target.name)
-	if _, err := runtime.MergeBackendListResults(backends...); err != nil {
+	// A resolved bead on a single backend can be verified by its exact
+	// ownership query even when bulk enumeration is unavailable.
+	resolvedSingle := target.sessionID != "" && len(backends) == 1
+	if _, err := runtime.MergeBackendListResults(backends...); err != nil && !resolvedSingle {
 		return target, empty, err
 	}
 	var id string
 	for _, backend := range backends {
-		if !slices.Contains(backend.Names, target.name) && !backend.Provider.IsRunning(target.name) {
-			continue
-		}
 		city, ownerID, err := stopSessionOwnership(backend.Provider, target.name)
 		if runtime.IsSessionNotFound(err) {
 			continue
@@ -59,9 +55,17 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 			return target, empty, err
 		}
 		if city == "" || ownerID == "" {
+			// Legacy metadata reads cannot distinguish an empty backend from
+			// missing ownership. Preserve the manual-stop compatibility rule;
+			// typed ownership providers must positively report absence.
+			if _, typed := backend.Provider.(interface {
+				SessionOwnership(string) (string, string, error)
+			}); !typed && !slices.Contains(backend.Names, target.name) && !backend.Provider.IsRunning(target.name) {
+				continue
+			}
 			return target, empty, fmt.Errorf("incomplete ownership on backend %q", backend.Label)
 		}
-		if filepath.Clean(city) != filepath.Clean(cityPath) || (id != "" && id != ownerID) {
+		if filepath.Clean(city) != filepath.Clean(cityPath) || (id != "" && id != ownerID) || (target.sessionID != "" && target.sessionID != ownerID) {
 			return target, empty, fmt.Errorf("conflicting ownership on backend %q", backend.Label)
 		}
 		id = ownerID
@@ -82,6 +86,9 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 	}
 	record, err := store.Get(id)
 	target.runtimeOnly = stopSessionRecordAbsent(err)
+	if target.runtimeOnly {
+		target.sessionID = ""
+	}
 	if err != nil && !target.runtimeOnly {
 		return target, empty, fmt.Errorf("checking session record %q: %w", id, err)
 	}
@@ -99,8 +106,18 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 		}
 	}
 	verified := &verifiedManualStopBackend{Provider: provider, verify: func() error {
-		if err := verifyManualStopOwnership(sp, info, cityPath, backend.Label, map[string]bool{backend.Label: true}); err != nil {
-			return err
+		if resolvedSingle {
+			current := runtime.ListBackendSessions("runtime", sp, "")
+			if len(current) != 1 || current[0].Label != backend.Label {
+				return fmt.Errorf("runtime %q backend selection changed during shutdown", target.name)
+			}
+			if err := verifyScopedOrphanStopOwnership(current[0].Provider, target.name, cityPath, id); err != nil {
+				return err
+			}
+		} else {
+			if err := verifyManualStopOwnership(sp, info, cityPath, backend.Label, map[string]bool{backend.Label: true}); err != nil {
+				return err
+			}
 		}
 		if target.runtimeOnly {
 			if _, err := store.Get(id); !stopSessionRecordAbsent(err) {

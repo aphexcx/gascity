@@ -968,7 +968,7 @@ func testCmdStopBodyRefusedOrphanSweepFails(t *testing.T) {
 }
 
 func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
-	for _, mode := range []string{"owned", "unowned", "delete refused"} {
+	for _, mode := range []string{"owned", "owned closed", "unowned", "delete refused"} {
 		t.Run(mode, func(t *testing.T) {
 			cityDir := t.TempDir()
 			cfg := &config.City{Workspace: config.Workspace{Name: "test"}, Beads: config.BeadsConfig{Provider: "file"}}
@@ -985,6 +985,11 @@ func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
 			}
 			// Pending Kubernetes pods retain identity but are absent from both
 			// ListRunning and IsRunning. No controller is started in this city.
+			if mode == "owned closed" {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
 			sp := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: true}
 			env := map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID}
 			if mode == "unowned" {
@@ -1000,7 +1005,7 @@ func TestCmdStopBodyPendingManualArtifact(t *testing.T) {
 			overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
 			var stdout, stderr lockedBuffer
 			code := cmdStopBody(cityDir, cfg, true, &stdout, &stderr)
-			wantFailure := mode != "owned"
+			wantFailure := mode != "owned" && mode != "owned closed"
 			if (code != 0) != wantFailure || sp.Fake.IsRunning("pending-runtime") != wantFailure {
 				t.Fatalf("code=%d artifact=%v stderr=%q; want failure=%v", code, sp.Fake.IsRunning("pending-runtime"), stderr.String(), wantFailure)
 			}
