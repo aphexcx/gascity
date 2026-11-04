@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -147,7 +148,7 @@ func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.S
 // configured runtime has no ownership metadata. Providers that require an
 // ownership record must refuse that binding themselves.
 func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.Provider, label string, provider runtime.Provider) (stopTarget, runtime.BackendListResult, error) {
-	verify := func() error {
+	verify := func(allowAbsent bool) error {
 		if store == nil {
 			return fmt.Errorf("session store unavailable")
 		}
@@ -156,6 +157,7 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 			return err
 		}
 		selected := 0
+		boundAbsent := false
 		for _, backend := range current {
 			// Listing is optional for exec scripts. The bound backend may
 			// instead confirm this configured name with its exact liveness probe.
@@ -174,8 +176,9 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 				}
 				return fmt.Errorf("runtime %q absence is unconfirmed on backend %q", target.name, backend.Label)
 			}
+			boundAbsent = boundAbsent || backend.Label == label
 		}
-		if selected == 0 {
+		if selected == 0 && (!allowAbsent || !boundAbsent) {
 			return runtime.ErrSessionNotFound
 		}
 		if target.sessionID != "" {
@@ -199,12 +202,71 @@ func bindConfiguredStopTarget(target stopTarget, store beads.Store, sp runtime.P
 		}
 		return nil
 	}
-	if err := verify(); err != nil {
+	if err := verify(false); err != nil {
 		return target, runtime.BackendListResult{}, err
 	}
 	target.runtimeOnly = target.sessionID == ""
 	return target, runtime.BackendListResult{
 		Label: label, Names: []string{target.name},
-		Provider: &verifiedManualStopBackend{Provider: provider, verify: verify},
+		Provider: &configuredStopBackend{
+			verifiedManualStopBackend: &verifiedManualStopBackend{Provider: provider, verify: func() error { return verify(false) }},
+			verifyCleanup:             func() error { return verify(true) },
+		},
 	}, nil
+}
+
+// configuredStopBackend retains the cleanup obligation after a successful
+// cancellation, even when the script no longer reports a live session.
+type configuredStopBackend struct {
+	*verifiedManualStopBackend
+	verifyCleanup func() error
+	mu            sync.Mutex
+	interrupted   bool
+	stopped       bool
+}
+
+// Stop rechecks the original binding and completes its teardown at most once.
+func (p *configuredStopBackend) Stop(name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return nil
+	}
+	backend := *p.verifiedManualStopBackend
+	if p.interrupted {
+		backend.verify = p.verifyCleanup
+	}
+	if err := backend.Stop(name); err != nil {
+		return err
+	}
+	p.stopped = true
+	return nil
+}
+
+// Interrupt records successful cancellation without treating it as teardown.
+func (p *configuredStopBackend) Interrupt(name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return runtime.ErrSessionNotFound
+	}
+	if err := p.verifiedManualStopBackend.Interrupt(name); err != nil {
+		return err
+	}
+	p.interrupted = true
+	return nil
+}
+
+// SendKeys retains cleanup after successful soft or fallback cancellation.
+func (p *configuredStopBackend) SendKeys(name string, keys ...string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return runtime.ErrSessionNotFound
+	}
+	if err := p.verifiedManualStopBackend.SendKeys(name, keys...); err != nil {
+		return err
+	}
+	p.interrupted = true
+	return nil
 }

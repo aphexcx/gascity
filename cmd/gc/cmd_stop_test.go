@@ -292,6 +292,86 @@ func TestConfiguredStopBackendSelection(t *testing.T) {
 	}
 }
 
+type configuredStopCleanupProvider struct {
+	*stopUnlistedRuntimeProvider
+	interruptErr error
+}
+
+func (p *configuredStopCleanupProvider) Interrupt(name string) error {
+	if p.interruptErr != nil {
+		return p.interruptErr
+	}
+	return p.Fake.Interrupt(name)
+}
+
+func TestConfiguredStopCleanup(t *testing.T) {
+	for _, mode := range []string{"interrupted", "keys", "already absent", "interrupt failed", "sibling appeared", "unlisted sibling appeared", "record appeared", "already stopped"} {
+		t.Run(mode, func(t *testing.T) {
+			primary := &configuredStopCleanupProvider{stopUnlistedRuntimeProvider: &stopUnlistedRuntimeProvider{Fake: runtime.NewFake()}}
+			sibling := &stopUnlistedRuntimeProvider{Fake: runtime.NewFake(), hidden: mode == "unlisted sibling appeared"}
+			startStopTestSession(t, primary.Fake, "worker", nil)
+			store := beads.NewMemStore()
+			_, binding, err := bindConfiguredStopTarget(stopTarget{name: "worker", resolved: true}, store, auto.New(primary, sibling), "runtime/default", primary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound := binding.Provider
+			switch mode {
+			case "already absent":
+			case "already stopped":
+				primary.StopLeavesRunning["worker"] = true
+				if err := bound.Stop("worker"); err != nil {
+					t.Fatal(err)
+				}
+			case "keys":
+				if err := bound.SendKeys("worker", "C-c"); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if mode == "interrupt failed" {
+					primary.interruptErr = errors.New("interrupt failed")
+				}
+				if err := bound.Interrupt("worker"); !errors.Is(err, primary.interruptErr) {
+					t.Fatalf("interrupt: %v", err)
+				}
+			}
+			if mode != "already stopped" {
+				// Simulate exit independently of the bound cleanup operation.
+				if err := primary.Stop("worker"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasSuffix(mode, "sibling appeared") {
+				startStopTestSession(t, sibling.Fake, "worker", nil)
+			}
+			if mode == "record appeared" {
+				if _, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "worker", "state": "active"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := primary.CountCalls("Stop", "worker")
+			err = bound.Stop("worker")
+			wantCleanup := mode == "interrupted" || mode == "keys"
+			wantSuccess := wantCleanup || mode == "already stopped"
+			if (err == nil) != wantSuccess {
+				t.Errorf("cleanup error = %v, want success=%v", err, wantSuccess)
+			}
+			if (mode == "already absent" || mode == "interrupt failed") && !runtime.IsSessionNotFound(err) {
+				t.Errorf("untouched absent session: %v, want not found", err)
+			}
+			if wantCleanup {
+				before++
+				if err := bound.Stop("worker"); err != nil {
+					t.Errorf("repeat cleanup: %v", err)
+				}
+			}
+			if got := primary.CountCalls("Stop", "worker"); got != before || sibling.CountCalls("Stop", "worker") != 0 {
+				t.Fatalf("cleanup calls = %d, want %d; sibling must remain untouched", got, before)
+			}
+		})
+	}
+}
+
 func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
 	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed", "resolved", "resolved unknown", "resolved conflict", "resolved replacement", "resolved deleted"} {
 		t.Run(mode, func(t *testing.T) {
