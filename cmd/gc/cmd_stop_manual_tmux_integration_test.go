@@ -106,6 +106,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 				{name: "desired opaque child", origin: "desired", force: true, child: true, opaque: true},
 				{name: "desired partial city", origin: "desired", force: true, child: true, missing: "GC_SESSION_ID"},
 				{name: "desired partial session", origin: "desired", force: true, child: true, missing: "GC_CITY_PATH"},
+				{name: "desired no ownership", origin: "desired", force: true, child: true, missing: "both"},
 				{name: "orphan child", origin: "orphan", force: true, child: true},
 				{name: "orphan opaque child", origin: "orphan", force: true, child: true, opaque: true},
 				{name: "legacy manual", origin: "manual", force: true, legacy: true},
@@ -126,7 +127,8 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						Session: config.SessionConfig{Provider: leaf}, Daemon: config.DaemonConfig{ShutdownTimeout: "1ns"},
 					}
 					if tc.origin == "desired" {
-						cfg.Agents = []config.Agent{{Name: "worker"}}
+						one := 1
+						cfg.Agents = []config.Agent{{Name: "worker", MaxActiveSessions: &one}}
 					}
 					writeStopLifecycleCityConfig(t, cityDir, cfg)
 					store, err := openCityStoreAt(cityDir)
@@ -145,10 +147,12 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						metadata["configured_named_session"] = "true"
 						metadata["configured_named_identity"] = "sky"
 					}
-					b := beads.Bead{ID: "deleted-record"}
-					if tc.origin != "orphan" && tc.origin != "desired" {
-						b, err = store.Create(beads.Bead{Type: "session", Metadata: metadata})
-						if err != nil {
+					b, err := store.Create(beads.Bead{Type: "session", Metadata: metadata})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc.origin == "orphan" || tc.origin == "desired" {
+						if err := store.Delete(b.ID); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -192,7 +196,7 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 							t.Fatal(err)
 						}
 						t.Cleanup(func() {
-							if tc.missing != "" || tc.descendant {
+							if (tc.missing != "" || tc.descendant) && identity.PID > 1 && identity.PID != os.Getpid() {
 								_ = syscall.Kill(-identity.PID, syscall.SIGKILL)
 								if err := waitForProcessGroupExit(identity.PID, testutil.ExecRaceTimeout); err != nil {
 									t.Error(err)
@@ -249,12 +253,12 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						sp = newProvider()
 					}
 					for key, value := range map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": b.ID} {
-						if key != tc.missing {
+						if key != tc.missing && tc.missing != "both" {
 							if err := sp.SetMeta(name, key, value); err != nil {
 								t.Fatal(err)
 							}
 						} else if tc.child {
-							if err := sp.SetMeta(name, key, ""); err != nil {
+							if err := sp.RemoveMeta(name, key); err != nil {
 								t.Fatal(err)
 							}
 						}
@@ -268,10 +272,10 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 							PID     int    `json:"pid,omitempty"`
 							Start   string `json:"start,omitempty"`
 						}{City: cityDir, Session: b.ID}
-						if tc.missing == "GC_CITY_PATH" {
+						if tc.missing == "GC_CITY_PATH" || tc.missing == "both" {
 							owner.City = ""
 						}
-						if tc.missing == "GC_SESSION_ID" {
+						if tc.missing == "GC_SESSION_ID" || tc.missing == "both" {
 							owner.Session = ""
 						}
 						if !tc.legacy {
@@ -318,6 +322,12 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 						})
 					}
 					oldFactory := sessionProviderForStopCity
+					if tc.origin == "desired" {
+						_, desired, _, err := resolveStopSessionNames(store, cfg, cityDir, "test", sp, io.Discard)
+						if err != nil || !desired[name] {
+							t.Fatalf("fixture is not a desired singleton: desired=%v, error=%v", desired[name], err)
+						}
+					}
 					t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 					sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 					overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
@@ -340,6 +350,13 @@ func TestCmdStopSubprocessPersistedIdentity(t *testing.T) {
 							if tc.missing != "" && tc.child {
 								if current, err := proctable.ProcessIdentity(identity.PID); err != nil || current != identity.Start {
 									t.Errorf("partial identity child was signaled: %q, %v", current, err)
+								}
+								key := "gc_process_identity"
+								if leaf == "acp" {
+									key = "gc_session_owner"
+								}
+								if got, err := sp.GetMeta(name, key); err != nil || got != string(record) {
+									t.Errorf("refused target lost its process record: %q, %v", got, err)
 								}
 							}
 							if tc.descendant {

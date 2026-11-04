@@ -389,7 +389,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// Keep one dependency graph and grace window while retaining the backend
 	// that proved each manual session's identity, even after routing changes.
 	stopProvider := providerForManualStopTargets(sp, manualTargets)
-	code := doStopWithoutSuccess(sessionNames, stopProvider, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	code := doStopWithoutSuccessAt(cityPath, sessionNames, stopProvider, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 	if desiredErr != nil {
 		code = 1
 	}
@@ -956,6 +956,12 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
+	return doStopWithoutSuccessAt("", sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
+}
+
+func doStopWithoutSuccessAt(cityPath string, sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
+	rec events.Recorder, stdout, stderr io.Writer,
+) int {
 	code := 0
 	visible := map[string]bool{}
 	if sp != nil {
@@ -998,7 +1004,16 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 			running = append(running, sn)
 		}
 	}
-	if !gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr) {
+	targets := stopTargetsForNames(running, cfg, store, stderr)
+	if cityPath != "" {
+		var err error
+		targets, sp, err = resolveRuntimeOnlyStopTargets(cityPath, targets, store, sp)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+			code = 1
+		}
+	}
+	if !gracefulStopTargets(targets, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr, nil) {
 		code = 1
 	}
 	if manual, ok := sp.(*manualStopProvider); ok && manual.shutdownError() != nil {

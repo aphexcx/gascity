@@ -163,6 +163,7 @@ go_library(
         "cmd_status.go",
         "cmd_stop.go",
         "cmd_stop_manual_sessions.go",
+        "cmd_stop_runtime_targets.go",
         "cmd_storage.go",
         "cmd_supervisor.go",
         "cmd_supervisor_city.go",

@@ -298,7 +298,7 @@ func TestCmdStopReportsUnownedSessions(t *testing.T) {
 				startStopTestSession(t, sp.Fake, "removed-gc-9", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "deleted-bead"})
 				startStopTestSession(t, sp.Fake, "foreign-runtime", map[string]string{"GC_CITY_PATH": cityDir + "-foreign", "GC_SESSION_ID": "foreign-id"})
 				if !tc.emptyConfig {
-					startStopTestSession(t, sp.Fake, "worker", nil)
+					startStopTestSession(t, sp.Fake, "worker", map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "deleted-worker-bead"})
 				}
 				if !tc.allOwned {
 					startStopTestSession(t, sp.Fake, "legacy-manual", nil)
@@ -1395,6 +1395,8 @@ func TestCmdStopBodyManualDependencyOrder(t *testing.T) {
 							runtimeName = sessionNameFromBeadID(info.ID)
 							dbName = runtimeName
 						}
+					} else {
+						env["GC_SESSION_ID"] = "deleted-" + target.name
 					}
 					startStopTestSession(t, target.provider, runtimeName, env)
 				}
@@ -1432,9 +1434,24 @@ func TestCmdStopBodyPreservesForeignSessionsThroughTeardown(t *testing.T) {
 				Agents:    []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}},
 			}
 			writeStopLifecycleCityConfig(t, cityDir, cfg)
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workerRecord, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{
+				"session_name": "worker", "template": "worker", "state": "active",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			sp := &lifecycleOrderProvider{Fake: runtime.NewFake()}
 			for _, name := range []string{"worker", "foreign"} {
 				if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for key, value := range map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": workerRecord.ID} {
+				if err := sp.SetMeta("worker", key, value); err != nil {
 					t.Fatal(err)
 				}
 			}

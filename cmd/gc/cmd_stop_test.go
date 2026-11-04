@@ -133,6 +133,65 @@ func TestStopScopedOrphanRevalidatesReplacement(t *testing.T) {
 	}
 }
 
+func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
+	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence", "unknown", "replacement", "lookup changed"} {
+		t.Run(mode, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Type: "session", Metadata: map[string]string{"session_name": "test-worker", "state": "active"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "live" {
+				if err := store.Delete(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookup := &stopOrphanLookupStore{Store: store, id: b.ID}
+			switch mode {
+			case "transient":
+				lookup.err = errors.New("store unavailable")
+			case "collision":
+				lookup.err = beads.ErrIDCollision
+			case "mixed absence":
+				lookup.err = errors.Join(beads.ErrNotFound, errors.New("store unavailable"))
+			}
+			sp := runtime.NewFake()
+			env := map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID}
+			if mode == "unknown" {
+				env = nil
+			}
+			startStopTestSession(t, sp, "test-worker", env)
+			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker"}}, lookup, sp)
+			refuse := mode == "transient" || mode == "collision" || mode == "mixed absence" || mode == "unknown"
+			if refuse {
+				if err == nil || len(targets) != 0 || sp.CountCalls("Stop", "test-worker") != 0 {
+					t.Fatalf("unsafe target selected: targets=%v err=%v", targets, err)
+				}
+				return
+			}
+			if err != nil || len(targets) != 1 || targets[0].runtimeOnly != (mode != "live") {
+				t.Fatalf("targets=%v err=%v", targets, err)
+			}
+			if mode == "replacement" {
+				if err := sp.SetMeta("test-worker", "GC_CITY_PATH", "/cities/foreign"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "lookup changed" {
+				lookup.err = errors.New("store unavailable after selection")
+			}
+			err = provider.Stop("test-worker")
+			if mode == "replacement" || mode == "lookup changed" {
+				if err == nil || !sp.IsRunning("test-worker") || sp.CountCalls("Stop", "test-worker") != 0 {
+					t.Fatalf("ownership/lookup change was not fenced: %v", err)
+				}
+			} else if err != nil || sp.IsRunning("test-worker") {
+				t.Fatalf("verified target not stopped: %v", err)
+			}
+		})
+	}
+}
+
 func TestStopScopedOrphanBeadLookup(t *testing.T) {
 	for _, mode := range []string{"deleted", "live", "transient", "collision", "mixed absence"} {
 		t.Run(mode, func(t *testing.T) {
@@ -579,9 +638,7 @@ func TestCmdStopWallClockTimeoutBoundsDirectStop(t *testing.T) {
 
 	sp := newHangingProvider()
 	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
-	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
+	startStopTestSession(t, sp.Fake, sessionName, map[string]string{"GC_CITY_PATH": cityDir, "GC_SESSION_ID": "deleted-worker-bead"})
 
 	// cmdStop's wall-clock cap returns 1 while its worker is still blocked in
 	// hangingProvider.Stop. The worker eventually calls back into
