@@ -49,15 +49,19 @@ func TestHardenedReadAuth(t *testing.T) {
 		}
 	}
 	// A city grant cannot authorize cross-city aggregates or the dashboard.
-	for _, path := range []string{"/", "/health", "/v0/cities", "/v0/events", "/v0/events/stream", "/api/city/acme/config", "/openapi.json"} {
+	for _, path := range []string{"/", "/v0/events", "/v0/events/stream", "/api/city/acme/config", "/openapi.json"} {
 		for _, method := range []string{"GET", "HEAD"} {
 			if w := request(hardened, method, path, ""); w.Code != http.StatusForbidden {
 				t.Errorf("unguarded %s %s: %d", method, path, w.Code)
 			}
 		}
 	}
-	if w := request(sm.Handler(), "GET", "/health", ""); w.Code != http.StatusOK {
-		t.Fatalf("primary health changed: %d", w.Code)
+	for _, path := range []string{"/health", "/v0/cities"} {
+		for _, handler := range []http.Handler{sm.Handler(), hardened} {
+			if w := request(handler, "GET", path, ""); w.Code != http.StatusOK {
+				t.Errorf("public supervisor read %s: %d", path, w.Code)
+			}
+		}
 	}
 }
 

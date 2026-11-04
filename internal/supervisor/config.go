@@ -76,13 +76,15 @@ type Section struct {
 }
 
 // HardenedListener holds the [supervisor.hardened] table: an additional
-// grant-gated listener. Enabled when Port > 0. WriteAuthVerifyKey is REQUIRED
-// when enabled — there is no unverified acknowledgement knob for this listener
+// grant-gated listener. Enabled when Port > 0. A write key from WriteAuthVerifyKey
+// or TrustedKeysDir is REQUIRED — there is no unverified acknowledgement knob
 // because its whole purpose is to require grants; a hardened port without a key
 // is a boot error (fail closed). ReadAuthVerifyKey optionally gives this listener
-// its own read gate: city GET/HEAD requests require a signed city read grant,
-// and reads outside the per-city API are refused. Without it, the primary's read
-// posture is inherited. The primary listener is never changed by these fields.
+// its own read gate, as does TrustedKeysDir: city GET/HEAD requests require a
+// signed city read grant. Only /health and /v0/cities remain public; other reads
+// outside the per-city API are refused. Without either setting, the primary's
+// read posture is inherited and startup warns about the unauthenticated read
+// plane. The primary listener is never changed by these fields.
 type HardenedListener struct {
 	Bind               string `toml:"bind,omitempty"`
 	Port               int    `toml:"port,omitempty"`
@@ -91,10 +93,38 @@ type HardenedListener struct {
 	// It is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids
 	// must be disjoint from the primary read keys; it may use the hardened write
 	// key's kid because read grants have the separate gc-city-read audience.
+	// Use gc-write-mint --aud gc-city-read with a read request binding to mint a
+	// read grant; the gc context grant_command currently supplies write grants only.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	// ReadAuthRequired refuses startup before either listener binds when the
-	// hardened read key is empty. A configured key always gates reads.
+	// hardened read key and trusted_keys_dir are empty. A configured key always gates reads.
 	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
+	// TrustedKeysDir supplies both hardened verifiers with one <kid>.pub file
+	// per trusted city. Each regular file contains one standard-base64 32-byte
+	// Ed25519 public key; a trailing newline and lines starting with # are allowed.
+	// World-writable directories/files and symlink files are refused. Inline keys
+	// are merged; a duplicate kid is an error. Empty disables directory loading.
+	// At boot malformed files are reported and valid files load; at least one
+	// write key is required. A failed reload retains the previous complete set.
+	// Add a file to register a city, remove it to revoke; run gc supervisor reload
+	// or wait one interval. Reloads preserve single-use grants across key changes.
+	TrustedKeysDir string `toml:"trusted_keys_dir,omitempty"`
+	// TrustedKeysReloadInterval is the directory refresh interval (default 60s).
+	// Set "0" to disable the timer; explicit supervisor reload still refreshes keys.
+	// Negative or invalid durations refuse startup. Inline key changes need a restart.
+	TrustedKeysReloadInterval string `toml:"trusted_keys_reload_interval,omitempty"`
+}
+
+// TrustedKeysReloadDuration validates the configured interval, defaulting to 60s.
+func (h HardenedListener) TrustedKeysReloadDuration() (time.Duration, error) {
+	if h.TrustedKeysReloadInterval == "" {
+		return time.Minute, nil
+	}
+	d, err := time.ParseDuration(h.TrustedKeysReloadInterval)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("trusted_keys_reload_interval %q: want a non-negative duration", h.TrustedKeysReloadInterval)
+	}
+	return d, nil
 }
 
 // Enabled reports whether the hardened listener is configured (Port > 0).

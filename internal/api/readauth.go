@@ -200,6 +200,14 @@ func InstallHardenedReadAuth(sm *SupervisorMux, primaryKey, configKey string, re
 	if err != nil {
 		return fmt.Errorf("hardened read-auth: %w", err)
 	}
+	if err := hardenedReadVerifierKidsDisjoint(primaryKey, raw); err != nil {
+		return err
+	}
+	sm.hardenedReadAuth = v
+	return nil
+}
+
+func hardenedReadVerifierKidsDisjoint(primaryKey, raw string) error {
 	primary := strings.TrimSpace(primaryKey)
 	if env := strings.TrimSpace(os.Getenv("GC_CITY_READ_PUBKEY")); env != "" {
 		primary = env
@@ -219,7 +227,6 @@ func InstallHardenedReadAuth(sm *SupervisorMux, primaryKey, configKey string, re
 			}
 		}
 	}
-	sm.hardenedReadAuth = v
 	return nil
 }
 
@@ -229,6 +236,10 @@ func InstallHardenedReadAuth(sm *SupervisorMux, primaryKey, configKey string, re
 func hardenedReadScopeGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if r.URL.Path == "/health" || r.URL.Path == "/v0/cities" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if _, ok := cityScopedObjectPath(r.URL.Path); !ok {
 				problemHardenedReadScopeRefused.writeTo(w)
 				return

@@ -29,9 +29,10 @@ new rig — both authenticated by a fresh, request-bound grant your machine mint
 - **Protect reads as well as writes.** With only write-auth, anyone who can
   reach the port can read beads, mail, session transcripts, and events, including
   rig-provisioning progress. Keep that configuration behind an authenticated
-  proxy, private network, or firewall. With `read_auth_verify_key` set on
-  `[supervisor.hardened]`, city reads require signed grants and other reads are
-  refused; that port alone may sit behind a public TLS front. The primary
+  proxy, private network, or firewall. With `read_auth_verify_key` or
+  `trusted_keys_dir` set on `[supervisor.hardened]`, city reads require signed
+  grants. Only `/health` and `/v0/cities` remain public; other reads outside the
+  city API are refused. That port alone may sit behind a public TLS front. The primary
   listener and standalone `[api]` read posture are unchanged.
 - **TLS.** `gc` refuses a plain-`http` non-loopback URL at context validation.
   Terminate TLS in front of the city and, if the cert is private, pass its CA to
@@ -120,7 +121,7 @@ allowed_hosts = ["city.example.ts.net"]
 [supervisor.hardened]
 bind = "127.0.0.1"                # default; reachable only through the TLS front on this host
 port = 8447
-write_auth_verify_key = "peer:<base64 ed25519 pubkey>"   # REQUIRED; no unverified ack knob
+write_auth_verify_key = "peer:<base64 ed25519 pubkey>"   # or use trusted_keys_dir below
 read_auth_verify_key = "peer:<base64 ed25519 pubkey>"
 read_auth_required = true
 ```
@@ -131,28 +132,76 @@ with independent write and read verifiers. It refuses (403) every supervisor-sco
 `start_command`, which write-auth exempts because a not-yet-created city has
 no name to bind a grant to), the whole `/svc/*` workspace-service pass-through
 (any method — a GET can be a WebSocket upgrade the proxy then tunnels), and any
-protocol upgrade on any path. With its read key set, only grant-signed
-`/v0/city/{city}/…` reads and mutations are served. Aggregate events, city lists,
-health probes, the dashboard and its `/api/*` routes, and static files are
-refused on that port: a city grant cannot authorize data across cities.
+protocol upgrade on any path. With a read key or trusted-key directory set,
+`/v0/city/{city}/…` reads and mutations require grants. `/health` and `/v0/cities`
+stay public, including the city names, paths, and status in the city list.
+Aggregate events, the dashboard and its `/api/*` routes, and static files are
+refused on that port.
 Front the hardened port with your TLS edge and register that URL as the peer's
 context. Boot is fail-closed
 and all-or-nothing: an enabled hardened port without a key, a hardened port
 equal to the primary address, a hardened kid that also appears in the primary
 key list for the same audience (each verifier keeps its own single-use replay
-guard), `read_auth_required = true` without a hardened read key, a read-only
+guard), `read_auth_required = true` without a hardened read key or directory key, a read-only
 primary bind, or a hardened bind failure refuses to start with **no** listener
 up. `GC_CITY_WRITE_PUBKEY`, `GC_CITY_READ_PUBKEY`, and `GC_CITY_READ_REQUIRED`
 belong to the primary gates; they cannot supply or replace the hardened keys.
 The hardened read verifier shares the `GC_CITY_READ_EPOCH_FLOOR` revocation
 floor and uses the audience `gc-city-read`.
 
-With `read_auth_verify_key` set on the hardened listener, no unsigned read is
-served on that port. A public TLS front, such as a Funnel or a provider's public
-TLS port, is then acceptable for that port alone. Keep the primary listener
-private. Without the hardened read key, the listener inherits the primary's
-read posture exactly as before and still needs an authenticated network front;
-the primary read gate alone does not cover aggregate events or dashboard reads.
+With `read_auth_verify_key` or `trusted_keys_dir` set, city reads on the hardened
+port are grant-gated. A public TLS front, such as a Funnel or a provider's public
+TLS port, can expose that port without putting peer cities on a private network.
+Keep the primary listener private. Without either setting, the listener inherits
+the primary's read posture and emits the G23 unauthenticated-read-plane warning,
+including on loopback binds used behind a TLS front. It still needs an authenticated
+network front; the primary read gate alone does not cover aggregate events or dashboard reads.
+
+### Register or revoke trusted cities without restarting
+
+Use a directory to trust each city's public key for both read and write grants:
+
+```toml
+[supervisor.hardened]
+port = 8447
+trusted_keys_dir = "/srv/gc/trusted-cities"
+trusted_keys_reload_interval = "60s" # default; "0" disables the timer
+read_auth_required = true
+```
+
+Each regular file is named `<kid>.pub` and contains standard base64 of the
+32-byte Ed25519 public key on one line. A trailing newline and comment lines
+starting with `#` are allowed. Keep the directory and files writable only by
+the supervisor's user (for example, modes `0700` and `0600`). World-writable
+directories/files and symlink files are refused. Files without `.pub` are
+ignored, so a writer can stage a file and atomically rename it to `<kid>.pub`.
+
+To trust a new city, write its `<kid>.pub` into `trusted_keys_dir`, then run
+`gc supervisor reload` or wait one interval. To revoke it, remove the file and
+reload or wait. Removing the last key keeps both grant gates active and rejects
+all directory-signed requests. The single-use grant record survives every reload.
+
+Inline `write_auth_verify_key` and `read_auth_verify_key` lists are merged with
+the directory independently. A kid in both an inline list and the directory is
+an error; use one source per kid in each list. Hardened read and write keys may
+share kids, but a kid cannot also appear in the primary listener's key list for
+the same audience. Inline lists and directory settings are read at startup;
+only directory contents reload.
+
+| Condition | Result |
+|---|---|
+| Missing, unreadable, or world-writable directory at boot | Startup refuses before either listener binds |
+| Malformed or unsafe individual file at boot | File is named and refused; valid files still load; both planes need usable keys |
+| Inline/directory duplicate kid or primary/hardened collision | Startup refuses; a later reload keeps the previous set |
+| Failed directory read or malformed/unsafe file during reload | One diagnostic line names the failure; both previous key sets remain active |
+| Valid reload, including removal of all keys | Both verifiers change together; in-flight requests finish with their existing snapshot |
+
+Explicit reload refreshes keys **after** city reconciliation and before the
+control-socket acknowledgement. This keeps the existing reconciliation order;
+the independent timer refreshes trust without waiting for a reconcile request.
+Read grants use `gc-write-mint --aud gc-city-read` with the GET/HEAD request
+binding described below. Context-driven read-grant minting is still a separate
+client feature; `gc --context` currently supplies write grants only.
 
 ## 4. Configure the client context
 

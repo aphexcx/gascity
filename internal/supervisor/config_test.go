@@ -424,6 +424,8 @@ port = 8447
 write_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
 read_auth_verify_key = "peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY="
 read_auth_required = true
+trusted_keys_dir = "/srv/gc/trusted-cities"
+trusted_keys_reload_interval = "15s"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -443,6 +445,9 @@ read_auth_required = true
 	}
 	if h.ReadAuthVerifyKey != h.WriteAuthVerifyKey || !h.ReadAuthRequired {
 		t.Errorf("Hardened read-auth fields did not round-trip: %#v", h)
+	}
+	if h.TrustedKeysDir != "/srv/gc/trusted-cities" || h.TrustedKeysReloadInterval != "15s" {
+		t.Errorf("Hardened trusted-key fields did not round-trip: %#v", h)
 	}
 	// Absent table => disabled.
 	if err := os.WriteFile(path, []byte("[supervisor]\nport = 8372\n"), 0o644); err != nil {

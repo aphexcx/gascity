@@ -7820,11 +7820,20 @@ func TestRunSupervisorHardenedListenerBoots(t *testing.T) {
 func TestRunSupervisorHardenedListenerRequiresKey(t *testing.T) {
 	const key = "\"peer:QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\""
 	const writeKey = "write_auth_verify_key = " + key + "\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "peer.pub"), []byte("QAXnBkSUJFXHA/sCICfJ1auCLZn4Lq4xWT8ASnAsEWY=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirConfig := "trusted_keys_dir = " + strconv.Quote(dir) + "\n"
 	for _, tc := range []struct{ name, primary, hardened, want string }{
 		{"write-required", "", "", "write_auth_verify_key"},
 		{"read-required", "", writeKey + "read_auth_required = true\n", "read_auth_verify_key"},
 		{"shared-read-kid", "read_auth_verify_key = " + key + "\n", writeKey + "read_auth_verify_key = " + key + "\n", "kids must be disjoint"},
 		{"malformed-read-key", "", writeKey + "read_auth_verify_key = \"bad-key\"\n", "read-auth"},
+		{"absent-directory", "", writeKey + "trusted_keys_dir = " + strconv.Quote(filepath.Join(dir, "absent")) + "\n", "trusted_keys_dir"},
+		{"inline-directory-collision", "", writeKey + dirConfig, "peer"},
+		{"directory-primary-read-collision", "read_auth_verify_key = " + key + "\n", dirConfig, "kids must be disjoint"},
+		{"invalid-reload-interval", "", writeKey + "trusted_keys_reload_interval = \"-1s\"\n", "trusted_keys_reload_interval"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			writeSupervisorBootFixture(t, "[supervisor]\nport = 8372\n"+tc.primary+"[supervisor.hardened]\nport = 8447\n"+tc.hardened)

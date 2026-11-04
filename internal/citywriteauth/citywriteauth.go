@@ -134,19 +134,9 @@ func New(opts Options) (*Verifier, error) {
 	if opts.MaxTTL <= 0 {
 		return nil, errors.New("citywriteauth: MaxTTL must be positive")
 	}
-	keys := make(map[string]ed25519.PublicKey, len(opts.Keys))
-	for kid, pub := range opts.Keys {
-		if kid == "" {
-			return nil, errors.New("citywriteauth: empty kid in key set")
-		}
-		if len(pub) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("citywriteauth: key %q has wrong size", kid)
-		}
-		// ed25519.PublicKey is a mutable []byte, so copying only the map would
-		// alias the caller's backing array and let a later mutation of
-		// opts.Keys change the verifier's trust root after construction. Clone
-		// each key so the verifier owns an immutable copy.
-		keys[kid] = append(ed25519.PublicKey(nil), pub...)
+	keys, err := cloneKeys(opts.Keys)
+	if err != nil {
+		return nil, err
 	}
 	now := opts.Now
 	if now == nil {
@@ -167,6 +157,38 @@ func New(opts Options) (*Verifier, error) {
 		now:        now,
 		replay:     replay,
 	}, nil
+}
+
+// WithKeys returns an immutable replacement with new keys and the same policy,
+// clock, and replay guard. An empty set revokes all keys without disabling auth.
+// Callers publish the replacement atomically; the original remains usable by
+// in-flight requests and shares consumed JTIs with every replacement.
+func (v *Verifier) WithKeys(replacement map[string]ed25519.PublicKey) (*Verifier, error) {
+	keys, err := cloneKeys(replacement)
+	if err != nil {
+		return nil, err
+	}
+	next := *v
+	next.keys = keys
+	return &next, nil
+}
+
+func cloneKeys(source map[string]ed25519.PublicKey) (map[string]ed25519.PublicKey, error) {
+	keys := make(map[string]ed25519.PublicKey, len(source))
+	for kid, pub := range source {
+		if kid == "" {
+			return nil, errors.New("citywriteauth: empty kid in key set")
+		}
+		if len(pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("citywriteauth: key %q has wrong size", kid)
+		}
+		// ed25519.PublicKey is a mutable []byte, so copying only the map would
+		// alias the caller's backing array and let a later mutation of
+		// opts.Keys change the verifier's trust root after construction. Clone
+		// each key so the verifier owns an immutable copy.
+		keys[kid] = append(ed25519.PublicKey(nil), pub...)
+	}
+	return keys, nil
 }
 
 // Verify authenticates token and binds it to expect. On success it returns the

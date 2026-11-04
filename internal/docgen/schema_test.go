@@ -76,7 +76,7 @@ func TestGenerateSupervisorSchema(t *testing.T) {
 	if h == nil {
 		t.Fatal("missing hardened listener schema")
 	}
-	for _, name := range []string{"read_auth_verify_key", "read_auth_required"} {
+	for _, name := range []string{"read_auth_verify_key", "read_auth_required", "trusted_keys_dir", "trusted_keys_reload_interval"} {
 		p, ok := h.Properties.Get(name)
 		if !ok || p.Description == "" {
 			t.Errorf("missing documented property %s", name)

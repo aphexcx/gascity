@@ -16,6 +16,7 @@ go_test(
     srcs = [
         "citywriteauth_test.go",
         "golden_test.go",
+        "rotation_test.go",
         "testenv_import_test.go",
     ],
     embed = [":citywriteauth"],

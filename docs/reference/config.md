@@ -1112,8 +1112,10 @@ HardenedListener holds the [supervisor.hardened] table: an additional grant-gate
 | `bind` | string |  |  |  |
 | `port` | integer |  |  |  |
 | `write_auth_verify_key` | string |  |  |  |
-| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list. It is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids must be disjoint from the primary read keys; it may use the hardened write key's kid because read grants have the separate gc-city-read audience. |
-| `read_auth_required` | boolean |  |  | ReadAuthRequired refuses startup before either listener binds when the hardened read key is empty. A configured key always gates reads. |
+| `read_auth_verify_key` | string |  |  | ReadAuthVerifyKey is a comma-separated kid:base64-ed25519-public-key list. It is independent of the primary read key and GC_CITY_READ_PUBKEY. Its kids must be disjoint from the primary read keys; it may use the hardened write key's kid because read grants have the separate gc-city-read audience. Use gc-write-mint --aud gc-city-read with a read request binding to mint a read grant; the gc context grant_command currently supplies write grants only. |
+| `read_auth_required` | boolean |  |  | ReadAuthRequired refuses startup before either listener binds when the hardened read key and trusted_keys_dir are empty. A configured key always gates reads. |
+| `trusted_keys_dir` | string |  |  | TrustedKeysDir supplies both hardened verifiers with one &lt;kid&gt;.pub file per trusted city. Each regular file contains one standard-base64 32-byte Ed25519 public key; a trailing newline and lines starting with # are allowed. World-writable directories/files and symlink files are refused. Inline keys are merged; a duplicate kid is an error. Empty disables directory loading. At boot malformed files are reported and valid files load; at least one write key is required. A failed reload retains the previous complete set. Add a file to register a city, remove it to revoke; run gc supervisor reload or wait one interval. Reloads preserve single-use grants across key changes. |
+| `trusted_keys_reload_interval` | string |  |  | TrustedKeysReloadInterval is the directory refresh interval (default 60s). Set "0" to disable the timer; explicit supervisor reload still refreshes keys. Negative or invalid durations refuse startup. Inline key changes need a restart. |
 
 ## PublicationConfig
 
