@@ -82,6 +82,8 @@ run_go_test() {
   run_go test "$@"
 }
 
+# make check-inventories checks these arrays against go test -list and verifies
+# the formula partition, canonical cmd/gc manifest, and runtime-tmux manifest.
 formula_tests=(
   TestAdoptPRFormulaCompileAndRun
   TestPersonalWorkFormulaCompileAndRun
