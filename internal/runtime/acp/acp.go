@@ -508,7 +508,7 @@ func (p *Provider) Stop(name string) error {
 
 	if ok {
 		if !sc.alive() {
-			return p.cleanupProcessGeneration(name, sc.ownership)
+			return p.stopProcessGeneration(name, sc.ownership)
 		}
 		// Guard against sentinel sessionConn (nil cmd/stdin during handshake).
 		// Signal the in-progress handshake to abort via the cancel func.
@@ -521,7 +521,7 @@ func (p *Provider) Stop(name string) error {
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc)
 		if err == nil || runtime.IsSessionGone(err) {
-			return p.cleanupProcessGeneration(name, sc.ownership)
+			return p.stopProcessGeneration(name, sc.ownership)
 		}
 		return err
 	}

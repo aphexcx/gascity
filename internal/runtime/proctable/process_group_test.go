@@ -103,27 +103,33 @@ func TestTerminateProcessGroupMissingLeaderSurvivor(t *testing.T) {
 
 func TestTerminateProcessGroupWaitsForLeaderlessDrain(t *testing.T) {
 	cmd, exited := startKillTestProcess(t, "sleep", []string{"60"}, nil)
-	reads, signals := 0, 0
-	err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
-		reads++
-		// Keep the group present through the initial identity checks, then
-		// model descendants completing an already-accepted shutdown.
-		if reads == 4 {
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-				t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		reads, signals := 0, 0
+		started := time.Now()
+		err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
+			reads++
+			// Keep the group through the waiter's first probe, then model
+			// descendants completing an already-accepted shutdown.
+			if reads == 5 {
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-exited:
+				case <-time.After(time.Second):
+					t.Fatal("test group did not finish draining")
+				}
 			}
-			select {
-			case <-exited:
-			case <-time.After(time.Second):
-				t.Fatal("test group did not finish draining")
-			}
+			return "", ErrProcessGone
+		}, func(int, syscall.Signal) error {
+			signals++
+			return nil
+		})
+		if err != nil || signals != 0 {
+			t.Fatalf("draining leaderless group: err=%v signals=%d; want success without signals", err, signals)
 		}
-		return "", ErrProcessGone
-	}, func(int, syscall.Signal) error {
-		signals++
-		return nil
+		if elapsed := time.Since(started); elapsed < 10*time.Millisecond || elapsed >= runtime.ManagedProcessStopGrace {
+			t.Fatalf("drain observed after %s; want a polling interval before the grace bound", elapsed)
+		}
 	})
-	if err != nil || signals != 0 {
-		t.Fatalf("draining leaderless group: err=%v signals=%d; want success without signals", err, signals)
-	}
 }

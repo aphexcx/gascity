@@ -10,11 +10,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -561,6 +563,123 @@ func TestStop_Idempotent(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Stop("never-started"); err != nil {
 		t.Errorf("Stop on never-started session: %v", err)
+	}
+}
+
+func TestStopTrackedLeaderlessGroup(t *testing.T) {
+	for _, exitedBeforeStop := range []bool{false, true} {
+		for _, drain := range []bool{false, true} {
+			t.Run(fmt.Sprintf("exited=%v/drain=%v", exitedBeforeStop, drain), func(t *testing.T) {
+				p := newTestProvider(t)
+				name := testName()
+				pidPath := filepath.Join(t.TempDir(), "child-pid")
+				command := strings.Replace(fakeACPShellCommand(), "import sys, json", `import sys, json, os, signal
+ready_r, ready_w = os.pipe()
+child_pid = os.fork()
+if child_pid == 0:
+    os.close(ready_r)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGUSR1, lambda *_: os._exit(0))
+    os.write(ready_w, b"1")
+    os.close(ready_w)
+    while True:
+        signal.pause()
+os.close(ready_w)
+assert os.read(ready_r, 1) == b"1"
+os.close(ready_r)
+with open(os.environ["GASCITY_ACP_DRAIN_PID"], "w") as marker:
+    marker.write(str(child_pid))`, 1)
+				if err := p.Start(context.Background(), name, runtime.Config{Command: command, Env: map[string]string{
+					"GC_CITY_PATH": "/test-city", "GC_SESSION_ID": name, "GASCITY_ACP_DRAIN_PID": pidPath,
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(pidPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				childPID, err := strconv.Atoi(string(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				childStart, err := proctable.ProcessIdentity(childPID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					live, err := proctable.ProcessIdentityMatches(childPID, childStart, proctable.ProcessIdentity)
+					if err != nil {
+						t.Error(err)
+					} else if live {
+						if err := syscall.Kill(childPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+							t.Error(err)
+						}
+					}
+					if err := p.Stop(name); err != nil {
+						t.Error(err)
+					}
+				})
+				p.mu.Lock()
+				sc := p.conns[name]
+				p.mu.Unlock()
+				if exitedBeforeStop {
+					if err := sc.stdin.Close(); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-sc.done:
+					case <-time.After(testutil.ExecRaceTimeout):
+						t.Fatal("ACP leader did not exit")
+					}
+				}
+				var mu sync.Mutex
+				var firstGone time.Time
+				goneReads, signals := 0, 0
+				released := false
+				p.ops.processIdentity = func(pid int) (string, error) {
+					identity, err := proctable.ProcessIdentity(pid)
+					if !drain || !errors.Is(err, proctable.ErrProcessGone) {
+						return identity, err
+					}
+					mu.Lock()
+					goneReads++
+					if firstGone.IsZero() {
+						firstGone = time.Now()
+					}
+					release := !released && goneReads >= 3 && time.Since(firstGone) >= 20*time.Millisecond
+					if release {
+						released = true
+					}
+					mu.Unlock()
+					if release {
+						if err := syscall.Kill(childPID, syscall.SIGUSR1); err != nil {
+							return "", fmt.Errorf("releasing ready descendant: %w", err)
+						}
+					}
+					return identity, err
+				}
+				p.ops.signal = func(int, syscall.Signal) error { signals++; return nil }
+				check := func(t *testing.T) {
+					started := time.Now()
+					err := p.Stop(name)
+					if (err == nil) != drain || signals != 0 {
+						t.Fatalf("tracked stop: err=%v signals=%d drain=%v", err, signals, drain)
+					}
+					if !drain && time.Since(started) != runtime.ManagedProcessStopGrace {
+						t.Fatalf("survivor grace = %s, want %s", time.Since(started), runtime.ManagedProcessStopGrace)
+					}
+					owner, err := p.readProcessOwnership(name)
+					if err != nil || (owner == nil) != drain {
+						t.Fatalf("ownership after stop = %+v, %v; drain=%v", owner, err, drain)
+					}
+				}
+				if drain {
+					check(t)
+				} else {
+					synctest.Test(t, check)
+				}
+			})
+		}
 	}
 }
 
