@@ -389,7 +389,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// Keep one dependency graph and grace window while retaining the backend
 	// that proved each manual session's identity, even after routing changes.
 	stopProvider := providerForManualStopTargets(sp, manualTargets)
-	code := doStopWithoutSuccessAt(cityPath, sessionNames, stopProvider, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
+	code, configuredTargets := doStopWithoutSuccessAt(cityPath, sessionNames, stopProvider, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 	if desiredErr != nil {
 		code = 1
 	}
@@ -400,7 +400,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	if !orphansStopped {
 		code = 1
 	}
-	if err := verifyStopSurvivors(cityPath, cityName, sp, manualTargets); err != nil {
+	// The orphan sweep excludes configured names. Retain their resolved bindings
+	// here so that exclusion cannot hide a runtime whose stop was only accepted.
+	if err := verifyStopSurvivors(cityPath, cityName, sp, append(manualTargets, configuredTargets...)); err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		code = 1
 	}
@@ -492,6 +494,9 @@ func listStopSurvivors(cityPath, cityName string, sp runtime.Provider, retained 
 						result = errors.Join(result, diagnostic.ShutdownDiagnostic(name))
 					}
 				case retained[name]:
+					// A metadata-free binding can acknowledge stop before disappearing.
+					// Contrary ownership still fails without waiting for another city's runtime.
+					survivors = survivors || ownerCity == ""
 					result = errors.Join(result, fmt.Errorf("cannot confirm deletion of session %q: ownership changed or is missing", name))
 				}
 			}
@@ -956,12 +961,13 @@ func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store 
 func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
-	return doStopWithoutSuccessAt("", sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
+	code, _ := doStopWithoutSuccessAt("", sessionNames, sp, cfg, store, timeout, rec, stdout, stderr)
+	return code
 }
 
 func doStopWithoutSuccessAt(cityPath string, sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
-) int {
+) (int, []runtime.BackendListResult) {
 	code := 0
 	visible := map[string]bool{}
 	if sp != nil {
@@ -1005,9 +1011,11 @@ func doStopWithoutSuccessAt(cityPath string, sessionNames []string, sp runtime.P
 		}
 	}
 	targets := stopTargetsForNames(running, cfg, store, stderr)
+	var bindings []runtime.BackendListResult
 	if cityPath != "" {
 		var err error
-		targets, sp, err = resolveRuntimeOnlyStopTargets(cityPath, targets, store, sp)
+		targets, bindings, err = resolveRuntimeOnlyStopTargets(cityPath, targets, store, sp)
+		sp = providerForManualStopTargets(sp, bindings)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			code = 1
@@ -1017,7 +1025,7 @@ func doStopWithoutSuccessAt(cityPath string, sessionNames []string, sp runtime.P
 		code = 1
 	}
 	if manual, ok := sp.(*manualStopProvider); ok && manual.shutdownError() != nil {
-		return 1
+		return 1, bindings
 	}
-	return code
+	return code, bindings
 }

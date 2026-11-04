@@ -32,18 +32,47 @@ import (
 )
 
 func TestCmdStopExecWithoutOwnership(t *testing.T) {
-	for _, retainBead := range []bool{false, true} {
+	for _, tc := range []struct {
+		teardown   string
+		retainBead bool
+	}{
+		{teardown: "immediate"},
+		{teardown: "immediate", retainBead: true},
+		{teardown: "delayed"},
+		{teardown: "incomplete"},
+	} {
+		teardown, retainBead := tc.teardown, tc.retainBead
 		for _, force := range []bool{false, true} {
-			t.Run(fmt.Sprintf("bead=%v/force=%v", retainBead, force), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/bead=%v/force=%v", teardown, retainBead, force), func(t *testing.T) {
+				if teardown == "incomplete" {
+					oldBound := stopPerTargetTimeoutDefault
+					stopPerTargetTimeoutDefault = 100 * time.Millisecond
+					t.Cleanup(func() { stopPerTargetTimeoutDefault = oldBound })
+				}
 				cityDir := t.TempDir()
 				script := filepath.Join(t.TempDir(), "runtime")
+				if err := os.WriteFile(script+".teardown", []byte(teardown), 0o600); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.WriteFile(script, []byte(`#!/bin/sh
 case "$1" in
 start) : > "$0.running" ;;
-stop) printf 'stop\n' >> "$0.calls"; rm -f "$0.running" ;;
+stop)
+  printf 'stop\n' >> "$0.calls"
+  if [ "$(cat "$0.teardown")" = immediate ]; then rm -f "$0.running"; fi
+  echo 0 > "$0.polls"
+  ;;
 interrupt) printf 'interrupt\n' >> "$0.calls" ;;
 is-running) if [ -f "$0.running" ]; then echo true; else echo false; fi ;;
-list-running) if [ -f "$0.running" ]; then echo worker; fi ;;
+list-running)
+  if [ -f "$0.polls" ] && [ "$(cat "$0.teardown")" = delayed ]; then
+    polls=$(cat "$0.polls")
+    polls=$((polls + 1))
+    echo "$polls" > "$0.polls"
+    if [ "$polls" -ge 4 ]; then rm -f "$0.running"; fi
+  fi
+  if [ -f "$0.running" ]; then echo worker; fi
+  ;;
 get-meta) if [ -f "$0.$3" ]; then cat "$0.$3"; fi ;;
 set-meta) cat > "$0.$3" ;;
 *) exit 2 ;;
@@ -86,7 +115,17 @@ esac
 				sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
 				for attempt := 0; attempt < 2; attempt++ {
 					var stdout, stderr bytes.Buffer
+					started := time.Now()
 					code := cmdStopBody(cityDir, cfg, force, &stdout, &stderr)
+					if teardown == "incomplete" {
+						if code == 0 || strings.Contains(stdout.String(), "City stopped.") || !strings.Contains(stderr.String(), `session "worker"`) {
+							t.Fatalf("unreported survivor: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+						}
+						if !sp.IsRunning("worker") || time.Since(started) < stopPerTargetTimeoutDefault {
+							t.Fatal("incomplete teardown did not remain alive through the shutdown bound")
+						}
+						break
+					}
 					if code != 0 || sp.IsRunning("worker") || !strings.Contains(stdout.String(), "City stopped.") {
 						t.Fatalf("attempt %d: code=%d stdout=%q stderr=%q", attempt, code, stdout.String(), stderr.String())
 					}

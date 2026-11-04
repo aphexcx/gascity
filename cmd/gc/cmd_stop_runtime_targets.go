@@ -13,7 +13,7 @@ import (
 
 // resolveRuntimeOnlyStopTargets verifies every shutdown target's provider
 // binding and session record before crossing the worker boundary.
-func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store beads.Store, sp runtime.Provider) ([]stopTarget, runtime.Provider, error) {
+func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store beads.Store, sp runtime.Provider) ([]stopTarget, []runtime.BackendListResult, error) {
 	var resolved []stopTarget
 	var bindings []runtime.BackendListResult
 	var backends []runtime.BackendListResult
@@ -33,7 +33,7 @@ func resolveRuntimeOnlyStopTargets(cityPath string, targets []stopTarget, store 
 		resolved = append(resolved, bound)
 		bindings = append(bindings, binding)
 	}
-	return resolved, providerForManualStopTargets(sp, bindings), result
+	return resolved, bindings, result
 }
 
 func bindRuntimeOnlyStopTarget(cityPath string, target stopTarget, store beads.Store, sp runtime.Provider, listed []runtime.BackendListResult) (stopTarget, runtime.BackendListResult, error) {

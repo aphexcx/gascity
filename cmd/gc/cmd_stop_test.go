@@ -169,7 +169,8 @@ func TestStopRepairableSession(t *testing.T) {
 			t.Cleanup(func() { log.SetOutput(previous) })
 			sp := runtime.NewFake()
 			startStopTestSession(t, sp, "test-worker", map[string]string{"GC_CITY_PATH": "/cities/test", "GC_SESSION_ID": b.ID})
-			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker", sessionID: b.ID}}, store, sp)
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{{name: "test-worker", sessionID: b.ID}}, store, sp)
+			provider := providerForManualStopTargets(sp, bindings)
 			if err != nil || len(targets) != 1 || targets[0].runtimeOnly {
 				t.Fatalf("repairable session excluded: targets=%v err=%v", targets, err)
 			}
@@ -230,7 +231,8 @@ func TestResolveRuntimeOnlyStopTargets(t *testing.T) {
 			if strings.HasPrefix(mode, "resolved") {
 				target.sessionID = b.ID
 			}
-			targets, provider, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{target}, lookup, sp)
+			targets, bindings, err := resolveRuntimeOnlyStopTargets("/cities/test", []stopTarget{target}, lookup, sp)
+			provider := providerForManualStopTargets(sp, bindings)
 			refuse := mode == "transient" || mode == "collision" || mode == "mixed absence" || mode == "unknown" || mode == "resolved unknown" || mode == "resolved conflict"
 			if refuse {
 				if err == nil || len(targets) != 0 || sp.CountCalls("Stop", "test-worker") != 0 {
