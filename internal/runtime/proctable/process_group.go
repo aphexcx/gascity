@@ -75,6 +75,12 @@ func TerminateProcessGroup(pid int, start string, read func(int) (string, error)
 			if groupLive, err := ProcessGroupIdentityMatches(pid, start, read); err != nil || !groupLive {
 				return err
 			}
+			// A previous tracked shutdown may have reaped the leader while
+			// its descendants are still exiting. Observe the existing grace
+			// without sending a signal that can no longer be identity-fenced.
+			if gone, err := waitForProcessIdentityGone(pid, start, phase.grace, read); err != nil || gone {
+				return err
+			}
 			return fmt.Errorf("process group %d survives without its recorded leader; refusing an unfenced signal", pid)
 		}
 		if err := signal(-pid, phase.signal); err != nil && !errors.Is(err, syscall.ESRCH) {

@@ -83,14 +83,47 @@ func TestProcessIdentityMatchesInvalidAndEmpty(t *testing.T) {
 
 func TestTerminateProcessGroupMissingLeaderSurvivor(t *testing.T) {
 	cmd, _ := startKillTestProcess(t, "sleep", []string{"60"}, nil)
-	signals := 0
+	synctest.Test(t, func(t *testing.T) {
+		signals := 0
+		started := time.Now()
+		err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
+			return "", ErrProcessGone
+		}, func(int, syscall.Signal) error {
+			signals++
+			return nil
+		})
+		if err == nil || signals != 0 {
+			t.Fatalf("live group without leader identity: err=%v signals=%d; want refusal without signals", err, signals)
+		}
+		if elapsed := time.Since(started); elapsed != runtime.ManagedProcessStopGrace {
+			t.Fatalf("leaderless group grace = %s, want %s", elapsed, runtime.ManagedProcessStopGrace)
+		}
+	})
+}
+
+func TestTerminateProcessGroupWaitsForLeaderlessDrain(t *testing.T) {
+	cmd, exited := startKillTestProcess(t, "sleep", []string{"60"}, nil)
+	reads, signals := 0, 0
 	err := TerminateProcessGroup(cmd.Process.Pid, "departed-leader", func(int) (string, error) {
+		reads++
+		// Keep the group present through the initial identity checks, then
+		// model descendants completing an already-accepted shutdown.
+		if reads == 4 {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-exited:
+			case <-time.After(time.Second):
+				t.Fatal("test group did not finish draining")
+			}
+		}
 		return "", ErrProcessGone
 	}, func(int, syscall.Signal) error {
 		signals++
 		return nil
 	})
-	if err == nil || signals != 0 {
-		t.Fatalf("live group without leader identity: err=%v signals=%d; want refusal without signals", err, signals)
+	if err != nil || signals != 0 {
+		t.Fatalf("draining leaderless group: err=%v signals=%d; want success without signals", err, signals)
 	}
 }

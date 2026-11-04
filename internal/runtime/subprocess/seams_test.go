@@ -22,7 +22,7 @@ func TestSeamsLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	place, err := rt.Provision(ctx, "seam", runtime.ProvisionRequest{
-		Config: runtime.Config{Command: "sleep 3600"},
+		Config: runtime.Config{Command: "exec sleep 3600"},
 	})
 	if err != nil {
 		t.Fatalf("provision: %v", err)
@@ -40,7 +40,7 @@ func TestSeamsLifecycle(t *testing.T) {
 
 	// A duplicate Provision of a live session is rejected (←Start ErrSessionExists).
 	if _, err := rt.Provision(ctx, "seam", runtime.ProvisionRequest{
-		Config: runtime.Config{Command: "sleep 3600"},
+		Config: runtime.Config{Command: "exec sleep 3600"},
 	}); !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("duplicate Provision err = %v; want ErrSessionExists", err)
 	}
