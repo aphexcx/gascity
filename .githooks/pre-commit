@@ -13,6 +13,13 @@ staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/ap
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 staged_spec=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
 
+# Include deletions and renames: removing a test can leave a stale BUILD or
+# shard entry just as adding one can leave a missing entry.
+staged_inventories=$(git diff --cached --name-only -- '*.go' 'BUILD.bazel' '**/BUILD.bazel' 'MODULE.bazel' 'go.mod' 'go.sum' 'Makefile' 'scripts/check-inventories.py' 'scripts/test_check_inventories.py' 'scripts/test-integration-shard' 'scripts/runtime-tmux-tests.manifest' 'tools/bazel/repo_tree.py' 'test/test-resources.toml' 'TESTING.md')
+if [ -n "$staged_inventories" ]; then
+  make --no-print-directory check-inventories
+fi
+
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ] && [ -z "$staged_spec" ]; then
   exit 0
 fi

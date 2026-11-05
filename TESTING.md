@@ -44,8 +44,13 @@ bazel test //internal/X   # one package while iterating
 The first run costs the same as `go test`; every later run is a cache
 hit because the remote CAS is shared fleet-wide. A test that passed on
 CI does not re-execute locally. After changing imports or adding
-packages, run `make bazel-sync` and commit the regenerated BUILD files
-(the CI sync gate checks this).
+packages, run `make bazel-sync` and commit the regenerated BUILD files.
+Run `make check-inventories` to check BUILD generation, integration shard
+routing, and the resource census together before a full test run. The check
+leaves working files unchanged and runs in seconds with warm build caches.
+When Bazel is unavailable it reports `bazel absent: BUILD sync left to CI`;
+standalone Gazelle does not preserve this repository's Bzlmod dependency labels.
+The repository source tree, shard lists, and census are still checked locally.
 
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
@@ -383,6 +388,21 @@ Changing `bootstrapPolicy` together with the TOML and generated table is an
 explicit policy change that requires the same staged-diff council review as
 other test-infrastructure changes. The guard makes ordinary drift visible; it
 does not claim that self-modifying source can be cryptographically forbidden.
+
+For an intentional census change, edit `bootstrapPolicy` in
+`internal/testpolicy/resourcecensus/census.go` and the matching rows in
+`test/test-resources.toml` first. Then regenerate the documentation with this
+single command, from the module root with the Go toolchain selected by `go.mod`:
+
+```bash
+go test ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$' -count=1 -update
+```
+
+The command validates policy and TOML before updating the generated block;
+it cannot fix a policy mismatch. Review all three files and rerun
+`make check-inventories` without an update flag. Pre-commit runs this check
+for staged Go, BUILD, shard, census, or generator inputs, including deletions.
+Pre-push prints its result before starting the fast test shards.
 
 `[[reviewed_hermetic_body]]` rows record a narrower fact than a Small-test
 classification: the exact untagged top-level test body and every statically

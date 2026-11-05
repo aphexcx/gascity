@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -93,6 +94,13 @@ var tmuxSocketAliveSentinel *os.File
 
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if flag.Lookup("test.list").Value.String() != "" {
+		// Inventory discovery needs only the registered tests, without runtime
+		// setup, binary builds, tmux availability, or process cleanup sweeps.
+		os.Exit(m.Run())
+	}
+
 	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
 		select {}
 	}

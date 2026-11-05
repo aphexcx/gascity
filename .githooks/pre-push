@@ -63,6 +63,12 @@ if [ "$any_non_deletion" -eq 1 ]; then
   fi
 fi
 
+# Print inventory drift before any long fan-out, including BUILD/shard-only
+# pushes for which the Go-source scan below does not select the fast suite.
+if [ "$any_non_deletion" -eq 1 ]; then
+  make --no-print-directory check-inventories
+fi
+
 if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
