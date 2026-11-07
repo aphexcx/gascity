@@ -136,6 +136,7 @@ func resolveReloadSessionTemplates(bp *agentBuildParams, cfg *config.City, infos
 		if err != nil {
 			return nil, fmt.Errorf("previewing session %q: %w", info.SessionNameMetadata, err)
 		}
+		tp.ManualSession = isManualSessionInfoForAgent(info, agent)
 		desired[info.SessionNameMetadata] = tp
 	}
 	return desired, nil

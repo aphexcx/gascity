@@ -273,6 +273,43 @@ func TestReloadPreviewNamesRuntimeReplacementSessions(t *testing.T) {
 	}
 }
 
+func TestReloadPreviewUnchangedManualSession(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateResolveCityConfig(t, dir, "file")
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "test"},
+		Providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		Agents:    []config.Agent{{Name: "worker"}},
+	}
+	bp := newAgentBuildParams("test", dir, cfg, nil, time.Time{}, nil, io.Discard)
+	bp.readOnly = true
+	info := session.Info{ID: "manual-one", Template: "worker", SessionNameMetadata: "manual-worker", SessionOrigin: "manual"}
+	agent := &cfg.Agents[0]
+	qualifiedName := sessionBeadQualifiedNameInfo(dir, agent, cfg.Rigs, info)
+	resolveAgent := sessionBeadConfigAgent(agent, qualifiedName)
+	started, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedName, buildFingerprintExtra(resolveAgent), info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Manual starts enable mouse mode by default, as normal reconciliation does.
+	started.ManualSession = true
+	core := sessionCoreConfigForHashInfo(started, info)
+	if !core.MouseOn {
+		t.Fatal("manual fixture did not enable mouse mode")
+	}
+	info.StartedConfigHash = runtime.CoreFingerprint(core)
+	infos := []session.Info{info}
+	desired, err := resolveReloadSessionTemplates(bp, cfg, infos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, soft := range []bool{false, true} {
+		if changes := reloadSessionChanges(infos, desired, cfg, soft); len(changes) != 0 {
+			t.Fatalf("soft=%v unchanged manual session reports drift: %+v", soft, changes)
+		}
+	}
+}
+
 func TestReloadDryRunDoesNotRunReconciliationOrConsumeWatcherChange(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCityTOML(t, dir, "test", "worker")
