@@ -909,14 +909,18 @@ schedule = "*/1 * * * *"
 	if !strings.Contains(stderr.String(), "orders reloaded: removed dynamic-tick") {
 		t.Fatalf("stderr = %q, want removal log", stderr.String())
 	}
+	appliedRevision := reply.Revision
+	if appliedRevision == "" {
+		t.Fatal("applied reply has no revision")
+	}
 
 	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
 	if reply.Outcome != reloadOutcomeNoChange {
 		t.Fatalf("quiet reply.Outcome = %q, want %q; message=%q stderr=%q",
 			reply.Outcome, reloadOutcomeNoChange, reply.Message, stderr.String())
 	}
-	if want := fmt.Sprintf("No config changes detected. (rev %s)", shortRev(result.Revision)); reply.Message != want || reply.Revision != result.Revision {
-		t.Fatalf("quiet reply.Message = %q, revision = %q; want %q, revision = %q", reply.Message, reply.Revision, want, result.Revision)
+	if want := fmt.Sprintf("No config changes detected. (rev %s)", shortRev(appliedRevision)); reply.Message != want || reply.Revision != appliedRevision {
+		t.Fatalf("quiet reply.Message = %q, revision = %q; want %q, revision = %q", reply.Message, reply.Revision, want, appliedRevision)
 	}
 }
 
