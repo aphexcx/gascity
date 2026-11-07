@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+var errReloadTemplatesUnresolved = errors.New("session templates unresolved")
 
 type reloadChange struct {
 	Kind     string   `json:"kind"`
@@ -57,9 +60,9 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 	if err != nil {
 		return changes, err
 	}
-	replaced := make(map[string]bool, len(runtimeChanges))
-	for _, change := range runtimeChanges {
-		replaced[change.Name] = true
+	replaced := make(map[string]int, len(runtimeChanges))
+	for i, change := range runtimeChanges {
+		replaced[change.Name] = len(changes) - len(runtimeChanges) + i
 	}
 	snapshot, err := loadSessionBeadSnapshot(cr.sessionsBeadStore().Store)
 	if err != nil {
@@ -70,16 +73,20 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 		return changes, nil
 	}
 	bp := newAgentBuildParams(cr.cityName, cr.cityPath, cfg, cr.sp, time.Time{}, nil, cr.stderr)
-	desired, err := resolveReloadSessionTemplates(bp, cfg, infos)
-	if err != nil {
-		return changes, err
-	}
-	for _, change := range reloadSessionChanges(infos, desired, cfg, soft) {
-		if !replaced[change.Name] {
+	desired, unresolved, err := resolveReloadSessionTemplates(bp, cfg, infos)
+	for _, change := range unresolved {
+		if index, ok := replaced[change.Name]; ok {
+			changes[index].Reasons = append(changes[index].Reasons, "template unresolved: "+strings.Join(change.Reasons, "; "))
+		} else {
 			changes = append(changes, change)
 		}
 	}
-	return changes, nil
+	for _, change := range reloadSessionChanges(infos, desired, cfg, soft) {
+		if _, ok := replaced[change.Name]; !ok {
+			changes = append(changes, change)
+		}
+	}
+	return changes, err
 }
 
 func (cr *CityRuntime) reloadRuntimeChanges(cfg *config.City) ([]reloadChange, error) {
@@ -120,11 +127,13 @@ func (cr *CityRuntime) reloadRuntimeChanges(cfg *config.City) ([]reloadChange, e
 	return changes, nil
 }
 
-func resolveReloadSessionTemplates(bp *agentBuildParams, cfg *config.City, infos []session.Info) (map[string]TemplateParams, error) {
+func resolveReloadSessionTemplates(bp *agentBuildParams, cfg *config.City, infos []session.Info) (map[string]TemplateParams, []reloadChange, error) {
 	local := *bp
 	bp = &local
 	bp.readOnly = true
 	desired := make(map[string]TemplateParams, len(infos))
+	var unresolved []reloadChange
+	var failures []error
 	for _, info := range infos {
 		template := normalizedSessionTemplateInfo(info, cfg)
 		agent := findAgentByTemplate(cfg, template)
@@ -138,12 +147,20 @@ func resolveReloadSessionTemplates(bp *agentBuildParams, cfg *config.City, infos
 		}
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedName, buildFingerprintExtra(resolveAgent), info)
 		if err != nil {
-			return nil, fmt.Errorf("previewing session %q: %w", info.SessionNameMetadata, err)
+			failures = append(failures, fmt.Errorf("previewing session %q: %w", info.SessionNameMetadata, err))
+			unresolved = append(unresolved, reloadChange{
+				Kind: "session", Name: info.SessionNameMetadata,
+				Template: template, Action: "unresolved", Reasons: []string{err.Error()},
+			})
+			continue
 		}
 		tp.ManualSession = isManualSessionInfoForAgent(info, agent)
 		desired[info.SessionNameMetadata] = tp
 	}
-	return desired, nil
+	if len(failures) > 0 {
+		return desired, unresolved, fmt.Errorf("%w: %w", errReloadTemplatesUnresolved, errors.Join(failures...))
+	}
+	return desired, nil, nil
 }
 
 func reloadSessionChanges(infos []session.Info, desired map[string]TemplateParams, cfg *config.City, soft bool) []reloadChange {
@@ -205,8 +222,11 @@ func (cr *CityRuntime) previewReload(req *reloadRequest, cityRoot string) reload
 	applyRuntimeCityIdentity(result.Cfg, cr.cityName)
 	reply.Changes, err = cr.previewReloadChanges(result.Cfg, req.soft)
 	if err != nil {
-		reply.Error = err.Error()
-		return reply
+		if !errors.Is(err, errReloadTemplatesUnresolved) {
+			reply.Error = err.Error()
+			return reply
+		}
+		reply.Warnings = append(reply.Warnings, "reload preview incomplete: "+err.Error())
 	}
 	reply.Outcome = reloadOutcomePreview
 	reply.TargetRevision = result.Revision
@@ -246,7 +266,11 @@ func softReloadAcceptanceMessage(count int, names []string) string {
 func reloadReplyMessage(reply reloadControlReply) string {
 	message := strings.TrimSpace(reply.Message)
 	if reply.Revision != "" && !strings.Contains(message, shortRev(reply.Revision)) {
-		message += fmt.Sprintf(" (rev %s)", shortRev(reply.Revision))
+		if reply.Outcome == reloadOutcomeAccepted {
+			message += fmt.Sprintf(" (rev %s at request)", shortRev(reply.Revision))
+		} else {
+			message += fmt.Sprintf(" (rev %s)", shortRev(reply.Revision))
+		}
 	}
 	return strings.TrimSpace(message)
 }

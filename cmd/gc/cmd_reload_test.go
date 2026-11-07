@@ -121,10 +121,16 @@ func TestCmdReloadShowsIncompletePreviewWarningBeforeResult(t *testing.T) {
 		if !strings.Contains(stderr.String(), "reload preview incomplete: session snapshot unavailable") {
 			t.Errorf("pre-apply warning missing: %q", stderr.String())
 		}
-		return reloadControlReply{Outcome: reloadOutcomeApplied, Revision: "current-rev"}, nil
+		return reloadControlReply{
+			Outcome: reloadOutcomeApplied, Revision: "current-rev",
+			Warnings: []string{"reload preview incomplete: session snapshot unavailable"},
+		}, nil
 	}
 	if code := cmdReload([]string{dir}, false, false, false, false, "5m", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("reload exit=%d: %s", code, stderr.String())
+	}
+	if count := strings.Count(stderr.String(), "reload preview incomplete:"); count != 1 {
+		t.Fatalf("preview warning printed %d times: %q", count, stderr.String())
 	}
 }
 

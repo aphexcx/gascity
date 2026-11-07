@@ -71,7 +71,7 @@ func TestReloadPreviewResolvesChangedTemplateWithoutWriting(t *testing.T) {
 		lookPath:  func(string) (string, error) { return "/bin/echo", nil }, stderr: io.Discard,
 	}
 	infos := []session.Info{{ID: "one", Template: "worker", SessionNameMetadata: "worker-1"}}
-	desired, err := resolveReloadSessionTemplates(bp, cfg, infos)
+	desired, _, err := resolveReloadSessionTemplates(bp, cfg, infos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestReloadPreviewResolvesChangedTemplateWithoutWriting(t *testing.T) {
 		t.Fatalf("unchanged template reported drift: %+v", changes)
 	}
 	cfg.Agents[0].StartCommand = "echo new"
-	desired, err = resolveReloadSessionTemplates(bp, cfg, infos)
+	desired, _, err = resolveReloadSessionTemplates(bp, cfg, infos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestReloadPreviewUnchangedManualSession(t *testing.T) {
 	}
 	info.StartedConfigHash = runtime.CoreFingerprint(core)
 	infos := []session.Info{info}
-	desired, err := resolveReloadSessionTemplates(bp, cfg, infos)
+	desired, _, err := resolveReloadSessionTemplates(bp, cfg, infos)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestReloadPreviewUnchangedRelativeRigPath(t *testing.T) {
 	}
 	info := session.Info{ID: "one", Template: cfg.Agents[0].QualifiedName(), SessionNameMetadata: "rig-session"}
 	bp := newAgentBuildParams("test", dir, cfg, nil, time.Time{}, nil, io.Discard)
-	desired, err := resolveReloadSessionTemplates(bp, cfg, []session.Info{info})
+	desired, _, err := resolveReloadSessionTemplates(bp, cfg, []session.Info{info})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,5 +379,90 @@ func TestReloadDryRunDoesNotRunReconciliationOrConsumeWatcherChange(t *testing.T
 	}
 	if !dirty.Load() || cr.configRev != "current" || !reflect.DeepEqual(cr.cfg, &config.City{}) || cr.activeReload != nil {
 		t.Fatal("dry run changed runtime configuration or consumed a watcher notification")
+	}
+}
+
+func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
+	dir := t.TempDir()
+	writeCatalogFile(t, dir, "city.toml", "[workspace]\nname = \"test\"\nprovider = \"test\"\n"+
+		"[beads]\nprovider = \"file\"\n[providers.test]\ncommand = \"echo\"\nprompt_mode = \"none\"\n")
+	writeCatalogFile(t, dir, "pack.toml", "[pack]\nname = \"preview-test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeCatalogFile(t, dir, "agents/bad/agent.toml", "work_dir = \"{{.Missing}}\"\n")
+	writeCatalogFile(t, dir, "agents/good/agent.toml", "start_command = \"echo changed\"\n")
+	path := filepath.Join(dir, "city.toml")
+	result, err := tryReloadConfig(path, "test", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	for _, name := range []string{"bad", "good"} {
+		if _, err := store.Create(beads.Bead{
+			Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": name, "template": name,
+				"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "old"}),
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cr := &CityRuntime{
+		cityName: "test", cityPath: dir, tomlPath: path, cfg: result.Cfg,
+		standaloneCityStore: store, stderr: io.Discard,
+	}
+	for _, entry := range []string{"dry-run", "pre-apply"} {
+		t.Run(entry, func(t *testing.T) {
+			var changes []reloadChange
+			if entry == "dry-run" {
+				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+				if reply.Outcome != reloadOutcomePreview || len(reply.Warnings) == 0 ||
+					!strings.Contains(strings.Join(reply.Warnings, " "), "reload preview incomplete") {
+					t.Fatalf("partial preview must be visible and flagged incomplete: %+v", reply)
+				}
+				changes = reply.Changes
+			} else {
+				var err error
+				changes, err = cr.previewReloadChanges(result.Cfg, false)
+				if err == nil || !strings.Contains(err.Error(), "bad") {
+					t.Fatalf("missing unresolved-session diagnostic: %v", err)
+				}
+			}
+			actions := make(map[string]string)
+			for _, change := range changes {
+				actions[change.Name] = change.Action
+			}
+			if len(changes) != 2 || actions["bad"] != "unresolved" || actions["good"] != "drain" {
+				t.Fatalf("partial plan lost a session: %+v", changes)
+			}
+		})
+	}
+	t.Run("runtime replacement keeps one row per session", func(t *testing.T) {
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "bad", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		current := *result.Cfg
+		current.Session.Provider = "pack-runtime"
+		current.Runtimes = map[string]config.DiscoveredRuntime{"pack-runtime": {Command: "old"}}
+		next := current
+		next.Runtimes = map[string]config.DiscoveredRuntime{"pack-runtime": {Command: "new"}}
+		cr.cfg, cr.sp = &current, sp
+		changes, err := cr.previewReloadChanges(&next, false)
+		if err == nil || len(changes) != 2 {
+			t.Fatalf("runtime replacement partial plan = %+v, %v", changes, err)
+		}
+		for _, change := range changes {
+			if change.Name == "bad" && (change.Action != "stop and restart" ||
+				!strings.Contains(strings.Join(change.Reasons, " "), "template unresolved")) {
+				t.Fatalf("replacement lost unresolved reason: %+v", change)
+			}
+		}
+	})
+}
+
+func TestReloadAcceptedRevisionIsAtRequest(t *testing.T) {
+	reply := reloadControlReply{Outcome: reloadOutcomeAccepted, Message: "Reload requested.", Revision: "abcdef1234567890"}
+	if got := reloadReplyMessage(reply); got != "Reload requested. (rev abcdef123456 at request)" {
+		t.Fatalf("acceptance revision is ambiguous: %q", got)
 	}
 }

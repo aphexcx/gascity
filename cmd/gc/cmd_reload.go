@@ -164,10 +164,17 @@ func cmdReload(args []string, async bool, soft bool, dryRun bool, jsonOut bool, 
 	}
 
 	planPrinted := false
+	printedWarnings := make(map[string]bool)
+	printWarning := func(warning string) {
+		if !printedWarnings[warning] {
+			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort diagnostic
+			printedWarnings[warning] = true
+		}
+	}
 	req := reloadControlRequest{Wait: !async, Soft: soft, DryRun: dryRun, Progress: !async}
 	req.onProgress = func(progress reloadControlReply) {
 		for _, warning := range progress.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort progress
+			printWarning(warning)
 		}
 		if progress.Changes != nil {
 			if !jsonOut {
@@ -235,7 +242,7 @@ func cmdReload(args []string, async bool, soft bool, dryRun bool, jsonOut bool, 
 			fmt.Fprintln(stdout, softReloadAcceptanceMessage(*reply.AcceptedDriftCount, reply.AcceptedDriftSessions)) //nolint:errcheck // best-effort stdout
 		}
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			printWarning(warning)
 		}
 		return 0
 	case reloadOutcomeFailed:
@@ -243,7 +250,7 @@ func cmdReload(args []string, async bool, soft bool, dryRun bool, jsonOut bool, 
 			fmt.Fprintf(stderr, "Current config rev %s\n", shortRev(reply.Revision)) //nolint:errcheck // best-effort stderr
 		}
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			printWarning(warning)
 		}
 		switch {
 		case strings.TrimSpace(reply.Error) != "":
