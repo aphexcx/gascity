@@ -810,8 +810,8 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	if reply.Outcome != reloadOutcomeNoChange {
 		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeNoChange)
 	}
-	if reply.Message != "No config changes detected." {
-		t.Fatalf("reply.Message = %q", reply.Message)
+	if want := fmt.Sprintf("No config changes detected. (rev %s)", shortRev(configRev)); reply.Message != want || reply.Revision != configRev {
+		t.Fatalf("reply.Message = %q, revision = %q; want %q, revision = %q", reply.Message, reply.Revision, want, configRev)
 	}
 	// The fixture intentionally uses [[agent]] which now emits a loud v1
 	// surface deprecation warning at every config load. That warning is
@@ -915,8 +915,8 @@ schedule = "*/1 * * * *"
 		t.Fatalf("quiet reply.Outcome = %q, want %q; message=%q stderr=%q",
 			reply.Outcome, reloadOutcomeNoChange, reply.Message, stderr.String())
 	}
-	if reply.Message != "No config changes detected." {
-		t.Fatalf("quiet reply.Message = %q", reply.Message)
+	if want := fmt.Sprintf("No config changes detected. (rev %s)", shortRev(result.Revision)); reply.Message != want || reply.Revision != result.Revision {
+		t.Fatalf("quiet reply.Message = %q, revision = %q; want %q, revision = %q", reply.Message, reply.Revision, want, result.Revision)
 	}
 }
 
