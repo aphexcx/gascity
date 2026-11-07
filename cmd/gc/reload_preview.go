@@ -42,6 +42,10 @@ func (cr *CityRuntime) noChangeReloadMessage() string {
 }
 
 func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]reloadChange, error) {
+	previewCfg := *cfg
+	previewCfg.Rigs = append([]config.Rig(nil), cfg.Rigs...)
+	resolveRigPaths(cr.cityPath, previewCfg.Rigs)
+	cfg = &previewCfg
 	changes := make([]reloadChange, 0)
 	if cr.svc != nil {
 		for _, change := range cr.svc.PreviewReload(cfg) {

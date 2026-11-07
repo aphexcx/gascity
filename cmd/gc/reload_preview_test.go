@@ -310,6 +310,49 @@ func TestReloadPreviewUnchangedManualSession(t *testing.T) {
 	}
 }
 
+func TestReloadPreviewUnchangedRelativeRigPath(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateResolveCityConfig(t, dir, "file")
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "test"},
+		Providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "demo"}},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(dir, "demo")}},
+	}
+	info := session.Info{ID: "one", Template: cfg.Agents[0].QualifiedName(), SessionNameMetadata: "rig-session"}
+	bp := newAgentBuildParams("test", dir, cfg, nil, time.Time{}, nil, io.Discard)
+	desired, err := resolveReloadSessionTemplates(bp, cfg, []session.Info{info})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := desired[info.SessionNameMetadata]
+	if started.Env["GC_RIG_ROOT"] != cfg.Rigs[0].Path {
+		t.Fatalf("fixture rig root = %q", started.Env["GC_RIG_ROOT"])
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": info.SessionNameMetadata, "template": info.Template,
+			"started_config_hash": runtime.CoreFingerprint(sessionCoreConfigForHashInfo(started, info)),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidate := *cfg
+	candidate.Rigs = []config.Rig{{Name: "demo", Path: "demo"}}
+	cr := &CityRuntime{cityName: "test", cityPath: dir, cfg: cfg, standaloneCityStore: store, stderr: io.Discard}
+	for _, soft := range []bool{false, true} {
+		changes, err := cr.previewReloadChanges(&candidate, soft)
+		if err != nil || len(changes) != 0 {
+			t.Fatalf("soft=%v unchanged relative rig preview=%+v, %v", soft, changes, err)
+		}
+	}
+	if candidate.Rigs[0].Path != "demo" {
+		t.Fatal("preview mutated the candidate rig paths")
+	}
+}
+
 func TestReloadDryRunDoesNotRunReconciliationOrConsumeWatcherChange(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCityTOML(t, dir, "test", "worker")
