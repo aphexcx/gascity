@@ -299,7 +299,7 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 	if err := json.NewDecoder(client).Decode(&got); err != nil {
 		t.Fatalf("decode identity: %v", err)
 	}
-	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor {
+	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor || got.ProtocolVersion != 1 {
 		t.Fatalf("identity = %+v, want PID %d hosted by supervisor", got, os.Getpid())
 	}
 

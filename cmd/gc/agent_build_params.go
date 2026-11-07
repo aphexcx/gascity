@@ -28,6 +28,7 @@ type agentBuildParams struct {
 	providers       map[string]config.ProviderSpec
 	lookPath        config.LookPathFunc
 	fs              fsys.FS
+	readOnly        bool // resolve existing templates without materializing hooks/settings
 	sp              runtime.Provider
 	rigs            []config.Rig
 	sessionTemplate string

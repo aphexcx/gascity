@@ -25,9 +25,16 @@ type lifecycleActionJSON struct {
 	// Unregistered reports whether this action also removed the city's
 	// supervisor registration (gc stop unregisters a supervisor-managed
 	// city as part of stopping it; see gastownhall/gascity#4366).
-	Unregistered *bool  `json:"unregistered,omitempty"`
-	Outcome      string `json:"outcome,omitempty"`
-	Revision     string `json:"revision,omitempty"`
+	Unregistered          *bool            `json:"unregistered,omitempty"`
+	Outcome               string           `json:"outcome,omitempty"`
+	Revision              string           `json:"revision,omitempty"`
+	DryRun                *bool            `json:"dry_run,omitempty"`
+	Changes               []reloadChange   `json:"changes,omitempty"`
+	TargetRevision        string           `json:"target_revision,omitempty"`
+	LastApplied           *reloadApplyInfo `json:"last_applied,omitempty"`
+	AcceptedDriftCount    *int             `json:"accepted_drift_count,omitempty"`
+	AcceptedDriftSessions []string         `json:"accepted_drift_sessions,omitempty"`
+	Warnings              []string         `json:"warnings,omitempty"`
 }
 
 func writeLifecycleActionJSON(stdout io.Writer, payload lifecycleActionJSON) error {

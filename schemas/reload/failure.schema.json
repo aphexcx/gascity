@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "error"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": false },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "exit_code"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "exit_code": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "revision": { "type": "string", "description": "Last known applied config revision, when available." },
+    "outcome": { "type": "string" },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "name", "action", "reasons"],
+        "properties": {
+          "kind": { "enum": ["service", "session"] },
+          "name": { "type": "string" },
+          "template": { "type": "string" },
+          "action": { "enum": ["start", "stop", "restart", "stop and restart", "drain", "accept", "rebaseline", "unresolved"] },
+          "reasons": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -21,6 +21,8 @@ const (
 	reloadOutcomeFailed   reloadOutcome = "failed"
 	reloadOutcomeBusy     reloadOutcome = "busy"
 	reloadOutcomeTimeout  reloadOutcome = "timeout"
+	reloadOutcomePreview  reloadOutcome = "preview"
+	reloadOutcomeProgress reloadOutcome = "progress"
 )
 
 type reloadSource string
@@ -46,8 +48,11 @@ var (
 )
 
 type reloadControlRequest struct {
-	Wait    bool   `json:"wait"`
-	Timeout string `json:"timeout,omitempty"`
+	Wait       bool                     `json:"wait"`
+	Timeout    string                   `json:"timeout,omitempty"`
+	DryRun     bool                     `json:"dry_run,omitempty"`
+	Progress   bool                     `json:"progress,omitempty"`
+	onProgress func(reloadControlReply) `json:"-"`
 	// Soft requests that the reload tick accept any detected per-session
 	// config drift instead of draining the drifted sessions. The
 	// controller updates each open session's started_config_hash to the
@@ -65,14 +70,20 @@ type reloadControlReply struct {
 	Revision string        `json:"revision,omitempty"`
 	Warnings []string      `json:"warnings,omitempty"`
 	// AcceptedDriftCount is set only for soft reload requests.
-	AcceptedDriftCount *int   `json:"accepted_drift_count,omitempty"`
-	Error              string `json:"error,omitempty"`
+	AcceptedDriftCount    *int             `json:"accepted_drift_count,omitempty"`
+	AcceptedDriftSessions []string         `json:"accepted_drift_sessions,omitempty"`
+	Changes               []reloadChange   `json:"changes"`
+	TargetRevision        string           `json:"target_revision,omitempty"`
+	LastApplied           *reloadApplyInfo `json:"last_applied,omitempty"`
+	Error                 string           `json:"error,omitempty"`
 }
 
 type reloadRequest struct {
 	wait       bool
 	timeout    time.Duration
 	soft       bool
+	dryRun     bool
+	progressCh chan reloadControlReply
 	acceptedCh chan reloadControlReply
 	doneCh     chan reloadControlReply
 	// started is stamped by handleReloadRequest when the request becomes
@@ -85,6 +96,7 @@ type reloadRequest struct {
 func newReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var async bool
 	var soft bool
+	var dryRun bool
 	var jsonOut bool
 	var timeoutValue string
 	cmd := &cobra.Command{
@@ -106,12 +118,22 @@ immediately-following reconcile tick sees no drift and no config-drift
 drains fire. Useful when editing a running city's .gc/settings.json
 without disrupting in-flight work. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
-drain handles them on the next tick.`,
+drain handles them on the next tick.
+
+The reload plan names service replacements and existing sessions with
+changed or unmapped templates. With --dry-run, load and validate config
+and print that plan without applying it or running a reconciliation tick.
+Config loading may populate the pack cache. Runtime activity and work
+guards still control when planned session drains happen.
+
+The default completion timeout is 5m. Progress is printed every 30s while
+waiting. If a caller's outer timeout ends the wait early, supervisor.log's
+"Config reloaded" line and revision are the proof of config application.`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeCityNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			timeoutChanged := cmd.Flags().Changed("timeout")
-			if cmdReload(args, async, soft, jsonOut, timeoutValue, timeoutChanged, stdout, stderr) != 0 {
+			if cmdReload(args, async, soft, dryRun, jsonOut, timeoutValue, timeoutChanged, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -119,12 +141,13 @@ drain handles them on the next tick.`,
 	}
 	cmd.Flags().BoolVar(&async, "async", false, "Return after the controller accepts the reload request")
 	cmd.Flags().BoolVar(&soft, "soft", false, "Accept config drift on open sessions instead of draining them")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview config changes without applying them or running a tick")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	cmd.Flags().StringVar(&timeoutValue, "timeout", "5m", "How long to wait for reload completion")
 	return cmd
 }
 
-func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue string, timeoutChanged bool, stdout, stderr io.Writer) int {
+func cmdReload(args []string, async bool, soft bool, dryRun bool, jsonOut bool, timeoutValue string, timeoutChanged bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc reload: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -135,8 +158,33 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 		fmt.Fprintln(stderr, "gc reload: --async and --timeout cannot be used together") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if async && dryRun {
+		fmt.Fprintln(stderr, "gc reload: --async and --dry-run cannot be used together") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	req := reloadControlRequest{Wait: !async, Soft: soft}
+	planPrinted := false
+	printedWarnings := make(map[string]bool)
+	printWarning := func(warning string) {
+		if !printedWarnings[warning] {
+			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort diagnostic
+			printedWarnings[warning] = true
+		}
+	}
+	req := reloadControlRequest{Wait: !async, Soft: soft, DryRun: dryRun, Progress: !async}
+	req.onProgress = func(progress reloadControlReply) {
+		for _, warning := range progress.Warnings {
+			printWarning(warning)
+		}
+		if progress.Changes != nil {
+			if !jsonOut {
+				writeReloadChanges(stdout, progress.Changes)
+				planPrinted = true
+			}
+		} else if progress.Message != "" {
+			fmt.Fprintln(stderr, progress.Message) //nolint:errcheck // best-effort progress
+		}
+	}
 	if !async {
 		timeout, err := time.ParseDuration(timeoutValue)
 		if err != nil {
@@ -162,33 +210,47 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 		return 1
 	}
 
-	switch reply.Outcome {
-	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange:
-		message := strings.TrimSpace(reply.Message)
-		if jsonOut {
-			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc reload", lifecycleActionJSON{
-				Command:  "reload",
-				Action:   "reload",
-				Message:  message,
-				CityPath: cityPath,
-				Async:    lifecycleBoolPtr(async),
-				Soft:     lifecycleBoolPtr(soft),
-				Outcome:  string(reply.Outcome),
-				Revision: reply.Revision,
-			})
-		} else if message != "" {
-			fmt.Fprintln(stdout, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stdout
+	if jsonOut {
+		ok := reply.Outcome == reloadOutcomeAccepted || reply.Outcome == reloadOutcomeApplied || reply.Outcome == reloadOutcomeNoChange || reply.Outcome == reloadOutcomePreview
+		if !ok {
+			return writeReloadFailureJSON(stdout, stderr, reply)
 		}
-		if !jsonOut && soft && reply.AcceptedDriftCount != nil {
-			fmt.Fprintf(stdout, "soft reload: accepted config drift on %d session(s)\n", *reply.AcceptedDriftCount) //nolint:errcheck // best-effort stdout
+		code := writeCLIJSONLineOrExit(stdout, stderr, "gc reload", lifecycleActionJSON{
+			SchemaVersion: "1", OK: ok, Command: "reload", Action: "reload",
+			Message: reloadReplyMessage(reply), CityPath: cityPath,
+			Async: lifecycleBoolPtr(async), Soft: lifecycleBoolPtr(soft), DryRun: lifecycleBoolPtr(dryRun),
+			Outcome: string(reply.Outcome), Revision: reply.Revision, Changes: reply.Changes,
+			TargetRevision: reply.TargetRevision, LastApplied: reply.LastApplied,
+			AcceptedDriftCount: reply.AcceptedDriftCount, AcceptedDriftSessions: reply.AcceptedDriftSessions,
+			Warnings: reply.Warnings,
+		})
+		if code != 0 || !ok {
+			return 1
+		}
+		return 0
+	}
+	switch reply.Outcome {
+	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange, reloadOutcomePreview:
+		message := reloadReplyMessage(reply)
+		if message != "" {
+			fmt.Fprintln(stdout, message) //nolint:errcheck // best-effort stdout
+		}
+		if !planPrinted {
+			writeReloadChanges(stdout, reply.Changes)
+		}
+		if soft && reply.AcceptedDriftCount != nil {
+			fmt.Fprintln(stdout, softReloadAcceptanceMessage(*reply.AcceptedDriftCount, reply.AcceptedDriftSessions)) //nolint:errcheck // best-effort stdout
 		}
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			printWarning(warning)
 		}
 		return 0
 	case reloadOutcomeFailed:
+		if reply.Revision != "" {
+			fmt.Fprintf(stderr, "Current config rev %s\n", shortRev(reply.Revision)) //nolint:errcheck // best-effort stderr
+		}
 		for _, warning := range reply.Warnings {
-			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+			printWarning(warning)
 		}
 		switch {
 		case strings.TrimSpace(reply.Error) != "":
@@ -201,7 +263,7 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 		return 1
 	case reloadOutcomeBusy, reloadOutcomeTimeout:
 		if strings.TrimSpace(reply.Message) != "" {
-			fmt.Fprintln(stderr, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, reloadReplyMessage(reply)) //nolint:errcheck // best-effort stderr
 		} else {
 			fmt.Fprintf(stderr, "gc reload: %s\n", reply.Outcome) //nolint:errcheck // best-effort stderr
 		}
@@ -220,23 +282,50 @@ func isControllerUnavailableError(err error) bool {
 }
 
 func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
-	data, err := json.Marshal(req)
+	if req.DryRun {
+		identity := controllerIdentityHook(cityPath)
+		if identity.PID > 0 && identity.ProtocolVersion < controllerProtocolVersion {
+			return reloadControlReply{}, errors.New("the running controller predates reload previews; restart it on this build")
+		}
+	}
+	command, err := marshalReloadControlCommand(req)
 	if err != nil {
-		return reloadControlReply{}, fmt.Errorf("marshaling request: %w", err)
+		return reloadControlReply{}, err
 	}
 	readTimeout, err := reloadControlReadTimeout(req)
 	if err != nil {
 		return reloadControlReply{}, err
 	}
-	resp, err := sendControllerCommandWithReadTimeout(cityPath, "reload:"+string(data), readTimeout)
-	if err != nil {
-		return reloadControlReply{}, err
-	}
 	var reply reloadControlReply
-	if err := json.Unmarshal(resp, &reply); err != nil {
-		return reloadControlReply{}, fmt.Errorf("parsing response: %w", err)
+	err = readControllerCommandLines(cityPath, command, 2*time.Second, 5*time.Second, readTimeout, func(resp []byte) (bool, error) {
+		var frame reloadControlReply
+		if err := json.Unmarshal(resp, &frame); err != nil {
+			return false, fmt.Errorf("parsing response: %w", err)
+		}
+		if frame.Outcome == reloadOutcomeProgress {
+			if req.onProgress != nil {
+				req.onProgress(frame)
+			}
+			return false, nil
+		}
+		reply = frame
+		return true, nil
+	})
+	return reply, err
+}
+
+func marshalReloadControlCommand(req reloadControlRequest) (string, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("marshaling request: %w", err)
 	}
-	return reply, nil
+	prefix := "reload:"
+	if req.DryRun {
+		// Older controllers ignore unknown JSON fields. A separate verb keeps
+		// an unsupported preview from silently becoming a real reload.
+		prefix = "reload-preview:"
+	}
+	return prefix + string(data), nil
 }
 
 func reloadControlReadTimeout(req reloadControlRequest) (time.Duration, error) {
