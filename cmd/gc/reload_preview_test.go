@@ -212,6 +212,67 @@ func TestReloadNoChangeIdentifiesLastWatcherApply(t *testing.T) {
 	}
 }
 
+func TestReloadPreviewNamesRuntimeReplacementSessions(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, name := range []string{"session-b", "session-a"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := &config.City{
+		Session:  config.SessionConfig{Provider: "pack-runtime"},
+		Runtimes: map[string]config.DiscoveredRuntime{"pack-runtime": {Command: "/pack/old/runtime"}},
+	}
+	cr := &CityRuntime{cfg: old, sp: sp, standaloneCityStore: beads.NewMemStore()}
+	for _, tc := range []struct {
+		name     string
+		provider string
+		runtime  config.DiscoveredRuntime
+		reason   string
+	}{
+		{"command", "pack-runtime", config.DiscoveredRuntime{Command: "/pack/new/runtime"}, "pack runtime command changed: pack-runtime"},
+		{"protocol", "pack-runtime", config.DiscoveredRuntime{Command: "/pack/old/runtime", Protocol: 1}, "pack runtime protocol changed: pack-runtime"},
+		{"provider", "other", config.DiscoveredRuntime{}, "session provider changed: pack-runtime → other"},
+		{"attribution-only", "pack-runtime", config.DiscoveredRuntime{Command: "/pack/old/runtime", PackName: "renamed"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{
+				Session:  config.SessionConfig{Provider: tc.provider},
+				Runtimes: map[string]config.DiscoveredRuntime{"pack-runtime": tc.runtime},
+			}
+			for _, soft := range []bool{false, true} {
+				changes, err := cr.previewReloadChanges(cfg, soft)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.reason == "" {
+					if len(changes) != 0 {
+						t.Fatalf("attribution-only change replaces sessions: %+v", changes)
+					}
+					continue
+				}
+				want := []reloadChange{
+					{Kind: "session", Name: "session-a", Action: "stop and restart", Reasons: []string{tc.reason}},
+					{Kind: "session", Name: "session-b", Action: "stop and restart", Reasons: []string{tc.reason}},
+				}
+				if !reflect.DeepEqual(changes, want) {
+					t.Fatalf("soft=%v plan=%+v, want %+v", soft, changes, want)
+				}
+				var output bytes.Buffer
+				writeReloadChanges(&output, changes)
+				if !strings.Contains(output.String(), "0 service(s), 2 session(s)") {
+					t.Fatalf("missing counts: %s", output.String())
+				}
+			}
+		})
+	}
+	for _, call := range sp.Calls {
+		if call.Method != "Start" && call.Method != "ListRunning" {
+			t.Fatalf("preview changed runtime: %+v", call)
+		}
+	}
+}
+
 func TestReloadDryRunDoesNotRunReconciliationOrConsumeWatcherChange(t *testing.T) {
 	dir := t.TempDir()
 	path := writeCityTOML(t, dir, "test", "worker")

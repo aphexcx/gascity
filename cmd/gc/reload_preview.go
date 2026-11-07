@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -47,6 +48,15 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 			changes = append(changes, reloadChange{Kind: "service", Name: change.Name, Action: change.Action, Reasons: change.Reasons})
 		}
 	}
+	runtimeChanges, err := cr.reloadRuntimeChanges(cfg)
+	changes = append(changes, runtimeChanges...)
+	if err != nil {
+		return changes, err
+	}
+	replaced := make(map[string]bool, len(runtimeChanges))
+	for _, change := range runtimeChanges {
+		replaced[change.Name] = true
+	}
 	snapshot, err := loadSessionBeadSnapshot(cr.sessionsBeadStore().Store)
 	if err != nil {
 		return changes, fmt.Errorf("previewing session changes: %w", err)
@@ -60,7 +70,49 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 	if err != nil {
 		return changes, err
 	}
-	changes = append(changes, reloadSessionChanges(infos, desired, cfg, soft)...)
+	for _, change := range reloadSessionChanges(infos, desired, cfg, soft) {
+		if !replaced[change.Name] {
+			changes = append(changes, change)
+		}
+	}
+	return changes, nil
+}
+
+func (cr *CityRuntime) reloadRuntimeChanges(cfg *config.City) ([]reloadChange, error) {
+	if cr.sp == nil || cr.cfg == nil {
+		return nil, nil
+	}
+	oldName, newName := cr.cfg.Session.Provider, cfg.Session.Provider
+	if override := os.Getenv("GC_SESSION"); override != "" {
+		oldName, newName = override, override
+	}
+	reason := ""
+	if oldName != newName {
+		reason = fmt.Sprintf("session provider changed: %s → %s", displayProviderName(oldName), displayProviderName(newName))
+	} else if packRuntimeDeclarationChanged(cr.cfg, cfg, newName) {
+		oldRuntime, oldOK := cr.cfg.Runtimes[newName]
+		newRuntime, newOK := cfg.Runtimes[newName]
+		switch {
+		case oldOK != newOK:
+			reason = "pack runtime declaration changed: " + newName
+		case oldRuntime.Command != newRuntime.Command:
+			reason = "pack runtime command changed: " + newName
+		default:
+			reason = "pack runtime protocol changed: " + newName
+		}
+	}
+	if reason == "" {
+		return nil, nil
+	}
+	running, err := cr.sp.ListRunning("")
+	if err != nil {
+		return nil, fmt.Errorf("previewing runtime replacement: %w", err)
+	}
+	sort.Strings(running)
+	changes := make([]reloadChange, 0, len(running))
+	for _, name := range running {
+		changes = append(changes, reloadChange{Kind: "session", Name: name, Action: "stop and restart", Reasons: []string{reason}})
+	}
 	return changes, nil
 }
 
