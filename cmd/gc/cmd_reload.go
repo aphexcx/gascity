@@ -166,6 +166,9 @@ func cmdReload(args []string, async bool, soft bool, dryRun bool, jsonOut bool, 
 	planPrinted := false
 	req := reloadControlRequest{Wait: !async, Soft: soft, DryRun: dryRun, Progress: !async}
 	req.onProgress = func(progress reloadControlReply) {
+		for _, warning := range progress.Warnings {
+			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort progress
+		}
 		if progress.Changes != nil {
 			if !jsonOut {
 				writeReloadChanges(stdout, progress.Changes)

@@ -524,15 +524,12 @@ func handleReloadSocketRequest(conn net.Conn, payload string, ch chan reloadRequ
 		return
 	}
 
-	waitReloadCompletion(conn, req, reply.Revision)
+	waitReloadCompletion(conn, req, reply.Revision, waitStarted, waitProgress.C)
 }
 
-func waitReloadCompletion(conn net.Conn, req reloadRequest, revision string) {
-	started := time.Now()
+func waitReloadCompletion(conn net.Conn, req reloadRequest, revision string, started time.Time, progress <-chan time.Time) {
 	timeout := time.NewTimer(req.timeout)
 	defer timeout.Stop()
-	progress := time.NewTicker(30 * time.Second)
-	defer progress.Stop()
 	writeProgress := func(reply reloadControlReply) {
 		if reply.Revision != "" {
 			revision = reply.Revision
@@ -555,7 +552,7 @@ func waitReloadCompletion(conn net.Conn, req reloadRequest, revision string) {
 			return
 		case plan := <-req.progressCh:
 			writeProgress(plan)
-		case <-progress.C:
+		case <-progress:
 			if req.progressCh != nil {
 				message := fmt.Sprintf("reload accepted, tick running, %d s", int(time.Since(started).Seconds()))
 				if req.dryRun {

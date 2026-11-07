@@ -2052,14 +2052,18 @@ func (cr *CityRuntime) reloadConfigTraced(
 			applyRuntimeCityIdentity(result.Cfg, cr.cityName)
 			var previewErr error
 			changes, previewErr = cr.previewReloadChanges(result.Cfg, request.soft)
+			var previewWarnings []string
 			if previewErr != nil {
-				appendWarning(previewErr.Error())
+				warning := "reload preview incomplete: " + previewErr.Error()
+				appendWarning(warning)
+				previewWarnings = []string{warning}
 			}
 			writeReloadChanges(cr.stdout, changes)
 			if request.progressCh != nil {
 				cr.sendReloadReply(request.progressCh, reloadControlReply{
 					Outcome: reloadOutcomeProgress, Revision: cr.configRev,
 					TargetRevision: result.Revision, Changes: changes,
+					Warnings: previewWarnings,
 				})
 			}
 		}

@@ -86,6 +86,27 @@ func TestCmdReloadApplied(t *testing.T) {
 	}
 }
 
+func TestCmdReloadShowsIncompletePreviewWarningBeforeResult(t *testing.T) {
+	dir := t.TempDir()
+	writeCityTOML(t, dir, "test", "worker")
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	var stdout, stderr bytes.Buffer
+	sendReloadControlRequestHook = func(_ string, req reloadControlRequest) (reloadControlReply, error) {
+		req.onProgress(reloadControlReply{
+			Outcome: reloadOutcomeProgress, Changes: []reloadChange{},
+			Warnings: []string{"reload preview incomplete: session snapshot unavailable"},
+		})
+		if !strings.Contains(stderr.String(), "reload preview incomplete: session snapshot unavailable") {
+			t.Errorf("pre-apply warning missing: %q", stderr.String())
+		}
+		return reloadControlReply{Outcome: reloadOutcomeApplied, Revision: "current-rev"}, nil
+	}
+	if code := cmdReload([]string{dir}, false, false, false, false, "5m", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("reload exit=%d: %s", code, stderr.String())
+	}
+}
+
 func TestCmdReloadJSONApplied(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-json-cli-")
 	writeCityTOML(t, dir, "test", "mayor")
@@ -247,13 +268,16 @@ func TestReloadCompletionStreamsPlanProgressThenResult(t *testing.T) {
 		}()
 		req := reloadRequest{timeout: 2 * time.Minute, doneCh: make(chan reloadControlReply, 1), progressCh: make(chan reloadControlReply, 1)}
 		req.progressCh <- reloadControlReply{Outcome: reloadOutcomeProgress, Changes: []reloadChange{{Kind: "service", Name: "adapter", Action: "restart"}}}
+		started := time.Now()
+		progress := time.NewTicker(30 * time.Second)
+		defer progress.Stop()
 		go func() {
 			defer func() {
 				if err := server.Close(); err != nil {
 					t.Error(err)
 				}
 			}()
-			waitReloadCompletion(server, req, "current-rev")
+			waitReloadCompletion(server, req, "current-rev", started, progress.C)
 		}()
 		decoder := json.NewDecoder(client)
 		var reply reloadControlReply
@@ -296,6 +320,45 @@ func TestReloadWaitingProgressDoesNotClaimAcceptance(t *testing.T) {
 		}
 		req := <-requests
 		req.acceptedCh <- reloadControlReply{Outcome: reloadOutcomeAccepted, Revision: "current-rev"}
+		req.doneCh <- reloadControlReply{Outcome: reloadOutcomeNoChange, Revision: "current-rev"}
+		if err := decoder.Decode(&reply); err != nil || reply.Outcome != reloadOutcomeNoChange {
+			t.Fatalf("final=%+v err=%v", reply, err)
+		}
+	})
+}
+
+func TestReloadProgressKeepsCadenceAcrossAcceptance(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server, client := net.Pipe()
+		defer func() {
+			if err := client.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		requests := make(chan reloadRequest)
+		started := time.Now()
+		go func() {
+			defer func() {
+				if err := server.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			handleReloadSocketCmd(server, `{"wait":true,"timeout":"5m","progress":true}`, requests)
+		}()
+		synctest.Wait()
+		acceptAt := time.NewTimer(29 * time.Second)
+		defer acceptAt.Stop()
+		<-acceptAt.C
+		req := <-requests
+		req.acceptedCh <- reloadControlReply{Outcome: reloadOutcomeAccepted, Revision: "current-rev"}
+		decoder := json.NewDecoder(client)
+		var reply reloadControlReply
+		if err := decoder.Decode(&reply); err != nil || reply.Message != "reload accepted, tick running, 30 s" {
+			t.Fatalf("progress=%+v err=%v", reply, err)
+		}
+		if elapsed := time.Since(started); elapsed != 30*time.Second {
+			t.Errorf("first progress after %s, want 30s", elapsed)
+		}
 		req.doneCh <- reloadControlReply{Outcome: reloadOutcomeNoChange, Revision: "current-rev"}
 		if err := decoder.Decode(&reply); err != nil || reply.Outcome != reloadOutcomeNoChange {
 			t.Fatalf("final=%+v err=%v", reply, err)
