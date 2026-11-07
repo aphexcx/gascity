@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -102,7 +103,7 @@ func TestReloadDryRunRejectsInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := &CityRuntime{cityPath: dir, cityName: "test", tomlPath: path, configRev: "current", cfg: &config.City{}}
-	reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+	reply := cr.previewReload(&reloadRequest{dryRun: true}, dir, cr.cfg.Session.Provider)
 	if reply.Outcome != reloadOutcomeFailed || reply.Error == "" || reply.Revision != "current" {
 		t.Fatalf("invalid config preview=%+v", reply)
 	}
@@ -152,11 +153,11 @@ func TestReloadPreviewPreservesRealFilesystem(t *testing.T) {
 			}
 			before := reloadPreviewTreeDigest(t, dir)
 			if entry == "dry-run" {
-				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir, cr.cfg.Session.Provider)
 				if reply.Outcome != reloadOutcomePreview || len(reply.Changes) != 2 {
 					t.Fatalf("preview = %+v", reply)
 				}
-			} else if changes, err := cr.previewReloadChanges(result.Cfg, false); err != nil || len(changes) != 2 {
+			} else if changes, err := cr.previewReloadChanges(result.Cfg, false, cr.cfg.Session.Provider, result.Revision); err != nil || len(changes) != 2 {
 				t.Fatalf("pre-apply preview = %+v, %v", changes, err)
 			}
 			after := reloadPreviewTreeDigest(t, dir)
@@ -241,7 +242,7 @@ func TestReloadPreviewNamesRuntimeReplacementSessions(t *testing.T) {
 				Runtimes: map[string]config.DiscoveredRuntime{"pack-runtime": tc.runtime},
 			}
 			for _, soft := range []bool{false, true} {
-				changes, err := cr.previewReloadChanges(cfg, soft)
+				changes, err := cr.previewReloadChanges(cfg, soft, cr.cfg.Session.Provider, "next")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -343,7 +344,7 @@ func TestReloadPreviewUnchangedRelativeRigPath(t *testing.T) {
 	candidate.Rigs = []config.Rig{{Name: "demo", Path: "demo"}}
 	cr := &CityRuntime{cityName: "test", cityPath: dir, cfg: cfg, standaloneCityStore: store, stderr: io.Discard}
 	for _, soft := range []bool{false, true} {
-		changes, err := cr.previewReloadChanges(&candidate, soft)
+		changes, err := cr.previewReloadChanges(&candidate, soft, cr.cfg.Session.Provider, "next")
 		if err != nil || len(changes) != 0 {
 			t.Fatalf("soft=%v unchanged relative rig preview=%+v, %v", soft, changes, err)
 		}
@@ -414,7 +415,7 @@ func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
 		t.Run(entry, func(t *testing.T) {
 			var changes []reloadChange
 			if entry == "dry-run" {
-				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir, cr.cfg.Session.Provider)
 				if reply.Outcome != reloadOutcomePreview || len(reply.Warnings) == 0 ||
 					!strings.Contains(strings.Join(reply.Warnings, " "), "reload preview incomplete") {
 					t.Fatalf("partial preview must be visible and flagged incomplete: %+v", reply)
@@ -422,7 +423,7 @@ func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
 				changes = reply.Changes
 			} else {
 				var err error
-				changes, err = cr.previewReloadChanges(result.Cfg, false)
+				changes, err = cr.previewReloadChanges(result.Cfg, false, cr.cfg.Session.Provider, result.Revision)
 				if err == nil || !strings.Contains(err.Error(), "bad") {
 					t.Fatalf("missing unresolved-session diagnostic: %v", err)
 				}
@@ -447,7 +448,7 @@ func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
 		next := current
 		next.Runtimes = map[string]config.DiscoveredRuntime{"pack-runtime": {Command: "new"}}
 		cr.cfg, cr.sp = &current, sp
-		changes, err := cr.previewReloadChanges(&next, false)
+		changes, err := cr.previewReloadChanges(&next, false, cr.cfg.Session.Provider, "next")
 		if err == nil || len(changes) != 2 {
 			t.Fatalf("runtime replacement partial plan = %+v, %v", changes, err)
 		}
@@ -464,5 +465,107 @@ func TestReloadAcceptedRevisionIsAtRequest(t *testing.T) {
 	reply := reloadControlReply{Outcome: reloadOutcomeAccepted, Message: "Reload requested.", Revision: "abcdef1234567890"}
 	if got := reloadReplyMessage(reply); got != "Reload requested. (rev abcdef123456 at request)" {
 		t.Fatalf("acceptance revision is ambiguous: %q", got)
+	}
+}
+
+func TestReloadPreviewUsesActiveProviderAfterFailedReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	writeCityRuntimeConfig(t, path, "fake")
+	cfg, err := config.Load(osFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRegistry := runtimeRegistry
+	runtimeRegistry = runtimeRegistry.Clone()
+	t.Cleanup(func() { runtimeRegistry = oldRegistry })
+	available := false
+	constructorCalls := 0
+	nextProvider := runtime.NewFake()
+	if err := runtimeRegistry.Register("recovering", func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		constructorCalls++
+		if !available {
+			return nil, fmt.Errorf("runtime construction unavailable")
+		}
+		return nextProvider, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	for _, name := range []string{"session-a", "session-b"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: dir, CityName: "test-city", TomlPath: path,
+		Cfg: cfg, SP: sp, Dops: newDrainOps(sp), Rec: events.Discard, Stdout: io.Discard, Stderr: io.Discard,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", dir)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+	writeCityRuntimeConfig(t, path, "recovering")
+	activeProvider := "fake"
+	first := cr.reloadConfigTraced(context.Background(), &activeProvider, dir, nil, reloadSourceWatch)
+	if first.Outcome != reloadOutcomeApplied || cr.cfg.Session.Provider != "recovering" || cr.sp != sp ||
+		activeProvider != "fake" || constructorCalls != 1 {
+		t.Fatalf("failed construction did not retain active provider: reply=%+v selected=%s active=%s calls=%d",
+			first, cr.cfg.Session.Provider, activeProvider, constructorCalls)
+	}
+	available = true
+	unchanged := cr.previewReload(&reloadRequest{dryRun: true}, dir, activeProvider)
+	if unchanged.Outcome != reloadOutcomePreview || len(unchanged.Changes) != 0 {
+		t.Fatalf("same-revision reload does not retry provider replacement: %+v", unchanged)
+	}
+	writeCityRuntimeConfigWithShutdownTimeout(t, path, "recovering", "1ms")
+	checkPlan := func(changes []reloadChange) {
+		t.Helper()
+		if len(changes) != 2 {
+			t.Fatalf("recovery preview omitted runtime-wide stop: %+v", changes)
+		}
+		for i, name := range []string{"session-a", "session-b"} {
+			if changes[i].Name != name || changes[i].Action != "stop and restart" ||
+				!strings.Contains(strings.Join(changes[i].Reasons, " "), "fake → recovering") {
+				t.Fatalf("recovery preview = %+v", changes)
+			}
+		}
+	}
+	for _, soft := range []bool{false, true} {
+		req := &reloadRequest{dryRun: true, soft: soft, doneCh: make(chan reloadControlReply, 1)}
+		cr.activeReload = req
+		var previous map[string]bool
+		cr.tick(context.Background(), &atomic.Bool{}, &activeProvider, dir, &previous, "reload")
+		var reply reloadControlReply
+		select {
+		case reply = <-req.doneCh:
+		default:
+			t.Fatal("dry-run did not reply")
+		}
+		if reply.Outcome != reloadOutcomePreview {
+			t.Fatalf("dry-run recovery preview = %+v", reply)
+		}
+		checkPlan(reply.Changes)
+	}
+	if constructorCalls != 1 {
+		t.Fatal("preview constructed a runtime")
+	}
+	progress := make(chan reloadControlReply, 1)
+	cr.activeReload = &reloadRequest{soft: true, progressCh: progress}
+	reply := cr.reloadConfigTraced(context.Background(), &activeProvider, dir, nil, reloadSourceManual)
+	select {
+	case preview := <-progress:
+		checkPlan(preview.Changes)
+	default:
+		t.Fatal("pre-apply preview was not sent")
+	}
+	if reply.Outcome != reloadOutcomeApplied || activeProvider != "recovering" || cr.sp != nextProvider || constructorCalls != 2 {
+		t.Fatalf("recovery apply = %+v active=%s calls=%d", reply, activeProvider, constructorCalls)
+	}
+	if sp.IsRunning("session-a") || sp.IsRunning("session-b") {
+		t.Fatal("apply did not perform the previewed stop")
 	}
 }

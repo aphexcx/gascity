@@ -44,7 +44,7 @@ func (cr *CityRuntime) noChangeReloadMessage() string {
 	return message
 }
 
-func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]reloadChange, error) {
+func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool, activeProviderName, targetRevision string) ([]reloadChange, error) {
 	previewCfg := *cfg
 	previewCfg.Rigs = append([]config.Rig(nil), cfg.Rigs...)
 	resolveRigPaths(cr.cityPath, previewCfg.Rigs)
@@ -55,7 +55,7 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 			changes = append(changes, reloadChange{Kind: "service", Name: change.Name, Action: change.Action, Reasons: change.Reasons})
 		}
 	}
-	runtimeChanges, err := cr.reloadRuntimeChanges(cfg)
+	runtimeChanges, err := cr.reloadRuntimeChanges(cfg, activeProviderName, targetRevision)
 	changes = append(changes, runtimeChanges...)
 	if err != nil {
 		return changes, err
@@ -89,13 +89,13 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool) ([]relo
 	return changes, err
 }
 
-func (cr *CityRuntime) reloadRuntimeChanges(cfg *config.City) ([]reloadChange, error) {
-	if cr.sp == nil || cr.cfg == nil {
+func (cr *CityRuntime) reloadRuntimeChanges(cfg *config.City, activeProviderName, targetRevision string) ([]reloadChange, error) {
+	if cr.sp == nil || cr.cfg == nil || targetRevision == cr.configRev {
 		return nil, nil
 	}
-	oldName, newName := cr.cfg.Session.Provider, cfg.Session.Provider
+	oldName, newName := activeProviderName, cfg.Session.Provider
 	if override := os.Getenv("GC_SESSION"); override != "" {
-		oldName, newName = override, override
+		newName = override
 	}
 	reason := ""
 	if oldName != newName {
@@ -201,7 +201,7 @@ func reloadSessionChanges(infos []session.Info, desired map[string]TemplateParam
 	return changes
 }
 
-func (cr *CityRuntime) previewReload(req *reloadRequest, cityRoot string) reloadControlReply {
+func (cr *CityRuntime) previewReload(req *reloadRequest, cityRoot, activeProviderName string) reloadControlReply {
 	reply := reloadControlReply{Outcome: reloadOutcomeFailed, Revision: cr.configRev}
 	configName := cr.configName
 	if configName == "" {
@@ -220,7 +220,7 @@ func (cr *CityRuntime) previewReload(req *reloadRequest, cityRoot string) reload
 		return reply
 	}
 	applyRuntimeCityIdentity(result.Cfg, cr.cityName)
-	reply.Changes, err = cr.previewReloadChanges(result.Cfg, req.soft)
+	reply.Changes, err = cr.previewReloadChanges(result.Cfg, req.soft, activeProviderName, result.Revision)
 	if err != nil {
 		if !errors.Is(err, errReloadTemplatesUnresolved) {
 			reply.Error = err.Error()

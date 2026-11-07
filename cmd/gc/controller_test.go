@@ -295,19 +295,12 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 	if _, err := client.Write([]byte("identify\n")); err != nil {
 		t.Fatalf("write command: %v", err)
 	}
-	var got struct {
-		PID             int                   `json:"pid"`
-		HostingMode     controllerHostingMode `json:"hosting_mode"`
-		ProtocolVersion int                   `json:"protocol_version"`
-	}
+	var got controllerIdentityReply
 	if err := json.NewDecoder(client).Decode(&got); err != nil {
 		t.Fatalf("decode identity: %v", err)
 	}
-	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor {
+	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor || got.ProtocolVersion != 1 {
 		t.Fatalf("identity = %+v, want PID %d hosted by supervisor", got, os.Getpid())
-	}
-	if got.ProtocolVersion != 1 {
-		t.Fatalf("identity protocol version = %d, want reload preview support (1)", got.ProtocolVersion)
 	}
 
 	client.Close() //nolint:errcheck

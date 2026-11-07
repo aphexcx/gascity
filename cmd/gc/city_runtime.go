@@ -1143,7 +1143,7 @@ func (cr *CityRuntime) tick(
 	preview := cr.activeReload
 	cr.reloadMu.Unlock()
 	if preview != nil && preview.dryRun {
-		reply := cr.previewReload(preview, cityRoot)
+		reply := cr.previewReload(preview, cityRoot, *lastProviderName)
 		cr.sendReloadReply(preview.doneCh, reply)
 		cr.clearActiveReloadIf(preview)
 		return
@@ -2051,7 +2051,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if request != nil && !config.StorageReloadRequiresRestart(cr.cfg, result.Cfg) {
 			applyRuntimeCityIdentity(result.Cfg, cr.cityName)
 			var previewErr error
-			changes, previewErr = cr.previewReloadChanges(result.Cfg, request.soft)
+			changes, previewErr = cr.previewReloadChanges(result.Cfg, request.soft, *lastProviderName, result.Revision)
 			var previewWarnings []string
 			if previewErr != nil {
 				warning := "reload preview incomplete: " + previewErr.Error()
