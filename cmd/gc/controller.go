@@ -75,6 +75,7 @@ func (e controllerCommandError) Is(target error) bool {
 const (
 	controllerSocketPathLimit        = 100
 	controllerIdentityCommand        = "identify"
+	controllerProtocolVersion        = 1 // Version 1 supports reload-preview.
 	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
 )
 
@@ -91,8 +92,9 @@ func (m controllerHostingMode) known() bool {
 }
 
 type controllerIdentityReply struct {
-	PID         int                   `json:"pid"`
-	HostingMode controllerHostingMode `json:"hosting_mode"`
+	PID             int                   `json:"pid"`
+	HostingMode     controllerHostingMode `json:"hosting_mode"`
+	ProtocolVersion int                   `json:"protocol_version,omitempty"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -212,7 +214,7 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, ProtocolVersion: controllerProtocolVersion})
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.

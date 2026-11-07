@@ -27,6 +27,27 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
+func TestCmdReloadDryRunExplainsOlderController(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateResolveCityConfig(t, dir, "file")
+	var legacy controllerIdentityReply
+	if err := json.Unmarshal([]byte(`{"pid":42,"hosting_mode":"standalone"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	oldIdentity, oldSend := controllerIdentityHook, sendReloadControlRequestHook
+	t.Cleanup(func() {
+		controllerIdentityHook, sendReloadControlRequestHook = oldIdentity, oldSend
+	})
+	controllerIdentityHook = func(string) controllerIdentityReply { return legacy }
+	sendReloadControlRequestHook = sendReloadControlRequest
+	var stdout, stderr bytes.Buffer
+	code := cmdReload([]string{dir}, false, false, true, false, "5m", false, &stdout, &stderr)
+	want := "gc reload: the running controller predates reload previews; restart it on this build\n"
+	if code != 1 || stderr.String() != want || stdout.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want %q", code, stdout.String(), stderr.String(), want)
+	}
+}
+
 func TestCmdReloadNoChangePrintsRevision(t *testing.T) {
 	dir := t.TempDir()
 	writeCityTOML(t, dir, "test", "worker")

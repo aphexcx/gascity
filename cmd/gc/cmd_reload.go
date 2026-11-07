@@ -275,6 +275,12 @@ func isControllerUnavailableError(err error) bool {
 }
 
 func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+	if req.DryRun {
+		identity := controllerIdentityHook(cityPath)
+		if identity.PID > 0 && identity.ProtocolVersion < controllerProtocolVersion {
+			return reloadControlReply{}, errors.New("the running controller predates reload previews; restart it on this build")
+		}
+	}
 	command, err := marshalReloadControlCommand(req)
 	if err != nil {
 		return reloadControlReply{}, err
