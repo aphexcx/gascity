@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -102,6 +106,99 @@ func TestReloadDryRunRejectsInvalidConfig(t *testing.T) {
 	if reply.Outcome != reloadOutcomeFailed || reply.Error == "" || reply.Revision != "current" {
 		t.Fatalf("invalid config preview=%+v", reply)
 	}
+}
+
+func TestReloadPreviewPreservesRealFilesystem(t *testing.T) {
+	for _, entry := range []string{"dry-run", "pre-apply"} {
+		t.Run(entry, func(t *testing.T) {
+			dir := t.TempDir()
+			content := "[workspace]\nname = \"test\"\nprovider = \"claude\"\n" +
+				"[session]\nprovider = \"tmux\"\n[beads]\nprovider = \"file\"\n" +
+				"[providers.claude]\ncommand = \"echo\"\nprompt_mode = \"none\"\n"
+			path := filepath.Join(dir, "city.toml")
+			for name, data := range map[string]string{
+				"city.toml":                  content,
+				"agents/worker/agent.toml":   "work_dir = \"new-workdir\"\n",
+				"agents/existing/agent.toml": "work_dir = \"existing-workdir\"\n",
+				"pack.toml":                  "[pack]\nname = \"preview-test\"\nversion = \"0.1.0\"\nschema = 2\n",
+				"skills/plan/SKILL.md":       "---\nname: plan\ndescription: test\n---\nbody\n",
+				"existing-workdir/.gc/tmp/skill-catalog-existing.b64": "preserve this snapshot",
+				".gc/settings.json": "{\"permissions\":{}}\n",
+			} {
+				file := filepath.Join(dir, name)
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := tryReloadConfig(path, "test", dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := beads.NewMemStore()
+			for _, name := range []string{"worker", "existing"} {
+				if _, err := store.Create(beads.Bead{
+					Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{"session_name": name, "template": name, "started_config_hash": "old"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cr := &CityRuntime{
+				cityPath: dir, cityName: "test", tomlPath: path, cfg: result.Cfg,
+				standaloneCityStore: store, stderr: io.Discard,
+			}
+			before := reloadPreviewTreeDigest(t, dir)
+			if entry == "dry-run" {
+				reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+				if reply.Outcome != reloadOutcomePreview || len(reply.Changes) != 2 {
+					t.Fatalf("preview = %+v", reply)
+				}
+			} else if changes, err := cr.previewReloadChanges(result.Cfg, false); err != nil || len(changes) != 2 {
+				t.Fatalf("pre-apply preview = %+v, %v", changes, err)
+			}
+			after := reloadPreviewTreeDigest(t, dir)
+			t.Logf("filesystem digest before=%x after=%x", before, after)
+			if before != after {
+				t.Fatal("preview changed the real filesystem")
+			}
+		})
+	}
+}
+
+func reloadPreviewTreeDigest(t *testing.T, root string) [sha256.Size]byte {
+	t.Helper()
+	hash := sha256.New()
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(hash, "%s\x00%s\x00", rel, info.Mode()); err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			hash.Write(data)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return [sha256.Size]byte(hash.Sum(nil))
 }
 
 func TestReloadNoChangeIdentifiesLastWatcherApply(t *testing.T) {

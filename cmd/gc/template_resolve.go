@@ -193,7 +193,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	workDir, err := resolveConfiguredWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	resolveWorkDir := resolveConfiguredWorkDir
+	if p.readOnly {
+		resolveWorkDir = resolveConfiguredWorkDirPath
+	}
+	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -641,16 +645,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				// templateNameFor returns cfgAgent.PoolName for pool
 				// instances and qualifiedName for singletons.
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
-				if sharedCatalog != nil {
-					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
-						if writeSkillSnapshotFile(workDir, materializeAgent, snapshot) == "" {
+				if !p.readOnly {
+					if sharedCatalog != nil {
+						if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
+							if writeSkillSnapshotFile(workDir, materializeAgent, snapshot) == "" {
+								removeSkillSnapshotFile(workDir, materializeAgent)
+							}
+						} else {
 							removeSkillSnapshotFile(workDir, materializeAgent)
 						}
 					} else {
 						removeSkillSnapshotFile(workDir, materializeAgent)
 					}
-				} else {
-					removeSkillSnapshotFile(workDir, materializeAgent)
 				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
 			}
