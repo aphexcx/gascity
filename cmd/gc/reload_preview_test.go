@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestReloadSessionChangesPreservesSoftAndDriftSemantics(t *testing.T) {
@@ -259,6 +260,7 @@ func TestReloadPreviewNamesRuntimeReplacementSessions(t *testing.T) {
 				if !reflect.DeepEqual(changes, want) {
 					t.Fatalf("soft=%v plan=%+v, want %+v", soft, changes, want)
 				}
+				validateReloadChangesSchemas(t, changes)
 				var output bytes.Buffer
 				writeReloadChanges(&output, changes)
 				if !strings.Contains(output.String(), "0 service(s), 2 session(s)") {
@@ -435,6 +437,7 @@ func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
 			if len(changes) != 2 || actions["bad"] != "unresolved" || actions["good"] != "drain" {
 				t.Fatalf("partial plan lost a session: %+v", changes)
 			}
+			validateReloadChangesSchemas(t, changes)
 		})
 	}
 	t.Run("runtime replacement keeps one row per session", func(t *testing.T) {
@@ -459,6 +462,52 @@ func TestReloadPreviewRetainsValidSessionsWhenOneIsUnresolved(t *testing.T) {
 			}
 		}
 	})
+}
+
+func validateReloadChangesSchemas(t *testing.T, changes []reloadChange) {
+	t.Helper()
+	for _, role := range []string{jsonSchemaResultRole, jsonSchemaFailureRole} {
+		t.Run(role+" schema", func(t *testing.T) {
+			var output bytes.Buffer
+			if role == jsonSchemaResultRole {
+				if err := writeLifecycleActionJSON(&output, lifecycleActionJSON{
+					Command: "reload", Action: "reload", CityPath: t.TempDir(),
+					Async: lifecycleBoolPtr(false), Soft: lifecycleBoolPtr(false),
+					Outcome: string(reloadOutcomePreview), Changes: changes,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			} else if code := writeReloadFailureJSON(&output, io.Discard, reloadControlReply{
+				Outcome: reloadOutcomeFailed, Error: "apply failed", Changes: changes,
+			}); code != 1 {
+				t.Fatalf("failure exit code = %d", code)
+			}
+			raw, err := readBuiltinSchema([]string{"reload"}, role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			compiler := jsonschema.NewCompiler()
+			url := "reload/" + role + ".schema.json"
+			if err := compiler.AddResource(url, doc); err != nil {
+				t.Fatal(err)
+			}
+			schema, err := compiler.Compile(url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance, err := jsonschema.UnmarshalJSON(&output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := schema.Validate(instance); err != nil {
+				t.Fatalf("preview actions violate %s schema: %v", role, err)
+			}
+		})
+	}
 }
 
 func TestReloadAcceptedRevisionIsAtRequest(t *testing.T) {

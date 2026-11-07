@@ -37,7 +37,7 @@
           "kind": { "enum": ["service", "session"] },
           "name": { "type": "string" },
           "template": { "type": "string" },
-          "action": { "enum": ["start", "stop", "restart", "drain", "accept", "rebaseline"] },
+          "action": { "enum": ["start", "stop", "restart", "stop and restart", "drain", "accept", "rebaseline", "unresolved"] },
           "reasons": { "type": "array", "items": { "type": "string" } }
         },
         "additionalProperties": false
