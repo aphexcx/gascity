@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -11,12 +12,13 @@ import (
 )
 
 type softReloadAcceptanceResult struct {
-	Updated        int
-	Failed         int
-	FailedSessions []string
-	CanceledDrains int
-	OpenSessions   int
-	DesiredEmpty   bool
+	Updated         int
+	UpdatedSessions []string
+	Failed          int
+	FailedSessions  []string
+	CanceledDrains  int
+	OpenSessions    int
+	DesiredEmpty    bool
 }
 
 func (r softReloadAcceptanceResult) warnings() []string {
@@ -153,7 +155,9 @@ func acceptConfigDriftAcrossSessions(
 			result.CanceledDrains++
 		}
 		result.Updated++
+		result.UpdatedSessions = append(result.UpdatedSessions, name)
 	}
+	sort.Strings(result.UpdatedSessions)
 	return result
 }
 

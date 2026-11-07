@@ -96,6 +96,9 @@ func TestAcceptConfigDriftAcrossSessions_UpdatesStaleHash(t *testing.T) {
 	if got.Updated != 1 {
 		t.Fatalf("updated = %d, want 1 (stderr=%s)", got.Updated, stderr.String())
 	}
+	if len(got.UpdatedSessions) != 1 || got.UpdatedSessions[0] != "worker" {
+		t.Fatalf("accepted session names = %v, want [worker]", got.UpdatedSessions)
+	}
 
 	updated, err := store.Get(sessionBead.ID)
 	if err != nil {

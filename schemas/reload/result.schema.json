@@ -11,8 +11,38 @@
     "city_path": { "type": "string" },
     "async": { "type": "boolean" },
     "soft": { "type": "boolean" },
-    "outcome": { "enum": ["accepted", "applied", "no_change"] },
-    "revision": { "type": "string" }
+    "outcome": { "enum": ["accepted", "applied", "no_change", "preview"] },
+    "revision": { "type": "string", "description": "Current applied config revision, when known." },
+    "target_revision": { "type": "string", "description": "Candidate config revision for a dry run; not applied." },
+    "dry_run": { "type": "boolean" },
+    "accepted_drift_count": { "type": "integer", "minimum": 0 },
+    "accepted_drift_sessions": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "last_applied": {
+      "type": "object",
+      "required": ["source", "at"],
+      "properties": {
+        "source": { "enum": ["watch", "manual"] },
+        "at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "changes": {
+      "type": "array",
+      "description": "Planned config-driven changes to existing sessions and services, before runtime deferrals and new pool allocations.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "name", "action", "reasons"],
+        "properties": {
+          "kind": { "enum": ["service", "session"] },
+          "name": { "type": "string" },
+          "template": { "type": "string" },
+          "action": { "enum": ["start", "stop", "restart", "drain", "accept", "rebaseline"] },
+          "reasons": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": true
 }

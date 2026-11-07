@@ -1,0 +1,145 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+func TestReloadSessionChangesPreservesSoftAndDriftSemantics(t *testing.T) {
+	oldHash := runtime.CoreFingerprint(runtime.Config{Command: "old"})
+	desired := map[string]TemplateParams{
+		"pool-1":    {Command: "new", TemplateName: "pool"},
+		"same":      {Command: "old", TemplateName: "pool"},
+		"unstarted": {Command: "new", TemplateName: "pool"},
+		"legacy":    {Command: "new", TemplateName: "pool"},
+	}
+	infos := []session.Info{
+		{ID: "one", Template: "pool", SessionNameMetadata: "pool-1", StartedConfigHash: oldHash},
+		{ID: "two", Template: "removed", SessionNameMetadata: "orphan", StartedConfigHash: oldHash},
+		{ID: "three", Template: "pool", SessionNameMetadata: "same", StartedConfigHash: oldHash},
+		{ID: "four", Template: "pool", SessionNameMetadata: "unstarted"},
+		{ID: "five", Template: "pool", SessionNameMetadata: "legacy", StartedConfigHash: "old-unversioned"},
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "pool"}}}
+	for _, soft := range []bool{false, true} {
+		got := reloadSessionChanges(infos, desired, cfg, soft)
+		action := "drain"
+		legacyAction := "rebaseline"
+		if soft {
+			action, legacyAction = "accept", "accept"
+		}
+		want := map[string]string{"pool-1": action, "orphan": "drain", "legacy": legacyAction}
+		if len(got) != len(want) {
+			t.Fatalf("soft=%v changes=%+v", soft, got)
+		}
+		for _, change := range got {
+			if change.Kind != "session" || change.Action != want[change.Name] || len(change.Reasons) == 0 {
+				t.Errorf("soft=%v unexpected change=%+v", soft, change)
+			}
+		}
+	}
+	if infos[0].StartedConfigHash != oldHash {
+		t.Fatal("preview accepted drift")
+	}
+}
+
+func TestReloadPreviewResolvesChangedTemplateWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplateResolveCityConfig(t, dir, "file")
+	fs := fsys.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "echo old"}}}
+	bp := &agentBuildParams{
+		cityName: "test", cityPath: dir, fs: fs, workspace: &config.Workspace{Provider: "test"},
+		providers: map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:  func(string) (string, error) { return "/bin/echo", nil }, stderr: io.Discard,
+	}
+	infos := []session.Info{{ID: "one", Template: "worker", SessionNameMetadata: "worker-1"}}
+	desired, err := resolveReloadSessionTemplates(bp, cfg, infos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos[0].StartedConfigHash = runtime.CoreFingerprint(sessionCoreConfigForHashInfo(desired["worker-1"], infos[0]))
+	if changes := reloadSessionChanges(infos, desired, cfg, false); len(changes) != 0 {
+		t.Fatalf("unchanged template reported drift: %+v", changes)
+	}
+	cfg.Agents[0].StartCommand = "echo new"
+	desired, err = resolveReloadSessionTemplates(bp, cfg, infos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := reloadSessionChanges(infos, desired, cfg, false)
+	if len(changes) != 1 || changes[0].Name != "worker-1" || changes[0].Action != "drain" {
+		t.Fatalf("re-rendered template=%+v", changes)
+	}
+	for _, call := range fs.Calls {
+		if call.Method == "WriteFile" || call.Method == "MkdirAll" || call.Method == "Rename" {
+			t.Fatalf("preview mutated filesystem: %+v", call)
+		}
+	}
+}
+
+func TestReloadDryRunRejectsInvalidConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte("[invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cr := &CityRuntime{cityPath: dir, cityName: "test", tomlPath: path, configRev: "current", cfg: &config.City{}}
+	reply := cr.previewReload(&reloadRequest{dryRun: true}, dir)
+	if reply.Outcome != reloadOutcomeFailed || reply.Error == "" || reply.Revision != "current" {
+		t.Fatalf("invalid config preview=%+v", reply)
+	}
+}
+
+func TestReloadNoChangeIdentifiesLastWatcherApply(t *testing.T) {
+	cr := &CityRuntime{configRev: "abcdef1234567890"}
+	cr.lastConfigApply = reloadApplyInfo{Source: reloadSourceWatch, At: time.Date(2026, 11, 7, 1, 35, 0, 0, time.UTC)}
+	got := cr.noChangeReloadMessage()
+	for _, part := range []string{"No config changes detected.", "rev abcdef123456", "already applied by the watcher at 01:35:00Z"} {
+		if !strings.Contains(got, part) {
+			t.Errorf("message=%q missing %q", got, part)
+		}
+	}
+}
+
+func TestReloadDryRunDoesNotRunReconciliationOrConsumeWatcherChange(t *testing.T) {
+	dir := t.TempDir()
+	path := writeCityTOML(t, dir, "test", "worker")
+	var stdout, stderr bytes.Buffer
+	dirty := &atomic.Bool{}
+	dirty.Store(true)
+	req := &reloadRequest{dryRun: true, soft: true, doneCh: make(chan reloadControlReply, 1)}
+	cr := &CityRuntime{
+		cityPath: dir, cityName: "test", tomlPath: path, cfg: &config.City{},
+		configRev: "current", activeReload: req, stdout: &stdout, stderr: &stderr,
+	}
+	// Nil reconciliation dependencies deliberately make entering a real tick
+	// invalid. The preview must return before any runtime work begins.
+	provider := "fake"
+	var previous map[string]bool
+	cr.tick(context.Background(), dirty, &provider, dir, &previous, "reload")
+	select {
+	case reply := <-req.doneCh:
+		if reply.Outcome != reloadOutcomePreview || reply.Revision != "current" || reply.TargetRevision == "" {
+			t.Fatalf("preview=%+v stderr=%s", reply, stderr.String())
+		}
+	default:
+		t.Fatal("dry run did not reply")
+	}
+	if !dirty.Load() || cr.configRev != "current" || !reflect.DeepEqual(cr.cfg, &config.City{}) || cr.activeReload != nil {
+		t.Fatal("dry run changed runtime configuration or consumed a watcher notification")
+	}
+}

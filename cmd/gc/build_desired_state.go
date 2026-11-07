@@ -6523,7 +6523,9 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	if err := validateAgentSessionTransportForBuild(bp, cfgAgent, qualifiedName); err != nil {
 		return TemplateParams{}, err
 	}
-	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	if !bp.readOnly {
+		prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
+	}
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 

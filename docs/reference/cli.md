@@ -3704,6 +3704,16 @@ without disrupting in-flight work. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
+The reload plan names service replacements and existing sessions with
+changed or unmapped templates. With --dry-run, load and validate config
+and print that plan without applying it or running a reconciliation tick.
+Config loading may populate the pack cache. Runtime activity and work
+guards still control when planned session drains happen.
+
+The default completion timeout is 5m. Progress is printed every 30s while
+waiting. If a caller's outer timeout ends the wait early, supervisor.log's
+"Config reloaded" line and revision are the proof of config application.
+
 ```
 gc reload [path|name] [flags]
 ```
@@ -3711,6 +3721,7 @@ gc reload [path|name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--async` | bool |  | Return after the controller accepts the reload request |
+| `--dry-run` | bool |  | Preview config changes without applying them or running a tick |
 | `--json` | bool |  | emit JSONL summary |
 | `--soft` | bool |  | Accept config drift on open sessions instead of draining them |
 | `--timeout` | string | `5m` | How long to wait for reload completion |

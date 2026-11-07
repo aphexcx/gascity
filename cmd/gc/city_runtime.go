@@ -104,15 +104,16 @@ type CityRuntime struct {
 	// Shared by this city's nudge backstops and targeted demand tick.
 	claimRefusals claimRefusalLog
 
-	cityPath     string
-	cityName     string
-	configName   string
-	tomlPath     string
-	watchTargets []config.WatchTarget
-	configRev    string
-	configDirty  *atomic.Bool
-	watchMu      sync.Mutex
-	watchCleanup func()
+	cityPath        string
+	cityName        string
+	configName      string
+	tomlPath        string
+	watchTargets    []config.WatchTarget
+	configRev       string
+	lastConfigApply reloadApplyInfo
+	configDirty     *atomic.Bool
+	watchMu         sync.Mutex
+	watchCleanup    func()
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
@@ -1138,6 +1139,15 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	cr.reloadMu.Lock()
+	preview := cr.activeReload
+	cr.reloadMu.Unlock()
+	if preview != nil && preview.dryRun {
+		reply := cr.previewReload(preview, cityRoot)
+		cr.sendReloadReply(preview.doneCh, reply)
+		cr.clearActiveReloadIf(preview)
+		return
+	}
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
 	cr.reloadMu.Lock()
@@ -1196,7 +1206,7 @@ func (cr *CityRuntime) tick(
 		dirtyCleared = true
 		source := reloadSourceWatch
 		cr.reloadMu.Lock()
-		if cr.activeReload != nil {
+		if cr.activeReload != nil && !cr.activeReload.dryRun {
 			source = reloadSourceManual
 			manualReload = cr.activeReload
 		}
@@ -1204,6 +1214,9 @@ func (cr *CityRuntime) tick(
 		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source)
 		if manualReload != nil {
 			manualReloadCompleted = true
+			if manualReload.progressCh != nil {
+				cr.sendReloadReply(manualReload.progressCh, reloadControlReply{Outcome: reloadOutcomeProgress, Revision: manualReply.Revision})
+			}
 			// #3206 defense-in-depth: a manual reload's reply is already final
 			// here unless soft-reload acceptance will amend it from
 			// post-reconcile state. For every other manual reload, send the
@@ -1854,6 +1867,7 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 		return
 	}
 	req.started = time.Now()
+	revision := cr.reloadRevision()
 	var stale *reloadRequest
 	cr.reloadMu.Lock()
 	if existing := cr.activeReload; existing != nil {
@@ -1864,8 +1878,9 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 		} else {
 			cr.reloadMu.Unlock()
 			req.acceptedCh <- reloadControlReply{
-				Outcome: reloadOutcomeBusy,
-				Message: "Reload request could not be accepted because another reload is already in progress.",
+				Outcome:  reloadOutcomeBusy,
+				Revision: revision,
+				Message:  "Reload request could not be accepted because another reload is already in progress.",
 			}
 			return
 		}
@@ -1874,11 +1889,14 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 	if cr.configDirty == nil {
 		cr.configDirty = &atomic.Bool{}
 	}
-	cr.configDirty.Store(true)
+	if !req.dryRun {
+		cr.configDirty.Store(true)
+	}
 	cr.reloadMu.Unlock()
 	if stale != nil {
 		cr.sendReloadReply(stale.doneCh, reloadControlReply{
-			Outcome: reloadOutcomeTimeout,
+			Outcome:  reloadOutcomeTimeout,
+			Revision: revision,
 			Error: fmt.Sprintf(
 				"Previous reload exceeded the %s active-reload TTL without completing; controller force-cleared the stuck reload slot.",
 				reloadActiveTTL,
@@ -1890,8 +1908,9 @@ func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
 	default:
 	}
 	req.acceptedCh <- reloadControlReply{
-		Outcome: reloadOutcomeAccepted,
-		Message: "Reload requested.",
+		Outcome:  reloadOutcomeAccepted,
+		Message:  "Reload requested.",
+		Revision: revision,
 	}
 }
 
@@ -1922,8 +1941,9 @@ func (cr *CityRuntime) failActiveReload(message string) {
 		return
 	}
 	cr.sendReloadReply(req.doneCh, reloadControlReply{
-		Outcome: reloadOutcomeFailed,
-		Error:   message,
+		Outcome:  reloadOutcomeFailed,
+		Error:    message,
+		Revision: cr.reloadRevision(),
 	})
 }
 
@@ -1974,7 +1994,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cityRoot string,
 	trace *sessionReconcilerTraceCycle,
 	source reloadSource,
-) reloadControlReply {
+) (reply reloadControlReply) {
+	var changes []reloadChange
+	defer func() {
+		if reply.Outcome == reloadOutcomeApplied {
+			cr.lastConfigApply = reloadApplyInfo{Source: source, At: time.Now().UTC()}
+		}
+		if reply.Outcome == reloadOutcomeFailed || reply.Revision == "" {
+			reply.Revision = cr.configRev
+		}
+		if !cr.lastConfigApply.At.IsZero() {
+			last := cr.lastConfigApply
+			reply.LastApplied = &last
+		}
+		reply.Changes = changes
+	}()
 	var warnings []string
 	appendWarning := func(message string) {
 		warnings = append(warnings, message)
@@ -2009,6 +2043,26 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
+	}
+	if source == reloadSourceManual {
+		cr.reloadMu.Lock()
+		request := cr.activeReload
+		cr.reloadMu.Unlock()
+		if request != nil && !config.StorageReloadRequiresRestart(cr.cfg, result.Cfg) {
+			applyRuntimeCityIdentity(result.Cfg, cr.cityName)
+			var previewErr error
+			changes, previewErr = cr.previewReloadChanges(result.Cfg, request.soft)
+			if previewErr != nil {
+				appendWarning(previewErr.Error())
+			}
+			writeReloadChanges(cr.stdout, changes)
+			if request.progressCh != nil {
+				cr.sendReloadReply(request.progressCh, reloadControlReply{
+					Outcome: reloadOutcomeProgress, Revision: cr.configRev,
+					TargetRevision: result.Revision, Changes: changes,
+				})
+			}
+		}
 	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
@@ -2064,7 +2118,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeNoChange), len(warnings), nil)
 		return reloadControlReply{
 			Outcome:  reloadOutcomeNoChange,
-			Message:  "No config changes detected.",
+			Message:  cr.noChangeReloadMessage(),
 			Revision: result.Revision,
 			Warnings: warnings,
 		}
@@ -2319,7 +2373,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
+	cr.serviceStateMu.Lock()
 	cr.configRev = result.Revision
+	cr.serviceStateMu.Unlock()
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -2376,11 +2432,12 @@ func (cr *CityRuntime) applySoftReloadAcceptance(
 	result := acceptConfigDriftAcrossSessions(sessionFrontDoor(cr.sessionsBeadStore().Store), desired, sessionBeads, cr.sp, cr.sessionDrains, cr.stderr)
 	accepted := result.Updated
 	reply.AcceptedDriftCount = &accepted
+	reply.AcceptedDriftSessions = result.UpdatedSessions
 	for _, warning := range result.warnings() {
 		reply.Warnings = append(reply.Warnings, warning)
 		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
 	}
-	fmt.Fprintf(cr.stdout, "%s: soft reload: accepted config drift on %d session(s)\n", cr.logPrefix, result.Updated) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(cr.stdout, "%s: %s\n", cr.logPrefix, softReloadAcceptanceMessage(result.Updated, result.UpdatedSessions)) //nolint:errcheck // best-effort stdout
 }
 
 func lockedConfigName(cfg *config.City, cityPath string) string {

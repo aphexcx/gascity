@@ -229,9 +229,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
 		}
 	}
-	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
-	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	sa := settingsArgs(p.cityPath, providerFamily)
+	if !p.readOnly {
+		sa, err = ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+		}
 	}
 	if sa != "" {
 		command = command + " " + sa

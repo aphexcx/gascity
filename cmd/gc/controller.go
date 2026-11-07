@@ -232,6 +232,8 @@ func handleControllerConn(
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
+		case strings.HasPrefix(line, "reload-preview:"):
+			handleReloadSocketRequest(conn, line[len("reload-preview:"):], reloadReqCh, true)
 		case line == "control-dispatcher":
 			select {
 			case controlDispatcherCh <- struct{}{}:
@@ -375,6 +377,10 @@ func resetSessionCircuitBreakerOnController(cityPath, sessionID, identity string
 }
 
 func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest) {
+	handleReloadSocketRequest(conn, payload, ch, false)
+}
+
+func handleReloadSocketRequest(conn net.Conn, payload string, ch chan reloadRequest, previewOnly bool) {
 	if ch == nil {
 		writeJSONLine(conn, reloadControlReply{
 			Outcome: reloadOutcomeFailed,
@@ -393,6 +399,7 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	}
 
 	var timeout time.Duration
+	wire.DryRun = wire.DryRun || previewOnly
 	if wire.Wait {
 		if wire.Timeout != "" {
 			parsed, err := time.ParseDuration(wire.Timeout)
@@ -424,8 +431,16 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 		wait:       wire.Wait,
 		timeout:    timeout,
 		soft:       wire.Soft,
+		dryRun:     wire.DryRun,
 		acceptedCh: make(chan reloadControlReply, 1),
 		doneCh:     make(chan reloadControlReply, 1),
+	}
+	if wire.DryRun && !wire.Wait {
+		writeJSONLine(conn, reloadControlReply{Outcome: reloadOutcomeFailed, Error: "dry run requires wait=true"})
+		return
+	}
+	if wire.Progress && wire.Wait {
+		req.progressCh = make(chan reloadControlReply, 2)
 	}
 
 	deadline := time.Now().Add(controllerReloadAcceptTimeout)
@@ -437,17 +452,32 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 		return d
 	}
 
+	waitStarted := time.Now()
+	waitProgress := time.NewTicker(30 * time.Second)
+	defer waitProgress.Stop()
+	writeWaiting := func() {
+		if wire.Progress && wire.Wait {
+			writeJSONLine(conn, reloadControlReply{
+				Outcome: reloadOutcomeProgress,
+				Message: fmt.Sprintf("reload request waiting for controller, %d s", int(time.Since(waitStarted).Seconds())),
+			})
+		}
+	}
 	waitFor := func(ch <-chan reloadControlReply, timeout time.Duration) (reloadControlReply, bool) {
 		if timeout <= 0 {
 			return reloadControlReply{}, false
 		}
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
-		select {
-		case reply := <-ch:
-			return reply, true
-		case <-timer.C:
-			return reloadControlReply{}, false
+		for {
+			select {
+			case reply := <-ch:
+				return reply, true
+			case <-timer.C:
+				return reloadControlReply{}, false
+			case <-waitProgress.C:
+				writeWaiting()
+			}
 		}
 	}
 
@@ -461,14 +491,20 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	}
 	timer := time.NewTimer(acceptTimeout)
 	defer timer.Stop()
-	select {
-	case ch <- req:
-	case <-timer.C:
-		writeJSONLine(conn, reloadControlReply{
-			Outcome: reloadOutcomeBusy,
-			Message: "Reload request could not be accepted because the controller is busy.",
-		})
-		return
+	sent := false
+	for !sent {
+		select {
+		case ch <- req:
+			sent = true
+		case <-timer.C:
+			writeJSONLine(conn, reloadControlReply{
+				Outcome: reloadOutcomeBusy,
+				Message: "Reload request could not be accepted because the controller is busy.",
+			})
+			return
+		case <-waitProgress.C:
+			writeWaiting()
+		}
 	}
 
 	reply, ok := waitFor(req.acceptedCh, controllerReloadAcceptTimeout)
@@ -488,15 +524,53 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 		return
 	}
 
-	finalReply, ok := waitFor(req.doneCh, req.timeout)
-	if !ok {
-		writeJSONLine(conn, reloadControlReply{
-			Outcome: reloadOutcomeTimeout,
-			Message: "Reload did not finish before timeout; it may still complete later.",
-		})
-		return
+	waitReloadCompletion(conn, req, reply.Revision)
+}
+
+func waitReloadCompletion(conn net.Conn, req reloadRequest, revision string) {
+	started := time.Now()
+	timeout := time.NewTimer(req.timeout)
+	defer timeout.Stop()
+	progress := time.NewTicker(30 * time.Second)
+	defer progress.Stop()
+	writeProgress := func(reply reloadControlReply) {
+		if reply.Revision != "" {
+			revision = reply.Revision
+		}
+		writeJSONLine(conn, reply)
 	}
-	writeJSONLine(conn, finalReply)
+	for {
+		select {
+		case reply := <-req.doneCh:
+			// A fast tick may finish before the socket writer consumes its plan.
+			// Always send the plan first when both channels are ready.
+			if req.progressCh != nil {
+				select {
+				case plan := <-req.progressCh:
+					writeProgress(plan)
+				default:
+				}
+			}
+			writeJSONLine(conn, reply)
+			return
+		case plan := <-req.progressCh:
+			writeProgress(plan)
+		case <-progress.C:
+			if req.progressCh != nil {
+				message := fmt.Sprintf("reload accepted, tick running, %d s", int(time.Since(started).Seconds()))
+				if req.dryRun {
+					message = fmt.Sprintf("reload preview accepted, computing plan, %d s", int(time.Since(started).Seconds()))
+				}
+				writeJSONLine(conn, reloadControlReply{Outcome: reloadOutcomeProgress, Message: message, Revision: revision})
+			}
+		case <-timeout.C:
+			writeJSONLine(conn, reloadControlReply{
+				Outcome: reloadOutcomeTimeout, Revision: revision,
+				Message: "Reload did not finish before timeout; it may still complete later. Check supervisor.log for the Config reloaded line and revision.",
+			})
+			return
+		}
+	}
 }
 
 // handleConvergeSocketCmd parses a convergence JSON request, enqueues it
@@ -546,10 +620,19 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 }
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
+	var response []byte
+	err := readControllerCommandLines(cityPath, command, dialTimeout, writeTimeout, readTimeout, func(line []byte) (bool, error) {
+		response = append([]byte(nil), line...)
+		return true, nil
+	})
+	return response, err
+}
+
+func readControllerCommandLines(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration, receive func([]byte) (bool, error)) error {
 	sockPath := controllerSocketPath(cityPath)
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
-		return nil, controllerCommandError{
+		return controllerCommandError{
 			op:          "connecting to controller",
 			err:         fmt.Errorf("%w (is the controller running?)", err),
 			unavailable: true,
@@ -559,25 +642,21 @@ func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, wr
 	conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(readTimeout))   //nolint:errcheck
 	if _, err := conn.Write([]byte(command + "\n")); err != nil {
-		return nil, fmt.Errorf("sending command: %w", err)
+		return fmt.Errorf("sending command: %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, controllerCommandError{
-				op:           "reading response",
-				err:          err,
-				unresponsive: true,
-			}
-		}
-		return nil, controllerCommandError{
-			op:           "reading response",
-			err:          io.ErrUnexpectedEOF,
-			unresponsive: true,
+	for scanner.Scan() {
+		done, err := receive([]byte(strings.TrimSpace(scanner.Text())))
+		if err != nil || done {
+			return err
 		}
 	}
-	return []byte(strings.TrimSpace(scanner.Text())), nil
+	err = scanner.Err()
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return controllerCommandError{op: "reading response", err: err, unresponsive: true}
 }
 
 // controllerAlive checks whether a controller is running by connecting
