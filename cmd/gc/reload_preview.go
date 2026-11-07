@@ -82,7 +82,13 @@ func (cr *CityRuntime) previewReloadChanges(cfg *config.City, soft bool, activeP
 		}
 	}
 	for _, change := range reloadSessionChanges(infos, desired, cfg, soft) {
-		if _, ok := replaced[change.Name]; !ok {
+		if index, ok := replaced[change.Name]; ok {
+			changes[index].Template = change.Template
+			changes[index].Reasons = append(changes[index].Reasons, change.Reasons...)
+			if agent := findAgentByTemplate(cfg, change.Template); agent == nil || agent.Suspended {
+				changes[index].Action = "stop"
+			}
+		} else {
 			changes = append(changes, change)
 		}
 	}

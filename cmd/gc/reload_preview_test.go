@@ -276,6 +276,45 @@ func TestReloadPreviewNamesRuntimeReplacementSessions(t *testing.T) {
 	}
 }
 
+func TestReloadPreviewKeepsPermanentStopsDuringRuntimeReplacement(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	for _, name := range []string{"removed", "suspended"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(beads.Bead{
+			Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{"session_name": name, "template": name},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := &config.City{Session: config.SessionConfig{Provider: "old"}}
+	next := &config.City{
+		Session: config.SessionConfig{Provider: "new"},
+		Agents:  []config.Agent{{Name: "suspended", Suspended: true}},
+	}
+	cr := &CityRuntime{cfg: current, sp: sp, standaloneCityStore: store, stderr: io.Discard}
+	for _, soft := range []bool{false, true} {
+		changes, err := cr.previewReloadChanges(next, soft, "old", "next")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []reloadChange{
+			{Kind: "session", Name: "removed", Template: "removed", Action: "stop", Reasons: []string{
+				"session provider changed: old → new", "template no longer maps",
+			}},
+			{Kind: "session", Name: "suspended", Template: "suspended", Action: "stop", Reasons: []string{
+				"session provider changed: old → new", "template suspended",
+			}},
+		}
+		if !reflect.DeepEqual(changes, want) {
+			t.Fatalf("soft=%v plan=%+v, want %+v", soft, changes, want)
+		}
+	}
+}
+
 func TestReloadPreviewUnchangedManualSession(t *testing.T) {
 	dir := t.TempDir()
 	writeTemplateResolveCityConfig(t, dir, "file")
