@@ -92,15 +92,17 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
+		SetupTimeout:               sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:            sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:          sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:         sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:           sc.NudgeLockTimeoutDuration(),
+		NudgeOwnPasteAge:           sc.NudgeOwnPasteAgeDuration(),
+		DisableOpaquePasteRecovery: !sc.NudgeOpaquePasteRecoveryEnabled(),
+		DebounceMs:                 sc.DebounceMsOrDefault(),
+		DisplayMs:                  sc.DisplayMsOrDefault(),
+		SocketName:                 socketName,
+		RuntimeDir:                 runtimeDir,
 	}
 }
 

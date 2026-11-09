@@ -201,12 +201,14 @@ type NudgeResult struct {
 	// delivery receipt — and are hints for everyone else.
 	Bytes  int                 `json:"bytes,omitempty"`
 	Submit runtime.NudgeSubmit `json:"submit,omitempty"`
+	// Held preserves the runtime's composer hold, including its first-seen age.
+	Held *runtime.NudgeHeld `json:"held,omitempty"`
 }
 
 // nudgeResultFromDelivery projects a runtime's delivery evidence onto the
 // handle's result without reinterpreting any of it.
 func nudgeResultFromDelivery(d runtime.NudgeDelivery) NudgeResult {
-	return NudgeResult{Delivered: d.Delivered, Bytes: d.Bytes, Submit: d.Submit}
+	return NudgeResult{Delivered: d.Delivered, Bytes: d.Bytes, Submit: d.Submit, Held: d.Held}
 }
 
 // UnconfirmedSubmitError is the retry signal a caller without an evidence
@@ -232,7 +234,7 @@ func (r NudgeResult) Landed() bool {
 }
 
 func (r NudgeResult) delivery() runtime.NudgeDelivery {
-	return runtime.NudgeDelivery{Delivered: r.Delivered, Bytes: r.Bytes, Submit: r.Submit}
+	return runtime.NudgeDelivery{Delivered: r.Delivered, Bytes: r.Bytes, Submit: r.Submit, Held: r.Held}
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not

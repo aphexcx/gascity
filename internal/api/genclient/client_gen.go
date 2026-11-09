@@ -159,6 +159,27 @@ func (e InboundReceiptStatusState) Valid() bool {
 	}
 }
 
+// Defines values for NudgeHeldState.
+const (
+	OwnPaste           NudgeHeldState = "own_paste"
+	UnownedDraft       NudgeHeldState = "unowned_draft"
+	UnreadableComposer NudgeHeldState = "unreadable_composer"
+)
+
+// Valid indicates whether the value is a known member of the NudgeHeldState enum.
+func (e NudgeHeldState) Valid() bool {
+	switch e {
+	case OwnPaste:
+		return true
+	case UnownedDraft:
+		return true
+	case UnreadableComposer:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -2307,13 +2328,14 @@ type InboundDelivery struct {
 
 // InboundDeliveryMember defines model for InboundDeliveryMember.
 type InboundDeliveryMember struct {
-	DeliveredBytes int64   `json:"delivered_bytes"`
-	Digest         string  `json:"digest"`
-	Error          *string `json:"error,omitempty"`
-	ExpectedBytes  int64   `json:"expected_bytes"`
-	Selector       *string `json:"selector,omitempty"`
-	SessionId      string  `json:"session_id"`
-	Status         string  `json:"status"`
+	DeliveredBytes int64      `json:"delivered_bytes"`
+	Digest         string     `json:"digest"`
+	Error          *string    `json:"error,omitempty"`
+	ExpectedBytes  int64      `json:"expected_bytes"`
+	Held           *NudgeHeld `json:"held,omitempty"`
+	Selector       *string    `json:"selector,omitempty"`
+	SessionId      string     `json:"session_id"`
+	Status         string     `json:"status"`
 
 	// Terminal When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds.
 	Terminal *bool `json:"terminal,omitempty"`
@@ -2823,6 +2845,16 @@ type MonitorFeedItemResponse struct {
 
 // NoPayload defines model for NoPayload.
 type NoPayload = map[string]interface{}
+
+// NudgeHeld defines model for NudgeHeld.
+type NudgeHeld struct {
+	AgeMs int64          `json:"age_ms"`
+	Since time.Time      `json:"since"`
+	State NudgeHeldState `json:"state"`
+}
+
+// NudgeHeldState defines model for NudgeHeld.State.
+type NudgeHeldState string
 
 // OKResponseBody defines model for OKResponseBody.
 type OKResponseBody struct {

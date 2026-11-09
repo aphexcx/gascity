@@ -4151,6 +4151,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "held": {
+            "$ref": "#/components/schemas/NudgeHeld"
+          },
           "selector": {
             "type": "string"
           },
@@ -5373,6 +5376,34 @@
       },
       "NoPayload": {
         "additionalProperties": false,
+        "type": "object"
+      },
+      "NudgeHeld": {
+        "additionalProperties": false,
+        "properties": {
+          "age_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "unowned_draft",
+              "own_paste",
+              "unreadable_composer"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "since",
+          "age_ms"
+        ],
         "type": "object"
       },
       "OKResponseBody": {

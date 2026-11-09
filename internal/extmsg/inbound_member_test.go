@@ -4,9 +4,24 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestClassifyInboundMemberComposerHeld(t *testing.T) {
+	held := &runtime.NudgeHeld{State: "unowned_draft", Since: time.Unix(1700000000, 0), AgeMS: 8000}
+	out := ClassifyInboundMember(InboundMemberEvidence{
+		NudgeDelivery: runtime.NudgeDelivery{Held: held}, ExpectedBytes: 123,
+		Err: errors.New("preserved draft deferred delivery"),
+	})
+	if string(out.Status) != "held" || out.DeliveredBytes != 0 || out.Terminal {
+		t.Fatalf("held composer classified as %+v; want a recoverable hold with no pasted bytes", out)
+	}
+	if !strings.Contains(out.Reason, "preserved draft deferred delivery") {
+		t.Fatalf("held receipt lost the send error: %q", out.Reason)
+	}
+}
 
 // TestClassifyInboundMemberTable is the spec for the one function that turns
 // a member's send result into a receipt status. One row per outcome the send

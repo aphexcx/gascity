@@ -100,6 +100,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
 	check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)
 	check("[session]", "nudge_lock_timeout", cfg.Session.NudgeLockTimeout)
+	checkPositive("[session]", "nudge_own_paste_age", cfg.Session.NudgeOwnPasteAge)
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
 	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)

@@ -1525,6 +1525,7 @@ export type InboundDeliveryMember = {
     digest: string;
     error?: string;
     expected_bytes: number;
+    held?: NudgeHeld;
     selector?: string;
     session_id: string;
     status: string;
@@ -2146,6 +2147,12 @@ export type MonitorFeedItemResponse = {
 
 export type NoPayload = {
     [key: string]: never;
+};
+
+export type NudgeHeld = {
+    age_ms: number;
+    since: string;
+    state: 'unowned_draft' | 'own_paste' | 'unreadable_composer';
 };
 
 export type OkResponseBody = {

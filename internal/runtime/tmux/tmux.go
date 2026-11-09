@@ -126,8 +126,13 @@ type Config struct {
 	// sent anyway (immediate fallback). Set to 0 to disable wait-idle and
 	// always send immediately.
 	NudgeIdleTimeout time.Duration
-	DebounceMs       int
-	DisplayMs        int
+	// NudgeOwnPasteAge is the minimum age for recovery of an earlier owned paste.
+	NudgeOwnPasteAge time.Duration
+	// DisableOpaquePasteRecovery disables line-count matching of Claude paste
+	// placeholders. The zero value keeps recovery enabled.
+	DisableOpaquePasteRecovery bool
+	DebounceMs                 int
+	DisplayMs                  int
 	// SocketName specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
@@ -159,6 +164,7 @@ func DefaultConfig() Config {
 		NudgeRetryInterval: 500 * time.Millisecond,
 		NudgeLockTimeout:   30 * time.Second,
 		NudgeIdleTimeout:   30 * time.Second,
+		NudgeOwnPasteAge:   5 * time.Second,
 		DebounceMs:         500,
 		DisplayMs:          5000,
 	}
@@ -2824,6 +2830,15 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
+	heldDraft, heldState := "", "unowned_draft"
+	var heldSince time.Time
+	defer func() {
+		if errors.Is(deliveryErr, ErrNudgeDraftDeferred) && !delivery.Landed() {
+			held, err := t.nudgeHeldReceipt(target, heldDraft, heldState, heldSince, time.Now())
+			delivery.Held = held
+			deliveryErr = errors.Join(deliveryErr, err)
+		}
+	}()
 
 	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
 	// only once delivery is actually confirmed (see delivered below). This
@@ -2893,57 +2908,86 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			prefix = marker.promptPrefix
 		}
 		draft, observed := nudgeComposer(content, prefix)
+		heldDraft = draft
 		if !observed {
+			heldState = "unreadable_composer"
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
+		}
+		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, prefix, message)
+			if !since.IsZero() {
+				heldState, heldSince = "own_paste", since
+			}
+			if err != nil {
+				return runtime.NudgeDelivery{}, err
+			}
+			if recovered {
+				heldState, heldSince = "unowned_draft", time.Time{}
+				content, err = t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("reading composer after recovery: %w", err)
+				}
+				draft, observed = nudgeComposer(content, prefix)
+				heldDraft = draft
+				if !observed {
+					heldState = "unreadable_composer"
+				}
+				if !observed || draft != "" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: composer changed after recovery", ErrNudgeDraftDeferred)
+				}
+			}
 		}
 		if draft != "" {
 			collapsed := strings.Contains(draft, "[Pasted text #")
 			deferred := ErrNudgeDraftDeferred
 			if collapsed {
 				deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
-				if !collapsedNudgeDraftMatches(draft, message) {
+				if t.cfg.DisableOpaquePasteRecovery || !collapsedNudgeDraftMatches(draft, message) {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste with a different or ambiguous shape", deferred, target)
 				}
 			}
-			if collapsed || !nudgeDraftMatches(draft, message, 0) {
-				if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
-				}
-				stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
-				if err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
-				}
-				if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
-					if strings.TrimSpace(stored) == "" {
-						deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
-					}
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
-				}
-				attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
-				if err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
-				}
-				if strings.TrimSpace(attached) != "0" {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
-				}
-				if !collapsed {
-					widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
-					if err != nil {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
-					}
-					width, err := strconv.Atoi(strings.TrimSpace(widthText))
-					if err != nil || width <= 2 {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
-					}
-					if !nudgeDraftMatches(draft, message, width-2) {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
-					}
-				}
-				resumeOwnedDraft = true
+			if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
 			}
+			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
+			}
+			if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+				if strings.TrimSpace(stored) == "" {
+					deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
+				}
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
+			}
+			attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
+			}
+			if strings.TrimSpace(attached) != "0" {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
+			}
+			if !collapsed && !nudgeDraftMatches(draft, message, 0) {
+				widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
+				}
+				width, err := strconv.Atoi(strings.TrimSpace(widthText))
+				if err != nil || width <= 2 {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
+				}
+				if !nudgeDraftMatches(draft, message, width-2) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
+				}
+			}
+			resumeOwnedDraft = true
 			resumeDraft = true
 		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+		}
+		if draft == "" {
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
+			}
 		}
 		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
 	}

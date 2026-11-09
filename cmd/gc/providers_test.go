@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -24,6 +25,14 @@ func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
 	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
 	if cfg.SocketName != "city" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
+	}
+	if cfg.NudgeOwnPasteAge != 5*time.Second || cfg.DisableOpaquePasteRecovery {
+		t.Fatalf("recovery defaults not wired: %+v", cfg)
+	}
+	disabled := false
+	cfg = tmuxConfigFromSession(config.SessionConfig{NudgeOwnPasteAge: "30s", NudgeOpaquePasteRecovery: &disabled}, "city", "")
+	if cfg.NudgeOwnPasteAge != 30*time.Second || !cfg.DisableOpaquePasteRecovery {
+		t.Fatalf("recovery overrides not wired: %+v", cfg)
 	}
 }
 

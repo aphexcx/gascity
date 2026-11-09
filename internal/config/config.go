@@ -1610,6 +1610,12 @@ type SessionConfig struct {
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
+	// NudgeOwnPasteAge is the minimum age before the next nudge can submit an
+	// earlier owned Claude paste while idle. Defaults to "5s".
+	NudgeOwnPasteAge string `toml:"nudge_own_paste_age,omitempty" jsonschema:"default=5s"`
+	// NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its
+	// recorded line count while ownership remains intact. Defaults to true.
+	NudgeOpaquePasteRecovery *bool `toml:"nudge_opaque_paste_recovery,omitempty" jsonschema:"default=true"`
 	// DebounceMs is the default debounce interval in milliseconds for send-keys.
 	// Defaults to 500.
 	DebounceMs *int `toml:"debounce_ms,omitempty" jsonschema:"default=500"`
@@ -1720,6 +1726,16 @@ func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
 // Defaults to 30s if empty or unparseable.
 func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
 	return durationOr(s.NudgeLockTimeout, 30*time.Second)
+}
+
+// NudgeOwnPasteAgeDuration returns the owned-paste recovery age, defaulting to 5s.
+func (s *SessionConfig) NudgeOwnPasteAgeDuration() time.Duration {
+	return durationOr(s.NudgeOwnPasteAge, 5*time.Second)
+}
+
+// NudgeOpaquePasteRecoveryEnabled reports whether collapsed-paste matching is enabled.
+func (s *SessionConfig) NudgeOpaquePasteRecoveryEnabled() bool {
+	return s.NudgeOpaquePasteRecovery == nil || *s.NudgeOpaquePasteRecovery
 }
 
 // StartupTimeoutDuration returns the startup timeout as a time.Duration.

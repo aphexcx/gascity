@@ -2902,6 +2902,16 @@
           "description": "NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.\nDuration string. Defaults to \"30s\".",
           "default": "30s"
         },
+        "nudge_own_paste_age": {
+          "type": "string",
+          "description": "NudgeOwnPasteAge is the minimum age before the next nudge can submit an\nearlier owned Claude paste while idle. Defaults to \"5s\".",
+          "default": "5s"
+        },
+        "nudge_opaque_paste_recovery": {
+          "type": "boolean",
+          "description": "NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its\nrecorded line count while ownership remains intact. Defaults to true.",
+          "default": true
+        },
         "debounce_ms": {
           "type": "integer",
           "description": "DebounceMs is the default debounce interval in milliseconds for send-keys.\nDefaults to 500.",
