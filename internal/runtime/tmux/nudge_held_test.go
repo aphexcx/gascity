@@ -15,7 +15,7 @@ import (
 )
 
 func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
-	for _, scenario := range []string{"recover", "retry owner", "retry owner identical", "retry owner startup", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
+	for _, scenario := range []string{"recover", "retry owner", "retry owner identical", "retry owner startup", "acknowledged retry", "retry owner release failure", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
@@ -31,10 +31,12 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 				}
 				draft, busy := "[Pasted text #12 +2 lines]", false
 				startup := newTmuxStartOps(tm, "", 0, runtime.Config{}, false)
-				stagingStartup := scenario == "retry owner startup"
+				terminalRetry := scenario == "acknowledged retry" || scenario == "retry owner release failure"
+				stagingStartup := scenario == "retry owner startup" || terminalRetry
 				if stagingStartup {
 					draft = ""
 					clear(options)
+					busy = terminalRetry
 				}
 				if scenario == "busy" {
 					busy = true
@@ -80,6 +82,11 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 						return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
 					case slices.Contains(args, "show-options"):
 						return options[args[len(args)-1]], nil
+					case slices.Contains(args, "if-shell") && strings.Contains(args[len(args)-1], "set-option") && strings.Contains(args[len(args)-1], nudgeDraftIdentityOption):
+						if scenario == "retry owner release failure" {
+							return "", errors.New("retry identity storage unavailable")
+						}
+						options[nudgeDraftIdentityOption] = prior + ":"
 					case slices.Contains(args, "set-option"):
 						if scenario == "empty metadata failure" {
 							return "", errors.New("pane metadata unavailable")
@@ -98,13 +105,27 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					return "", nil
 				}}
 				if stagingStartup {
-					if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
+					if terminalRetry {
+						d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo\nthree", "queue-A", func(_, text string, _ time.Duration) (int, error) {
+							pastes++
+							draft = "[Pasted text #12 +2 lines]"
+							return len(text), nil
+						})
+						if scenario == "retry owner release failure" {
+							if !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) || !errors.Is(d.UnconfirmedSubmitError(t.Name()), runtime.ErrNudgeSubmitUnconfirmed) || !d.Landed() {
+								t.Fatalf("failed owner release allowed acknowledgement: delivery=%+v err=%v", d, err)
+							}
+						} else if err != nil || d.UnconfirmedSubmitError(t.Name()) != nil || d.Submit != runtime.NudgeSubmitUnverified || !d.Landed() {
+							t.Fatalf("busy delivery cannot be acknowledged: delivery=%+v err=%v", d, err)
+						}
+					} else if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
 						t.Fatalf("staging startup: %v", err)
 					}
 					if pastes != 1 {
 						t.Fatalf("startup pasted %d times", pastes)
 					}
 					stagingStartup, pastes = false, 0
+					busy = false
 					options[nudgeDraftPayloadOption] = prior
 					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli())
 				}
@@ -125,7 +146,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					if err == nil || delivery.Landed() || delivery.Held != nil || pastes != 0 || submits != 0 {
 						t.Fatalf("empty composer reported a hold: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}
-				case scenario != "recover" && scenario != "suggestion":
+				case scenario != "recover" && scenario != "suggestion" && scenario != "acknowledged retry":
 					if !errors.Is(err, ErrNudgeDraftDeferred) || delivery.Landed() || delivery.Held == nil || pastes != 0 || submits != 0 {
 						t.Fatalf("unsafe recovery: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}

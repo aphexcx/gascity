@@ -2860,6 +2860,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	// submit-verified and the best-effort arm.
 	payloadBytes := 0
 	submitted := false
+	verifySubmit := false
 	resumeOwnedDraft := false
 	ownershipLost := false
 	defer func() {
@@ -2880,6 +2881,14 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		if delivery.Submit == runtime.NudgeSubmitOwnershipLost {
 			log.Printf("tmux nudge: target=%q digest=%s reason=draft_ownership_lost; draft preserved, automatic replay stopped", target, runtime.NudgePayloadDigest(message))
 		}
+		if verifySubmit && deliveryID != "" && delivery.Submit == runtime.NudgeSubmitUnverified {
+			if err := t.releaseNudgeDraftIdentity(target, message, deliveryID); err != nil {
+				// Do not acknowledge a delivery whose retry reservation could not
+				// be retired. Preserve the paste and its original submit-only retry.
+				delivery.Submit = runtime.NudgeSubmitUnconfirmed
+				deliveryErr = errors.Join(deliveryErr, fmt.Errorf("%w: retiring nudge retry ownership: %w", runtime.ErrNudgeSubmitUnconfirmed, err))
+			}
+		}
 		if submitted {
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
@@ -2899,7 +2908,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 
 	// Capture the baseline before the paste: a running turn may briefly lose
 	// its busy indicator at a tool boundary while the new input is staged.
-	verifySubmit := t.submitVerifyEligible(target)
+	verifySubmit = t.submitVerifyEligible(target)
 	idleBeforePaste := false
 	resumeDraft := false
 	if verifySubmit {
