@@ -345,6 +345,7 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		case errors.Is(err, extmsg.ErrInvalidInput) || errors.Is(err, extmsg.ErrInvalidConversation):
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		default:
+			log.Printf("extmsg: bind failed: %v", err)
 			return nil, apierr.Internal.Msg(err.Error())
 		}
 	}

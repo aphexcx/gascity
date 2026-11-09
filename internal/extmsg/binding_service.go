@@ -350,18 +350,26 @@ func (s *bindingService) rotateBindingIdentityLocked(caller Caller, active Sessi
 // recoverBindingRotationLocked restores ownership only when no replacement
 // persisted. A non-atomic create may succeed before membership setup fails;
 // reopening the old binding in that case would violate the one-active rule.
+// A failed ownership lookup preserves membership until a later Bind can retry.
 func (s *bindingService) recoverBindingRotationLocked(caller Caller, old SessionBindingRecord, members []ConversationMembershipRecord, now time.Time, cause error) error {
 	history, err := s.listBindingsForConversation(old.Conversation)
-	if err == nil {
-		for _, record := range history {
-			if record.Status == BindingActive {
-				return cause
+	if err != nil {
+		var memberIDs []string
+		for _, member := range members {
+			if member.SessionID == bindingMembershipKey(old) {
+				memberIDs = append(memberIDs, member.ID)
 			}
 		}
-		err = s.store.Reopen(old.ID)
-		if err == nil {
+		return errors.Join(cause, fmt.Errorf("preserve memberships %v for conversation %s: binding ownership lookup failed: %w", memberIDs, conversationTitle(old.Conversation), err))
+	}
+	for _, record := range history {
+		if record.Status == BindingActive {
 			return cause
 		}
+	}
+	err = s.store.Reopen(old.ID)
+	if err == nil {
+		return cause
 	}
 	cause = errors.Join(cause, fmt.Errorf("restore binding %s for conversation %s: %w", old.ID, conversationTitle(old.Conversation), err))
 	for _, member := range members {
@@ -406,6 +414,9 @@ func (s *bindingService) removeOrphanedMembershipLocked(caller Caller, member Co
 		Caller: caller, Conversation: member.Conversation, SessionID: member.SessionID,
 		Owner: MembershipOwnerBinding, Now: now,
 	}); err != nil {
+		if len(member.Owners) > 1 {
+			return fmt.Errorf("remove orphaned binding owner from membership %s for conversation %s: %w; membership has other owners, so remove only its binding owner", member.ID, conversationTitle(member.Conversation), err)
+		}
 		return fmt.Errorf("remove orphaned binding owner from membership %s for conversation %s: %w; to stop delivery to this membership run: gc bd close %s", member.ID, conversationTitle(member.Conversation), err, member.ID)
 	}
 	return nil

@@ -259,6 +259,81 @@ func TestBindingOwnershipRotationFailurePreservesMembership(t *testing.T) {
 	}
 }
 
+func TestBindingOwnershipRotationLookupFailurePreservesBackfill(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	store := &rotationFailureStore{bdLikeStore: &bdLikeStore{MemStore: beads.NewMemStore()}}
+	fabric := NewServices(store)
+	ref := testConversationRef()
+	appendEntry := func(id string) {
+		t.Helper()
+		if _, _, err := fabric.Transcript.Append(ctx, AppendTranscriptInput{
+			Caller: testAdapterCaller(), Conversation: ref,
+			Kind: TranscriptMessageInbound, Provenance: TranscriptProvenanceLive,
+			ProviderMessageID: id, Text: id, CreatedAt: testNow(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEntry("before-join")
+	input := BindInput{Conversation: ref, SessionID: "session-1", Now: testNow()}
+	first, err := fabric.Bindings.Bind(ctx, testAdapterCaller(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendEntry("acknowledged")
+	appendEntry("unread-1")
+	appendEntry("unread-2")
+	if err := fabric.Transcript.Ack(ctx, AckMembershipInput{
+		Caller: testControllerCaller(), Conversation: ref, SessionID: input.SessionID, Sequence: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := membershipRecordBySession(t, fabric.Transcript, ref, input.SessionID)
+	ensureErr := errors.New("membership setup lookup failed")
+	historyErr := errors.New("binding history lookup failed")
+	store.listErrorsAfterBindingCreate = map[string]error{
+		membershipExactLabel(ref, input.SessionID): ensureErr,
+		bindingConversationLabel(ref):              historyErr,
+	}
+	_, err = fabric.Bindings.Bind(ctx, testControllerCaller(), input)
+	if !errors.Is(err, ensureErr) || !errors.Is(err, historyErr) {
+		t.Fatalf("rotation error = %v, want both setup and recovery lookup failures", err)
+	}
+	if !strings.Contains(err.Error(), ref.ConversationID) || !strings.Contains(err.Error(), before.ID) {
+		t.Errorf("recovery error must identify the conversation and preserved membership %s: %v", before.ID, err)
+	}
+	members, err := fabric.Transcript.ListMemberships(ctx, testControllerCaller(), ref)
+	if err != nil || len(members) != 1 || !reflect.DeepEqual(members[0], before) {
+		t.Fatalf("indeterminate ownership changed membership: before=%+v after=%+v err=%v", before, members, err)
+	}
+	active, err := fabric.Bindings.ResolveByConversation(ctx, ref)
+	if err != nil || active == nil || active.ID == first.ID || active.Caller != testControllerCaller() {
+		t.Fatalf("persisted replacement lost after recovery: %+v, %v", active, err)
+	}
+	retried, err := fabric.Bindings.Bind(ctx, testControllerCaller(), input)
+	if err != nil || retried.ID != active.ID {
+		t.Fatalf("retry must reuse persisted replacement: %+v, %v", retried, err)
+	}
+	after := membershipRecordBySession(t, fabric.Transcript, ref, input.SessionID)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("retry changed membership: before=%+v after=%+v", before, after)
+	}
+	backfill, err := fabric.Transcript.ListBackfill(ctx, ListBackfillInput{
+		Caller: testControllerCaller(), Conversation: ref, SessionID: input.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unread []string
+	for _, entry := range backfill {
+		unread = append(unread, entry.Text)
+	}
+	if !reflect.DeepEqual(unread, []string{"unread-1", "unread-2"}) {
+		t.Fatalf("backfill after retry = %v, want previous unread messages", unread)
+	}
+}
+
 // A failed create must not strand a recipient when a non-atomic rotation has
 // already closed the binding that owned its transcript membership.
 func TestBindingOwnershipRotationCreateFailureCompensates(t *testing.T) {
@@ -372,7 +447,7 @@ func TestBindingOrphanCleanupPreservesIndependentOwners(t *testing.T) {
 		t.Run(string(owner), func(t *testing.T) {
 			freezeTestClock(t)
 			ctx := context.Background()
-			store := &bdLikeStore{MemStore: beads.NewMemStore()}
+			store := &rotationFailureStore{bdLikeStore: &bdLikeStore{MemStore: beads.NewMemStore()}}
 			fabric := NewServices(store)
 			ref := testConversationRef()
 			first, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
@@ -391,6 +466,17 @@ func TestBindingOrphanCleanupPreservesIndependentOwners(t *testing.T) {
 			if err := store.Close(first.ID); err != nil {
 				t.Fatal(err)
 			}
+			store.removeOwnerErr = errors.New("membership owner update failed")
+			_, err = fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+				Conversation: ref, SessionID: "session-2", Now: testNow(),
+			})
+			if !errors.Is(err, store.removeOwnerErr) || !strings.Contains(err.Error(), "other owners") || strings.Contains(err.Error(), "gc bd close") {
+				t.Fatalf("cleanup error must preserve independent owners and omit a close command: %v", err)
+			}
+			if !strings.Contains(err.Error(), before.ID) || !strings.Contains(err.Error(), ref.ConversationID) {
+				t.Fatalf("cleanup error must identify membership and conversation: %v", err)
+			}
+			store.removeOwnerErr = nil
 			if _, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
 				Conversation: ref, SessionID: "session-2", Now: testNow(),
 			}); err != nil {
@@ -409,6 +495,18 @@ type rotationFailureStore struct {
 	createErr          error
 	reopenErr          error
 	closeMembershipErr error
+	removeOwnerErr     error
+	// Arm one-shot lookup failures only after the replacement has persisted.
+	listErrorsAfterBindingCreate map[string]error
+	listErrors                   map[string]error
+}
+
+func (s *rotationFailureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if err := s.listErrors[query.Label]; err != nil {
+		delete(s.listErrors, query.Label)
+		return nil, err
+	}
+	return s.bdLikeStore.List(query)
 }
 
 func (s *rotationFailureStore) Tx(message string, fn func(beads.Tx) error) error {
@@ -422,6 +520,13 @@ func (s *rotationFailureStore) Reopen(id string) error {
 		return s.reopenErr
 	}
 	return s.bdLikeStore.Reopen(id)
+}
+
+func (s *rotationFailureStore) SetMetadataBatch(id string, fields map[string]string) error {
+	if _, ok := fields["membership_owner_kinds"]; ok && s.removeOwnerErr != nil {
+		return s.removeOwnerErr
+	}
+	return s.bdLikeStore.SetMetadataBatch(id, fields)
 }
 
 func (s *rotationFailureStore) Close(id string) error {
@@ -446,7 +551,12 @@ func (tx rotationFailureTx) Create(b beads.Bead) (beads.Bead, error) {
 	if hasLabel(b, "gc:extmsg-binding") && tx.store.createErr != nil {
 		return beads.Bead{}, tx.store.createErr
 	}
-	return tx.Tx.Create(b)
+	created, err := tx.Tx.Create(b)
+	if err == nil && hasLabel(b, "gc:extmsg-binding") {
+		tx.store.listErrors = tx.store.listErrorsAfterBindingCreate
+		tx.store.listErrorsAfterBindingCreate = nil
+	}
+	return created, err
 }
 
 func TestBindingConditionalUnbindRejectsAmbiguousSelectors(t *testing.T) {
