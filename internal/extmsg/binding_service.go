@@ -152,6 +152,9 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		case active != nil && (input.IfUnbound || (caller.Kind == CallerController && caller.ID == defaultRouteCallerID)):
 			// Opportunistic routes never take ownership of an existing binding.
 			out = *active
+			if err := overlayLiveSession(s.sessions, &out); err != nil {
+				return newSafeOperationError("resolve binding live session", err)
+			}
 			return nil
 		case active != nil && (active.SessionID != sessionID || active.AgentName != agentName):
 			if !input.Replace {
@@ -188,6 +191,24 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 // so the conversation is never left unbound. history supplies the next
 // generation.
 func (s *bindingService) createBindingLocked(caller Caller, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time, displaceID string) (SessionBindingRecord, error) {
+	if !beads.StoreSupportsAtomicTx(s.store) {
+		// Non-atomic callers have already closed any displaced binding. Drop
+		// abandoned binding owners before adding a recipient; the same target
+		// can adopt its membership without losing its cursor.
+		keep := bindingMembershipKey(SessionBindingRecord{SessionID: target.sessionID, AgentName: target.agentName})
+		members, err := s.bindingOwnedMembershipsLocked(ref)
+		if err != nil {
+			return SessionBindingRecord{}, err
+		}
+		for _, member := range members {
+			if member.SessionID == keep {
+				continue
+			}
+			if err := s.removeOrphanedMembershipLocked(caller, member, now); err != nil {
+				return SessionBindingRecord{}, err
+			}
+		}
+	}
 	nextGeneration := nextBindingGeneration(history)
 	// A binding targets either a configured agent (delivery-time resolution)
 	// or a concrete session. Agent bindings get only the agent label; session
@@ -299,8 +320,8 @@ func (s *bindingService) rebindActiveLocked(caller Caller, ref ConversationRef, 
 // clearing delivery contexts or removing transcript membership. Re-ensuring
 // the existing membership preserves its join sequence and read cursor. Atomic
 // stores close the old identity and create the new one in one transaction;
-// other stores close first, as in a handoff, to avoid two active identities
-// after a partial failure. Either way the membership survives a failed swap.
+// other stores close first and compensate a failed replacement by restoring
+// the old identity, or removing its binding-owned membership if restore fails.
 func (s *bindingService) rotateBindingIdentityLocked(caller Caller, active SessionBindingRecord, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time) (SessionBindingRecord, error) {
 	if active.SessionName != "" {
 		target.sessionName = active.SessionName
@@ -312,10 +333,82 @@ func (s *bindingService) rotateBindingIdentityLocked(caller Caller, active Sessi
 	if beads.StoreSupportsAtomicTx(s.store) {
 		return s.createBindingLocked(caller, ref, target, input, history, now, active.ID)
 	}
+	members, err := s.bindingOwnedMembershipsLocked(ref)
+	if err != nil {
+		return SessionBindingRecord{}, err
+	}
 	if err := s.store.Close(active.ID); err != nil {
 		return SessionBindingRecord{}, fmt.Errorf("close binding %s for identity rotation: %w", active.ID, err)
 	}
-	return s.createBindingLocked(caller, ref, target, input, history, now, "")
+	out, err := s.createBindingLocked(caller, ref, target, input, history, now, "")
+	if err != nil {
+		return SessionBindingRecord{}, s.recoverBindingRotationLocked(caller, active, members, now, err)
+	}
+	return out, nil
+}
+
+// recoverBindingRotationLocked restores ownership only when no replacement
+// persisted. A non-atomic create may succeed before membership setup fails;
+// reopening the old binding in that case would violate the one-active rule.
+func (s *bindingService) recoverBindingRotationLocked(caller Caller, old SessionBindingRecord, members []ConversationMembershipRecord, now time.Time, cause error) error {
+	history, err := s.listBindingsForConversation(old.Conversation)
+	if err == nil {
+		for _, record := range history {
+			if record.Status == BindingActive {
+				return cause
+			}
+		}
+		err = s.store.Reopen(old.ID)
+		if err == nil {
+			return cause
+		}
+	}
+	cause = errors.Join(cause, fmt.Errorf("restore binding %s for conversation %s: %w", old.ID, conversationTitle(old.Conversation), err))
+	for _, member := range members {
+		if member.SessionID != bindingMembershipKey(old) {
+			continue
+		}
+		if err := s.removeOrphanedMembershipLocked(caller, member, now); err != nil {
+			cause = errors.Join(cause, err)
+		} else {
+			cause = errors.Join(cause, fmt.Errorf("removed orphaned binding owner from membership %s for conversation %s", member.ID, conversationTitle(old.Conversation)))
+		}
+	}
+	return cause
+}
+
+func (s *bindingService) bindingOwnedMembershipsLocked(ref ConversationRef) ([]ConversationMembershipRecord, error) {
+	if s.transcript == nil {
+		return nil, nil
+	}
+	items, err := s.store.List(beads.ListQuery{Label: membershipConversationLabel(ref)})
+	if err != nil {
+		return nil, fmt.Errorf("list binding-owned memberships for conversation %s: %w", conversationTitle(ref), err)
+	}
+	var members []ConversationMembershipRecord
+	for _, item := range items {
+		if item.Status == "closed" || !hasLabel(item, "gc:extmsg-membership") {
+			continue
+		}
+		member, err := decodeMembershipBead(item)
+		if err != nil {
+			return nil, err
+		}
+		if sameConversationRef(member.Conversation, ref) && slices.Contains(member.Owners, MembershipOwnerBinding) {
+			members = append(members, member)
+		}
+	}
+	return members, nil
+}
+
+func (s *bindingService) removeOrphanedMembershipLocked(caller Caller, member ConversationMembershipRecord, now time.Time) error {
+	if err := s.transcript.removeMembershipLocked(RemoveMembershipInput{
+		Caller: caller, Conversation: member.Conversation, SessionID: member.SessionID,
+		Owner: MembershipOwnerBinding, Now: now,
+	}); err != nil {
+		return fmt.Errorf("remove orphaned binding owner from membership %s for conversation %s: %w; to stop delivery to this membership run: gc bd close %s", member.ID, conversationTitle(member.Conversation), err, member.ID)
+	}
+	return nil
 }
 
 // handoffActiveBindingLocked swaps the conversation's active binding from

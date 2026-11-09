@@ -272,8 +272,15 @@ func TestHandleInboundNormalizedDefaultRoutePreservesConcurrentSameAgentBind(t *
 	fabric := NewServices(beads.NewMemStore())
 	ref := testConversationRef()
 	var explicit SessionBindingRecord
+	var yields []SessionBindingRecord
 	deps := InboundDeps{
 		Services: fabric,
+		LogDefaultRouteYield: func(gotRef ConversationRef, binding SessionBindingRecord) {
+			if !sameConversationRef(gotRef, ref) {
+				t.Errorf("yield conversation = %+v, want %+v", gotRef, ref)
+			}
+			yields = append(yields, binding)
+		},
 		DefaultAgentForConversation: func(ConversationRef) string {
 			var err error
 			explicit, err = fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
@@ -291,6 +298,9 @@ func TestHandleInboundNormalizedDefaultRoutePreservesConcurrentSameAgentBind(t *
 	}
 	if result.Binding == nil || !reflect.DeepEqual(*result.Binding, explicit) {
 		t.Fatalf("default route replaced concurrent explicit bind: got=%+v want=%+v", result.Binding, explicit)
+	}
+	if len(yields) != 1 || !reflect.DeepEqual(yields[0], explicit) {
+		t.Fatalf("yield log = %+v, want exactly the active target and caller: %+v", yields, explicit)
 	}
 	active, err := fabric.Bindings.ResolveByConversation(ctx, ref)
 	if err != nil || active == nil || !reflect.DeepEqual(*active, explicit) {

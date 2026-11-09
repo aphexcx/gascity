@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,6 +257,196 @@ func TestBindingOwnershipRotationFailurePreservesMembership(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A failed create must not strand a recipient when a non-atomic rotation has
+// already closed the binding that owned its transcript membership.
+func TestBindingOwnershipRotationCreateFailureCompensates(t *testing.T) {
+	for _, recovery := range []string{"restore", "remove", "cleanup-fails"} {
+		t.Run(recovery, func(t *testing.T) {
+			freezeTestClock(t)
+			ctx := context.Background()
+			store := &rotationFailureStore{bdLikeStore: &bdLikeStore{MemStore: beads.NewMemStore()}}
+			fabric := NewServices(store)
+			ref := testConversationRef()
+			input := BindInput{Conversation: ref, SessionID: "session-1", Metadata: map[string]string{"kept": "value"}, Now: testNow()}
+			first, err := fabric.Bindings.Bind(ctx, testAdapterCaller(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := membershipRecordBySession(t, fabric.Transcript, ref, input.SessionID)
+			store.createErr = errors.New("replacement create failed")
+			if recovery != "restore" {
+				store.reopenErr = errors.New("restore failed")
+			}
+			if recovery == "cleanup-fails" {
+				store.closeMembershipErr = errors.New("membership close failed")
+			}
+			_, err = fabric.Bindings.Bind(ctx, testControllerCaller(), input)
+			if !errors.Is(err, store.createErr) {
+				t.Fatalf("rotation error = %v, want create failure", err)
+			}
+			active, resolveErr := fabric.Bindings.ResolveByConversation(ctx, ref)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			members, listErr := fabric.Transcript.ListMemberships(ctx, testControllerCaller(), ref)
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if recovery == "restore" {
+				if active == nil || !reflect.DeepEqual(*active, first) || len(members) != 1 || !reflect.DeepEqual(members[0], before) {
+					t.Fatalf("failed rotation changed original binding or membership: active=%+v members=%+v", active, members)
+				}
+			} else {
+				if active != nil || !errors.Is(err, store.reopenErr) || !strings.Contains(err.Error(), before.ID) {
+					t.Fatalf("failed restore must name orphan %s and leave no binding: active=%+v err=%v", before.ID, active, err)
+				}
+				if recovery == "remove" && len(members) != 0 {
+					t.Fatalf("failed restore left recipients: %+v", members)
+				}
+				if recovery == "cleanup-fails" {
+					if !errors.Is(err, store.closeMembershipErr) || !strings.Contains(err.Error(), ref.ConversationID) || !strings.Contains(err.Error(), "gc bd close "+before.ID) {
+						t.Fatalf("cleanup error must identify conversation and repair command: %v", err)
+					}
+					store.createErr = nil
+					if _, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+						Conversation: ref, SessionID: "session-2", Now: testNow(),
+					}); !errors.Is(err, store.closeMembershipErr) {
+						t.Fatalf("next bind must stop when orphan cleanup still fails: %v", err)
+					}
+					if active, err := fabric.Bindings.ResolveByConversation(ctx, ref); err != nil || active != nil {
+						t.Fatalf("failed orphan cleanup created a binding: %+v, %v", active, err)
+					}
+				}
+			}
+			store.createErr, store.reopenErr, store.closeMembershipErr = nil, nil, nil
+			if _, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+				Conversation: ref, SessionID: "session-2", Replace: true, Now: testNow(),
+			}); err != nil {
+				t.Fatalf("bind next recipient: %v", err)
+			}
+			members, err = fabric.Transcript.ListMemberships(ctx, testControllerCaller(), ref)
+			if err != nil || len(members) != 1 || members[0].SessionID != "session-2" {
+				t.Fatalf("next bind left an unintended recipient: %+v, %v", members, err)
+			}
+		})
+	}
+}
+
+func TestBindingAdoptsOrphanMembershipWithoutLosingCursor(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	store := &bdLikeStore{MemStore: beads.NewMemStore()}
+	fabric := NewServices(store)
+	ref := testConversationRef()
+	input := BindInput{Conversation: ref, SessionID: "session-1", Now: testNow()}
+	first, err := fabric.Bindings.Bind(ctx, testControllerCaller(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fabric.Transcript.Append(ctx, AppendTranscriptInput{
+		Caller: testAdapterCaller(), Conversation: ref, Kind: TranscriptMessageInbound,
+		Provenance: TranscriptProvenanceLive, ProviderMessageID: "unread", Text: "unread", CreatedAt: testNow(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := membershipRecordBySession(t, fabric.Transcript, ref, input.SessionID)
+	if err := store.Close(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fabric.Bindings.Bind(ctx, testControllerCaller(), input); err != nil {
+		t.Fatal(err)
+	}
+	after := membershipRecordBySession(t, fabric.Transcript, ref, input.SessionID)
+	backfill, err := fabric.Transcript.ListBackfill(ctx, ListBackfillInput{
+		Caller: testControllerCaller(), Conversation: ref, SessionID: input.SessionID,
+	})
+	if err != nil || !reflect.DeepEqual(before, after) || len(backfill) != 1 || backfill[0].Sequence != 1 {
+		t.Fatalf("orphan adoption changed cursor or lost unread message: before=%+v after=%+v backfill=%+v err=%v", before, after, backfill, err)
+	}
+}
+
+func TestBindingOrphanCleanupPreservesIndependentOwners(t *testing.T) {
+	for _, owner := range []MembershipOwner{MembershipOwnerManual, MembershipOwnerGroup} {
+		t.Run(string(owner), func(t *testing.T) {
+			freezeTestClock(t)
+			ctx := context.Background()
+			store := &bdLikeStore{MemStore: beads.NewMemStore()}
+			fabric := NewServices(store)
+			ref := testConversationRef()
+			first, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+				Conversation: ref, SessionID: "session-1", Now: testNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := fabric.Transcript.EnsureMembership(ctx, EnsureMembershipInput{
+				Caller: testControllerCaller(), Conversation: ref, SessionID: first.SessionID,
+				Owner: owner, BackfillPolicy: MembershipBackfillSinceJoin, Now: testNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(first.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+				Conversation: ref, SessionID: "session-2", Now: testNow(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			after := membershipRecordBySession(t, fabric.Transcript, ref, first.SessionID)
+			if after.ID != before.ID || after.JoinedSequence != before.JoinedSequence || after.LastReadSequence != before.LastReadSequence || !reflect.DeepEqual(after.Owners, []MembershipOwner{owner}) {
+				t.Fatalf("orphan cleanup damaged independent owner: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
+type rotationFailureStore struct {
+	*bdLikeStore
+	createErr          error
+	reopenErr          error
+	closeMembershipErr error
+}
+
+func (s *rotationFailureStore) Tx(message string, fn func(beads.Tx) error) error {
+	return s.bdLikeStore.Tx(message, func(tx beads.Tx) error {
+		return fn(rotationFailureTx{Tx: tx, store: s})
+	})
+}
+
+func (s *rotationFailureStore) Reopen(id string) error {
+	if s.reopenErr != nil {
+		return s.reopenErr
+	}
+	return s.bdLikeStore.Reopen(id)
+}
+
+func (s *rotationFailureStore) Close(id string) error {
+	if s.closeMembershipErr != nil {
+		b, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		if hasLabel(b, "gc:extmsg-membership") {
+			return s.closeMembershipErr
+		}
+	}
+	return s.bdLikeStore.Close(id)
+}
+
+type rotationFailureTx struct {
+	beads.Tx
+	store *rotationFailureStore
+}
+
+func (tx rotationFailureTx) Create(b beads.Bead) (beads.Bead, error) {
+	if hasLabel(b, "gc:extmsg-binding") && tx.store.createErr != nil {
+		return beads.Bead{}, tx.store.createErr
+	}
+	return tx.Tx.Create(b)
 }
 
 func TestBindingConditionalUnbindRejectsAmbiguousSelectors(t *testing.T) {

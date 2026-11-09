@@ -88,12 +88,18 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		Registry:                    reg,
 		EmitEvent:                   s.extmsgEmitEvent(),
 		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
+		LogDefaultRouteYield: func(ref extmsg.ConversationRef, binding extmsg.SessionBindingRecord) {
+			log.Printf("extmsg: default route yielded for %s/%s/%s (scope=%q) to binding %s (agent=%q session=%q caller=%s/%q)",
+				ref.Provider, ref.AccountID, ref.ConversationID, ref.ScopeID, binding.ID,
+				binding.AgentName, binding.SessionID, binding.Caller.Kind, binding.Caller.ID)
+		},
 	}
 
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
 		if handleErr != nil {
+			log.Printf("extmsg: normalized inbound routing failed: %v", handleErr)
 			// HandleInboundNormalized fails in one of two classes. Permanent
 			// rejections (a malformed/unroutable conversation, or an invariant
 			// violation such as duplicate active bindings) are a 4xx the adapter
@@ -172,6 +178,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		ReceivedAt: time.Now(),
 	})
 	if err != nil {
+		log.Printf("extmsg: inbound routing failed for %s/%s: %v", key.Provider, key.AccountID, err)
 		// Unlike the normalized branch above, this raw path maps every failure to
 		// a single 422 and does not split transient store faults (5xx) from
 		// permanent rejections (4xx). That split is intentionally deferred: the

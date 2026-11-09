@@ -75,6 +75,9 @@ type InboundDeps struct {
 	Registry                    *AdapterRegistry
 	EmitEvent                   func(eventType, subject string, payload events.Payload)
 	DefaultAgentForConversation func(ref ConversationRef) string
+	// LogDefaultRouteYield reports a competing owner's binding to the caller's
+	// service log without coupling the domain to a logging implementation.
+	LogDefaultRouteYield func(ref ConversationRef, binding SessionBindingRecord)
 }
 
 // applyDefaultRoute binds an unrouted, ungrouped conversation to its
@@ -99,6 +102,9 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	})
 	if err != nil {
 		return fmt.Errorf("binding default-route agent %q: %w", agentName, err)
+	}
+	if binding.Caller != caller && deps.LogDefaultRouteYield != nil {
+		deps.LogDefaultRouteYield(ref, binding)
 	}
 	result.Binding = &binding
 	result.TargetSessionID = binding.SessionID
