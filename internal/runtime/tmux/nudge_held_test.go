@@ -15,7 +15,7 @@ import (
 )
 
 func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
-	for _, scenario := range []string{"recover", "suggestion", "busy", "young", "disabled", "attached", "human identical"} {
+	for _, scenario := range []string{"recover", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
@@ -38,6 +38,9 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 				if scenario == "human identical" {
 					draft = "next nudge"
 					options[nudgeDraftPayloadOption] = ""
+				}
+				if scenario == "empty metadata failure" {
+					draft = ""
 				}
 				pastes, submits := 0, 0
 				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
@@ -68,6 +71,9 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					case slices.Contains(args, "show-options"):
 						return options[args[len(args)-1]], nil
 					case slices.Contains(args, "set-option"):
+						if scenario == "empty metadata failure" {
+							return "", errors.New("pane metadata unavailable")
+						}
 						options[args[len(args)-2]] = args[len(args)-1]
 					case slices.Contains(args, "send-keys") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ")):
 						submits++
@@ -83,7 +89,12 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					draft = text
 					return len(text), nil
 				})
-				if scenario != "recover" && scenario != "suggestion" {
+				switch {
+				case scenario == "empty metadata failure":
+					if err == nil || delivery.Landed() || delivery.Held != nil || pastes != 0 || submits != 0 {
+						t.Fatalf("empty composer reported a hold: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
+					}
+				case scenario != "recover" && scenario != "suggestion":
 					if !errors.Is(err, ErrNudgeDraftDeferred) || delivery.Landed() || delivery.Held == nil || pastes != 0 || submits != 0 {
 						t.Fatalf("unsafe recovery: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}
@@ -94,7 +105,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					if delivery.Held.State != want {
 						t.Fatalf("held=%+v, want %s", delivery.Held, want)
 					}
-				} else if err != nil || !delivery.Landed() || delivery.Bytes != len("next nudge") || pastes != 1 || submits != 2 {
+				case err != nil || !delivery.Landed() || delivery.Bytes != len("next nudge") || pastes != 1 || submits != 2:
 					t.Fatalf("delivery=%+v err=%v pastes=%d submits=%d; want recovery then exactly one new delivery", delivery, err, pastes, submits)
 				}
 			})

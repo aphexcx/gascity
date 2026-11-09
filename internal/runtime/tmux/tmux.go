@@ -2833,7 +2833,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	heldDraft, heldState := "", "unowned_draft"
 	var heldSince time.Time
 	defer func() {
-		if errors.Is(deliveryErr, ErrNudgeDraftDeferred) && !delivery.Landed() {
+		if errors.Is(deliveryErr, ErrNudgeDraftDeferred) && !delivery.Landed() && (heldDraft != "" || heldState == "unreadable_composer") {
 			held, err := t.nudgeHeldReceipt(target, heldDraft, heldState, heldSince, time.Now())
 			delivery.Held = held
 			deliveryErr = errors.Join(deliveryErr, err)
