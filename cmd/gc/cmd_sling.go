@@ -1736,14 +1736,16 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
 	now := time.Now()
+	item := newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))
 	if running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
-				Text:     msg,
-				Delivery: worker.NudgeDeliveryWaitIdle,
-				Source:   "sling",
-				Wake:     worker.NudgeWakeLiveOnly,
+				DeliveryID: item.ID,
+				Text:       msg,
+				Delivery:   worker.NudgeDeliveryWaitIdle,
+				Source:     "sling",
+				Wake:       worker.NudgeWakeLiveOnly,
 			})
 			if nudgeErr == nil {
 				// Unconfirmed submit = not live-delivered for this caller
@@ -1754,6 +1756,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nudgeErr)
 				fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", nudgeErr) //nolint:errcheck // best-effort
 				return
+			}
+			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
+				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
 			}
 			if nudgeErr == nil && result.Landed() {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
@@ -1768,7 +1773,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), item); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

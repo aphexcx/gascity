@@ -333,6 +333,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 
 // Nudge sends a best-effort redirect message to the worker.
 func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = runtime.WithNudgeIdentity(ctx, req.DeliveryID)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Landed())

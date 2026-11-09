@@ -3814,6 +3814,98 @@ func TestClaimDueQueuedNudgesClaimsOnceUntilAck(t *testing.T) {
 
 func TestQueuedNudgeRetryKeepsOriginalBatch(t *testing.T) {
 	testQueuedNudgeRetryKeepsOriginalBatch(t, false)
+	for _, backed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retry owner session-backed=%t", backed), func(t *testing.T) {
+			testQueuedNudgeRetryOwner(t, backed)
+		})
+	}
+}
+
+type retryOwnerFake struct {
+	*runtime.Fake
+	firstID  string
+	accepted bool
+	pastes   int
+}
+
+func (p *retryOwnerFake) NudgeDelivered(_ string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	id := runtime.NudgeIdentity(content)
+	result := runtime.NudgeDelivery{Delivered: true, Bytes: len(runtime.FlattenText(content)), Submit: runtime.NudgeSubmitConfirmed}
+	switch {
+	case p.firstID == "":
+		p.pastes++
+		p.firstID = id
+		result.Submit = runtime.NudgeSubmitUnconfirmed
+	case !p.accepted:
+		if id == "" || id != p.firstID {
+			return runtime.NudgeDelivery{}, tmux.ErrNudgeDraftDeferred
+		}
+		p.accepted = true
+	default:
+		p.pastes++
+	}
+	return result, nil
+}
+
+func testQueuedNudgeRetryOwner(t *testing.T, backed bool) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	item := newQueuedNudge("worker", "original reminder", time.Now().Add(-time.Minute))
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatal(err)
+	}
+	sp := &retryOwnerFake{Fake: runtime.NewFake()}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionName: "sess-worker"}
+	var store beads.Store
+	if backed {
+		store = openNudgeBeadStore(dir)
+		mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+			t.Fatal(err)
+		}
+		target.sessionID, target.sessionName = info.ID, info.SessionName
+		target.resolved = &config.ResolvedProvider{Name: "codex"}
+	} else if err := sp.Start(context.Background(), target.sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	deliver := func() (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, store, sp, 0, worker.LiveObservation{Running: true})
+	}
+	if delivered, err := deliver(); err != nil || delivered || sp.firstID != item.ID {
+		t.Fatalf("first attempt lost queued identity: delivered=%t err=%v id=%q want=%q", delivered, err, sp.firstID, item.ID)
+	}
+	handle, err := workerHandleForNudgeTarget(target, store, sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{Text: "different message", DeliveryID: "direct-B", Wake: worker.NudgeWakeLiveOnly})
+	if !errors.Is(err, tmux.ErrNudgeDraftDeferred) || result.Landed() || sp.pastes != 1 {
+		t.Fatalf("later message bypassed the retry owner: result=%+v err=%v pastes=%d", result, err, sp.pastes)
+	}
+	if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
+		for i := range state.Pending {
+			state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered, err := deliver(); err != nil || !delivered || sp.pastes != 1 {
+		t.Fatalf("recovered retry pasted twice: delivered=%t err=%v pastes=%d", delivered, err, sp.pastes)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("recovered delivery was not acknowledged: pending=%d in-flight=%d dead=%d err=%v", len(pending), len(inFlight), len(dead), err)
+	}
+	result, err = handle.Nudge(context.Background(), worker.NudgeRequest{Text: "different message", DeliveryID: "direct-B", Wake: worker.NudgeWakeLiveOnly})
+	if err != nil || !result.Landed() || sp.pastes != 2 {
+		t.Fatalf("later message stayed blocked after owner acknowledgement: result=%+v err=%v pastes=%d", result, err, sp.pastes)
+	}
 }
 
 func TestQueuedNudgeRecoveredLeaseKeepsOriginalBatch(t *testing.T) {
@@ -6685,8 +6777,9 @@ func testPollerRequeuesUnconfirmedSubmit(t *testing.T, flagDown bool, submit run
 // pane is idle): the payload lands whole, the agent is never seen taking it.
 type unconfirmedImmediateVouchingFake struct {
 	*runtime.Fake
-	draft  string
-	submit runtime.NudgeSubmit
+	draft      string
+	submit     runtime.NudgeSubmit
+	deliveryID string
 }
 
 func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
@@ -6694,6 +6787,10 @@ func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, conten
 		return runtime.NudgeDelivery{}, err
 	}
 	p.draft = runtime.FlattenText(content)
+	p.deliveryID = runtime.NudgeIdentity(content)
+	if p.deliveryID == "" {
+		p.deliveryID = "original-live-attempt"
+	}
 	submit := p.submit
 	if submit == "" {
 		submit = runtime.NudgeSubmitUnconfirmed
@@ -6702,6 +6799,9 @@ func (p *unconfirmedImmediateVouchingFake) NudgeNowDelivered(name string, conten
 }
 
 func (p *unconfirmedImmediateVouchingFake) NudgeDelivered(_ string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if runtime.NudgeIdentity(content) != p.deliveryID {
+		return runtime.NudgeDelivery{}, fmt.Errorf("retry lost original live delivery identity")
+	}
 	if text := runtime.FlattenText(content); text != p.draft {
 		return runtime.NudgeDelivery{}, fmt.Errorf("retry payload %q differs from preserved live draft %q", text, p.draft)
 	}

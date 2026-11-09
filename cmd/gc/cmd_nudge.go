@@ -1192,10 +1192,15 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	retryID := ""
+	if mode == nudgeDeliveryWaitIdle {
+		retryID = newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target)).ID
+	}
 	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
-		Text:     message,
-		Delivery: delivery,
-		Source:   "session",
+		DeliveryID: retryID,
+		Text:       message,
+		Delivery:   delivery,
+		Source:     "session",
 	})
 	if err != nil && errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
 		// The submit Enter was delivered and the composer drained; only the
@@ -1217,7 +1222,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if err != nil {
 		if errors.Is(err, runtime.ErrSessionNotFound) && target.sessionTransport() == "acp" {
 			if mode == nudgeDeliveryWaitIdle {
-				return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "", stdout, stderr)
+				return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "", stdout, stderr, retryID)
 			}
 			if mode == nudgeDeliveryImmediate {
 				fmt.Fprintf(stderr, "gc session nudge: live ACP delivery failed for %s because this process does not own the ACP connection; retry with --delivery=wait-idle or --delivery=queue so the queued dispatcher can deliver it\n", target.agentKey()) //nolint:errcheck
@@ -1230,13 +1235,13 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			// route and the nudge queued for a bounded retry; keep that
 			// outcome (the ga-bwm trade-off) rather than surfacing an error
 			// for a nudge that may be sitting drafted in the composer.
-			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "submit_unconfirmed", stdout, stderr)
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "submit_unconfirmed", stdout, stderr, retryID)
 		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Landed() {
-		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
+		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr, retryID)
 	}
 	if !result.Landed() {
 		// The runtime said nothing landed — a session that vanished between
@@ -1507,9 +1512,13 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // not) deliver. undelivered names why live delivery was skipped so the operator
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
-func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
+func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer, deliveryID ...string) int {
 	now := time.Now()
-	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", now, queuedNudgeOptionsFromTarget(target))
+	opts := queuedNudgeOptionsFromTarget(target)
+	if len(deliveryID) > 0 {
+		opts.ID = deliveryID[0]
+	}
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", now, opts)
 	if undelivered == "submit_unconfirmed" {
 		item, _ = failedQueuedNudge(item, runtime.ErrNudgeSubmitUnconfirmed, now)
 	}
@@ -1619,10 +1628,11 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
-				Text:     msg,
-				Delivery: worker.NudgeDeliveryWaitIdle,
-				Source:   "mail",
-				Wake:     worker.NudgeWakeLiveOnly,
+				DeliveryID: item.ID,
+				Text:       msg,
+				Delivery:   worker.NudgeDeliveryWaitIdle,
+				Source:     "mail",
+				Wake:       worker.NudgeWakeLiveOnly,
 			})
 			if nudgeErr == nil {
 				// Unconfirmed submit = not live-delivered for this caller
@@ -1902,10 +1912,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
 	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
-		Text:     msg,
-		Delivery: worker.NudgeDeliveryDefault,
-		Source:   "queue",
-		Wake:     worker.NudgeWakeLiveOnly,
+		DeliveryID: nudgequeue.DeliveryIdentity(items),
+		Text:       msg,
+		Delivery:   worker.NudgeDeliveryDefault,
+		Source:     "queue",
+		Wake:       worker.NudgeWakeLiveOnly,
 	})
 	if result.Submit == runtime.NudgeSubmitOwnershipLost || errors.Is(err, runtime.ErrNudgeDraftOwnershipLost) {
 		// Persist the terminal queue transition before best-effort bead writes.

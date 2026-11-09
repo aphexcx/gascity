@@ -1611,7 +1611,8 @@ type SessionConfig struct {
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
 	// NudgeOwnPasteAge is the minimum age before the next nudge can submit an
-	// earlier owned Claude paste while idle. Defaults to "5s".
+	// earlier one-shot owned Claude paste while idle. Caller-owned queued retries
+	// retain their retry owner. Defaults to "5s".
 	NudgeOwnPasteAge string `toml:"nudge_own_paste_age,omitempty" jsonschema:"default=5s"`
 	// NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its
 	// recorded line count while ownership remains intact. Defaults to true.

@@ -2904,7 +2904,7 @@
         },
         "nudge_own_paste_age": {
           "type": "string",
-          "description": "NudgeOwnPasteAge is the minimum age before the next nudge can submit an\nearlier owned Claude paste while idle. Defaults to \"5s\".",
+          "description": "NudgeOwnPasteAge is the minimum age before the next nudge can submit an\nearlier one-shot owned Claude paste while idle. Caller-owned queued retries\nretain their retry owner. Defaults to \"5s\".",
           "default": "5s"
         },
         "nudge_opaque_paste_recovery": {

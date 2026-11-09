@@ -73,7 +73,15 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 
 // stageNudgeDraftProvenance marks a paste as pending only while detached.
 // An attachment clears the marker even if it occurs during the paste.
-func (t *Tmux) stageNudgeDraftProvenance(pane, message string) error {
+func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...string) error {
+	id := ""
+	if len(deliveryID) > 0 {
+		id = deliveryID[0]
+	}
+	if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftIdentityOption,
+		runtime.NudgePayloadDigest(message)+":"+id); err != nil {
+		return err
+	}
 	// Shape contains no payload text. It is useful only beside the matching,
 	// confirmed digest, which the attachment hooks invalidate atomically.
 	if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftShapeOption,

@@ -15,17 +15,27 @@ import (
 )
 
 func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
-	for _, scenario := range []string{"recover", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
+	for _, scenario := range []string{"recover", "retry owner", "retry owner identical", "retry owner startup", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 				tm := NewTmux()
 				prior := runtime.NudgePayloadDigest("one\ntwo\nthree")
 				options := map[string]string{
-					nudgeDraftPayloadOption: prior,
-					"@gc-nudge-draft-shape": fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli()),
+					nudgeDraftPayloadOption:    prior,
+					"@gc-nudge-draft-shape":    fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli()),
+					"@gc-nudge-draft-identity": prior + ":",
+				}
+				if strings.HasPrefix(scenario, "retry owner") {
+					options[nudgeDraftIdentityOption] = prior + ":queue-A"
 				}
 				draft, busy := "[Pasted text #12 +2 lines]", false
+				startup := newTmuxStartOps(tm, "", 0, runtime.Config{}, false)
+				stagingStartup := scenario == "retry owner startup"
+				if stagingStartup {
+					draft = ""
+					clear(options)
+				}
 				if scenario == "busy" {
 					busy = true
 				}
@@ -75,13 +85,34 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 							return "", errors.New("pane metadata unavailable")
 						}
 						options[args[len(args)-2]] = args[len(args)-1]
+					case slices.Contains(args, "paste-buffer"):
+						pastes++
+						draft = "[Pasted text #12 +2 lines]"
 					case slices.Contains(args, "send-keys") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ")):
+						if stagingStartup {
+							return "", nil
+						}
 						submits++
 						draft, busy = "", true
 					}
 					return "", nil
 				}}
-				delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "next nudge", func(_, text string, _ time.Duration) (int, error) {
+				if stagingStartup {
+					if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
+						t.Fatalf("staging startup: %v", err)
+					}
+					if pastes != 1 {
+						t.Fatalf("startup pasted %d times", pastes)
+					}
+					stagingStartup, pastes = false, 0
+					options[nudgeDraftPayloadOption] = prior
+					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli())
+				}
+				message, identity := "next nudge", ""
+				if scenario == "retry owner identical" {
+					message, identity = "one\ntwo\nthree", "queue-B"
+				}
+				delivery, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, identity, func(_, text string, _ time.Duration) (int, error) {
 					if draft != "" {
 						t.Fatalf("new paste overwrote held draft %q", draft)
 					}
@@ -99,14 +130,36 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 						t.Fatalf("unsafe recovery: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}
 					want := "unowned_draft"
-					if scenario == "busy" || scenario == "young" {
+					if scenario == "busy" || scenario == "young" || strings.HasPrefix(scenario, "retry owner") {
 						want = "own_paste"
 					}
 					if delivery.Held.State != want {
 						t.Fatalf("held=%+v, want %s", delivery.Held, want)
 					}
-				case err != nil || !delivery.Landed() || delivery.Bytes != len("next nudge") || pastes != 1 || submits != 2:
+				case err != nil || !delivery.Landed() || delivery.Bytes != len(message) || pastes != 1 || submits != 2:
 					t.Fatalf("delivery=%+v err=%v pastes=%d submits=%d; want recovery then exactly one new delivery", delivery, err, pastes, submits)
+				}
+				if strings.HasPrefix(scenario, "retry owner") {
+					send := func(_, text string, _ time.Duration) (int, error) {
+						pastes++
+						draft = text
+						return len(text), nil
+					}
+					if scenario == "retry owner startup" {
+						if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); err != nil || pastes != 0 || submits != 1 || draft != "" {
+							t.Fatalf("startup retry duplicated input: err=%v pastes=%d submits=%d draft=%q", err, pastes, submits, draft)
+						}
+					} else {
+						retry, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo\nthree", "queue-A", send)
+						if err != nil || !retry.Landed() || retry.Submit != runtime.NudgeSubmitConfirmed || pastes != 0 || submits != 1 || draft != "" {
+							t.Fatalf("recovered queue retry duplicated input: receipt=%+v err=%v pastes=%d submits=%d draft=%q", retry, err, pastes, submits, draft)
+						}
+					}
+					busy = false
+					fresh, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, identity, send)
+					if err != nil || !fresh.Landed() || pastes != 1 || submits != 2 {
+						t.Fatalf("later message was suppressed after the retry owner resolved: receipt=%+v err=%v pastes=%d submits=%d", fresh, err, pastes, submits)
+					}
 				}
 			})
 		})

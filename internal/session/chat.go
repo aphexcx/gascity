@@ -856,7 +856,7 @@ func formatWaitIdleReminder(source, message string) string {
 // about whether it reached the terminal. See [Manager.nudgeContent] for why
 // that is a separate answer from the error.
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) (runtime.NudgeDelivery, error) {
-	content := runtime.TextContent(message)
+	content := runtime.NudgeContent(ctx, message)
 	delivery, err := m.nudgeContent(sessName, content, immediate)
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {

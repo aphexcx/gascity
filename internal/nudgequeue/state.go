@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +53,24 @@ type Item struct {
 	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
 	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
 	DeadAt            time.Time  `json:"dead_at,omitempty"`
+}
+
+// DeliveryIdentity identifies a stable batch independently of its text and
+// ordering. A single-item batch retains its original queue identity.
+func DeliveryIdentity(items []Item) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) == 1 {
+		return items[0].ID
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	sort.Strings(ids)
+	digest := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
+	return fmt.Sprintf("batch-%x", digest)
 }
 
 // Tombstone preserves terminalization intent after a dead letter's payload expires.

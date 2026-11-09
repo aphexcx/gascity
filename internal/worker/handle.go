@@ -179,10 +179,12 @@ const (
 
 // NudgeRequest delivers a best-effort wake or redirect message.
 type NudgeRequest struct {
-	Text     string          `json:"text"`
-	Delivery NudgeDelivery   `json:"delivery,omitempty"`
-	Source   string          `json:"source,omitempty"`
-	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// DeliveryID reserves staged-input retries for this caller. It is never model input.
+	DeliveryID string          `json:"-"`
+	Text       string          `json:"text"`
+	Delivery   NudgeDelivery   `json:"delivery,omitempty"`
+	Source     string          `json:"source,omitempty"`
+	Wake       NudgeWakePolicy `json:"wake,omitempty"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.

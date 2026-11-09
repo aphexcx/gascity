@@ -126,7 +126,7 @@ type Config struct {
 	// sent anyway (immediate fallback). Set to 0 to disable wait-idle and
 	// always send immediately.
 	NudgeIdleTimeout time.Duration
-	// NudgeOwnPasteAge is the minimum age for recovery of an earlier owned paste.
+	// NudgeOwnPasteAge is the minimum age for recovery of an earlier one-shot owned paste.
 	NudgeOwnPasteAge time.Duration
 	// DisableOpaquePasteRecovery disables line-count matching of Claude paste
 	// placeholders. The zero value keeps recovery enabled.
@@ -2804,8 +2804,8 @@ func (t *Tmux) nudgeSessionDelivery(session, message string) (runtime.NudgeDeliv
 // nudgeStartupSession sends the initial startup prompt. Copilot startup
 // prompts use provider-safe paste chunks so its TUI keeps the text inline.
 // Like NudgeSession it owes its caller the retry signal, not evidence.
-func (t *Tmux) nudgeStartupSession(session, message string) error {
-	delivery, err := t.nudgeSessionDeliveryWith(session, message, func(target, text string, timeout time.Duration) (int, error) {
+func (t *Tmux) nudgeStartupSession(session, message, deliveryID string) error {
+	delivery, err := t.nudgeSessionDeliveryWithIdentity(session, message, deliveryID, func(target, text string, timeout time.Duration) (int, error) {
 		return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
 	})
 	if err != nil {
@@ -2817,6 +2817,10 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 // nudgeSessionDeliveryWith is nudgeSessionDelivery with the paste function
 // injected (plain nudges paste whole; startup prompts may chunk for copilot).
 func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
+	return t.nudgeSessionDeliveryWithIdentity(session, message, "", sendText)
+}
+
+func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2914,7 +2918,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
-			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, prefix, message)
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, prefix, message, deliveryID)
 			if !since.IsZero() {
 				heldState, heldSince = "own_paste", since
 			}
@@ -2981,6 +2985,12 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			}
 			resumeOwnedDraft = true
 			resumeDraft = true
+			if id, _, err := t.nudgeDraftIdentity(target, runtime.NudgePayloadDigest(message)); err != nil {
+				return runtime.NudgeDelivery{}, err
+			} else if id != "" && id != deliveryID {
+				heldState = "own_paste"
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: draft belongs to another retry owner", ErrNudgeDraftDeferred)
+			}
 		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
@@ -3025,7 +3035,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		if verifySubmit {
 			pane, err := t.nudgeDraftOwnershipHook(session, target, true)
 			if err == nil {
-				err = t.stageNudgeDraftProvenance(pane, message)
+				err = t.stageNudgeDraftProvenance(pane, message, deliveryID)
 			}
 			if err != nil {
 				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)

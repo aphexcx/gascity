@@ -13,6 +13,16 @@ import (
 )
 
 func TestClaimDueBatchKeepsRetryPayloadStable(t *testing.T) {
+	t.Run("delivery identity", func(t *testing.T) {
+		a := []Item{{ID: "a", Message: "same"}, {ID: "b", Message: "same"}}
+		b := []Item{a[1], a[0]}
+		if DeliveryIdentity(a) != DeliveryIdentity(b) || DeliveryIdentity(a) == DeliveryIdentity(a[:1]) {
+			t.Fatal("batch identity must be stable across order and distinct from a single item")
+		}
+		if DeliveryIdentity(a[:1]) != "a" || DeliveryIdentity(nil) != "" {
+			t.Fatal("single-item delivery must retain its original identity")
+		}
+	})
 	now := time.Unix(100, 0)
 	old := now.Add(-time.Second)
 	future := now.Add(time.Minute)

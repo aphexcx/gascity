@@ -48,10 +48,10 @@ func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 	return time.UnixMilli(at), shown == lines
 }
 
-// recoverEarlierNudgePaste submits only an earlier owned placeholder, never the
-// incoming payload. Activity with the placeholder still visible is a hold, not
-// an acknowledgement, and recoverStagedDraft checks it before every Enter.
-func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message string) (bool, time.Time, error) {
+// recoverEarlierNudgePaste submits an earlier one-shot owned placeholder, never
+// another caller's queued retry. Activity with the placeholder still visible is
+// a hold, not an acknowledgement, and recoverStagedDraft checks before every Enter.
+func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message, requestedID string) (bool, time.Time, error) {
 	if !claudeCollapsedPaste.MatchString(draft) {
 		return false, time.Time{}, nil
 	}
@@ -61,7 +61,13 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message 
 	}
 	stored = strings.TrimSpace(stored)
 	if stored == runtime.NudgePayloadDigest(message) {
-		return false, time.Time{}, nil
+		id, _, err := t.nudgeDraftIdentity(target, stored)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if id == "" || requestedID == id {
+			return false, time.Time{}, nil
+		}
 	}
 	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
@@ -80,6 +86,13 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message 
 	}
 	if strings.TrimSpace(attached) != "0" {
 		return false, time.Time{}, fmt.Errorf("%w: %w: earlier paste is not confirmed detached", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	}
+	id, known, err := t.nudgeDraftIdentity(target, stored)
+	if err != nil {
+		return false, since, fmt.Errorf("%w: %w", ErrNudgeDraftDeferred, err)
+	}
+	if !known || id != "" {
+		return false, since, fmt.Errorf("%w: earlier paste has another or unknown retry owner", ErrNudgeDraftDeferred)
 	}
 	age := t.cfg.NudgeOwnPasteAge
 	if age <= 0 {
