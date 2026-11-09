@@ -260,12 +260,24 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 		return nil, err
 	}
 
-	if input.SessionID == "" {
-		return nil, apierr.InvalidRequest.Msg("session_id query parameter is required")
+	conversation := extmsg.ConversationRef{
+		ScopeID: input.ScopeID, Provider: input.Provider, AccountID: input.AccountID,
+		Kind: extmsg.ConversationKind(input.Kind), ConversationID: input.ConversationID, ParentConversationID: input.ParentConversationID,
 	}
-
-	bindings, err := svc.Bindings.ListBySession(ctx, input.SessionID)
+	hasConversation := conversation != (extmsg.ConversationRef{})
+	if (strings.TrimSpace(input.SessionID) != "") == hasConversation {
+		return nil, apierr.InvalidRequest.Msg("use session_id or conversation query fields, exclusively")
+	}
+	var bindings []extmsg.SessionBindingRecord
+	if hasConversation {
+		bindings, err = svc.Bindings.ListByConversation(ctx, conversation)
+	} else {
+		bindings, err = svc.Bindings.ListBySession(ctx, input.SessionID)
+	}
 	if err != nil {
+		if errors.Is(err, extmsg.ErrInvalidConversation) {
+			return nil, apierr.InvalidRequest.Msg(err.Error())
+		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if bindings == nil {
@@ -363,18 +375,28 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 
 	sessionID := strings.TrimSpace(input.Body.SessionID)
 	agentName := strings.TrimSpace(input.Body.AgentName)
-	if input.Body.Conversation == nil && sessionID == "" && agentName == "" {
+	if input.Body.Conversation == nil && sessionID == "" && agentName == "" && input.Body.BindingID == "" && input.Body.ExpectedAgentName == "" && input.Body.ExpectedCallerID == "" {
 		return nil, apierr.InvalidRequest.Msg("conversation, session_id, or agent_name is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	unbound, err := svc.Bindings.Unbind(ctx, caller, extmsg.UnbindInput{
-		Conversation: input.Body.Conversation,
-		SessionID:    sessionID,
-		AgentName:    agentName,
-		Now:          time.Now(),
+		Conversation:      input.Body.Conversation,
+		SessionID:         sessionID,
+		AgentName:         agentName,
+		BindingID:         input.Body.BindingID,
+		ExpectedAgentName: input.Body.ExpectedAgentName,
+		ExpectedCallerID:  input.Body.ExpectedCallerID,
+		Now:               time.Now(),
 	})
 	if err != nil {
+		var conflict *extmsg.BindingPreconditionError
+		if errors.As(err, &conflict) {
+			return nil, &ExtMsgBindingConflict{ErrorModel: *apierr.ConflictConcurrentModify.Msg(err.Error()), ActiveBinding: conflict.ActiveBinding}
+		}
+		if errors.Is(err, extmsg.ErrBindingNotFound) {
+			return nil, apierr.ExtmsgBindingNotFound.Msg(err.Error())
+		}
 		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 

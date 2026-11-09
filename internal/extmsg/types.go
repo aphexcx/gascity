@@ -125,6 +125,8 @@ type SessionBindingRecord struct {
 	AgentName         string
 	Status            BindingStatus
 	BoundAt           time.Time
+	Caller            Caller    `json:"caller"`
+	CreatedAt         time.Time `json:"created_at"`
 	ExpiresAt         *time.Time
 	BindingGeneration int64
 	Metadata          map[string]string
@@ -435,14 +437,18 @@ type BindInput struct {
 	Now          time.Time
 }
 
-// UnbindInput is the input for removing a session binding. SessionID and
-// AgentName filter which active bindings are removed; with a nil
-// Conversation, at least one of them selects the bindings to close.
+// UnbindInput selects active bindings to remove. Unconditional filters combine
+// Conversation, SessionID, and AgentName. BindingID alone selects one exact
+// active identity. Alternatively, Conversation plus ExpectedAgentName and
+// ExpectedCallerID checks ownership under the conversation lock before removal.
 type UnbindInput struct {
-	Conversation *ConversationRef
-	SessionID    string
-	AgentName    string
-	Now          time.Time
+	Conversation      *ConversationRef
+	SessionID         string
+	AgentName         string
+	BindingID         string
+	ExpectedAgentName string
+	ExpectedCallerID  string
+	Now               time.Time
 }
 
 // EnsureGroupInput is the input for creating or updating a conversation group.
@@ -566,6 +572,7 @@ type BindingService interface {
 	Bind(ctx context.Context, caller Caller, input BindInput) (SessionBindingRecord, error)
 	ResolveByConversation(ctx context.Context, ref ConversationRef) (*SessionBindingRecord, error)
 	ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error)
+	ListByConversation(ctx context.Context, ref ConversationRef) ([]SessionBindingRecord, error)
 	Touch(ctx context.Context, caller Caller, bindingID string, now time.Time) error
 	Unbind(ctx context.Context, caller Caller, input UnbindInput) ([]SessionBindingRecord, error)
 }

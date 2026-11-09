@@ -1653,7 +1653,7 @@
             "$ref": "#/$defs/ExtMsgDefaultRoute"
           },
           "type": "array",
-          "description": "DefaultRoutes map inbound conversations that have no binding and no\ngroup route to a configured agent, keyed by provider and optionally\nnarrowed to one adapter account. The first matching inbound message\nbinds the conversation to the agent (an agent-name binding), so the\nroute is sticky until rebound or unbound."
+          "description": "DefaultRoutes map inbound conversations that have no binding and no\ngroup route to a configured agent, keyed by provider and optionally\nnarrowed to one adapter account. The first matching inbound message\nbinds the conversation to the agent (an agent-name binding), so the\nroute is sticky until rebound or unbound.\nInspect it with gc extmsg bindings --json. Each record exposes caller\nkind/ID and created_at; default routes use caller ID extmsg-default-route.\nTo clear only that route, use gc extmsg unbind with conversation flags,\n--expect-agent and --expect-caller extmsg-default-route, or --binding-id\nfrom the inspected record. A concurrent replacement is preserved."
         }
       },
       "additionalProperties": false,

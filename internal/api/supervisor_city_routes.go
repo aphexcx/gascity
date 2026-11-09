@@ -455,7 +455,13 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/extmsg/outbound", (*Server).humaHandleExtMsgOutbound, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/bindings", (*Server).humaHandleExtMsgBindingList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/bind", (*Server).humaHandleExtMsgBind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
-	cityPost(sm, "/extmsg/unbind", (*Server).humaHandleExtMsgUnbind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
+	cityPost(sm, "/extmsg/unbind", (*Server).humaHandleExtMsgUnbind, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable), func(op *huma.Operation) {
+		op.Responses = map[string]*huma.Response{
+			"409": {Description: "The active binding does not match the expected agent and caller.", Content: map[string]*huma.MediaType{
+				"application/problem+json": {Schema: sm.humaAPI.OpenAPI().Components.Schemas.Schema(reflect.TypeOf(ExtMsgBindingConflict{}), true, "ExtMsgBindingConflict")},
+			}},
+		}
+	})
 	cityGet(sm, "/extmsg/groups", (*Server).humaHandleExtMsgGroupLookup, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
 		OperationID:   "ensure-extmsg-group",

@@ -480,6 +480,13 @@ export type BoundEventPayload = {
     session_id: string;
 };
 
+export type Caller = {
+    account_id: string;
+    id: string;
+    kind: string;
+    provider: string;
+};
+
 export type CityCreateRequest = {
     /**
      * Optional bootstrap profile.
@@ -1083,6 +1090,41 @@ export type ExtMsgBindInputBody = {
     session_id?: string;
 };
 
+export type ExtMsgBindingConflict = {
+    /**
+     * Binding observed under the conversation lock; absent when none is active.
+     */
+    active_binding?: SessionBindingRecord;
+    /**
+     * Stable machine-readable error code (the final segment of the type URN).
+     */
+    code?: string;
+    /**
+     * A human-readable explanation specific to this occurrence of the problem.
+     */
+    detail?: string;
+    /**
+     * Optional list of individual error details
+     */
+    errors?: Array<ErrorDetail> | null;
+    /**
+     * A URI reference that identifies the specific occurrence of the problem.
+     */
+    instance?: string;
+    /**
+     * HTTP status code
+     */
+    status?: number;
+    /**
+     * A short, human-readable summary of the problem type. This value should not change between occurrences of the error.
+     */
+    title?: string;
+    /**
+     * A URI reference to human-readable documentation for the error.
+     */
+    type?: string;
+};
+
 export type ExtMsgGroupEnsureInputBody = {
     /**
      * Default handle for the group.
@@ -1210,9 +1252,21 @@ export type ExtMsgUnbindInputBody = {
      */
     agent_name?: string;
     /**
+     * Remove exactly this active binding; exclusive with other selectors. Stale IDs return 404.
+     */
+    binding_id?: string;
+    /**
      * Conversation to unbind (nil = filter by session_id/agent_name).
      */
     conversation?: ConversationRef;
+    /**
+     * With conversation and expected_caller_id, remove only a matching active binding; otherwise return 409 with active_binding.
+     */
+    expected_agent_name?: string;
+    /**
+     * Caller ID expected on the active binding; requires expected_agent_name and conversation.
+     */
+    expected_caller_id?: string;
     /**
      * Session ID to unbind.
      */
@@ -3183,6 +3237,8 @@ export type SessionBindingRecord = {
     SessionID: string;
     SessionName: string;
     Status: BindingStatus;
+    caller: Caller;
+    created_at: string;
 };
 
 export type SessionCreateBody = {
@@ -12992,6 +13048,30 @@ export type GetV0CityByCityNameExtmsgBindingsData = {
          * Session ID to list bindings for.
          */
         session_id?: string;
+        /**
+         * Conversation scope ID.
+         */
+        scope_id?: string;
+        /**
+         * Conversation provider.
+         */
+        provider?: string;
+        /**
+         * Conversation adapter account ID.
+         */
+        account_id?: string;
+        /**
+         * Conversation kind: dm, room, or thread.
+         */
+        kind?: string;
+        /**
+         * Conversation ID; use conversation fields or session_id, exclusively.
+         */
+        conversation_id?: string;
+        /**
+         * Parent conversation ID for a thread.
+         */
+        parent_conversation_id?: string;
     };
     url: '/v0/city/{cityName}/extmsg/bindings';
 };
@@ -13581,6 +13661,10 @@ export type PostV0CityByCityNameExtmsgUnbindErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * The active binding does not match the expected agent and caller.
+     */
+    409: ExtMsgBindingConflict;
     /**
      * Unprocessable Entity
      */

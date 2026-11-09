@@ -42,11 +42,11 @@ func TestBindingServiceBindEnforcesOwnershipAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bind(idempotent): %v", err)
 	}
-	if second.ID != first.ID {
-		t.Fatalf("idempotent bind changed ID: got %s want %s", second.ID, first.ID)
+	if second.ID == first.ID {
+		t.Fatal("new caller must receive a fresh binding identity")
 	}
-	if second.BindingGeneration != first.BindingGeneration {
-		t.Fatalf("idempotent bind changed generation: got %d want %d", second.BindingGeneration, first.BindingGeneration)
+	if second.BindingGeneration != first.BindingGeneration+1 {
+		t.Fatalf("ownership transfer generation: got %d want %d", second.BindingGeneration, first.BindingGeneration+1)
 	}
 
 	_, err = svc.Bind(context.Background(), Caller{

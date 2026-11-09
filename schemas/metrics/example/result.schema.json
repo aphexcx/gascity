@@ -220,7 +220,8 @@
               "nudge-drop",
               "beads-city-migrate-proxied",
               "maintenance-owner-backfill",
-              "nudge-replay"
+              "nudge-replay",
+              "extmsg-bindings"
             ]
           },
           "event_id": {

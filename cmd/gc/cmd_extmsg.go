@@ -37,6 +37,7 @@ These commands require the city API server; they have no local fallback.`,
 	cmd.AddCommand(newExtMsgBindCmd(stdout, stderr))
 	cmd.AddCommand(newExtMsgHandoffCmd(stdout, stderr))
 	cmd.AddCommand(newExtMsgUnbindCmd(stdout, stderr))
+	cmd.AddCommand(newExtMsgBindingsCmd(stdout, stderr))
 	return cmd
 }
 
@@ -238,32 +239,50 @@ func cmdExtMsgBind(conv extMsgConversationFlags, agentName, sessionID string, re
 
 func newExtMsgUnbindCmd(stdout, stderr io.Writer) *cobra.Command {
 	var conv extMsgConversationFlags
-	var agentName, sessionID string
+	var input extmsg.UnbindInput
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "unbind",
 		Short: "Remove active conversation bindings",
 		Long: `Remove active external-conversation bindings. Filter by conversation
 (--provider/--conversation-id), by --agent, by --session, or a
-combination. At least one filter is required.`,
+combination. At least one filter is required.
+
+Use --binding-id alone to remove exactly the binding you inspected (404 if
+it is no longer active). Or combine conversation flags with --expect-agent
+and --expect-caller to remove only a matching active binding (409 if changed).
+For a default route, the expected caller is extmsg-default-route.`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdExtMsgUnbind(conv, agentName, sessionID, jsonOutput, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			for _, flag := range []string{"binding-id", "expect-agent", "expect-caller"} {
+				value, err := cmd.Flags().GetString(flag)
+				if err != nil {
+					return err
+				}
+				if cmd.Flags().Changed(flag) && strings.TrimSpace(value) == "" {
+					return fmt.Errorf("--%s must not be empty", flag)
+				}
+			}
+			if cmdExtMsgUnbind(conv, input, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	addExtMsgConversationFlags(cmd, &conv)
-	cmd.Flags().StringVar(&agentName, "agent", "", "Unbind conversations bound to this configured agent")
-	cmd.Flags().StringVar(&sessionID, "session", "", "Unbind conversations bound to this session ID")
+	cmd.Flags().StringVar(&input.AgentName, "agent", "", "Unbind conversations bound to this configured agent")
+	cmd.Flags().StringVar(&input.SessionID, "session", "", "Unbind conversations bound to this session ID")
+	cmd.Flags().StringVar(&input.BindingID, "binding-id", "", "Remove exactly this active binding (exclusive with other filters)")
+	cmd.Flags().StringVar(&input.ExpectedAgentName, "expect-agent", "", "Require this agent on the conversation's active binding")
+	cmd.Flags().StringVar(&input.ExpectedCallerID, "expect-caller", "", "Require this caller ID on the conversation's active binding")
+	cmd.MarkFlagsRequiredTogether("expect-agent", "expect-caller")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output the removed binding records as JSON")
 	return cmd
 }
 
-func cmdExtMsgUnbind(conv extMsgConversationFlags, agentName, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	agentName = strings.TrimSpace(agentName)
-	sessionID = strings.TrimSpace(sessionID)
+func cmdExtMsgUnbind(conv extMsgConversationFlags, input extmsg.UnbindInput, jsonOutput bool, stdout, stderr io.Writer) int {
+	input.AgentName = strings.TrimSpace(input.AgentName)
+	input.SessionID = strings.TrimSpace(input.SessionID)
 	c, cityPath, ok := extMsgClient("unbind", stderr)
 	if !ok {
 		return 1
@@ -273,11 +292,12 @@ func cmdExtMsgUnbind(conv extMsgConversationFlags, agentName, sessionID string, 
 		fmt.Fprintf(stderr, "gc extmsg unbind: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if ref == nil && agentName == "" && sessionID == "" {
+	if ref == nil && input.AgentName == "" && input.SessionID == "" && input.BindingID == "" && input.ExpectedAgentName == "" && input.ExpectedCallerID == "" {
 		fmt.Fprintln(stderr, "gc extmsg unbind: a conversation (--provider/--conversation-id), --agent, or --session is required") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	unbound, err := c.UnbindExtMsgConversation(ref, sessionID, agentName)
+	input.Conversation = ref
+	unbound, err := c.UnbindExtMsgBindings(input)
 	if err != nil {
 		return extMsgReportBindError("unbind", c, err, stderr)
 	}
@@ -301,4 +321,46 @@ func cmdExtMsgUnbind(conv extMsgConversationFlags, agentName, sessionID string, 
 			record.Conversation.Provider, record.Conversation.ConversationID, target, record.ID)
 	}
 	return 0
+}
+
+func newExtMsgBindingsCmd(stdout, stderr io.Writer) *cobra.Command {
+	var conv extMsgConversationFlags
+	var sessionID string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use: "bindings", Short: "List active external-conversation bindings and their caller",
+		Long: `List active bindings by conversation (--provider/--conversation-id) or
+--session. Conversation results include agent-name bindings. JSON records
+include caller.kind, caller.id, and created_at for conditional unbinds.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			c, cityPath, ok := extMsgClient("bindings", stderr)
+			if !ok {
+				return errExit
+			}
+			ref, err := conv.conversationRefIfSet(cityPath)
+			if err == nil {
+				var records []extmsg.SessionBindingRecord
+				records, err = c.ListExtMsgBindings(ref, sessionID)
+				if err == nil {
+					if jsonOutput {
+						return json.NewEncoder(stdout).Encode(records)
+					}
+					for _, record := range records {
+						if printExtMsgBinding(stdout, false, record, "bound") != 0 {
+							return errExit
+						}
+						fmt.Fprintf(stdout, "  caller %s/%s, created %s\n", record.Caller.Kind, record.Caller.ID, record.CreatedAt.Format("2006-01-02T15:04:05Z07:00")) //nolint:errcheck // best-effort stdout
+					}
+					return nil
+				}
+			}
+			fmt.Fprintf(stderr, "gc extmsg bindings: %v\n", err) //nolint:errcheck // best-effort stderr
+			return errExit
+		},
+	}
+	addExtMsgConversationFlags(cmd, &conv)
+	cmd.Flags().StringVar(&sessionID, "session", "", "List bindings for this session ID instead of a conversation")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output binding records including caller provenance as JSON")
+	return cmd
 }

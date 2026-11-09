@@ -137,6 +137,7 @@ cmd_gc_integration_tests=(
   TestCmdStopSubprocessChildHelper
   TestCmdStopSubprocessPersistedIdentity
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestExtMsgConditionalFlagsRoundTrip
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
   TestManualStopRealTmuxSessionVanishes

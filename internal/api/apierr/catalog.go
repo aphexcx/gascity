@@ -14,20 +14,21 @@ var (
 	// Resource resolution. Codes are per-resource (city-not-found, not a generic
 	// not-found) so a client branches on which resource was missing; rig-not-found
 	// is shared across the domains that resolve a rig.
-	CityNotFound        = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
-	BeadNotFound        = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
-	MailNotFound        = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
-	RigNotFound         = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
-	SessionNotFound     = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
-	WaitNotFound        = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
-	AgentNotFound       = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
-	ProviderNotFound    = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
-	ConvoyNotFound      = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
-	WorkflowNotFound    = Register(ProblemType{Code: "workflow-not-found", Status: http.StatusNotFound, Title: "Workflow Not Found"})
-	RunNotFound         = Register(ProblemType{Code: "run-not-found", Status: http.StatusNotFound, Title: "Run Not Found"})
-	FormulaNotFound     = Register(ProblemType{Code: "formula-not-found", Status: http.StatusNotFound, Title: "Formula Not Found"})
-	OrderNotFound       = Register(ProblemType{Code: "order-not-found", Status: http.StatusNotFound, Title: "Order Not Found"})
-	ExtmsgGroupNotFound = Register(ProblemType{Code: "extmsg-group-not-found", Status: http.StatusNotFound, Title: "External-Message Group Not Found"})
+	CityNotFound          = Register(ProblemType{Code: "city-not-found", Status: http.StatusNotFound, Title: "City Not Found"})
+	BeadNotFound          = Register(ProblemType{Code: "bead-not-found", Status: http.StatusNotFound, Title: "Bead Not Found"})
+	MailNotFound          = Register(ProblemType{Code: "mail-not-found", Status: http.StatusNotFound, Title: "Mail Message Not Found"})
+	RigNotFound           = Register(ProblemType{Code: "rig-not-found", Status: http.StatusNotFound, Title: "Rig Not Found"})
+	SessionNotFound       = Register(ProblemType{Code: "session-not-found", Status: http.StatusNotFound, Title: "Session Not Found"})
+	WaitNotFound          = Register(ProblemType{Code: "wait-not-found", Status: http.StatusNotFound, Title: "Wait Not Found"})
+	AgentNotFound         = Register(ProblemType{Code: "agent-not-found", Status: http.StatusNotFound, Title: "Agent Not Found"})
+	ProviderNotFound      = Register(ProblemType{Code: "provider-not-found", Status: http.StatusNotFound, Title: "Provider Not Found"})
+	ConvoyNotFound        = Register(ProblemType{Code: "convoy-not-found", Status: http.StatusNotFound, Title: "Convoy Not Found"})
+	WorkflowNotFound      = Register(ProblemType{Code: "workflow-not-found", Status: http.StatusNotFound, Title: "Workflow Not Found"})
+	RunNotFound           = Register(ProblemType{Code: "run-not-found", Status: http.StatusNotFound, Title: "Run Not Found"})
+	FormulaNotFound       = Register(ProblemType{Code: "formula-not-found", Status: http.StatusNotFound, Title: "Formula Not Found"})
+	OrderNotFound         = Register(ProblemType{Code: "order-not-found", Status: http.StatusNotFound, Title: "Order Not Found"})
+	ExtmsgGroupNotFound   = Register(ProblemType{Code: "extmsg-group-not-found", Status: http.StatusNotFound, Title: "External-Message Group Not Found"})
+	ExtmsgBindingNotFound = Register(ProblemType{Code: "extmsg-binding-not-found", Status: http.StatusNotFound, Title: "External-Message Binding Not Found"})
 	// ScopeNotFound is a city-or-rig scope reference that does not resolve (the
 	// detail names which kind); it is distinct from the resource the scope was
 	// being resolved for (e.g. a formula).

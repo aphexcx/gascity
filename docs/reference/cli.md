@@ -1709,6 +1709,7 @@ gc extmsg
 | Subcommand | Description |
 |------------|-------------|
 | [gc extmsg bind](#gc-extmsg-bind) | Bind a conversation to a session or configured agent |
+| [gc extmsg bindings](#gc-extmsg-bindings) | List active external-conversation bindings and their caller |
 | [gc extmsg handoff](#gc-extmsg-handoff) | Rebind a conversation to another configured agent |
 | [gc extmsg unbind](#gc-extmsg-unbind) | Remove active conversation bindings |
 
@@ -1735,6 +1736,27 @@ gc extmsg bind [flags]
 | `--provider` | string |  | External messaging provider (required) |
 | `--scope-id` | string |  | Conversation scope (default: the city name) |
 | `--session` | string |  | Session ID to bind (mutually exclusive with --agent) |
+
+## gc extmsg bindings
+
+List active bindings by conversation (--provider/--conversation-id) or
+--session. Conversation results include agent-name bindings. JSON records
+include caller.kind, caller.id, and created_at for conditional unbinds.
+
+```
+gc extmsg bindings [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--account-id` | string | `default` | Adapter account ID |
+| `--conversation-id` | string |  | Provider conversation ID (required) |
+| `--json` | bool |  | Output binding records including caller provenance as JSON |
+| `--kind` | string | `dm` | Conversation kind: dm, room, or thread |
+| `--parent-conversation-id` | string |  | Parent conversation ID for thread conversations |
+| `--provider` | string |  | External messaging provider (required) |
+| `--scope-id` | string |  | Conversation scope (default: the city name) |
+| `--session` | string |  | List bindings for this session ID instead of a conversation |
 
 ## gc extmsg handoff
 
@@ -1764,6 +1786,11 @@ Remove active external-conversation bindings. Filter by conversation
 (--provider/--conversation-id), by --agent, by --session, or a
 combination. At least one filter is required.
 
+Use --binding-id alone to remove exactly the binding you inspected (404 if
+it is no longer active). Or combine conversation flags with --expect-agent
+and --expect-caller to remove only a matching active binding (409 if changed).
+For a default route, the expected caller is extmsg-default-route.
+
 ```
 gc extmsg unbind [flags]
 ```
@@ -1772,7 +1799,10 @@ gc extmsg unbind [flags]
 |------|------|---------|-------------|
 | `--account-id` | string | `default` | Adapter account ID |
 | `--agent` | string |  | Unbind conversations bound to this configured agent |
+| `--binding-id` | string |  | Remove exactly this active binding (exclusive with other filters) |
 | `--conversation-id` | string |  | Provider conversation ID (required) |
+| `--expect-agent` | string |  | Require this agent on the conversation's active binding |
+| `--expect-caller` | string |  | Require this caller ID on the conversation's active binding |
 | `--json` | bool |  | Output the removed binding records as JSON |
 | `--kind` | string | `dm` | Conversation kind: dm, room, or thread |
 | `--parent-conversation-id` | string |  | Parent conversation ID for thread conversations |

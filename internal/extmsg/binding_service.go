@@ -151,6 +151,11 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 			}
 			out, err = s.handoffActiveBindingLocked(ctx, caller, *active, ref, target, input, history, now)
 			return err
+		case active != nil && (active.Caller.Kind != normalizeCaller(caller).Kind || active.Caller.ID != normalizeCaller(caller).ID):
+			// A new owner gets a new identity even when the target is unchanged.
+			// Otherwise a reader holding the old ID could delete the new bind.
+			out, err = s.handoffActiveBindingLocked(ctx, caller, *active, ref, target, input, history, now)
+			return err
 		case active != nil:
 			out, err = s.rebindActiveLocked(caller, ref, *active, target, input, now)
 			return err
@@ -407,6 +412,18 @@ func overlayLiveSession(sessions session.AddressDirectory, record *SessionBindin
 	return overlayLiveSessionID(sessions, record.SessionName, record.SessionID, &record.SessionID)
 }
 
+// ListByConversation lists the active binding regardless of its target kind.
+func (s *bindingService) ListByConversation(ctx context.Context, ref ConversationRef) ([]SessionBindingRecord, error) {
+	active, err := s.ResolveByConversation(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if active == nil {
+		return []SessionBindingRecord{}, nil
+	}
+	return []SessionBindingRecord{*active}, nil
+}
+
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -487,6 +504,13 @@ func (s *bindingService) Touch(ctx context.Context, caller Caller, bindingID str
 func (s *bindingService) Unbind(ctx context.Context, caller Caller, input UnbindInput) ([]SessionBindingRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
+	}
+	conditional := input.BindingID != "" || input.ExpectedAgentName != "" || input.ExpectedCallerID != ""
+	input.BindingID = strings.TrimSpace(input.BindingID)
+	input.ExpectedAgentName = strings.TrimSpace(input.ExpectedAgentName)
+	input.ExpectedCallerID = strings.TrimSpace(input.ExpectedCallerID)
+	if conditional {
+		return s.unbindConditional(ctx, caller, input)
 	}
 	now := zeroNow(input.Now)
 	sessionID := strings.TrimSpace(input.SessionID)
@@ -1079,6 +1103,8 @@ func decodeBindingBead(b beads.Bead) (SessionBindingRecord, error) {
 		AgentName:         strings.TrimSpace(b.Metadata["agent_name"]),
 		Status:            recordStatus(b),
 		BoundAt:           boundAt,
+		Caller:            Caller{Kind: CallerKind(b.Metadata["created_by_kind"]), ID: b.Metadata["created_by_id"]},
+		CreatedAt:         b.CreatedAt,
 		ExpiresAt:         expiresAt,
 		BindingGeneration: parseInt64(b.Metadata, "binding_generation"),
 		Metadata:          decodePrefixedMetadata(b.Metadata),
