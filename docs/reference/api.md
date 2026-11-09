@@ -53,6 +53,41 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Config & packs.** Per-city config and pack metadata under
   `/v0/city/{cityName}/config` and `/v0/city/{cityName}/packs`.
 
+## External-conversation bindings
+
+Inspect a conversation before removing its route with
+`GET /v0/city/{cityName}/extmsg/bindings`. Supply `provider`, `account_id`,
+`kind`, `conversation_id`, `scope_id`, and, for threads,
+`parent_conversation_id` as query parameters. Alternatively, use `session_id`
+alone to retain the session-filtered list. Conversation results include
+agent-name bindings and session bindings; each exact conversation has at most
+one active binding. Records include `caller.kind`, `caller.id`, and `created_at`.
+
+`POST /v0/city/{cityName}/extmsg/unbind` supports these selectors:
+
+| Body fields | Result |
+| --- | --- |
+| `binding_id` alone | Removes exactly that active binding; a stale ID returns 404. |
+| `conversation`, `expected_agent_name`, `expected_caller_id` | Removes only a matching active binding; a mismatch returns 409 with `active_binding` when one exists. |
+| `conversation`, `agent_name`, and/or `session_id` | Removes matching bindings without a precondition. |
+
+Successful responses return removed records in `unbound`, including their
+IDs, targets, caller provenance, and creation time. A bind by a different
+caller creates a fresh binding ID even when the target agent stays the same.
+Repeating a bind with the same target and caller retains its ID.
+
+To clear a default route safely, use caller ID `extmsg-default-route`:
+
+```bash
+gc extmsg bindings --provider slack --conversation-id C123 --kind room --json
+gc extmsg unbind --provider slack --conversation-id C123 --kind room \
+  --expect-agent planner --expect-caller extmsg-default-route --json
+```
+
+An explicit bind that wins before the conditional unbind remains active and
+returns a conflict. Unbinding does not disable a configured default route:
+another unbound inbound message can activate it again.
+
 ## External-message adapter reminders
 
 Adapters register with `POST /v0/city/{cityName}/extmsg/adapters`. To reduce

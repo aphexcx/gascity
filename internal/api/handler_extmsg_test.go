@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -373,11 +375,8 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 }
 
-// faultBindingService injects a fixed error from ResolveByConversation so the
-// inbound handler's error-status mapping can be exercised without a live store.
-// The normalized inbound path resolves the binding first, so this single
-// override is enough to drive the handler's error branch; the embedded nil
-// interface is never touched on that path.
+// faultBindingService injects a fixed error into bind and inbound handling
+// without a live store. The embedded interface is unused on those error paths.
 type faultBindingService struct {
 	extmsg.BindingService
 	err error
@@ -385,6 +384,29 @@ type faultBindingService struct {
 
 func (f faultBindingService) ResolveByConversation(context.Context, extmsg.ConversationRef) (*extmsg.SessionBindingRecord, error) {
 	return nil, f.err
+}
+
+func (f faultBindingService) Bind(context.Context, extmsg.Caller, extmsg.BindInput) (extmsg.SessionBindingRecord, error) {
+	return extmsg.SessionBindingRecord{}, f.err
+}
+
+func TestHandleExtMsgBindLogsRecoveryFailureOnce(t *testing.T) {
+	fs, srv, services, ref := newExtMsgAgentBindingFixture(t)
+	failure := errors.New("binding recovery lookup unavailable")
+	services.Bindings = faultBindingService{err: failure}
+	var logs bytes.Buffer
+	previousLog := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLog) })
+	rec := postExtMsg(t, fs, srv, "/extmsg/bind", map[string]any{
+		"conversation": conversationBody(ref), "session_id": "session-1",
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("bind failure status = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Count(logs.String(), failure.Error()) != 1 {
+		t.Fatalf("bind failure must be logged once: %q", logs.String())
+	}
 }
 
 func inboundNormalizedBody(t *testing.T) string {

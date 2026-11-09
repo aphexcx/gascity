@@ -14,6 +14,51 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestExtmsgNotifyMembersExcludesOrphanAfterBind(t *testing.T) {
+	ctx := context.Background()
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+	ref := extmsg.ConversationRef{
+		ScopeID: "guild-1", Provider: "slack", AccountID: "acct-1",
+		ConversationID: "room-recovery", Kind: extmsg.ConversationRoom,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	oldSession := createTestSession(t, fs.cityBeadStore, fs.sp, "Previous")
+	newSession := createTestSession(t, fs.cityBeadStore, fs.sp, "Current")
+	oldBinding, err := services.Bindings.Bind(ctx, caller, extmsg.BindInput{
+		Conversation: ref, SessionID: oldSession.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a failed close-first swap that left the old membership behind.
+	if err := fs.cityBeadStore.Close(oldBinding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := services.Bindings.Bind(ctx, caller, extmsg.BindInput{
+		Conversation: ref, SessionID: newSession.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcomes, err := srv.extmsgNotifyMembers(ctx, extmsgNotifyBroadcast{
+		Conversation: ref, ActorDisplay: "Operator", ActorKind: "human", Text: "new recipient only",
+	})
+	if err != nil || len(outcomes) != 1 || outcomes[0].SessionID != newSession.ID || outcomes[0].Status != extmsg.InboundDeliveryDelivered {
+		t.Fatalf("fan-out reached an unintended recipient: %+v, %v", outcomes, err)
+	}
+	nudges := 0
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("runtime received %d nudges, want only the new recipient", nudges)
+	}
+}
+
 // notifyDeliveryFixture wires a conversation with two session members, which
 // is the shape that makes the receipt non-trivial: the reminder text differs
 // per member, so the byte accounting has to be per-member and summed.

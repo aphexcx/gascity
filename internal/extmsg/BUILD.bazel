@@ -4,6 +4,7 @@ go_library(
     name = "extmsg",
     srcs = [
         "adapter_registry.go",
+        "binding_conditional.go",
         "binding_reaper.go",
         "binding_service.go",
         "delivery_service.go",
@@ -43,6 +44,7 @@ go_test(
     srcs = [
         "agent_binding_test.go",
         "binding_survival_test.go",
+        "conditional_binding_test.go",
         "default_route_test.go",
         "extmsg_test.go",
         "helpers_test.go",

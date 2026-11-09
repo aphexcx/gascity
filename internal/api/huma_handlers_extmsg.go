@@ -88,12 +88,18 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		Registry:                    reg,
 		EmitEvent:                   s.extmsgEmitEvent(),
 		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
+		LogDefaultRouteYield: func(ref extmsg.ConversationRef, binding extmsg.SessionBindingRecord) {
+			log.Printf("extmsg: default route yielded for %s/%s/%s (scope=%q) to binding %s (agent=%q session=%q caller=%s/%q)",
+				ref.Provider, ref.AccountID, ref.ConversationID, ref.ScopeID, binding.ID,
+				binding.AgentName, binding.SessionID, binding.Caller.Kind, binding.Caller.ID)
+		},
 	}
 
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
 		if handleErr != nil {
+			log.Printf("extmsg: normalized inbound routing failed: %v", handleErr)
 			// HandleInboundNormalized fails in one of two classes. Permanent
 			// rejections (a malformed/unroutable conversation, or an invariant
 			// violation such as duplicate active bindings) are a 4xx the adapter
@@ -172,6 +178,7 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		ReceivedAt: time.Now(),
 	})
 	if err != nil {
+		log.Printf("extmsg: inbound routing failed for %s/%s: %v", key.Provider, key.AccountID, err)
 		// Unlike the normalized branch above, this raw path maps every failure to
 		// a single 422 and does not split transient store faults (5xx) from
 		// permanent rejections (4xx). That split is intentionally deferred: the
@@ -260,12 +267,24 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 		return nil, err
 	}
 
-	if input.SessionID == "" {
-		return nil, apierr.InvalidRequest.Msg("session_id query parameter is required")
+	conversation := extmsg.ConversationRef{
+		ScopeID: input.ScopeID, Provider: input.Provider, AccountID: input.AccountID,
+		Kind: extmsg.ConversationKind(input.Kind), ConversationID: input.ConversationID, ParentConversationID: input.ParentConversationID,
 	}
-
-	bindings, err := svc.Bindings.ListBySession(ctx, input.SessionID)
+	hasConversation := conversation != (extmsg.ConversationRef{})
+	if (strings.TrimSpace(input.SessionID) != "") == hasConversation {
+		return nil, apierr.InvalidRequest.Msg("use session_id or conversation query fields, exclusively")
+	}
+	var bindings []extmsg.SessionBindingRecord
+	if hasConversation {
+		bindings, err = svc.Bindings.ListByConversation(ctx, conversation)
+	} else {
+		bindings, err = svc.Bindings.ListBySession(ctx, input.SessionID)
+	}
 	if err != nil {
+		if errors.Is(err, extmsg.ErrInvalidConversation) {
+			return nil, apierr.InvalidRequest.Msg(err.Error())
+		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if bindings == nil {
@@ -326,6 +345,7 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		case errors.Is(err, extmsg.ErrInvalidInput) || errors.Is(err, extmsg.ErrInvalidConversation):
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		default:
+			log.Printf("extmsg: bind failed: %v", err)
 			return nil, apierr.Internal.Msg(err.Error())
 		}
 	}
@@ -363,18 +383,28 @@ func (s *Server) humaHandleExtMsgUnbind(ctx context.Context, input *ExtMsgUnbind
 
 	sessionID := strings.TrimSpace(input.Body.SessionID)
 	agentName := strings.TrimSpace(input.Body.AgentName)
-	if input.Body.Conversation == nil && sessionID == "" && agentName == "" {
+	if input.Body.Conversation == nil && sessionID == "" && agentName == "" && input.Body.BindingID == "" && input.Body.ExpectedAgentName == "" && input.Body.ExpectedCallerID == "" {
 		return nil, apierr.InvalidRequest.Msg("conversation, session_id, or agent_name is required")
 	}
 
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
 	unbound, err := svc.Bindings.Unbind(ctx, caller, extmsg.UnbindInput{
-		Conversation: input.Body.Conversation,
-		SessionID:    sessionID,
-		AgentName:    agentName,
-		Now:          time.Now(),
+		Conversation:      input.Body.Conversation,
+		SessionID:         sessionID,
+		AgentName:         agentName,
+		BindingID:         input.Body.BindingID,
+		ExpectedAgentName: input.Body.ExpectedAgentName,
+		ExpectedCallerID:  input.Body.ExpectedCallerID,
+		Now:               time.Now(),
 	})
 	if err != nil {
+		var conflict *extmsg.BindingPreconditionError
+		if errors.As(err, &conflict) {
+			return nil, &ExtMsgBindingConflict{ErrorModel: *apierr.ConflictConcurrentModify.Msg(err.Error()), ActiveBinding: conflict.ActiveBinding}
+		}
+		if errors.Is(err, extmsg.ErrBindingNotFound) {
+			return nil, apierr.ExtmsgBindingNotFound.Msg(err.Error())
+		}
 		return nil, apierr.ValidationFailed.Msg(err.Error())
 	}
 

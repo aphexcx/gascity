@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 211,
+  "next_id": 212,
   "permanent_ids": [
     {
       "name": "help",
@@ -1559,6 +1559,21 @@
       "classification": "extmsg-bind",
       "owner": "immediate",
       "id": 52
+    },
+    {
+      "path": "gc extmsg bindings",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "extmsg-bindings",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc extmsg handoff",

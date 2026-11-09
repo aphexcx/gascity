@@ -9,6 +9,11 @@ type ExtMsgConfig struct {
 	// narrowed to one adapter account. The first matching inbound message
 	// binds the conversation to the agent (an agent-name binding), so the
 	// route is sticky until rebound or unbound.
+	// Inspect it with gc extmsg bindings --json. Each record exposes caller
+	// kind/ID and created_at; default routes use caller ID extmsg-default-route.
+	// To clear only that route, use gc extmsg unbind with conversation flags,
+	// --expect-agent and --expect-caller extmsg-default-route, or --binding-id
+	// from the inspected record. A concurrent replacement is preserved.
 	DefaultRoutes []ExtMsgDefaultRoute `toml:"default_route,omitempty"`
 }
 

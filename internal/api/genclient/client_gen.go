@@ -1380,6 +1380,14 @@ type BoundEventPayload struct {
 	SessionId      string  `json:"session_id"`
 }
 
+// Caller defines model for Caller.
+type Caller struct {
+	AccountId string `json:"account_id"`
+	Id        string `json:"id"`
+	Kind      string `json:"kind"`
+	Provider  string `json:"provider"`
+}
+
 // CityCreateRequest defines model for CityCreateRequest.
 type CityCreateRequest struct {
 	// BootstrapProfile Optional bootstrap profile.
@@ -1923,6 +1931,32 @@ type ExtMsgBindInputBody struct {
 	SessionId *string `json:"session_id,omitempty"`
 }
 
+// ExtMsgBindingConflict defines model for ExtMsgBindingConflict.
+type ExtMsgBindingConflict struct {
+	ActiveBinding *SessionBindingRecord `json:"active_binding,omitempty"`
+
+	// Code Stable machine-readable error code (the final segment of the type URN).
+	Code *string `json:"code,omitempty"`
+
+	// Detail A human-readable explanation specific to this occurrence of the problem.
+	Detail *string `json:"detail,omitempty"`
+
+	// Errors Optional list of individual error details
+	Errors *[]ErrorDetail `json:"errors,omitempty"`
+
+	// Instance A URI reference that identifies the specific occurrence of the problem.
+	Instance *string `json:"instance,omitempty"`
+
+	// Status HTTP status code
+	Status *int64 `json:"status,omitempty"`
+
+	// Title A short, human-readable summary of the problem type. This value should not change between occurrences of the error.
+	Title *string `json:"title,omitempty"`
+
+	// Type A URI reference to human-readable documentation for the error.
+	Type *string `json:"type,omitempty"`
+}
+
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
 	// DefaultHandle Default handle for the group.
@@ -2013,8 +2047,17 @@ type ExtMsgUnbindBody struct {
 // ExtMsgUnbindInputBody defines model for ExtMsgUnbindInputBody.
 type ExtMsgUnbindInputBody struct {
 	// AgentName Configured agent identity to unbind.
-	AgentName    *string          `json:"agent_name,omitempty"`
+	AgentName *string `json:"agent_name,omitempty"`
+
+	// BindingId Remove exactly this active binding; exclusive with other selectors. Stale IDs return 404.
+	BindingId    *string          `json:"binding_id,omitempty"`
 	Conversation *ConversationRef `json:"conversation,omitempty"`
+
+	// ExpectedAgentName With conversation and expected_caller_id, remove only a matching active binding; otherwise return 409 with active_binding.
+	ExpectedAgentName *string `json:"expected_agent_name,omitempty"`
+
+	// ExpectedCallerId Caller ID expected on the active binding; requires expected_agent_name and conversation.
+	ExpectedCallerId *string `json:"expected_caller_id,omitempty"`
 
 	// SessionId Session ID to unbind.
 	SessionId *string `json:"session_id,omitempty"`
@@ -3711,7 +3754,9 @@ type SessionBindingRecord struct {
 	SessionName       string            `json:"SessionName"`
 
 	// Status Lifecycle state of a session binding.
-	Status BindingStatus `json:"Status"`
+	Status    BindingStatus `json:"Status"`
+	Caller    Caller        `json:"caller"`
+	CreatedAt time.Time     `json:"created_at"`
 }
 
 // SessionCreateBody defines model for SessionCreateBody.
@@ -9625,6 +9670,24 @@ type PostV0CityByCityNameExtmsgBindParams struct {
 type GetV0CityByCityNameExtmsgBindingsParams struct {
 	// SessionId Session ID to list bindings for.
 	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
+
+	// ScopeId Conversation scope ID.
+	ScopeId *string `form:"scope_id,omitempty" json:"scope_id,omitempty"`
+
+	// Provider Conversation provider.
+	Provider *string `form:"provider,omitempty" json:"provider,omitempty"`
+
+	// AccountId Conversation adapter account ID.
+	AccountId *string `form:"account_id,omitempty" json:"account_id,omitempty"`
+
+	// Kind Conversation kind: dm, room, or thread.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// ConversationId Conversation ID; use conversation fields or session_id, exclusively.
+	ConversationId *string `form:"conversation_id,omitempty" json:"conversation_id,omitempty"`
+
+	// ParentConversationId Parent conversation ID for a thread.
+	ParentConversationId *string `form:"parent_conversation_id,omitempty" json:"parent_conversation_id,omitempty"`
 }
 
 // GetV0CityByCityNameExtmsgGroupsParams defines parameters for GetV0CityByCityNameExtmsgGroups.
@@ -26434,6 +26497,102 @@ func NewGetV0CityByCityNameExtmsgBindingsRequest(server string, cityName string,
 
 		}
 
+		if params.ScopeId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_id", *params.ScopeId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Provider != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "provider", *params.Provider, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AccountId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "account_id", *params.AccountId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "kind", *params.Kind, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ConversationId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "conversation_id", *params.ConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ParentConversationId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "parent_conversation_id", *params.ParentConversationId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -35954,6 +36113,7 @@ type PostV0CityByCityNameExtmsgUnbindResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ExtMsgBindingConflict
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -44350,6 +44510,13 @@ func ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp *http.Response) (*PostV0C
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ExtMsgBindingConflict
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

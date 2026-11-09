@@ -75,13 +75,16 @@ type InboundDeps struct {
 	Registry                    *AdapterRegistry
 	EmitEvent                   func(eventType, subject string, payload events.Payload)
 	DefaultAgentForConversation func(ref ConversationRef) string
+	// LogDefaultRouteYield reports a competing owner's binding to the caller's
+	// service log without coupling the domain to a logging implementation.
+	LogDefaultRouteYield func(ref ConversationRef, binding SessionBindingRecord)
 }
 
 // applyDefaultRoute binds an unrouted, ungrouped conversation to its
 // configured default agent and marks the result as routed to it. The caller
 // restricts this to conversations with no group so the sticky binding cannot
-// shadow a room's own routing. A concurrent bind races benignly: on conflict
-// the freshly active binding wins, whatever its kind.
+// shadow a room's own routing. The create-only operation returns any concurrent
+// binding untouched, whatever its target kind.
 func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundResult, ref ConversationRef, now time.Time) error {
 	if deps.DefaultAgentForConversation == nil {
 		return nil
@@ -90,29 +93,21 @@ func applyDefaultRoute(ctx context.Context, deps InboundDeps, result *InboundRes
 	if agentName == "" {
 		return nil
 	}
-	caller := Caller{Kind: CallerController, ID: "extmsg-default-route"}
+	caller := Caller{Kind: CallerController, ID: defaultRouteCallerID}
 	binding, err := deps.Services.Bindings.Bind(ctx, caller, BindInput{
 		Conversation: ref,
 		AgentName:    agentName,
+		IfUnbound:    true,
 		Now:          now,
 	})
 	if err != nil {
-		if !errors.Is(err, ErrBindingConflict) {
-			return fmt.Errorf("binding default-route agent %q: %w", agentName, err)
-		}
-		active, rerr := deps.Services.Bindings.ResolveByConversation(ctx, ref)
-		if rerr != nil {
-			return fmt.Errorf("resolving binding after default-route conflict: %w", rerr)
-		}
-		if active == nil {
-			return nil
-		}
-		result.Binding = active
-		result.TargetSessionID = active.SessionID
-		result.TargetAgentName = active.AgentName
-		return nil
+		return fmt.Errorf("binding default-route agent %q: %w", agentName, err)
+	}
+	if binding.Caller != caller && deps.LogDefaultRouteYield != nil {
+		deps.LogDefaultRouteYield(ref, binding)
 	}
 	result.Binding = &binding
+	result.TargetSessionID = binding.SessionID
 	result.TargetAgentName = binding.AgentName
 	return nil
 }

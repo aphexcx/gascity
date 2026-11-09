@@ -5,6 +5,7 @@ package api
 // for navigability.
 
 import (
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
@@ -67,7 +68,13 @@ type ExtMsgOutboundOutput struct {
 // ExtMsgBindingListInput is the Huma input for GET /v0/city/{cityName}/extmsg/bindings.
 type ExtMsgBindingListInput struct {
 	CityScope
-	SessionID string `query:"session_id" required:"false" doc:"Session ID to list bindings for."`
+	SessionID            string `query:"session_id" required:"false" doc:"Session ID to list bindings for."`
+	ScopeID              string `query:"scope_id" doc:"Conversation scope ID."`
+	Provider             string `query:"provider" doc:"Conversation provider."`
+	AccountID            string `query:"account_id" doc:"Conversation adapter account ID."`
+	Kind                 string `query:"kind" doc:"Conversation kind: dm, room, or thread."`
+	ConversationID       string `query:"conversation_id" doc:"Conversation ID; use conversation fields or session_id, exclusively."`
+	ParentConversationID string `query:"parent_conversation_id" doc:"Parent conversation ID for a thread."`
 }
 
 // ExtMsgBindInput is the Huma input for POST /v0/city/{cityName}/extmsg/bind.
@@ -93,14 +100,17 @@ type ExtMsgBindOutput struct {
 
 // ExtMsgUnbindInput is the Huma input for POST /v0/city/{cityName}/extmsg/unbind.
 //
-// At least one of Conversation, SessionID, and AgentName must be set; the
-// handler enforces the rule (the schema cannot).
+// Select either unconditional filters, BindingID alone, or Conversation plus
+// both expected fields. The binding service enforces selector compatibility.
 type ExtMsgUnbindInput struct {
 	CityScope
 	Body struct {
-		Conversation *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = filter by session_id/agent_name)."`
-		SessionID    string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
-		AgentName    string                  `json:"agent_name,omitempty" doc:"Configured agent identity to unbind."`
+		Conversation      *extmsg.ConversationRef `json:"conversation,omitempty" doc:"Conversation to unbind (nil = filter by session_id/agent_name)."`
+		SessionID         string                  `json:"session_id,omitempty" doc:"Session ID to unbind."`
+		AgentName         string                  `json:"agent_name,omitempty" doc:"Configured agent identity to unbind."`
+		BindingID         string                  `json:"binding_id,omitempty" minLength:"1" doc:"Remove exactly this active binding; exclusive with other selectors. Stale IDs return 404."`
+		ExpectedAgentName string                  `json:"expected_agent_name,omitempty" minLength:"1" doc:"With conversation and expected_caller_id, remove only a matching active binding; otherwise return 409 with active_binding."`
+		ExpectedCallerID  string                  `json:"expected_caller_id,omitempty" minLength:"1" doc:"Caller ID expected on the active binding; requires expected_agent_name and conversation."`
 	}
 }
 
@@ -112,6 +122,12 @@ type ExtMsgUnbindBody struct {
 // ExtMsgUnbindOutput is the Huma output for POST /v0/extmsg/unbind.
 type ExtMsgUnbindOutput struct {
 	Body ExtMsgUnbindBody
+}
+
+// ExtMsgBindingConflict is the typed conditional-unbind problem detail.
+type ExtMsgBindingConflict struct {
+	apierr.ErrorModel
+	ActiveBinding *extmsg.SessionBindingRecord `json:"active_binding,omitempty" doc:"Binding observed under the conversation lock; absent when none is active."`
 }
 
 // ExtMsgGroupLookupInput is the Huma input for GET /v0/city/{cityName}/extmsg/groups.

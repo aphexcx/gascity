@@ -2013,19 +2013,34 @@ func (c *Client) BindExtMsgConversation(spec ExtMsgBindSpec) (extmsg.SessionBind
 // via POST /v0/extmsg/unbind, filtered by conversation and/or session ID
 // and agent name. It returns the bindings that were ended.
 func (c *Client) UnbindExtMsgConversation(conversation *extmsg.ConversationRef, sessionID, agentName string) ([]extmsg.SessionBindingRecord, error) {
+	return c.UnbindExtMsgBindings(extmsg.UnbindInput{Conversation: conversation, SessionID: sessionID, AgentName: agentName})
+}
+
+// UnbindExtMsgBindings removes bindings using unconditional filters, an exact
+// binding ID, or an expected agent and caller checked atomically by the server.
+func (c *Client) UnbindExtMsgBindings(input extmsg.UnbindInput) ([]extmsg.SessionBindingRecord, error) {
 	if err := c.requireCityScope(); err != nil {
 		return nil, err
 	}
 	body := genclient.PostV0CityByCityNameExtmsgUnbindJSONRequestBody{}
-	if conversation != nil {
-		conv := genclientConversationRef(*conversation)
+	if input.Conversation != nil {
+		conv := genclientConversationRef(*input.Conversation)
 		body.Conversation = &conv
 	}
-	if sessionID != "" {
-		body.SessionId = &sessionID
+	if input.SessionID != "" {
+		body.SessionId = &input.SessionID
 	}
-	if agentName != "" {
-		body.AgentName = &agentName
+	if input.AgentName != "" {
+		body.AgentName = &input.AgentName
+	}
+	if input.BindingID != "" {
+		body.BindingId = &input.BindingID
+	}
+	if input.ExpectedAgentName != "" {
+		body.ExpectedAgentName = &input.ExpectedAgentName
+	}
+	if input.ExpectedCallerID != "" {
+		body.ExpectedCallerId = &input.ExpectedCallerID
 	}
 	resp, err := c.cw.PostV0CityByCityNameExtmsgUnbindWithResponse(context.Background(), c.cityName, nil, body)
 	if err != nil {
@@ -2033,6 +2048,14 @@ func (c *Client) UnbindExtMsgConversation(conversation *extmsg.ConversationRef, 
 	}
 	if resp == nil {
 		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if problem := resp.ApplicationproblemJSON409; problem != nil {
+		conflict := &extmsg.BindingPreconditionError{}
+		if problem.ActiveBinding != nil {
+			record := extmsgBindingRecordFromWire(*problem.ActiveBinding)
+			conflict.ActiveBinding = &record
+		}
+		return nil, conflict
 	}
 	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return nil, err
@@ -2042,6 +2065,46 @@ func (c *Client) UnbindExtMsgConversation(conversation *extmsg.ConversationRef, 
 	}
 	out := make([]extmsg.SessionBindingRecord, 0, len(*resp.JSON200.Unbound))
 	for _, record := range *resp.JSON200.Unbound {
+		out = append(out, extmsgBindingRecordFromWire(record))
+	}
+	return out, nil
+}
+
+// ListExtMsgBindings returns active bindings for a conversation or a session.
+func (c *Client) ListExtMsgBindings(conversation *extmsg.ConversationRef, sessionID string) ([]extmsg.SessionBindingRecord, error) {
+	if err := c.requireCityScope(); err != nil {
+		return nil, err
+	}
+	params := &genclient.GetV0CityByCityNameExtmsgBindingsParams{}
+	if sessionID != "" {
+		params.SessionId = &sessionID
+	}
+	if conversation != nil {
+		kind := string(conversation.Kind)
+		params.ScopeId, params.Provider, params.AccountId = &conversation.ScopeID, &conversation.Provider, &conversation.AccountID
+		params.ConversationId, params.Kind = &conversation.ConversationID, &kind
+		if conversation.ParentConversationID != "" {
+			params.ParentConversationId = &conversation.ParentConversationID
+		}
+	}
+	resp, err := c.cw.GetV0CityByCityNameExtmsgBindingsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return nil, err
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("binding list response missing body")
+	}
+	if resp.JSON200.Items == nil {
+		return []extmsg.SessionBindingRecord{}, nil
+	}
+	out := make([]extmsg.SessionBindingRecord, 0, len(*resp.JSON200.Items))
+	for _, record := range *resp.JSON200.Items {
 		out = append(out, extmsgBindingRecordFromWire(record))
 	}
 	return out, nil
@@ -2078,6 +2141,8 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 		AgentName:         record.AgentName,
 		Status:            extmsg.BindingStatus(record.Status),
 		BoundAt:           record.BoundAt,
+		Caller:            extmsg.Caller{Kind: extmsg.CallerKind(record.Caller.Kind), ID: record.Caller.Id, Provider: record.Caller.Provider, AccountID: record.Caller.AccountId},
+		CreatedAt:         record.CreatedAt,
 		ExpiresAt:         record.ExpiresAt,
 		BindingGeneration: record.BindingGeneration,
 		Metadata:          record.Metadata,

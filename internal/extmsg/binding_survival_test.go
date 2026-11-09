@@ -95,6 +95,32 @@ func TestResolveByConversationOverlaysLiveSessionAfterRespawn(t *testing.T) {
 	}
 }
 
+func TestBindingIfUnboundOverlaysLiveSessionAfterRespawn(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	svc := NewServices(store).Bindings
+	ref := testConversationRef()
+	oldID := makeSessionBead(t, store, "gc-helper")
+	first, err := svc.Bind(ctx, testControllerCaller(), BindInput{
+		Conversation: ref, SessionID: oldID, Now: testNow(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newID := respawn(t, store, oldID, "gc-helper")
+	got, err := svc.Bind(ctx, testControllerCaller(), BindInput{
+		Conversation: ref, AgentName: "helper", IfUnbound: true, Now: testNow(),
+	})
+	if err != nil || got.SessionID != newID || got.ID != first.ID || got.Caller != first.Caller {
+		t.Fatalf("yielded binding = %+v, %v; want original identity routed to %s", got, err, newID)
+	}
+	stored, err := store.Get(first.ID)
+	if err != nil || stored.Metadata["session_id"] != oldID {
+		t.Fatalf("yield must only overlay the returned copy: %+v, %v", stored, err)
+	}
+}
+
 func TestResolveByConversationLeavesStaleIDWhenSessionGone(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -120,9 +121,10 @@ func TestClientBindExtMsgConversationPreservesSessionName(t *testing.T) {
 
 func TestClientUnbindExtMsgConversationByAgent(t *testing.T) {
 	var gotBody struct {
-		Conversation *extmsg.ConversationRef `json:"conversation"`
-		SessionID    string                  `json:"session_id"`
-		AgentName    string                  `json:"agent_name"`
+		Conversation     *extmsg.ConversationRef `json:"conversation"`
+		SessionID        string                  `json:"session_id"`
+		AgentName        string                  `json:"agent_name"`
+		ExpectedCallerID string                  `json:"expected_caller_id"`
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/alpha/extmsg/unbind" {
@@ -130,6 +132,16 @@ func TestClientUnbindExtMsgConversationByAgent(t *testing.T) {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode unbind body: %v", err)
+		}
+		if gotBody.ExpectedCallerID != "" {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusConflict)
+			if err := json.NewEncoder(w).Encode(ExtMsgBindingConflict{
+				ActiveBinding: &extmsg.SessionBindingRecord{ID: "new-binding", AgentName: "helper", Caller: extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}},
+			}); err != nil {
+				t.Error(err)
+			}
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -148,5 +160,10 @@ func TestClientUnbindExtMsgConversationByAgent(t *testing.T) {
 	}
 	if len(unbound) != 1 || unbound[0].ID != "bind-9" || unbound[0].Status != extmsg.BindingEnded {
 		t.Fatalf("unbound = %+v, want one ended binding", unbound)
+	}
+	_, err = c.UnbindExtMsgBindings(extmsg.UnbindInput{ExpectedAgentName: "helper", ExpectedCallerID: "extmsg-default-route"})
+	var conflict *extmsg.BindingPreconditionError
+	if !errors.As(err, &conflict) || conflict.ActiveBinding == nil || conflict.ActiveBinding.ID != "new-binding" || conflict.ActiveBinding.Caller.ID != "api" {
+		t.Fatalf("lost conflict binding: %#v", err)
 	}
 }

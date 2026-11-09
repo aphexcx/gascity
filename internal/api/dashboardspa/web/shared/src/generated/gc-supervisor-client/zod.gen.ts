@@ -179,6 +179,13 @@ export const zBoundEventPayload = z.object({
     session_id: z.string()
 });
 
+export const zCaller = z.object({
+    account_id: z.string(),
+    id: z.string(),
+    kind: z.string(),
+    provider: z.string()
+});
+
 export const zCityCreateRequest = z.object({
     bootstrap_profile: z.enum([
         'k8s-cell',
@@ -568,7 +575,10 @@ export const zExtMsgTranscriptAckInputBody = z.object({
 
 export const zExtMsgUnbindInputBody = z.object({
     agent_name: z.string().optional(),
+    binding_id: z.string().min(1).optional(),
     conversation: zConversationRef.optional(),
+    expected_agent_name: z.string().min(1).optional(),
+    expected_caller_id: z.string().min(1).optional(),
     session_id: z.string().optional()
 });
 
@@ -1672,7 +1682,20 @@ export const zSessionBindingRecord = z.object({
     SchemaVersion: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     SessionID: z.string(),
     SessionName: z.string(),
-    Status: zBindingStatus
+    Status: zBindingStatus,
+    caller: zCaller,
+    created_at: z.iso.datetime()
+});
+
+export const zExtMsgBindingConflict = z.object({
+    active_binding: zSessionBindingRecord.optional(),
+    code: z.string().optional(),
+    detail: z.string().optional(),
+    errors: z.array(zErrorDetail).nullish(),
+    instance: z.url().optional(),
+    status: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    title: z.string().optional(),
+    type: z.url().optional().default('about:blank')
 });
 
 export const zExtMsgUnbindBody = z.object({
@@ -8392,7 +8415,13 @@ export const zGetV0CityByCityNameExtmsgBindingsPath = z.object({
 });
 
 export const zGetV0CityByCityNameExtmsgBindingsQuery = z.object({
-    session_id: z.string().optional()
+    session_id: z.string().optional(),
+    scope_id: z.string().optional(),
+    provider: z.string().optional(),
+    account_id: z.string().optional(),
+    kind: z.string().optional(),
+    conversation_id: z.string().optional(),
+    parent_conversation_id: z.string().optional()
 });
 
 /**
