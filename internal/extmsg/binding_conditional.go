@@ -70,6 +70,10 @@ func (s *bindingService) unbindConditional(ctx context.Context, caller Caller, i
 			return err
 		}
 		active.Status = BindingEnded
+		if active.Metadata == nil {
+			active.Metadata = make(map[string]string)
+		}
+		active.Metadata["last_touched_at"] = formatTime(now)
 		removed = []SessionBindingRecord{*active}
 		if s.delivery != nil && active.SessionID != "" {
 			return s.delivery.ClearForConversation(ctx, active.SessionID, ref)

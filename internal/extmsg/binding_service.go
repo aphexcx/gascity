@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 )
 
 const defaultTouchDebounce = 30 * time.Second
+
+const defaultRouteCallerID = "extmsg-default-route"
 
 type bindingLockEntry struct {
 	mu   sync.Mutex
@@ -109,6 +112,7 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 	if err := authorizeMutation(caller, ref); err != nil {
 		return SessionBindingRecord{}, err
 	}
+	caller = normalizeCaller(caller)
 	sessionID := strings.TrimSpace(input.SessionID)
 	agentName := strings.TrimSpace(input.AgentName)
 	switch {
@@ -145,16 +149,20 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 			return err
 		}
 		switch {
+		case active != nil && (input.IfUnbound || (caller.Kind == CallerController && caller.ID == defaultRouteCallerID)):
+			// Opportunistic routes never take ownership of an existing binding.
+			out = *active
+			return nil
 		case active != nil && (active.SessionID != sessionID || active.AgentName != agentName):
 			if !input.Replace {
 				return fmt.Errorf("%w: conversation already bound to %s", ErrBindingConflict, bindingTarget(*active))
 			}
 			out, err = s.handoffActiveBindingLocked(ctx, caller, *active, ref, target, input, history, now)
 			return err
-		case active != nil && (active.Caller.Kind != normalizeCaller(caller).Kind || active.Caller.ID != normalizeCaller(caller).ID):
+		case active != nil && (active.Caller.Kind != caller.Kind || active.Caller.ID != caller.ID):
 			// A new owner gets a new identity even when the target is unchanged.
 			// Otherwise a reader holding the old ID could delete the new bind.
-			out, err = s.handoffActiveBindingLocked(ctx, caller, *active, ref, target, input, history, now)
+			out, err = s.rotateBindingIdentityLocked(caller, *active, ref, target, input, history, now)
 			return err
 		case active != nil:
 			out, err = s.rebindActiveLocked(caller, ref, *active, target, input, now)
@@ -175,9 +183,8 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 // optional displaced-binding close into a single commit so a bind costs one
 // DOLT_COMMIT (gastownhall/gascity#3735). When displaceID is non-empty the
 // displaced binding is closed in the SAME transaction; on a store with atomic
-// transactions (the only caller that passes displaceID, see
-// handoffActiveBindingLocked) a failure creating the replacement or its
-// membership rolls the whole swap back and leaves the displaced binding active,
+// transactions (the callers that pass displaceID) a replacement or membership
+// creation failure rolls the whole swap back and leaves the displaced binding active,
 // so the conversation is never left unbound. history supplies the next
 // generation.
 func (s *bindingService) createBindingLocked(caller Caller, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time, displaceID string) (SessionBindingRecord, error) {
@@ -286,6 +293,29 @@ func (s *bindingService) rebindActiveLocked(caller Caller, ref ConversationRef, 
 		return SessionBindingRecord{}, err
 	}
 	return s.getBinding(active.ID)
+}
+
+// rotateBindingIdentityLocked changes ownership of the same target without
+// clearing delivery contexts or removing transcript membership. Re-ensuring
+// the existing membership preserves its join sequence and read cursor. Atomic
+// stores close the old identity and create the new one in one transaction;
+// other stores close first, as in a handoff, to avoid two active identities
+// after a partial failure. Either way the membership survives a failed swap.
+func (s *bindingService) rotateBindingIdentityLocked(caller Caller, active SessionBindingRecord, ref ConversationRef, target bindTarget, input BindInput, history []SessionBindingRecord, now time.Time) (SessionBindingRecord, error) {
+	if active.SessionName != "" {
+		target.sessionName = active.SessionName
+	}
+	metadata := make(map[string]string, len(active.Metadata)+len(input.Metadata))
+	maps.Copy(metadata, active.Metadata)
+	maps.Copy(metadata, input.Metadata)
+	input.Metadata = metadata
+	if beads.StoreSupportsAtomicTx(s.store) {
+		return s.createBindingLocked(caller, ref, target, input, history, now, active.ID)
+	}
+	if err := s.store.Close(active.ID); err != nil {
+		return SessionBindingRecord{}, fmt.Errorf("close binding %s for identity rotation: %w", active.ID, err)
+	}
+	return s.createBindingLocked(caller, ref, target, input, history, now, "")
 }
 
 // handoffActiveBindingLocked swaps the conversation's active binding from

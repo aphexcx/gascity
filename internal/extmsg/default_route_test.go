@@ -2,6 +2,7 @@ package extmsg
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -262,5 +263,58 @@ func TestHandleInboundNormalizedDefaultRouteConflictAdoptsExistingBinding(t *tes
 	}
 	if result.TargetSessionID != "sess-racer" || result.TargetAgentName != "" {
 		t.Fatalf("result = %q/%q, want racer session binding adopted", result.TargetSessionID, result.TargetAgentName)
+	}
+}
+
+func TestHandleInboundNormalizedDefaultRoutePreservesConcurrentSameAgentBind(t *testing.T) {
+	freezeTestClock(t)
+	ctx := context.Background()
+	fabric := NewServices(beads.NewMemStore())
+	ref := testConversationRef()
+	var explicit SessionBindingRecord
+	deps := InboundDeps{
+		Services: fabric,
+		DefaultAgentForConversation: func(ConversationRef) string {
+			var err error
+			explicit, err = fabric.Bindings.Bind(ctx, testControllerCaller(), BindInput{
+				Conversation: ref, AgentName: "helper", Now: testNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return "helper"
+		},
+	}
+	result, err := HandleInboundNormalized(ctx, deps, defaultRouteTestMessage(ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Binding == nil || !reflect.DeepEqual(*result.Binding, explicit) {
+		t.Fatalf("default route replaced concurrent explicit bind: got=%+v want=%+v", result.Binding, explicit)
+	}
+	active, err := fabric.Bindings.ResolveByConversation(ctx, ref)
+	if err != nil || active == nil || !reflect.DeepEqual(*active, explicit) {
+		t.Fatalf("active binding changed: %+v, %v", active, err)
+	}
+}
+
+func TestBindingDefaultRouteNeverReplacesActiveBinding(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without-replace", true: "with-replace"}[replace], func(t *testing.T) {
+			freezeTestClock(t)
+			ctx := context.Background()
+			svc := NewServices(beads.NewMemStore()).Bindings
+			ref := testConversationRef()
+			explicit, err := svc.Bind(ctx, testControllerCaller(), BindInput{Conversation: ref, SessionID: "session-1", Now: testNow()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := svc.Bind(ctx, Caller{Kind: CallerController, ID: "extmsg-default-route"}, BindInput{
+				Conversation: ref, AgentName: "helper", Replace: replace, Now: testNow(),
+			})
+			if err != nil || !reflect.DeepEqual(got, explicit) {
+				t.Fatalf("default bind = %+v, %v; want unchanged explicit binding %+v", got, err, explicit)
+			}
+		})
 	}
 }

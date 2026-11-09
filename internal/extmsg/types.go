@@ -427,11 +427,14 @@ type GroupOutboundDecision struct {
 // set. Replace rebinds a conversation whose active binding targets someone
 // else (a handoff): the active binding is ended and the new one created
 // under the same conversation lock. Without Replace such a bind conflicts.
+// IfUnbound creates only when no binding is active; otherwise it returns the
+// active binding untouched, even when Replace is set.
 type BindInput struct {
 	Conversation ConversationRef
 	SessionID    string
 	AgentName    string
 	Replace      bool
+	IfUnbound    bool
 	ExpiresAt    *time.Time
 	Metadata     map[string]string
 	Now          time.Time
