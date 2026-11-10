@@ -130,8 +130,9 @@ type Config struct {
 	NudgeOwnPasteAge time.Duration
 	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
 	NudgeReservationAge time.Duration
-	// NudgeReservationInvalidated checks durable cancellation before recovering
-	// an owned retry paste. Errors hold the draft; nil means no external ledger.
+	// NudgeReservationInvalidated checks pending cancellation before retry
+	// staging, recovery, or cleanup. Errors preserve input and cleanup intent;
+	// nil means no external ledger.
 	NudgeReservationInvalidated func(session, id string) (bool, error)
 	// DisableOpaquePasteRecovery disables recovery of owned Claude paste
 	// placeholders. The zero value keeps recovery enabled.
@@ -3078,6 +3079,15 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		// retries enter here; they may repeat the submit, never the paste.
 		payloadBytes = len(message)
 	} else {
+		if verifySubmit && deliveryID != "" && t.cfg.NudgeReservationInvalidated != nil {
+			pending, err := t.cfg.NudgeReservationInvalidated(session, deliveryID)
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pending reservation cleanup: %w", ErrNudgeDraftDeferred, err)
+			}
+			if pending {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: retry reservation cleanup is pending", ErrNudgeDraftDeferred)
+			}
+		}
 		provenancePane := ""
 		if verifySubmit {
 			pane, err := t.nudgeDraftOwnershipHook(session, target, true)
@@ -3086,6 +3096,9 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			}
 			if err != nil {
 				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)
+				if deliveryID != "" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("establishing retry paste ownership: %w", err)
+				}
 			} else {
 				provenancePane = pane
 			}

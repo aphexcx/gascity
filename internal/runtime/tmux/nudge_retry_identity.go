@@ -54,6 +54,22 @@ func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) (er
 	if len(parts) != 2 || parts[1] != id {
 		return nil
 	}
+	generation, err := p.tm.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftGenerationOption)
+	if err != nil {
+		return fmt.Errorf("reading reservation paste generation: %w", err)
+	}
+	if invalidate && p.tm.cfg.NudgeReservationInvalidated != nil {
+		// A duplicate processor may arrive after another completed this
+		// request. Check after the snapshot; its generation also fences a
+		// fresh paste that arrives between this check and the mutation.
+		pending, err := p.tm.cfg.NudgeReservationInvalidated(name, id)
+		if err != nil {
+			return fmt.Errorf("checking reservation cleanup intent: %w", err)
+		}
+		if !pending {
+			return nil
+		}
+	}
 	command := shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftIdentityOption, parts[0] + ":"})
 	if invalidate {
 		// A withdrawn batch must not regain submission permission. Preserve
@@ -61,7 +77,7 @@ func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) (er
 		command = shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""}) + " ; " + command
 	}
 	_, err = p.tm.run("if-shell", "-F", "-t", exactPaneTarget(target),
-		fmt.Sprintf("#{==:#{%s},%s}", nudgeDraftIdentityOption, strings.TrimSpace(value)),
+		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{%s},%s}}", nudgeDraftIdentityOption, strings.TrimSpace(value), nudgeDraftGenerationOption, strings.TrimSpace(generation)),
 		command)
 	return err
 }

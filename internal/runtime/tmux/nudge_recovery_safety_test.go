@@ -240,6 +240,93 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 }
 
 func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
+	for _, pause := range []string{"before snapshot", "before mutation"} {
+		t.Run("duplicate cleanup "+pause, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, p := newRecoveryPane(t)
+				p.loseEnter = true
+				message := "one\ntwo"
+				if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+					t.Fatal(err)
+				}
+				pending := true
+				tm.cfg.NudgeReservationInvalidated = func(string, string) (bool, error) { return pending, nil }
+				provider := &Provider{tm: tm}
+				renewed := false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					boundary := slices.Contains(args, "list-panes")
+					if pause == "before mutation" {
+						boundary = slices.Contains(args, "if-shell") && strings.Contains(strings.Join(args, " "), nudgeDraftIdentityOption)
+					}
+					if !renewed && boundary {
+						renewed = true
+						// A second processor completes the same request while the
+						// first is paused. The operator then clears the old input.
+						if err := provider.ReleaseNudgeReservation(t.Name(), "owner", true); err != nil {
+							t.Fatal(err)
+						}
+						pending = false
+						p.draft, p.busy = "", false
+						// Deliberately reuse both payload and retry identity: only
+						// the paste generation distinguishes the renewed input.
+						d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste("[Pasted text #13 +1 lines]"))
+						if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed {
+							t.Fatalf("renewed paste=%+v err=%v", d, err)
+						}
+					}
+					return p.exec(args)
+				}}
+				if err := provider.ReleaseNudgeReservation(t.Name(), "owner", true); err != nil {
+					t.Fatal(err)
+				}
+				if !renewed || p.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(message) {
+					t.Fatal("stale cleanup invalidated the surviving owner's fresh paste")
+				}
+				p.loseEnter = false
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", func(string, string, time.Duration) (int, error) {
+					t.Fatal("fresh owned draft was pasted again")
+					return 0, nil
+				})
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || len(p.submitted) != 1 {
+					t.Fatalf("survivor retry=%+v err=%v submitted=%v", d, err, p.submitted)
+				}
+			})
+		})
+	}
+	t.Run("fresh paste waits for cancellation cleanup", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, _ := newRecoveryPane(t)
+			tm.cfg.NudgeReservationInvalidated = func(string, string) (bool, error) { return true, nil }
+			pastes := 0
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "fresh reminder", "owner", func(_, text string, _ time.Duration) (int, error) {
+				pastes++
+				return len(text), nil
+			})
+			if pastes != 0 || d.Delivered || !errors.Is(err, ErrNudgeDraftDeferred) || errors.Is(err, runtime.ErrNudgeDraftUnowned) {
+				t.Fatalf("pending cleanup allowed fresh paste or terminalized survivor: pastes=%d delivery=%+v err=%v", pastes, d, err)
+			}
+		})
+	})
+	t.Run("fresh retry paste requires a new generation", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			writeErr := errors.New("paste generation unavailable")
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				if slices.Contains(args, "set-option") && slices.Contains(args, nudgeDraftGenerationOption) {
+					return "", writeErr
+				}
+				return p.exec(args)
+			}}
+			pastes := 0
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "fresh reminder", "owner", func(_, text string, _ time.Duration) (int, error) {
+				pastes++
+				return len(text), nil
+			})
+			if pastes != 0 || d.Delivered || !errors.Is(err, writeErr) {
+				t.Fatalf("unfenced retry pasted: pastes=%d delivery=%+v err=%v", pastes, d, err)
+			}
+		})
+	})
 	t.Run("full cancellation retires receipt without enabling recovery", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			tm, p := newRecoveryPane(t)

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"crypto/rand"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -16,6 +17,10 @@ import (
 // transport restart but does not follow a replacement pane. It contains only
 // a payload digest, never the message text.
 const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
+
+// nudgeDraftGenerationOption distinguishes renewed pastes even when both their
+// payload and retry owner are unchanged. Cleanup compares it atomically.
+const nudgeDraftGenerationOption = "@gc-nudge-draft-generation"
 
 // nudgeDraftOwnershipHook binds provenance to uninterrupted detached input.
 // Invalidation runs before user hooks, which may block. Checking that ordering
@@ -77,6 +82,9 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 	id := ""
 	if len(deliveryID) > 0 {
 		id = deliveryID[0]
+	}
+	if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftGenerationOption, rand.Text()); err != nil {
+		return err
 	}
 	if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftIdentityOption,
 		runtime.NudgePayloadDigest(message)+":"+id); err != nil {
