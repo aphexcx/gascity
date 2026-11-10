@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -109,12 +108,9 @@ func (t *Tmux) confirmNudgeDraftDigest(pane, digest string) error {
 }
 
 func normalizedNudgeDigest(message string) string {
-	return runtime.NudgePayloadDigest(strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, message))
+	// The composer trims outer padding. Interior spaces, tabs and explicit
+	// newlines can change a command's meaning and remain part of its identity.
+	return runtime.NudgePayloadDigest(strings.TrimSpace(message))
 }
 
 // recordNudgeDraftRendering binds recovery to what the completed paste actually

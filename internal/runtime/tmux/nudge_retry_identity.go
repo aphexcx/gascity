@@ -16,7 +16,7 @@ func recoveredNudgeOption(id string) string {
 
 // ReleaseNudgeReservation retires only the named caller's reservation. It never
 // sends keys or clears input, including when the pane has changed owners.
-func (p *Provider) ReleaseNudgeReservation(name, id string) error {
+func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) error {
 	if id == "" {
 		return nil
 	}
@@ -24,8 +24,10 @@ func (p *Provider) ReleaseNudgeReservation(name, id string) error {
 	if pane, err := p.tm.FindAgentPane(name); err == nil && pane != "" {
 		target = pane
 	}
-	if _, err := p.tm.run("set-option", "-p", "-u", "-t", exactPaneTarget(target), recoveredNudgeOption(id)); err != nil {
-		return err
+	if !invalidate {
+		if _, err := p.tm.run("set-option", "-p", "-u", "-t", exactPaneTarget(target), recoveredNudgeOption(id)); err != nil {
+			return err
+		}
 	}
 	value, err := p.tm.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftIdentityOption)
 	if err != nil {
@@ -35,10 +37,29 @@ func (p *Provider) ReleaseNudgeReservation(name, id string) error {
 	if len(parts) != 2 || parts[1] != id {
 		return nil
 	}
+	command := shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftIdentityOption, parts[0] + ":"})
+	if invalidate {
+		// A withdrawn batch must not regain submission permission. Preserve
+		// both its input and any receipt from recovery that already occurred.
+		command = shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""}) + " ; " + command
+	}
 	_, err = p.tm.run("if-shell", "-F", "-t", exactPaneTarget(target),
 		fmt.Sprintf("#{==:#{%s},%s}", nudgeDraftIdentityOption, strings.TrimSpace(value)),
-		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftIdentityOption, parts[0] + ":"}))
+		command)
 	return err
+}
+
+func (t *Tmux) recoveredNudgeAcknowledged(target, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	value, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), recoveredNudgeOption(id))
+	if err != nil {
+		return false, fmt.Errorf("reading recovered nudge receipt: %w", err)
+	}
+	// Queue survivors keep their attempted batch's identity even when its
+	// payload has shrunk. The original submission already included them.
+	return strings.TrimSpace(value) != "", nil
 }
 
 // A nonempty identity reserves submission for the caller that owns retries.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -227,6 +228,11 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	if err != nil {
 		return nil
 	}
+	defer func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			log.Printf("session provider: closing snapshot store: %v", err)
+		}
+	}()
 	// This snapshot reads only session-class beads (the gc:session label) to
 	// drive transport/ACP routing decisions, so route through the session
 	// coordination-class store for relocation-safety. openSessionProviderStore

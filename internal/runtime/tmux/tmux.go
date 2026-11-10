@@ -2837,14 +2837,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
-	if deliveryID != "" {
-		recovered, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), recoveredNudgeOption(deliveryID))
-		if err != nil {
-			return runtime.NudgeDelivery{}, fmt.Errorf("reading recovered nudge receipt: %w", err)
-		}
-		if strings.TrimSpace(recovered) == runtime.NudgePayloadDigest(message) {
-			return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
-		}
+	if acknowledged, err := t.recoveredNudgeAcknowledged(target, deliveryID); err != nil {
+		return runtime.NudgeDelivery{}, err
+	} else if acknowledged {
+		return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
 	}
 	heldDraft, heldState := "", "unowned_draft"
 	var heldSince time.Time
@@ -2957,6 +2953,11 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				return runtime.NudgeDelivery{}, err
 			}
 			if recovered {
+				if acknowledged, err := t.recoveredNudgeAcknowledged(target, deliveryID); err != nil {
+					return runtime.NudgeDelivery{}, err
+				} else if acknowledged {
+					return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
+				}
 				heldState, heldSince = "unowned_draft", time.Time{}
 				content, err = t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 				if err != nil {

@@ -5,16 +5,17 @@ import "context"
 // NudgeReservationProvider retires a delivery's retry reservation without
 // modifying composer input. Providers without reservations need no operation.
 type NudgeReservationProvider interface {
-	ReleaseNudgeReservation(name, id string) error
+	ReleaseNudgeReservation(name, id string, invalidate bool) error
 }
 
 // ReleaseNudgeReservation releases an optional provider reservation by identity.
-func ReleaseNudgeReservation(p Provider, name, id string) error {
+// Invalidation also revokes automatic recovery of its preserved composer text.
+func ReleaseNudgeReservation(p Provider, name, id string, invalidate bool) error {
 	if id == "" {
 		return nil
 	}
 	if rp, ok := p.(NudgeReservationProvider); ok {
-		return rp.ReleaseNudgeReservation(name, id)
+		return rp.ReleaseNudgeReservation(name, id, invalidate)
 	}
 	return nil
 }

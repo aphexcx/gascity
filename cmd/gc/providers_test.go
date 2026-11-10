@@ -1274,9 +1274,10 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })
 
 	calls := 0
+	store := &closeCountingWorkStore{Store: beads.NewMemStore()}
 	openSessionProviderStore = func(string) (beads.Store, error) {
 		calls++
-		return beads.NewMemStore(), nil
+		return store, nil
 	}
 
 	snapshot := loadProviderSessionSnapshot(sessionProviderContext{
@@ -1291,6 +1292,9 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
+	}
+	if store.closes != 1 {
+		t.Fatalf("snapshot store closed %d times, want 1", store.closes)
 	}
 }
 

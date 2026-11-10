@@ -13,6 +13,14 @@ import (
 )
 
 func TestClaimDueBatchKeepsRetryPayloadStable(t *testing.T) {
+	t.Run("partial retry retains attempted identity", func(t *testing.T) {
+		original := DeliveryIdentity([]Item{{ID: "a"}, {ID: "b"}})
+		state := State{Pending: []Item{{ID: "b", ReservationID: original, LastAttemptAt: time.Unix(1, 0)}}}
+		claimed := ClaimDueBatch(&state, time.Unix(100, 0), time.Minute, func(Item) bool { return true })
+		if len(claimed) != 1 || claimed[0].ReservationID != original || DeliveryIdentity(claimed) != original {
+			t.Fatalf("partial batch lost attempted identity: %+v", claimed)
+		}
+	})
 	t.Run("delivery identity", func(t *testing.T) {
 		a := []Item{{ID: "a", Message: "same"}, {ID: "b", Message: "same"}}
 		b := []Item{a[1], a[0]}

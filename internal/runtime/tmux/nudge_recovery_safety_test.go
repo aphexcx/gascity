@@ -91,8 +91,10 @@ func (p *recoveryPane) exec(args []string) (string, error) {
 				p.enter()
 			}
 		case strings.HasPrefix(command, "set-option"):
-			fields := strings.Fields(command)
-			p.options[fields[len(fields)-2]] = strings.Trim(fields[len(fields)-1], "'\"")
+			for _, statement := range strings.Split(command, " ; ") {
+				fields := strings.Fields(statement)
+				p.options[fields[len(fields)-2]] = strings.Trim(fields[len(fields)-1], "'\"")
+			}
 		}
 		return "", nil
 	}
@@ -207,6 +209,64 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 }
 
 func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
+	t.Run("partial batch invalidates automatic recovery", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			original := "[Pasted text #12 +1 lines]"
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "withdrawn\nremaining", "batch-owner", p.paste(original)); err != nil {
+				t.Fatal(err)
+			}
+			provider := &Provider{tm: tm}
+			if err := provider.ReleaseNudgeReservation(t.Name(), "batch-owner", true); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter, p.enters = false, 0
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", "batch-owner", p.paste(""))
+			if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != 0 || p.draft != original || d.Held == nil || d.Held.State != "unowned_draft" {
+				t.Fatalf("partial batch resubmitted: delivery=%+v err=%v enters=%d draft=%q", d, err, p.enters, p.draft)
+			}
+		})
+	})
+	t.Run("survivor acknowledges recovery already in progress", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "first\nremaining", "batch-owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter = false
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", "batch-owner", p.paste(""))
+			if err != nil || !d.Landed() || len(p.submitted) != 1 {
+				t.Fatalf("survivor duplicated after recovery: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+			}
+			provider := &Provider{tm: tm}
+			if err := provider.ReleaseNudgeReservation(t.Name(), "batch-owner", true); err != nil {
+				t.Fatal(err)
+			}
+			d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", "batch-owner", p.paste(""))
+			if err != nil || !d.Landed() || len(p.submitted) != 1 {
+				t.Fatalf("invalidation erased prior acknowledgement: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+			}
+		})
+	})
+	t.Run("inline whitespace edit is not owned", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), `print("a b")`, "", p.paste("")); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter, p.enters, p.draft = false, 0, `print("ab")`
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next nudge", "", p.paste(""))
+			if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != 0 || d.Held == nil || d.Held.State != "unowned_draft" {
+				t.Fatalf("edited inline input submitted: delivery=%+v err=%v enters=%d", d, err, p.enters)
+			}
+		})
+	})
 	synctest.Test(t, func(t *testing.T) {
 		tm, p := newRecoveryPane(t)
 		p.loseEnter = true
@@ -226,20 +286,20 @@ func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
 			t.Fatalf("abandoned reservation stranded delivery: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
 		}
 		p.busy = false
-		d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo\nthree", "lost-process", p.paste(""))
+		d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining subset", "lost-process", p.paste(""))
 		if err != nil || !d.Landed() || len(p.submitted) != 2 {
 			t.Fatalf("late owner duplicated recovered input: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
 		}
 		p.draft = "preserved input"
 		p.options[nudgeDraftIdentityOption] = "other-digest:other-owner"
 		provider := &Provider{tm: tm}
-		if err := provider.ReleaseNudgeReservation(t.Name(), "lost-process"); err != nil {
+		if err := provider.ReleaseNudgeReservation(t.Name(), "lost-process", false); err != nil {
 			t.Fatal(err)
 		}
 		if p.options[recoveredNudgeOption("lost-process")] != "" || p.options[nudgeDraftIdentityOption] != "other-digest:other-owner" {
 			t.Fatalf("release erased a different owner or retained recovered receipt: %v", p.options)
 		}
-		if err := provider.ReleaseNudgeReservation(t.Name(), "other-owner"); err != nil {
+		if err := provider.ReleaseNudgeReservation(t.Name(), "other-owner", false); err != nil {
 			t.Fatal(err)
 		}
 		if p.options[nudgeDraftIdentityOption] != "other-digest:" || p.draft != "preserved input" || len(p.submitted) != 2 {

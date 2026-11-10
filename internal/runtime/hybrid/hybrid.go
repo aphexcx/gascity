@@ -125,8 +125,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 }
 
 // ReleaseNudgeReservation forwards cleanup to the session's routed provider.
-func (p *Provider) ReleaseNudgeReservation(name, id string) error {
-	return runtime.ReleaseNudgeReservation(p.route(name), name, id)
+func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) error {
+	return runtime.ReleaseNudgeReservation(p.route(name), name, id, invalidate)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit

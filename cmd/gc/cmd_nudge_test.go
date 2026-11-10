@@ -3830,7 +3830,7 @@ type retryOwnerFake struct {
 	releaseErr error
 }
 
-func (p *retryOwnerFake) ReleaseNudgeReservation(_ string, id string) error {
+func (p *retryOwnerFake) ReleaseNudgeReservation(_ string, id string, _ bool) error {
 	p.released = append(p.released, id)
 	return p.releaseErr
 }
@@ -3983,7 +3983,7 @@ func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
 			if ending == "release-failure" {
 				sp.releaseErr = errors.New("reservation release unavailable")
 			}
-			nudgeReleaseEndedReservations = func(city string, ended []queuedNudge) error {
+			nudgeReleaseEndedReservations = func(city string, ended []nudgeReservationRelease) error {
 				if len(ended) == 0 {
 					return nil
 				}
@@ -3997,7 +3997,7 @@ func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
 					}
 				}
 				for _, owner := range ended {
-					if err := releaseLiveNudgeReservation(nudgeTarget{sessionName: owner.SessionName}, sp, owner.ReservationID); err != nil {
+					if err := releaseNudgeReservation(nudgeTarget{sessionName: owner.SessionName}, sp, owner.ReservationID, owner.Invalidate); err != nil {
 						return err
 					}
 				}
@@ -4059,7 +4059,7 @@ func TestQueuedNudgeYieldsToComposerRetryOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := nudgeReleaseEndedReservations
-	nudgeReleaseEndedReservations = func(string, []queuedNudge) error { return nil }
+	nudgeReleaseEndedReservations = func(string, []nudgeReservationRelease) error { return nil }
 	t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
 	deliver := func() (bool, error) {
 		return tryDeliverQueuedNudgesByPoller(target, nil, nil, sp, 0, worker.LiveObservation{Running: true})
@@ -4131,17 +4131,33 @@ func testQueuedNudgeRetryKeepsOriginalBatch(t *testing.T, interrupted bool) {
 
 type preservedBatchFake struct {
 	*runtime.Fake
-	draft     string
-	accept    bool
-	submitted []string
+	draft       string
+	accept      bool
+	submitted   []string
+	recoverable bool
+	invalidated bool
+}
+
+func (p *preservedBatchFake) ReleaseNudgeReservation(_ string, _ string, invalidate bool) error { //nolint:unparam // Provider cleanup requires an error result.
+	p.invalidated = p.invalidated || invalidate
+	p.recoverable = !p.invalidated
+	return nil
 }
 
 func (p *preservedBatchFake) NudgeDelivered(_ string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
 	text := runtime.FlattenText(content)
+	if p.draft != "" && p.draft != text && p.recoverable {
+		p.submitted = append(p.submitted, p.draft)
+		p.draft = ""
+	}
 	if p.draft != "" && p.draft != text {
+		if p.invalidated {
+			return runtime.NudgeDelivery{}, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+		}
 		return runtime.NudgeDelivery{}, fmt.Errorf("%w: different draft", tmux.ErrNudgeDraftDeferred)
 	}
 	if !p.accept {
+		p.invalidated = false
 		p.draft = text
 		return runtime.NudgeDelivery{Delivered: true, Submit: runtime.NudgeSubmitUnconfirmed}, nil
 	}
@@ -4150,20 +4166,31 @@ func (p *preservedBatchFake) NudgeDelivered(_ string, content []runtime.ContentB
 	return runtime.NudgeDelivery{Delivered: true, Submit: runtime.NudgeSubmitConfirmed}, nil
 }
 
-func TestQueuedNudgeChangedBatchDefersWithoutSpendingAttempts(t *testing.T) {
-	for _, removal := range []string{"expired", "withdrawn"} {
+func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
+	for _, removal := range []string{"expired", "withdrawn", "dropped"} {
 		t.Run(removal, func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
 			now := time.Now()
 			a := newQueuedNudge("worker", "first reminder", now.Add(-time.Minute))
 			b := newQueuedNudge("worker", "remaining reminder", now.Add(-time.Second))
+			a.SessionName, b.SessionName = "sess-worker", "sess-worker"
 			for _, item := range []queuedNudge{a, b} {
 				if err := enqueueQueuedNudge(dir, item); err != nil {
 					t.Fatal(err)
 				}
 			}
 			fake := &preservedBatchFake{Fake: runtime.NewFake()}
+			previousRelease := nudgeReleaseEndedReservations
+			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) error {
+				for _, item := range ended {
+					if err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, fake, item.ReservationID, item.Invalidate); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { nudgeReleaseEndedReservations = previousRelease })
 			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 				t.Fatal(err)
 			}
@@ -4178,6 +4205,10 @@ func TestQueuedNudgeChangedBatchDefersWithoutSpendingAttempts(t *testing.T) {
 			if removal == "withdrawn" {
 				if err := terminalizeBlockedQueuedNudges(dir, map[string][]queuedNudge{"mail-already-read": {a}}); err != nil {
 					t.Fatal(err)
+				}
+			} else if removal == "dropped" {
+				if rc := doNudgeDrop(dir, []string{a.ID}, false, io.Discard, io.Discard); rc != 0 {
+					t.Fatalf("drop rc=%d", rc)
 				}
 			} else if err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
 				for i := range state.Pending {
@@ -4200,18 +4231,16 @@ func TestQueuedNudgeChangedBatchDefersWithoutSpendingAttempts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for i := 0; i <= defaultQueuedNudgeMaxAttempts; i++ {
-				due()
-				if delivered, err := deliver(); delivered || !errors.Is(err, tmux.ErrNudgeDraftDeferred) {
-					t.Fatalf("deferred delivery=%v, %v; must surface the preserved draft blocker", delivered, err)
-				}
-				if fake.draft != original {
-					t.Fatal("changed batch modified the preserved draft")
-				}
+			due()
+			if delivered, err := deliver(); delivered || !errors.Is(err, runtime.ErrNudgeDraftUnowned) {
+				t.Fatalf("deferred delivery=%v, %v; must preserve invalidated input", delivered, err)
+			}
+			if fake.draft != original {
+				t.Fatal("changed batch modified the preserved draft")
 			}
 			pending, inFlight, _, err := listQueuedNudges(dir, "worker", time.Now())
-			if err != nil || len(pending) != 1 || pending[0].ID != b.ID || pending[0].Attempts != 1 || len(inFlight) != 0 {
-				t.Fatalf("deferred batch consumed attempts: pending=%v inFlight=%v err=%v", pending, inFlight, err)
+			if err != nil || len(pending) != 1 || pending[0].ID != b.ID || pending[0].Attempts != 2 || len(inFlight) != 0 {
+				t.Fatalf("invalidated draft retry: pending=%v inFlight=%v err=%v", pending, inFlight, err)
 			}
 			// Only the operator/provider can resolve an unrelated visible draft.
 			// Once it is empty, the surviving reminder is delivered by itself.

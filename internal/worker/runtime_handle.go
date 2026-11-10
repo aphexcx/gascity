@@ -45,11 +45,11 @@ var _ Handle = (*RuntimeHandle)(nil)
 
 // ReleaseNudgeReservation retires a completed caller's transport reservation.
 // Cleanup does not require a running session or permission to send new input.
-func (h *RuntimeHandle) ReleaseNudgeReservation(ctx context.Context, id string) error {
+func (h *RuntimeHandle) ReleaseNudgeReservation(ctx context.Context, id string, invalidate bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return runtime.ReleaseNudgeReservation(h.provider, h.sessionName, id)
+	return runtime.ReleaseNudgeReservation(h.provider, h.sessionName, id, invalidate)
 }
 
 // NewRuntimeHandle constructs a worker handle for a runtime-only session.

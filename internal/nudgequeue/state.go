@@ -59,10 +59,19 @@ type Item struct {
 }
 
 // DeliveryIdentity identifies a stable batch independently of its text and
-// ordering. A single-item batch retains its original queue identity.
+// ordering. Surviving members retain their already-attempted batch identity.
 func DeliveryIdentity(items []Item) string {
 	if len(items) == 0 {
 		return ""
+	}
+	if id := items[0].ReservationID; id != "" {
+		shared := true
+		for _, item := range items[1:] {
+			shared = shared && item.ReservationID == id
+		}
+		if shared {
+			return id
+		}
 	}
 	if len(items) == 1 {
 		return items[0].ID
