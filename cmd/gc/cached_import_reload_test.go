@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,7 +191,17 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(tomlPath, strings.ReplaceAll(string(data), previousCommit, commit))
+	oldLifecycle := cityRuntimeStartBeadsLifecycle
+	t.Cleanup(func() { cityRuntimeStartBeadsLifecycle = oldLifecycle })
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+		return fmt.Errorf("fixture lifecycle refused")
+	}
 	dirty.Store(true)
+	tick()
+	if failure := cr.configLoadHealth.snapshot(); failure == nil || !strings.Contains(failure.Error, "fixture lifecycle refused") {
+		t.Fatalf("failed application cleared or hid the hold: %+v", failure)
+	}
+	cityRuntimeStartBeadsLifecycle = oldLifecycle
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "watch")
 	if !strings.Contains(stdout.String(), "config-drift") || cr.configLoadHealth.snapshot() != nil {
 		t.Fatalf("clean skill change failed to drift: stdout=%s stderr=%s", stdout.String(), stderr.String())

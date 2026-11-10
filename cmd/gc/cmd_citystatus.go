@@ -178,10 +178,14 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		configStderr = io.Discard
 	}
 	cfg, err := loadCityConfig(cityPath, configStderr)
-	if err != nil {
-		if failure, healthErr := readConfigLoadFailureHook(cityPath); healthErr == nil && failure != nil {
+	if failure, healthErr := readConfigLoadFailureHook(cityPath); healthErr == nil && failure != nil {
+		if err != nil {
 			err = fmt.Errorf("%s; current load: %w", configLoadFailureMessage(failure), err)
+		} else {
+			err = fmt.Errorf("%s", configLoadFailureMessage(failure))
 		}
+	}
+	if err != nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
 		}

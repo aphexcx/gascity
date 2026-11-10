@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -81,5 +82,27 @@ func readConfigLoadFailure(cityPath string) (*configLoadFailure, error) {
 }
 
 func configLoadFailureMessage(failure *configLoadFailure) string {
-	return fmt.Sprintf("config load failing since %s; keeping last good config, reconciliation and orders paused: %s", failure.Since.UTC().Format(time.RFC3339), failure.Error)
+	return fmt.Sprintf("config reload failing since %s; keeping last good config, reconciliation and orders paused: %s", failure.Since.UTC().Format(time.RFC3339), failure.Error)
+}
+
+// finishConfigReloadHealth keeps rejected filesystem paths fenced until the
+// replacement is accepted, including failures after parsing and validation.
+func (cr *CityRuntime) finishConfigReloadHealth(reply reloadControlReply) {
+	switch reply.Outcome {
+	case reloadOutcomeFailed:
+		if cr.configLoadHealth == nil {
+			cr.configLoadHealth = &configLoadHealth{}
+		}
+		if !cr.configLoadHealth.record(errors.New(reply.Error), time.Now()) {
+			return
+		}
+		fmt.Fprintf(cr.stderr, "%s: %s\n", cr.logPrefix, configLoadFailureMessage(cr.configLoadHealth.snapshot())) //nolint:errcheck // best-effort stderr
+	case reloadOutcomeApplied, reloadOutcomeNoChange:
+		cr.configLoadHealth.clear()
+	default:
+		return
+	}
+	for _, warning := range reply.Warnings {
+		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
+	}
 }

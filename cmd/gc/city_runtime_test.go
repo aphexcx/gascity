@@ -4806,7 +4806,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	if lastProviderName != "fake" {
 		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
 	}
-	if !strings.Contains(stderr.String(), "config reload: boom (keeping old config)") {
+	if !strings.Contains(stderr.String(), "config reload: boom") || !strings.Contains(stderr.String(), "keeping last good config") {
 		t.Fatalf("stderr = %q, want lifecycle failure", stderr.String())
 	}
 	if strings.Contains(stdout.String(), "Session provider swapped") {

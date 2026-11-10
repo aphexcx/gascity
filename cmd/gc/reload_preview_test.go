@@ -111,6 +111,11 @@ func TestReloadDryRunRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestReloadPreviewPreservesRealFilesystem(t *testing.T) {
+	// This filesystem proof uses deliberate provider overrides. Own its mode
+	// independently of commands that enable strict validation elsewhere.
+	oldStrict := strictMode
+	strictMode = false
+	t.Cleanup(func() { strictMode = oldStrict })
 	for _, entry := range []string{"dry-run", "pre-apply"} {
 		t.Run(entry, func(t *testing.T) {
 			dir := t.TempDir()
