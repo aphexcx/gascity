@@ -1338,7 +1338,7 @@ func TestCreateSessionNamedWithTransport_RejectsReusedName(t *testing.T) {
 	}
 }
 
-func TestCreateSessionNamedWithTransport_ClosedSessionStillReservesName(t *testing.T) {
+func TestCreateSessionNamedWithTransport_ClosedManualSessionReleasesName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
@@ -1351,10 +1351,19 @@ func TestCreateSessionNamedWithTransport_ClosedSessionStillReservesName(t *testi
 		t.Fatalf("Close: %v", err)
 	}
 
-	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err == nil {
-		t.Fatal("expected closed session to keep reserving its explicit name")
-	} else if !errors.Is(err, ErrSessionNameExists) {
-		t.Fatalf("expected ErrSessionNameExists, got %v", err)
+	successor, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "second", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("creating successor to closed manual session: %v", err)
+	}
+	if successor.ID == info.ID || successor.SessionName != "sky" || !sp.IsRunning("sky") {
+		t.Fatalf("successor = %+v, want a fresh running session named sky", successor)
+	}
+	closed, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" || closed.Metadata["session_name"] != "sky" {
+		t.Fatalf("historical session changed: %+v", closed)
 	}
 }
 
