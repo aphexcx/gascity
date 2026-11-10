@@ -67,7 +67,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 
 	var findings []string
 	if c.cfg != nil {
-		warnings, nameErr := closedPoolSessionNameWarnings(c.cfg, c.cityPath, c.cfg.Agents, cliSessionStore(store, c.cfg, c.cityPath))
+		warnings, nameErr := closedPoolSessionNameWarnings(c.cfg, c.cityPath, c.cfg.Agents, store, c.newStore)
 		findings = append(findings, warnings...)
 		if nameErr != nil {
 			findings = append(findings, fmt.Sprintf("checking pool session names: %v", nameErr))

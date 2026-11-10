@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -13,17 +14,36 @@ import (
 
 // closedPoolSessionNameWarnings checks the next fresh slot with the same name
 // derivation and reservation rules as pool creation. It never allocates a bead.
-func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []config.Agent, store beads.Store) ([]string, error) {
-	if cfg == nil || store == nil || len(agents) == 0 {
+func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []config.Agent, cityStore beads.Store, openStore func(string) (beads.Store, error)) ([]string, error) {
+	if cfg == nil || cityStore == nil || len(agents) == 0 {
 		return nil, nil
 	}
-	infos, err := loadOpenSessionInfos(store)
+	suspended := buildSuspendedRigPathsForCity(cfg, cityPath)
+	rigStores := make(map[string]beads.Store)
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" || suspended[filepath.Clean(rig.Path)] {
+			continue
+		}
+		if openStore == nil {
+			return nil, fmt.Errorf("opening rig %q session census: store opener unavailable", rig.Name)
+		}
+		store, err := openStore(rig.Path)
+		if err != nil {
+			return nil, fmt.Errorf("opening rig %q session census: %w", rig.Name, err)
+		}
+		if store == nil {
+			return nil, fmt.Errorf("opening rig %q session census: store unavailable", rig.Name)
+		}
+		rigStores[rig.Name] = store
+	}
+	infos, err := collectAllOpenSessionInfos(cityPath, cfg, cityStore, rigStores, suspended)
 	if err != nil {
 		return nil, err
 	}
+	store := cliSessionStore(cityStore, cfg, cityPath)
 	bp := &agentBuildParams{
 		city: cfg, cityName: loadedCityName(cfg, cityPath), cityPath: cityPath, rigs: cfg.Rigs,
-		sessionBeads: newSessionBeadSnapshotFromInfos(infos),
+		sessionOccupancyInfos: infos,
 	}
 	var warnings []string
 	for _, a := range agents {
@@ -71,7 +91,9 @@ func printClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr i
 		}
 		store = cityStore
 	}
-	warnings, err := closedPoolSessionNameWarnings(deps.Cfg, deps.CityPath, []config.Agent{opts.Target}, cliSessionStore(store, deps.Cfg, deps.CityPath))
+	warnings, err := closedPoolSessionNameWarnings(deps.Cfg, deps.CityPath, []config.Agent{opts.Target}, store, func(path string) (beads.Store, error) {
+		return openAuthoritativeStoreAtForCity(path, deps.CityPath)
+	})
 	for _, warning := range warnings {
 		fmt.Fprintf(stderr, "warning: %s\n", warning) //nolint:errcheck
 	}

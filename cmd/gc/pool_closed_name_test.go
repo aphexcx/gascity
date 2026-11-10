@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +14,92 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+func TestSlingHelpersDoNotOpenDiagnosticStores(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		name := "single"
+		if batch {
+			name = "batch"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: intPtr(1)}
+			cfg := &config.City{Agents: []config.Agent{a}, Rigs: []config.Rig{{Name: "rig", Path: t.TempDir(), Prefix: "gc"}}}
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.StoreRef = "rig:rig"
+			store := beads.NewMemStore()
+			deps.Store = store
+			work, err := store.Create(beads.Bead{Title: "work", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened := false
+			previous := slingOpenCityStore
+			slingOpenCityStore = func(string) (beads.Store, error) {
+				opened = true
+				return nil, errors.New("unexpected diagnostic store open")
+			}
+			t.Cleanup(func() { slingOpenCityStore = previous })
+			opts := testOpts(a, work.ID)
+			opts.SkipPoke = true
+			var code int
+			if batch {
+				code = doSlingBatch(opts, deps, store, stdout, stderr)
+			} else {
+				code = doSling(opts, deps, store, stdout, stderr)
+			}
+			if code != 0 || opened {
+				t.Fatalf("helper result=%d opened diagnostic store=%v; stderr=%s", code, opened, stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdSlingWarnsAboutClosedPoolSessionName(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+max_active_sessions = 1
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "session_origin": "unknown", "session_name_explicit": "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(holder.ID); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cmdSling([]string{"worker", "ship feature"}, false, false, false, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSling=%d: %s", code, stderr.String())
+	}
+	want := "warning: pool \"worker\" cannot create its next session: name \"worker\" is held by closed session bead " + holder.ID
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("command warning missing: %s", stderr.String())
+	}
+}
 
 func TestSlingWarnsAboutClosedPoolSessionName(t *testing.T) {
 	for _, tc := range []struct {
@@ -25,13 +114,9 @@ func TestSlingWarnsAboutClosedPoolSessionName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{a}}
-			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps, _, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 			store := beads.NewMemStore()
 			deps.Store = store
-			b, err := store.Create(beads.Bead{Title: "work", Type: "task"})
-			if err != nil {
-				t.Fatal(err)
-			}
 			holder, err := store.Create(beads.Bead{
 				Type: session.BeadType, Labels: []string{session.LabelSession},
 				Metadata: map[string]string{
@@ -47,12 +132,9 @@ func TestSlingWarnsAboutClosedPoolSessionName(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			opts := testOpts(a, b.ID)
-			opts.SkipPoke = true
+			opts := testOpts(a, "")
 			opts.Force = tc.force
-			if code := doSlingBatch(opts, deps, store, stdout, stderr); code != 0 {
-				t.Fatalf("sling = %d: %s", code, stderr.String())
-			}
+			printClosedPoolSessionNameWarnings(opts, deps, stderr)
 			want := "warning: pool \"worker\" cannot create its next session: name \"worker\" is held by closed session bead " + holder.ID
 			if got := strings.Contains(stderr.String(), want); got != tc.warn {
 				t.Fatalf("closed-name warning = %v, want %v; stderr = %q", got, tc.warn, stderr.String())
@@ -89,6 +171,47 @@ func TestSlingClosedPoolNameUsesCitySessionStoreForRigWork(t *testing.T) {
 	}
 }
 
+func TestDoctorClosedPoolNameUsesCrossStoreOccupancy(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := t.TempDir()
+	a := config.Agent{Name: "worker", TmuxAlias: "lane", MaxActiveSessions: intPtr(2)}
+	cfg := &config.City{Agents: []config.Agent{a}, Rigs: []config.Rig{{Name: "project", Path: rigPath}}}
+	primary := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "closed-primary", Type: session.BeadType, Status: "closed",
+		Metadata: map[string]string{"session_name": "lane-2", "session_origin": "unknown"},
+	}}, nil)
+	var foreign beads.Store = beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "foreign-slot", Type: session.BeadType, Status: "open",
+		Metadata: map[string]string{
+			"session_name": "lane", "session_origin": "ephemeral", "pool_managed": "true",
+			"agent_name": "worker-1", "template": "worker", "pool_slot": "1", "state": "active",
+		},
+	}}, nil)
+	check := &sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: func(path string) (beads.Store, error) {
+		if path == rigPath {
+			return foreign, nil
+		}
+		if path != cityPath {
+			t.Fatalf("unexpected store path %q", path)
+		}
+		return primary, nil
+	}}
+	result := check.Run(&doctor.CheckContext{})
+	if !strings.Contains(strings.Join(result.Details, "\n"), "name \"lane-2\" is held by closed session bead closed-primary") {
+		t.Fatalf("cross-store next-slot holder missing: %+v", result)
+	}
+	foreign = listFailStore{Store: foreign}
+	result = check.Run(&doctor.CheckContext{})
+	if !strings.Contains(strings.Join(result.Details, "\n"), "list failed") {
+		t.Fatalf("foreign census failure hidden: %+v", result)
+	}
+	cfg.Rigs[0].Suspended = true
+	result = check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("suspended foreign store should not participate in the census: %+v", result)
+	}
+}
+
 func TestClosedPoolSessionNameWarningsNextAliasedSlot(t *testing.T) {
 	a := config.Agent{Name: "worker", TmuxAlias: "lane", MaxActiveSessions: intPtr(2)}
 	cfg := &config.City{Agents: []config.Agent{a}}
@@ -101,7 +224,7 @@ func TestClosedPoolSessionNameWarningsNextAliasedSlot(t *testing.T) {
 			"session_name": "lane-2", "session_origin": "unknown",
 		}},
 	}, nil)
-	warnings, err := closedPoolSessionNameWarnings(cfg, "", cfg.Agents, store)
+	warnings, err := closedPoolSessionNameWarnings(cfg, "", cfg.Agents, store, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +232,7 @@ func TestClosedPoolSessionNameWarningsNextAliasedSlot(t *testing.T) {
 		t.Fatalf("warnings = %v, want the next aliased slot's holder", warnings)
 	}
 	broken := degradedQueryStore{Store: store, err: errors.New("reservation query unavailable")}
-	if _, err := closedPoolSessionNameWarnings(cfg, "", cfg.Agents, broken); err == nil || !strings.Contains(err.Error(), "reservation query unavailable") {
+	if _, err := closedPoolSessionNameWarnings(cfg, "", cfg.Agents, broken, nil); err == nil || !strings.Contains(err.Error(), "reservation query unavailable") {
 		t.Fatalf("reservation query failure was hidden: %v", err)
 	}
 }

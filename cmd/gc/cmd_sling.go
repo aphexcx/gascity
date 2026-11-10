@@ -570,7 +570,11 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 		},
 	}
 
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	code := doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	if code == 0 && !opts.DryRun {
+		printClosedPoolSessionNameWarnings(opts, deps, stderr)
+	}
+	return code
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
@@ -977,9 +981,6 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 	// a different querier with pre-seeded beads.
 	_ = sl // Sling instance available for future direct use
 	result, err := sling.DoSling(opts, deps, querier)
-	if err == nil {
-		printClosedPoolSessionNameWarnings(opts, deps, stderr)
-	}
 	// Always print warnings (suspended, pool-empty, bead warnings)
 	// even when the operation fails -- they provide context for the error.
 	printSlingWarnings(result, stderr)
@@ -1043,9 +1044,6 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			InlineText: opts.InlineText,
 			NoFormula:  opts.NoFormula,
 		}, querier)
-	}
-	if err == nil {
-		printClosedPoolSessionNameWarnings(opts, deps, stderr)
 	}
 	// Print warnings before error check so they're visible on failure.
 	printSlingWarnings(result, stderr)
