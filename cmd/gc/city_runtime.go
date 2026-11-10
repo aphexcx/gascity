@@ -1162,6 +1162,7 @@ func (cr *CityRuntime) tick(
 	cr.reloadMu.Unlock()
 	if preview != nil && preview.dryRun {
 		reply := cr.previewReload(preview, cityRoot, *lastProviderName)
+		cr.finishConfigReloadHealth(reply)
 		cr.sendReloadReply(preview.doneCh, reply)
 		cr.clearActiveReloadIf(preview)
 		return

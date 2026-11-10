@@ -59,7 +59,7 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	write(tomlPath, "[workspace]\nname = \"test-city\"\nprovider = \"claude\"\n[beads]\nprovider = \"file\"\n[session]\nprovider = \"tmux\"\n[providers.claude]\ncommand = \"echo\"\nprompt_mode = \"none\"\n[[agent]]\nname = \"worker\"\nscope = \"city\"\n"+imports.String())
+	write(tomlPath, "[workspace]\nname = \"test-city\"\nprovider = \"claude\"\n[beads]\nprovider = \"file\"\n[session]\nprovider = \"tmux\"\n[providers.claude]\ncommand = \"echo\"\nprompt_mode = \"none\"\n[[agent]]\nname = \"worker\"\nscope = \"city\"\n"+imports.String()+fmt.Sprintf("\n[[agent]]\nname = %q\nscope = \"city\"\n", config.ControlDispatcherAgentName))
 	cfg, revision := loadCityRuntimeControllerConfig(t, cityPath)
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -136,6 +136,25 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 	if err := os.Chtimes(cacheDirs[1], stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
+	previewReplies := make(chan reloadControlReply, 1)
+	cr.activeReload = &reloadRequest{dryRun: true, doneCh: previewReplies}
+	tick()
+	select {
+	case reply := <-previewReplies:
+		if reply.Outcome != reloadOutcomeFailed || cr.activeReload != nil {
+			t.Fatalf("rejected dry run did not complete: %+v", reply)
+		}
+	default:
+		t.Fatal("rejected dry run did not reply")
+	}
+	if cr.configLoadHealth.snapshot() == nil {
+		t.Fatal("rejected dry-run load did not establish the hold before targeted dispatch")
+	}
+	runtimeCalls := len(sp.SnapshotCalls())
+	cr.controlDispatcherTick(context.Background())
+	if len(sp.SnapshotCalls()) != runtimeCalls {
+		t.Fatal("targeted dispatch reached the runtime after a rejected dry-run load")
+	}
 	dirty.Store(true)
 	tick()
 	failure := cr.configLoadHealth.snapshot()
@@ -164,6 +183,16 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 	}
 	if err := os.Remove(stray); err != nil {
 		t.Fatal(err)
+	}
+	cr.activeReload = &reloadRequest{dryRun: true, doneCh: previewReplies}
+	tick()
+	select {
+	case reply := <-previewReplies:
+		if reply.Outcome != reloadOutcomePreview || cr.configLoadHealth.snapshot() == nil {
+			t.Fatalf("successful preview cleared the hold without accepting a config: %+v", reply)
+		}
+	default:
+		t.Fatal("repaired dry run did not reply")
 	}
 	tick()
 	if cr.configLoadHealth.snapshot() != nil {
