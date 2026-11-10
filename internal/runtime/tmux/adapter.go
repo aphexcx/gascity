@@ -1020,6 +1020,7 @@ type startOps interface {
 	recordStartCrash(name, paneContent string) string
 	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
+	releaseNudge(name, text string)
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
@@ -1307,6 +1308,20 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 		func() error { return o.tm.KillSessionWithProcesses(name) },
 		func() error { return o.tm.KillSession(name) },
 	)
+}
+
+// releaseNudge ends startup's retry ownership when its bounded caller is done.
+// A remaining staged paste can then be recovered by a later nudge.
+func (o *tmuxStartOps) releaseNudge(name, text string) {
+	target := name
+	if pane, err := o.tm.FindAgentPane(name); err == nil && pane != "" {
+		target = pane
+	}
+	if err := o.tm.releaseNudgeDraftIdentity(target, text, o.startupNudgeID); err != nil {
+		cause := fmt.Errorf("retiring startup nudge retry ownership: %w", err)
+		fmt.Fprintf(os.Stderr, "warning: startup nudge to %q: %v\n", name, cause)
+		o.recordUnconfirmedNudge(name, text, cause)
+	}
 }
 
 // paneBusy reports whether the target agent pane is showing a busy/
@@ -1801,6 +1816,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if cfg.Nudge != "" {
+		ops.releaseNudge(name, cfg.Nudge)
 	}
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 

@@ -136,6 +136,7 @@ type fakeStartOps struct {
 	capturePaneErr             error
 	recordStartCrashPath       string
 	recordUnconfirmedNudgePath string
+	releaseNudgeHook           func(string, string)
 
 	paneBusyResult bool
 	paneBusyErr    error
@@ -281,6 +282,12 @@ func (f *fakeStartOps) recordStartCrash(name, _ string) string {
 func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
 	f.calls = append(f.calls, startCall{method: "recordUnconfirmedNudge", name: name})
 	return f.recordUnconfirmedNudgePath
+}
+
+func (f *fakeStartOps) releaseNudge(name, message string) {
+	if f.releaseNudgeHook != nil {
+		f.releaseNudgeHook(name, message)
+	}
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration, _ ...*lanectx.PreStartDiagnostics) error {

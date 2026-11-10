@@ -2883,10 +2883,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		}
 		if verifySubmit && deliveryID != "" && delivery.Submit == runtime.NudgeSubmitUnverified {
 			if err := t.releaseNudgeDraftIdentity(target, message, deliveryID); err != nil {
-				// Do not acknowledge a delivery whose retry reservation could not
-				// be retired. Preserve the paste and its original submit-only retry.
-				delivery.Submit = runtime.NudgeSubmitUnconfirmed
-				deliveryErr = errors.Join(deliveryErr, fmt.Errorf("%w: retiring nudge retry ownership: %w", runtime.ErrNudgeSubmitUnconfirmed, err))
+				// Terminal delivery must not become replayable because metadata
+				// failed: the harness may already have consumed this payload.
+				// Preserve any held draft and surface the failed cleanup to operators.
+				log.Printf("tmux nudge: retiring nudge retry ownership for %q: %v; any remaining owned draft requires attention", target, err)
 			}
 		}
 		if submitted {

@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -15,11 +16,17 @@ import (
 )
 
 func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
-	for _, scenario := range []string{"recover", "retry owner", "retry owner identical", "retry owner startup", "acknowledged retry", "retry owner release failure", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
+	for _, scenario := range []string{"recover", "retry owner", "retry owner identical", "retry owner startup", "startup finished busy", "startup exhausted", "acknowledged retry", "retry owner release failure", "suggestion", "busy", "young", "disabled", "attached", "human identical", "empty metadata failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 				tm := NewTmux()
+				var retirementLog bytes.Buffer
+				if scenario == "retry owner release failure" {
+					writer := log.Writer()
+					log.SetOutput(&retirementLog)
+					defer log.SetOutput(writer)
+				}
 				prior := runtime.NudgePayloadDigest("one\ntwo\nthree")
 				options := map[string]string{
 					nudgeDraftPayloadOption:    prior,
@@ -32,7 +39,8 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 				draft, busy := "[Pasted text #12 +2 lines]", false
 				startup := newTmuxStartOps(tm, "", 0, runtime.Config{}, false)
 				terminalRetry := scenario == "acknowledged retry" || scenario == "retry owner release failure"
-				stagingStartup := scenario == "retry owner startup" || terminalRetry
+				startupFinished := scenario == "startup finished busy" || scenario == "startup exhausted"
+				stagingStartup := scenario == "retry owner startup" || terminalRetry || startupFinished
 				if stagingStartup {
 					draft = ""
 					clear(options)
@@ -105,21 +113,37 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					return "", nil
 				}}
 				if stagingStartup {
-					if terminalRetry {
+					switch {
+					case startupFinished:
+						ops := &fakeStartOps{hasSessionResult: true, paneBusyResult: scenario == "startup finished busy"}
+						ops.sendKeysHook = func() {
+							ops.sendKeysErr = startup.sendKeys(t.Name(), "one\ntwo\nthree")
+							options[nudgeDraftPayloadOption] = prior
+						}
+						ops.releaseNudgeHook = startup.releaseNudge
+						if err := launchOrchestration(context.Background(), ops, t.Name(), runtime.Config{Nudge: "one\ntwo\nthree"}, time.Second); err != nil {
+							t.Fatal(err)
+						}
+					case terminalRetry:
 						d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo\nthree", "queue-A", func(_, text string, _ time.Duration) (int, error) {
 							pastes++
 							draft = "[Pasted text #12 +2 lines]"
 							return len(text), nil
 						})
 						if scenario == "retry owner release failure" {
-							if !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) || !errors.Is(d.UnconfirmedSubmitError(t.Name()), runtime.ErrNudgeSubmitUnconfirmed) || !d.Landed() {
-								t.Fatalf("failed owner release allowed acknowledgement: delivery=%+v err=%v", d, err)
+							if err != nil || d.UnconfirmedSubmitError(t.Name()) != nil || d.Submit != runtime.NudgeSubmitUnverified || !d.Landed() {
+								t.Fatalf("metadata failure made terminal delivery replayable: delivery=%+v err=%v", d, err)
+							}
+							if !strings.Contains(retirementLog.String(), "retiring nudge retry ownership") {
+								t.Fatal("retirement failure was not logged")
 							}
 						} else if err != nil || d.UnconfirmedSubmitError(t.Name()) != nil || d.Submit != runtime.NudgeSubmitUnverified || !d.Landed() {
 							t.Fatalf("busy delivery cannot be acknowledged: delivery=%+v err=%v", d, err)
 						}
-					} else if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
-						t.Fatalf("staging startup: %v", err)
+					default:
+						if err := startup.sendKeys(t.Name(), "one\ntwo\nthree"); !errors.Is(err, runtime.ErrNudgeSubmitUnconfirmed) {
+							t.Fatalf("staging startup: %v", err)
+						}
 					}
 					if pastes != 1 {
 						t.Fatalf("startup pasted %d times", pastes)
@@ -146,7 +170,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					if err == nil || delivery.Landed() || delivery.Held != nil || pastes != 0 || submits != 0 {
 						t.Fatalf("empty composer reported a hold: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}
-				case scenario != "recover" && scenario != "suggestion" && scenario != "acknowledged retry":
+				case scenario != "recover" && scenario != "suggestion" && scenario != "acknowledged retry" && !startupFinished:
 					if !errors.Is(err, ErrNudgeDraftDeferred) || delivery.Landed() || delivery.Held == nil || pastes != 0 || submits != 0 {
 						t.Fatalf("unsafe recovery: delivery=%+v err=%v pastes=%d submits=%d", delivery, err, pastes, submits)
 					}
@@ -160,7 +184,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 				case err != nil || !delivery.Landed() || delivery.Bytes != len(message) || pastes != 1 || submits != 2:
 					t.Fatalf("delivery=%+v err=%v pastes=%d submits=%d; want recovery then exactly one new delivery", delivery, err, pastes, submits)
 				}
-				if strings.HasPrefix(scenario, "retry owner") {
+				if strings.HasPrefix(scenario, "retry owner") && scenario != "retry owner release failure" {
 					send := func(_, text string, _ time.Duration) (int, error) {
 						pastes++
 						draft = text
