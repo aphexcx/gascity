@@ -35,32 +35,42 @@ func retryNudgeReservationReleases(cityPath string) error {
 	if err != nil || len(state.ReservationReleases) == 0 {
 		return err
 	}
-	if err := nudgeReleaseEndedReservations(cityPath, state.ReservationReleases); err != nil {
-		return err
+	completed, err := nudgeReleaseEndedReservations(cityPath, state.ReservationReleases)
+	if len(completed) > 0 {
+		err = errors.Join(err, nudgequeue.AcknowledgeReservationReleases(cityPath, completed))
 	}
-	return nudgequeue.AcknowledgeReservationReleases(cityPath, state.ReservationReleases)
+	return err
 }
 
 // Release occurs after the queue commit and outside its lock. A cleanup failure
 // is reported without reversing a terminal queue transition. Durable intent
 // blocks unsafe recovery and remains pending until cleanup succeeds.
-func releaseEndedNudgeReservations(cityPath string, items []nudgeReservationRelease) error {
+func releaseEndedNudgeReservations(cityPath string, items []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
 	if len(items) == 0 {
-		return nil
+		return nil, nil
 	}
 	cfg, err := loadCityConfig(cityPath, nudgeWarningWriter)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return releaseQueuedNudgeReservations(sp, items)
+}
+
+func releaseQueuedNudgeReservations(sp runtime.Provider, items []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
+	var completed []nudgeReservationRelease
 	var result error
 	for _, item := range items {
-		result = errors.Join(result, releaseQueuedNudgeReservation(sp, item))
+		if err := releaseQueuedNudgeReservation(sp, item); err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		completed = append(completed, item)
 	}
-	return result
+	return completed, result
 }
 
 func releaseQueuedNudgeReservation(sp runtime.Provider, item nudgeReservationRelease) error {

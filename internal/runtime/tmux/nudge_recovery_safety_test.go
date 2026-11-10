@@ -285,6 +285,38 @@ func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
 			t.Fatal("ambiguous pane acknowledged cleanup")
 		}
 	})
+	t.Run("cleanup normalizes definitive absence", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			err    error
+			absent bool
+		}{
+			{"session gone", ErrSessionNotFound, true},
+			{"server gone", ErrNoServer, true},
+			{"executable missing", errors.New("tmux executable not found"), false},
+		} {
+			for _, failAt := range []int{1, 2} {
+				t.Run(fmt.Sprintf("%s lookup %d", tc.name, failAt), func(t *testing.T) {
+					tm, _ := newRecoveryPane(t)
+					lookups := 0
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						if !slices.Contains(args, "list-panes") {
+							t.Fatalf("cleanup continued after failed pane discovery: %v", args)
+						}
+						lookups++
+						if lookups == failAt {
+							return "", fmt.Errorf("lookup: %w", tc.err)
+						}
+						return "%agent", nil
+					}}
+					err := (&Provider{tm: tm}).ReleaseNudgeReservation(t.Name(), "owner", true)
+					if errors.Is(err, runtime.ErrSessionNotFound) != tc.absent || !errors.Is(err, tc.err) {
+						t.Fatalf("cleanup error=%v, want runtime absence=%t with original cause", err, tc.absent)
+					}
+				})
+			}
+		}
+	})
 	t.Run("failed pane discovery cannot acknowledge cleanup", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			tm, p := newRecoveryPane(t)

@@ -3823,15 +3823,19 @@ func TestQueuedNudgeRetryKeepsOriginalBatch(t *testing.T) {
 
 type retryOwnerFake struct {
 	*runtime.Fake
-	firstID    string
-	accepted   bool
-	pastes     int
-	released   []string
-	releaseErr error
+	firstID       string
+	accepted      bool
+	pastes        int
+	released      []string
+	releaseErr    error
+	releaseErrors map[string]error
 }
 
-func (p *retryOwnerFake) ReleaseNudgeReservation(_ string, id string, _ bool) error {
+func (p *retryOwnerFake) ReleaseNudgeReservation(name string, id string, _ bool) error {
 	p.released = append(p.released, id)
+	if err := p.releaseErrors[name]; err != nil {
+		return err
+	}
 	return p.releaseErr
 }
 
@@ -3961,6 +3965,36 @@ func testQueuedNudgeRetryOwner(t *testing.T, backed bool) {
 }
 
 func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
+	t.Run("failed cleanup does not retain another session cancellation", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "file")
+		dir := t.TempDir()
+		items := []nudgeReservationRelease{
+			{SessionName: "session-A", ReservationID: "batch-A", Invalidate: true, Generation: 1},
+			{SessionName: "session-B", ReservationID: "batch-B", Invalidate: true, Generation: 2},
+		}
+		if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+			state.ReservationReleases = items
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		unavailable := errors.New("session A cleanup unavailable")
+		sp := &retryOwnerFake{Fake: runtime.NewFake(), releaseErrors: map[string]error{"session-A": unavailable}}
+		previous := nudgeReleaseEndedReservations
+		nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
+			return releaseQueuedNudgeReservations(sp, ended)
+		}
+		t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
+		if err := retryNudgeReservationReleases(dir); !errors.Is(err, unavailable) {
+			t.Fatalf("cleanup error = %v, want original failure", err)
+		}
+		for _, item := range items {
+			invalid, err := nudgequeue.ReservationInvalidated(dir, item.SessionName, item.ReservationID)
+			if err != nil || invalid != (item.SessionName == "session-A") {
+				t.Fatalf("%s invalidated=%t err=%v; only failed cleanup should remain", item.SessionName, invalid, err)
+			}
+		}
+	})
 	t.Run("lookup failure is not proof of session absence", func(t *testing.T) {
 		sp := &retryOwnerFake{Fake: runtime.NewFake(), releaseErr: errors.New("tmux executable not found")}
 		item := nudgeReservationRelease{SessionName: "session-worker", ReservationID: "owner", Invalidate: true, RetireReceipt: true}
@@ -3994,25 +4028,20 @@ func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
 			if ending == "release-failure" {
 				sp.releaseErr = errors.New("reservation release unavailable")
 			}
-			nudgeReleaseEndedReservations = func(city string, ended []nudgeReservationRelease) error {
+			nudgeReleaseEndedReservations = func(city string, ended []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
 				if len(ended) == 0 {
-					return nil
+					return nil, nil
 				}
 				state, err := nudgequeue.LoadState(city)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				for _, active := range append(state.Pending, state.InFlight...) {
 					if active.ID == item.ID {
 						t.Fatal("release ran before terminal queue commit")
 					}
 				}
-				for _, owner := range ended {
-					if err := releaseNudgeReservation(nudgeTarget{sessionName: owner.SessionName}, sp, owner.ReservationID, owner.Invalidate); err != nil {
-						return err
-					}
-				}
-				return nil
+				return releaseQueuedNudgeReservations(sp, ended)
 			}
 			t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
 			var err error
@@ -4033,7 +4062,11 @@ func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(sp.released) != 1 || sp.released[0] != item.ID {
+			wantReleases := 2 // Revoke recovery, then retire the ended owner's receipt.
+			if ending == "release-failure" {
+				wantReleases = 1
+			}
+			if len(sp.released) != wantReleases || sp.released[0] != item.ID {
 				t.Fatalf("%s release=%v want %s", ending, sp.released, item.ID)
 			}
 			if ending == "release-failure" {
@@ -4070,7 +4103,7 @@ func TestQueuedNudgeYieldsToComposerRetryOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := nudgeReleaseEndedReservations
-	nudgeReleaseEndedReservations = func(string, []nudgeReservationRelease) error { return nil }
+	nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) ([]nudgeReservationRelease, error) { return ended, nil }
 	t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
 	deliver := func() (bool, error) {
 		return tryDeliverQueuedNudgesByPoller(target, nil, nil, sp, 0, worker.LiveObservation{Running: true})
@@ -4194,13 +4227,8 @@ func TestCanceledWholeNudgeBatchCannotRecover(t *testing.T) {
 			}
 			fake := &preservedBatchFake{Fake: runtime.NewFake()}
 			previous := nudgeReleaseEndedReservations
-			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) error {
-				for _, item := range ended {
-					if err := fake.ReleaseNudgeReservation(item.SessionName, item.ReservationID, item.Invalidate); err != nil {
-						return err
-					}
-				}
-				return nil
+			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
+				return releaseQueuedNudgeReservations(fake, ended)
 			}
 			t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
 			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
@@ -4283,16 +4311,11 @@ func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
 			fake := &preservedBatchFake{Fake: runtime.NewFake()}
 			failRelease := removal == "failed-invalidation"
 			previousRelease := nudgeReleaseEndedReservations
-			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) error {
+			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) ([]nudgeReservationRelease, error) {
 				if failRelease && len(ended) > 0 {
-					return errors.New("cleanup temporarily unavailable")
+					return nil, errors.New("cleanup temporarily unavailable")
 				}
-				for _, item := range ended {
-					if err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, fake, item.ReservationID, item.Invalidate); err != nil {
-						return err
-					}
-				}
-				return nil
+				return releaseQueuedNudgeReservations(fake, ended)
 			}
 			t.Cleanup(func() { nudgeReleaseEndedReservations = previousRelease })
 			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {

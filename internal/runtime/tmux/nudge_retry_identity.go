@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,7 +17,12 @@ func recoveredNudgeOption(id string) string {
 
 // ReleaseNudgeReservation retires only the named caller's reservation. It never
 // sends keys or clears input, including when the pane has changed owners.
-func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) error {
+func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) (err error) {
+	defer func() {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			err = errors.Join(runtime.ErrSessionNotFound, err)
+		}
+	}()
 	if id == "" {
 		return nil
 	}
