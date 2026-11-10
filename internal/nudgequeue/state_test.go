@@ -13,6 +13,29 @@ import (
 )
 
 func TestReservationCleanupSurvivesSharedWithdrawal(t *testing.T) {
+	t.Run("whole batch revokes recovery", func(t *testing.T) {
+		for _, ids := range [][]string{{"a"}, {"a", "b"}} {
+			dir := t.TempDir()
+			if err := WithState(dir, func(state *State) error {
+				for _, id := range ids {
+					state.Pending = append(state.Pending, Item{ID: id, SessionName: "session", ReservationID: "batch", LastAttemptAt: time.Unix(1, 0)})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := WithdrawWaitNudges(nil, dir, ids); err != nil {
+				t.Fatal(err)
+			}
+			if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || !invalid {
+				t.Fatalf("whole batch remained recoverable: ids=%v invalid=%v err=%v", ids, invalid, err)
+			}
+			state, err := LoadState(dir)
+			if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].RetireReceipt {
+				t.Fatalf("ended owner retained its receipt: state=%+v err=%v", state, err)
+			}
+		}
+	})
 	dir := t.TempDir()
 	if err := WithState(dir, func(state *State) error {
 		for _, id := range []string{"a", "b"} {
@@ -30,6 +53,9 @@ func TestReservationCleanupSurvivesSharedWithdrawal(t *testing.T) {
 		t.Fatalf("partial withdrawal lost cleanup intent: state=%+v err=%v", state, err)
 	}
 	first := state.ReservationReleases[0]
+	if first.RetireReceipt {
+		t.Fatal("partial withdrawal would erase the survivors' receipt")
+	}
 	if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || !invalid {
 		t.Fatalf("recovery allowed before cleanup: invalid=%v err=%v", invalid, err)
 	}

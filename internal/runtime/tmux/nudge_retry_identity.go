@@ -20,9 +20,20 @@ func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) err
 	if id == "" {
 		return nil
 	}
-	target := name
-	if pane, err := p.tm.FindAgentPane(name); err == nil && pane != "" {
-		target = pane
+	target, err := p.tm.FindAgentPane(name)
+	if err != nil {
+		return fmt.Errorf("finding reservation pane for %q: %w", name, err)
+	}
+	if target == "" {
+		panes, err := p.tm.run("list-panes", "-s", "-t", exactPaneTarget(name), "-F", "#{pane_id}")
+		if err != nil {
+			return fmt.Errorf("verifying reservation pane for %q: %w", name, err)
+		}
+		ids := strings.Fields(panes)
+		if len(ids) != 1 {
+			return fmt.Errorf("cannot identify reservation pane for %q among %d panes", name, len(ids))
+		}
+		target = ids[0]
 	}
 	if !invalidate {
 		if _, err := p.tm.run("set-option", "-p", "-u", "-t", exactPaneTarget(target), recoveredNudgeOption(id)); err != nil {

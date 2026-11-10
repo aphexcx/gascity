@@ -123,10 +123,12 @@ type State struct {
 
 // ReservationRelease is durable cleanup intent for an ended retry owner.
 // Invalidate revokes recovery of a paste whose attempted batch lost members.
+// RetireReceipt removes its acknowledgement only when no members remain.
 type ReservationRelease struct {
 	SessionName   string `json:"session_name"`
 	ReservationID string `json:"reservation_id"`
 	Invalidate    bool   `json:"invalidate,omitempty"`
+	RetireReceipt bool   `json:"retire_receipt,omitempty"`
 	Generation    uint64 `json:"generation"`
 }
 
@@ -186,7 +188,7 @@ func recordEndedReservations(state *State, previous []Item) {
 		}
 		seen[owner] = true
 		state.ReservationGeneration++
-		release := ReservationRelease{SessionName: item.SessionName, ReservationID: item.ReservationID, Invalidate: owners[owner], Generation: state.ReservationGeneration}
+		release := ReservationRelease{SessionName: item.SessionName, ReservationID: item.ReservationID, Invalidate: true, RetireReceipt: !owners[owner], Generation: state.ReservationGeneration}
 		found := false
 		for i, pending := range state.ReservationReleases {
 			if pending.SessionName == release.SessionName && pending.ReservationID == release.ReservationID {

@@ -4166,6 +4166,61 @@ func (p *preservedBatchFake) NudgeDelivered(_ string, content []runtime.ContentB
 	return runtime.NudgeDelivery{Delivered: true, Submit: runtime.NudgeSubmitConfirmed}, nil
 }
 
+func TestCanceledWholeNudgeBatchCannotRecover(t *testing.T) {
+	for _, operation := range []string{"drop-single", "withdraw-all"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := t.TempDir()
+			now := time.Now().Add(-time.Minute)
+			items := []queuedNudge{newQueuedNudgeWithOptions("worker", "first", "session", now, queuedNudgeOptions{SessionName: "sess-worker"})}
+			if operation == "withdraw-all" {
+				items = append(items, newQueuedNudgeWithOptions("worker", "second", "session", now, queuedNudgeOptions{SessionName: "sess-worker"}))
+			}
+			for _, item := range items {
+				if err := enqueueQueuedNudge(dir, item); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := &preservedBatchFake{Fake: runtime.NewFake()}
+			previous := nudgeReleaseEndedReservations
+			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) error {
+				for _, item := range ended {
+					if err := fake.ReleaseNudgeReservation(item.SessionName, item.ReservationID, item.Invalidate); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			t.Cleanup(func() { nudgeReleaseEndedReservations = previous })
+			if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionName: "sess-worker"}
+			deliver := func() (bool, error) {
+				return tryDeliverQueuedNudgesByPoller(target, nil, nil, fake, 0, worker.LiveObservation{Running: true})
+			}
+			if delivered, err := deliver(); delivered || err != nil {
+				t.Fatalf("staging=%v err=%v", delivered, err)
+			}
+			original := fake.draft
+			if operation == "drop-single" {
+				if rc := doNudgeDrop(dir, []string{items[0].ID}, false, io.Discard, io.Discard); rc != 0 {
+					t.Fatalf("drop=%d", rc)
+				}
+			} else if err := withdrawQueuedWaitNudges(dir, queuedNudgeIDs(items)); err != nil {
+				t.Fatal(err)
+			}
+			if err := enqueueQueuedNudge(dir, newQueuedNudgeWithOptions("worker", "next", "session", now, queuedNudgeOptions{SessionName: "sess-worker"})); err != nil {
+				t.Fatal(err)
+			}
+			fake.accept = true
+			if delivered, err := deliver(); delivered || !errors.Is(err, runtime.ErrNudgeDraftUnowned) || len(fake.submitted) != 0 || fake.draft != original {
+				t.Fatalf("canceled batch recovered: delivered=%v err=%v submitted=%q draft=%q", delivered, err, fake.submitted, fake.draft)
+			}
+		})
+	}
+}
+
 func TestQueuedNudgeWithdrawalFailureDoesNotSubmitSubset(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

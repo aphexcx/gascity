@@ -100,6 +100,8 @@ func (p *recoveryPane) exec(args []string) (string, error) {
 		return "", nil
 	}
 	switch {
+	case slices.Contains(args, "list-panes"):
+		return "%0", nil
 	case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
 		return "GC_PROVIDER=claude", nil
 	case slices.Contains(args, "capture-pane"):
@@ -238,6 +240,77 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 }
 
 func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
+	t.Run("full cancellation retires receipt without enabling recovery", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			message := "one\ntwo"
+			original := "[Pasted text #12 +1 lines]"
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste(original)); err != nil {
+				t.Fatal(err)
+			}
+			p.options[recoveredNudgeOption("owner")] = "pending:" + runtime.NudgePayloadDigest(message)
+			provider := &Provider{tm: tm}
+			if err := provider.ReleaseNudgeReservation(t.Name(), "owner", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.ReleaseNudgeReservation(t.Name(), "owner", false); err != nil {
+				t.Fatal(err)
+			}
+			if p.options[recoveredNudgeOption("owner")] != "" {
+				t.Fatal("terminal receipt not retired")
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter, p.enters = false, 0
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next", "", p.paste(""))
+			if !errors.Is(err, runtime.ErrNudgeDraftUnowned) || d.Held == nil || p.enters != 0 || p.draft != original {
+				t.Fatalf("full cancellation recovered: delivery=%+v err=%v enters=%d", d, err, p.enters)
+			}
+		})
+	})
+	t.Run("ambiguous pane cannot acknowledge cleanup", func(t *testing.T) {
+		tm, p := newRecoveryPane(t)
+		lookups := 0
+		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			if slices.Contains(args, "list-panes") {
+				lookups++
+				if lookups == 1 {
+					return "%shell", nil
+				}
+				return "%shell\n%agent", nil
+			}
+			return p.exec(args)
+		}}
+		if err := (&Provider{tm: tm}).ReleaseNudgeReservation(t.Name(), "owner", true); err == nil {
+			t.Fatal("ambiguous pane acknowledged cleanup")
+		}
+	})
+	t.Run("failed pane discovery cannot acknowledge cleanup", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo", "owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+				t.Fatal(err)
+			}
+			before := p.options[nudgeDraftPayloadOption]
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				if slices.Contains(args, "list-panes") {
+					return "", errors.New("pane lookup unavailable")
+				}
+				if slices.Contains(args, "show-options") && slices.Contains(args, exactPaneTarget(t.Name())) {
+					return "", nil
+				}
+				return p.exec(args)
+			}}
+			provider := &Provider{tm: tm}
+			if err := provider.ReleaseNudgeReservation(t.Name(), "owner", true); err == nil {
+				t.Fatal("failed lookup was acknowledged as successful cleanup")
+			}
+			if p.options[nudgeDraftPayloadOption] != before {
+				t.Fatal("failed lookup changed agent provenance")
+			}
+		})
+	})
 	t.Run("pending recovery resumes unchanged draft", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			tm, p := newRecoveryPane(t)
