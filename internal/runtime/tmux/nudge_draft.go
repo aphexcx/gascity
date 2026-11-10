@@ -152,8 +152,24 @@ func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, 
 	if !observed || draft == "" {
 		return false, nil
 	}
-	if !collapsedNudgeDraftMatches(draft, message) && normalizedNudgeDigest(draft) != normalizedNudgeDigest(message) {
-		return false, fmt.Errorf("pasted composer does not match the payload")
+	collapsed := collapsedNudgeDraftMatches(draft, message)
+	if !collapsed && !nudgeDraftMatches(draft, message, 0) {
+		widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
+		if err != nil {
+			return false, fmt.Errorf("reading pasted composer width: %w", err)
+		}
+		width, err := strconv.Atoi(strings.TrimSpace(widthText))
+		if err != nil || width <= 2 {
+			return false, fmt.Errorf("invalid pasted composer width %q", widthText)
+		}
+		if !nudgeDraftMatches(draft, message, width-2) {
+			return false, fmt.Errorf("pasted composer does not match the payload")
+		}
+	}
+	if !collapsed {
+		// Inline recovery compares this slot to the normalized rendering,
+		// including its observed wrap boundaries, rather than the payload.
+		parts[3] = normalizedNudgeDigest(draft)
 	}
 	parts[4] = runtime.NudgePayloadDigest(draft)
 	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
@@ -204,7 +220,7 @@ func (t *Tmux) sendOwnedNudgeDraftSubmitSequence(target, digest string, keys []s
 }
 
 func nudgeDraftDigestCondition(digest string) string {
-	return fmt.Sprintf("#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, digest)
+	return fmt.Sprintf("#{&&:#{||:#{==:#{%s},%s},#{==:#{%s},pending:%s}},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, digest, nudgeDraftPayloadOption, digest)
 }
 
 // captureNudgeDraftSubmit observes acceptance only while the draft still belongs

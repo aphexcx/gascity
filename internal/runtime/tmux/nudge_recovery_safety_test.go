@@ -26,26 +26,38 @@ type recoveryPane struct {
 	enters          int
 	onPaste         func()
 	afterEnter      func()
+	width           int
+	attached        bool
 }
 
-var recoveryOptionCondition = regexp.MustCompile(`#\{==:#\{(@gc-[^}]+)\},([^}]*)\}`)
+var (
+	recoveryFormatValue     = regexp.MustCompile(`#\{([^{}:,]+)\}`)
+	recoveryFormatOperation = regexp.MustCompile(`#\{(==|&&|\|\|):([^{}]*),([^{}]*)\}`)
+)
 
 func (p *recoveryPane) condition(condition string) bool {
-	matches := recoveryOptionCondition.FindAllStringSubmatch(condition, -1)
-	if strings.HasPrefix(condition, "#{||:") {
-		for _, m := range matches {
-			if p.options[m[1]] == m[2] {
-				return true
+	condition = recoveryFormatValue.ReplaceAllStringFunc(condition, func(value string) string {
+		key := recoveryFormatValue.FindStringSubmatch(value)[1]
+		if key == "session_attached" {
+			if p.attached {
+				return "1"
 			}
+			return "0"
 		}
-		return false
+		return p.options[key]
+	})
+	for recoveryFormatOperation.MatchString(condition) {
+		condition = recoveryFormatOperation.ReplaceAllStringFunc(condition, func(operation string) string {
+			m := recoveryFormatOperation.FindStringSubmatch(operation)
+			if (m[1] == "==" && m[2] == m[3]) ||
+				(m[1] == "&&" && m[2] == "1" && m[3] == "1") ||
+				(m[1] == "||" && (m[2] == "1" || m[3] == "1")) {
+				return "1"
+			}
+			return "0"
+		})
 	}
-	for _, m := range matches {
-		if p.options[m[1]] != m[2] {
-			return false
-		}
-	}
-	return true
+	return condition == "1"
 }
 
 func (p *recoveryPane) enter() {
@@ -109,8 +121,14 @@ func (p *recoveryPane) exec(args []string) (string, error) {
 	case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
 		return "%0", nil
 	case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
+		if p.attached {
+			return "1", nil
+		}
 		return "0", nil
 	case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_width}"):
+		if p.width != 0 {
+			return strconv.Itoa(p.width), nil
+		}
 		return "120", nil
 	case slices.Contains(args, "show-hooks"):
 		return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
@@ -233,6 +251,178 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next nudge", "", p.paste(""))
 				if err != nil || !d.Landed() || !slices.Equal(p.submitted, []string{rendering, "next nudge"}) {
 					t.Fatalf("own paste not recovered: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+				}
+			})
+		})
+	}
+}
+
+// A withdrawn batch cannot send another submit or acknowledge a survivor on
+// any reservation-bearing route, regardless of where cleanup overtakes it.
+func TestNudgeReservationInvalidationBoundaries(t *testing.T) {
+	for _, path := range []string{"fresh paste", "resume", "recovery", "survivor retry"} {
+		for _, boundary := range []string{"before paste", "after paste before Enter", "between Enter resends", "after failed recovery", "manual clear"} {
+			t.Run(path+"/"+boundary, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, p := newRecoveryPane(t)
+					const message, owner = "first\nremaining", "batch-owner"
+					const original = "[Pasted text #12 +1 lines]"
+					success := func(d runtime.NudgeDelivery) bool {
+						return d.Submit == runtime.NudgeSubmitConfirmed || d.Submit == runtime.NudgeSubmitUnverified
+					}
+					p.loseEnter = true
+					paste := p.paste(original)
+					failedRecovery := func() {
+						t.Helper()
+						p.agePaste(t, 11*time.Minute)
+						d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", owner, paste)
+						if !errors.Is(err, ErrNudgeDraftDeferred) || success(d) || p.options[recoveredNudgeOption(owner)] == "" {
+							t.Fatalf("failed recovery not reached: delivery=%+v err=%v", d, err)
+						}
+					}
+					if path != "fresh paste" {
+						d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, owner, paste)
+						if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed {
+							t.Fatalf("seed paste: delivery=%+v err=%v", d, err)
+						}
+					}
+					if path == "recovery" {
+						p.agePaste(t, 11*time.Minute)
+					}
+					if path == "survivor retry" {
+						failedRecovery()
+					}
+					invoke := func() (runtime.NudgeDelivery, error) {
+						text, id := message, owner
+						switch path {
+						case "recovery":
+							text, id = "next", "next-owner"
+						case "survivor retry":
+							text = "remaining"
+						}
+						return tm.nudgeSessionDeliveryWithIdentity(t.Name(), text, id, paste)
+					}
+					invalidated, entersAtCleanup, pastesAfterCleanup := false, 0, 0
+					pending := false
+					tm.cfg.NudgeReservationInvalidated = func(string, string) (bool, error) { return pending, nil }
+					invalidate := func(manual bool) {
+						t.Helper()
+						if invalidated {
+							return
+						}
+						invalidated, entersAtCleanup = true, p.enters
+						if manual {
+							// Attaching clears provenance before the person clears
+							// input. Detaching again must not acknowledge it.
+							p.options[nudgeDraftPayloadOption] = ""
+							p.draft = ""
+						} else {
+							pending = true
+							if err := (&Provider{tm: tm}).ReleaseNudgeReservation(t.Name(), owner, true); err != nil {
+								t.Fatal(err)
+							}
+							pending = boundary == "before paste" // no paste exists to fence yet
+						}
+						p.loseEnter = false // an illegal Enter would now accept input
+					}
+					switch boundary {
+					case "after failed recovery", "manual clear":
+						d, _ := invoke()
+						if success(d) {
+							t.Fatalf("lost Enters reported success: %+v", d)
+						}
+						failedRecovery()
+						invalidate(boundary == "manual clear")
+						// Every route converges on the original batch's receipt.
+						invoke = func() (runtime.NudgeDelivery, error) {
+							return tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", owner, paste)
+						}
+					case "before paste":
+						invalidate(false)
+					}
+					paste = func(target, text string, timeout time.Duration) (int, error) {
+						if invalidated {
+							pastesAfterCleanup++
+						}
+						n, err := p.paste(original)(target, text, timeout)
+						if boundary == "after paste before Enter" {
+							invalidate(false)
+						}
+						return n, err
+					}
+					guardedAcceptance := false
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						joined := strings.Join(args, " ")
+						isSubmit := strings.Contains(joined, "send-keys") && strings.Contains(joined, " Enter")
+						if isSubmit && boundary == "after paste before Enter" {
+							invalidate(false) // race after Go's last read, inside tmux
+						}
+						out, err := p.exec(args)
+						if slices.Contains(args, "if-shell") && strings.Contains(joined, "capture-pane") &&
+							out != "draft-ownership-changed" && p.draft == "" && len(p.submitted) > 0 {
+							guardedAcceptance = true
+						}
+						if isSubmit && boundary == "between Enter resends" {
+							invalidate(false)
+						}
+						return out, err
+					}}
+					d, err := invoke()
+					if !invalidated {
+						t.Fatal("cleanup boundary was not exercised")
+					}
+					if p.enters != entersAtCleanup || pastesAfterCleanup != 0 {
+						t.Errorf("input after cleanup: Enters=%d pastes=%d", p.enters-entersAtCleanup, pastesAfterCleanup)
+					}
+					if success(d) && !guardedAcceptance {
+						t.Errorf("acknowledged without guarded acceptance: delivery=%+v err=%v", d, err)
+					}
+					if boundary == "manual clear" && (err != nil || d.Submit != runtime.NudgeSubmitOwnershipLost) {
+						t.Errorf("cleared pending receipt: delivery=%+v err=%v", d, err)
+					}
+					if boundary != "manual clear" && boundary != "before paste" && p.draft != original {
+						t.Errorf("withdrawn draft not preserved: %q", p.draft)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestNudgeWrappedOneLineRecovery(t *testing.T) {
+	for _, scenario := range []string{"recover", "resize", "human draft"} {
+		t.Run(scenario, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, p := newRecoveryPane(t)
+				p.width, p.loseEnter = 80, true
+				message := strings.Repeat("a", p.width+60)
+				rendering := message[:78] + "\n" + message[78:]
+				if scenario == "human draft" {
+					p.draft = "a human's unfinished instruction"
+				} else {
+					d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste(rendering))
+					if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed {
+						t.Fatalf("lost Enter: delivery=%+v err=%v", d, err)
+					}
+					shape := strings.Split(p.options[nudgeDraftShapeOption], ":")
+					if len(shape) != 5 || shape[4] != runtime.NudgePayloadDigest(rendering) {
+						t.Errorf("observed wrapping not recorded: %q", shape)
+					}
+					p.agePaste(t, 11*time.Minute)
+					if scenario == "resize" {
+						p.width = 100
+						p.draft = message[:98] + "\n" + message[98:]
+					}
+				}
+				before := p.draft
+				p.loseEnter, p.enters = false, 0
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next nudge", "next-owner", p.paste(""))
+				if scenario == "recover" {
+					if err != nil || !d.Landed() || !slices.Equal(p.submitted, []string{rendering, "next nudge"}) {
+						t.Fatalf("wrapped paste not recovered: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+					}
+				} else if !errors.Is(err, ErrNudgeDraftDeferred) || d.Landed() || p.enters != 0 || p.draft != before {
+					t.Fatalf("unproven input changed: delivery=%+v err=%v Enters=%d draft=%q", d, err, p.enters, p.draft)
 				}
 			})
 		})
@@ -733,28 +923,47 @@ func TestNudgeStartupFailureAllowsLaterRecovery(t *testing.T) {
 }
 
 func TestNudgeCompletionPreservesConcurrentPaste(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		first, p := newRecoveryPane(t)
-		second := NewTmux()
-		second.exec = &fakeExecutor{fn: p.exec}
-		secondSession := t.Name() + "/other-process"
-		t.Cleanup(func() { sessionNudgeLocks.Delete(secondSession) })
-		p.afterEnter = func() {
-			p.afterEnter = nil
-			p.loseEnter = true
-			d, err := second.nudgeSessionDeliveryWithIdentity(secondSession, "later paste", "", p.paste(""))
-			if err != nil || d.Submit != runtime.NudgeSubmitUnverified {
-				t.Fatalf("second delivery=%+v err=%v", d, err)
-			}
-		}
-		d, err := first.nudgeSessionDeliveryWithIdentity(t.Name(), "first paste", "", p.paste(""))
-		if err != nil || d.Submit != runtime.NudgeSubmitConfirmed {
-			t.Fatalf("first delivery=%+v err=%v", d, err)
-		}
-		if p.draft != "later paste" || p.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest("later paste") {
-			t.Fatalf("first sender erased second sender's provenance: draft=%q options=%v", p.draft, p.options)
-		}
-	})
+	for _, timing := range []string{"before observation", "after observation"} {
+		t.Run(timing, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				first, p := newRecoveryPane(t)
+				second := NewTmux()
+				second.exec = &fakeExecutor{fn: p.exec}
+				secondSession := t.Name() + "/other-process"
+				t.Cleanup(func() { sessionNudgeLocks.Delete(secondSession) })
+				replaced := false
+				replace := func() {
+					replaced = true
+					p.afterEnter = nil
+					p.loseEnter = true
+					d, err := second.nudgeSessionDeliveryWithIdentity(secondSession, "later paste", "", p.paste(""))
+					if err != nil || d.Submit != runtime.NudgeSubmitUnverified {
+						t.Fatalf("second delivery=%+v err=%v", d, err)
+					}
+				}
+				want := runtime.NudgeSubmitOwnershipLost
+				if timing == "before observation" {
+					p.afterEnter = replace
+				} else {
+					want = runtime.NudgeSubmitConfirmed
+					first.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						out, err := p.exec(args)
+						if !replaced && slices.Contains(args, "if-shell") && strings.Contains(strings.Join(args, " "), "capture-pane") && len(p.submitted) > 0 {
+							replace()
+						}
+						return out, err
+					}}
+				}
+				d, err := first.nudgeSessionDeliveryWithIdentity(t.Name(), "first paste", "", p.paste(""))
+				if err != nil || d.Submit != want || !replaced {
+					t.Fatalf("first delivery=%+v err=%v replaced=%v; want %s", d, err, replaced, want)
+				}
+				if p.draft != "later paste" || p.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest("later paste") {
+					t.Fatalf("first sender erased second sender's provenance: draft=%q options=%v", p.draft, p.options)
+				}
+			})
+		})
+	}
 }
 
 func TestNudgeUnverifiedClearsConsumedPasteProvenance(t *testing.T) {

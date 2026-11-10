@@ -2876,7 +2876,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	payloadBytes := 0
 	submitted := false
 	verifySubmit := false
-	resumeOwnedDraft := false
+	guardOwnedDraft := false
 	ownershipLost := false
 	defer func() {
 		if !delivered {
@@ -2885,9 +2885,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		// Confirmation is established by the submit observation. A later
 		// attachment cannot revoke it. Without confirmation, losing ownership
 		// ends retries: a subsequent empty composer must not invite a new paste.
-		if resumeOwnedDraft && !submitted && delivery.Submit != runtime.NudgeSubmitOwnershipLost {
+		if guardOwnedDraft && !submitted && delivery.Submit != runtime.NudgeSubmitOwnershipLost {
 			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
-			if ownershipLost || err != nil || strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+			digest := runtime.NudgePayloadDigest(message)
+			if ownershipLost || err != nil || (strings.TrimSpace(stored) != digest && strings.TrimSpace(stored) != "pending:"+digest) {
 				log.Printf("tmux nudge: cannot retain draft ownership for %q: %v", target, err)
 				delivery.Submit = runtime.NudgeSubmitOwnershipLost
 				deliveryErr = nil
@@ -3031,7 +3032,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
 				}
 			}
-			resumeOwnedDraft = true
+			guardOwnedDraft = true
 			resumeDraft = true
 			if id, _, err := t.nudgeDraftIdentity(session, target, runtime.NudgePayloadDigest(message)); err != nil {
 				return runtime.NudgeDelivery{}, err
@@ -3101,6 +3102,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				}
 			} else {
 				provenancePane = pane
+				guardOwnedDraft = true
 			}
 		}
 		written, err := sendText(target, message, t.cfg.NudgeReadyTimeout)
@@ -3172,7 +3174,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				return err
 			}
 		}
-		if resumeOwnedDraft {
+		if guardOwnedDraft {
 			if ownershipLost {
 				return ErrNudgeDraftDeferred
 			}
@@ -3200,7 +3202,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 					log.Printf("tmux nudge: observing delayed paste rendering for %q: %v", target, err)
 				}
 			}
-			if resumeOwnedDraft {
+			if guardOwnedDraft {
 				if ownershipLost {
 					return nil, ErrNudgeDraftDeferred
 				}
