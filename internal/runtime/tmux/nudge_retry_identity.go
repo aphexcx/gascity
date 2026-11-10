@@ -118,6 +118,10 @@ func (t *Tmux) recoveredNudgeStatus(session, target, id string) (runtime.NudgeSu
 			if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); owned && strings.TrimPrefix(strings.TrimSpace(stored), "pending:") == digest {
 				return "", nil
 			}
+			// Input still present without ownership proof is not evidence of
+			// acceptance. Preserve it and require terminal attention instead
+			// of acknowledging a reminder whose recovery never submitted.
+			return runtime.NudgeSubmitOwnershipLost, nil
 		}
 		return runtime.NudgeSubmitUnverified, nil
 	}

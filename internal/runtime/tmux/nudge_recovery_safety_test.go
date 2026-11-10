@@ -584,6 +584,32 @@ func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
 			}
 		})
 	})
+	t.Run("survivor reports invalidation after unsuccessful recovery", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			original := "[Pasted text #12 +1 lines]"
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "first\nremaining", "batch-owner", p.paste(original)); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			_, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", "batch-owner", p.paste(""))
+			if !errors.Is(err, ErrNudgeDraftDeferred) || len(p.submitted) != 0 || !strings.HasPrefix(p.options[recoveredNudgeOption("batch-owner")], "pending:") {
+				t.Fatalf("failed recovery did not leave pending input: err=%v submitted=%v options=%v", err, p.submitted, p.options)
+			}
+			if err := (&Provider{tm: tm}).ReleaseNudgeReservation(t.Name(), "batch-owner", true); err != nil {
+				t.Fatal(err)
+			}
+			p.loseEnter, p.enters = false, 0
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "remaining", "batch-owner", func(string, string, time.Duration) (int, error) {
+				t.Fatal("invalidated survivor was pasted again")
+				return 0, nil
+			})
+			if err != nil || d.Submit != runtime.NudgeSubmitOwnershipLost || p.enters != 0 || p.draft != original || len(p.submitted) != 0 {
+				t.Fatalf("unsubmitted survivor appeared delivered: delivery=%+v err=%v enters=%d draft=%q", d, err, p.enters, p.draft)
+			}
+		})
+	})
 	t.Run("survivor acknowledges recovery already in progress", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			tm, p := newRecoveryPane(t)
