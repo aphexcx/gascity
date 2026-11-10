@@ -105,6 +105,9 @@ func (p *recoveryPane) exec(args []string) (string, error) {
 			}
 		case strings.HasPrefix(command, "set-option"):
 			for _, statement := range strings.Split(command, " ; ") {
+				if strings.HasPrefix(statement, "display-message") {
+					return "draft-ownership-changed", nil
+				}
 				fields := strings.Fields(statement)
 				p.options[fields[len(fields)-2]] = strings.Trim(fields[len(fields)-1], "'\"")
 			}
@@ -260,6 +263,28 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 // A withdrawn batch cannot send another submit or acknowledge a survivor on
 // any reservation-bearing route, regardless of where cleanup overtakes it.
 func TestNudgeReservationInvalidationBoundaries(t *testing.T) {
+	for _, id := range []string{"", "owner"} {
+		t.Run("attached empty composer/"+id, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, p := newRecoveryPane(t)
+				p.attached = true
+				pastes := 0
+				paste := func(target, text string, timeout time.Duration) (int, error) {
+					pastes++
+					return p.paste("")(target, text, timeout)
+				}
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "reminder", id, paste)
+				if !errors.Is(err, ErrNudgeDraftDeferred) || d.Landed() || pastes != 0 || p.enters != 0 || p.draft != "" {
+					t.Fatalf("attached input changed: delivery=%+v err=%v pastes=%d Enters=%d draft=%q", d, err, pastes, p.enters, p.draft)
+				}
+				p.attached = false
+				d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), "reminder", id, paste)
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 1 || !slices.Equal(p.submitted, []string{"reminder"}) {
+					t.Fatalf("detached retry lost: delivery=%+v err=%v pastes=%d submitted=%v", d, err, pastes, p.submitted)
+				}
+			})
+		})
+	}
 	for _, path := range []string{"fresh paste", "resume", "recovery", "survivor retry"} {
 		for _, boundary := range []string{"before paste", "after paste before Enter", "between Enter resends", "after failed recovery", "manual clear"} {
 			t.Run(path+"/"+boundary, func(t *testing.T) {

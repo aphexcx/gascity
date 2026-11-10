@@ -3097,8 +3097,8 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			}
 			if err != nil {
 				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)
-				if deliveryID != "" {
-					return runtime.NudgeDelivery{}, fmt.Errorf("establishing retry paste ownership: %w", err)
+				if deliveryID != "" || errors.Is(err, ErrNudgeDraftDeferred) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("establishing paste ownership: %w", err)
 				}
 			} else {
 				provenancePane = pane

@@ -97,9 +97,15 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 		return err
 	}
 	set := fmt.Sprintf("set-option -p -t %q %s ", pane, nudgeDraftPayloadOption)
-	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane), "#{==:#{session_attached},0}",
-		set+"pending:"+runtime.NudgePayloadDigest(message), set+"''")
-	return err
+	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane), "#{==:#{session_attached},0}",
+		set+"pending:"+runtime.NudgePayloadDigest(message), set+"'' ; display-message -p draft-ownership-changed")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("%w: target %q is attached before paste", ErrNudgeDraftDeferred, pane)
+	}
+	return nil
 }
 
 // confirmNudgeDraftProvenance promotes a full paste only if no attachment
