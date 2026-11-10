@@ -98,6 +98,14 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	if time.Since(since) < age {
 		return false, since, fmt.Errorf("%w: own paste is younger than recovery age", ErrNudgeDraftDeferred)
 	}
+	if id != "" {
+		// The original Enter may take effect before recovery's first
+		// observation. Persist intent before observing acceptance as well
+		// as before sending another key.
+		if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), recoveredNudgeOption(id), "pending:"+digest); err != nil {
+			return false, since, fmt.Errorf("%w: recording pending recovery: %w", ErrNudgeDraftDeferred, err)
+		}
+	}
 	var observeErr error
 	observe := func() (paneSubmitObservation, error) {
 		lines, err := t.captureOwnedNudgeDraftInput(target, digest)
@@ -113,18 +121,10 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 		}
 		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current != ""}, nil
 	}
-	recoveryStarted := false
 	send := func() error {
 		if _, _, err := t.nudgeDraftIdentity(session, target, digest); err != nil {
 			observeErr = err
 			return err
-		}
-		if id != "" && !recoveryStarted {
-			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), recoveredNudgeOption(id), "pending:"+digest); err != nil {
-				observeErr = fmt.Errorf("recording pending recovery: %w", err)
-				return observeErr
-			}
-			recoveryStarted = true
 		}
 		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target))
 		observeErr = err
