@@ -179,6 +179,9 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 	}
 	cfg, err := loadCityConfig(cityPath, configStderr)
 	if err != nil {
+		if failure, healthErr := readConfigLoadFailureHook(cityPath); healthErr == nil && failure != nil {
+			err = fmt.Errorf("%s; current load: %w", configLoadFailureMessage(failure), err)
+		}
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
 		}

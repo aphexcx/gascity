@@ -115,6 +115,8 @@ type CityRuntime struct {
 	watchMu         sync.Mutex
 	watchCleanup    func()
 
+	configLoadHealth *configLoadHealth
+
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
@@ -301,6 +303,8 @@ type CityRuntimeParams struct {
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
 
+	ConfigLoadHealth *configLoadHealth
+
 	Cfg                     *config.City
 	SP                      runtime.Provider
 	Publication             supervisor.PublicationConfig
@@ -377,6 +381,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if configDirty == nil {
 		configDirty = &atomic.Bool{}
 	}
+	loadHealth := p.ConfigLoadHealth
+	if loadHealth == nil {
+		loadHealth = &configLoadHealth{}
+	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
@@ -433,6 +441,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		configLoadHealth:        loadHealth,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -1201,7 +1210,7 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(manualReload)
 	}()
-	configChanged := dirty.Swap(false)
+	configChanged := dirty.Swap(false) || cr.configLoadHealth.snapshot() != nil
 	if configChanged {
 		dirtyCleared = true
 		source := reloadSourceWatch
@@ -1233,6 +1242,15 @@ func (cr *CityRuntime) tick(
 				completeManualReload()
 			}
 		}
+	}
+	// A retained config still points at mutable pack files. Building desired
+	// state here would fingerprint the rejected contents through those paths.
+	// Retry on the next tick; no new watch event is needed to recover.
+	if cr.configLoadHealth.snapshot() != nil {
+		completeManualReload()
+		completion = TraceCompletionCompleted
+		tickCompleted = true
+		return
 	}
 	if ctx.Err() != nil {
 		return
@@ -2021,16 +2039,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
 	if err != nil {
-		if result != nil {
-			for _, warning := range result.Warnings {
-				appendWarning(warning)
-			}
-		} else {
-			for _, warning := range reloadWarningsFromError(err) {
-				appendWarning(warning)
-			}
+		if cr.configLoadHealth == nil {
+			cr.configLoadHealth = &configLoadHealth{}
 		}
-		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		firstFailure := cr.configLoadHealth.record(err, time.Now())
+		if result != nil {
+			warnings = append(warnings, result.Warnings...)
+		} else {
+			warnings = append(warnings, reloadWarningsFromError(err)...)
+		}
+		if firstFailure {
+			for _, warning := range warnings {
+				fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
+			}
+			fmt.Fprintf(cr.stderr, "%s: %s\n", cr.logPrefix, configLoadFailureMessage(cr.configLoadHealth.snapshot())) //nolint:errcheck // best-effort stderr
+		}
 		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
 			trace.RecordConfigReload("", "", TraceOutcomeFailed, source, nil, nil, false, warnings, err)
@@ -2041,6 +2064,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Warnings: warnings,
 		}
 	}
+	cr.configLoadHealth.clear()
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
@@ -3498,6 +3522,9 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
+	if cr.configLoadHealth.snapshot() != nil {
+		return
+	}
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into
