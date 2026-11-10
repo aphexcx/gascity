@@ -128,7 +128,9 @@ type Config struct {
 	NudgeIdleTimeout time.Duration
 	// NudgeOwnPasteAge is the minimum age for recovery of an earlier one-shot owned paste.
 	NudgeOwnPasteAge time.Duration
-	// DisableOpaquePasteRecovery disables line-count matching of Claude paste
+	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
+	NudgeReservationAge time.Duration
+	// DisableOpaquePasteRecovery disables recovery of owned Claude paste
 	// placeholders. The zero value keeps recovery enabled.
 	DisableOpaquePasteRecovery bool
 	DebounceMs                 int
@@ -159,14 +161,15 @@ type Config struct {
 // DefaultConfig returns a Config with the original hardcoded values.
 func DefaultConfig() Config {
 	return Config{
-		SetupTimeout:       10 * time.Second,
-		NudgeReadyTimeout:  10 * time.Second,
-		NudgeRetryInterval: 500 * time.Millisecond,
-		NudgeLockTimeout:   30 * time.Second,
-		NudgeIdleTimeout:   30 * time.Second,
-		NudgeOwnPasteAge:   5 * time.Second,
-		DebounceMs:         500,
-		DisplayMs:          5000,
+		SetupTimeout:        10 * time.Second,
+		NudgeReadyTimeout:   10 * time.Second,
+		NudgeRetryInterval:  500 * time.Millisecond,
+		NudgeLockTimeout:    30 * time.Second,
+		NudgeIdleTimeout:    30 * time.Second,
+		NudgeOwnPasteAge:    15 * time.Second,
+		NudgeReservationAge: 10 * time.Minute,
+		DebounceMs:          500,
+		DisplayMs:           5000,
 	}
 }
 
@@ -2834,6 +2837,15 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
+	if deliveryID != "" {
+		recovered, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), recoveredNudgeOption(deliveryID))
+		if err != nil {
+			return runtime.NudgeDelivery{}, fmt.Errorf("reading recovered nudge receipt: %w", err)
+		}
+		if strings.TrimSpace(recovered) == runtime.NudgePayloadDigest(message) {
+			return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
+		}
+	}
 	heldDraft, heldState := "", "unowned_draft"
 	var heldSince time.Time
 	defer func() {
@@ -2889,8 +2901,18 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				log.Printf("tmux nudge: retiring nudge retry ownership for %q: %v; any remaining owned draft requires attention", target, err)
 			}
 		}
-		if submitted {
-			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+		clearProvenance := submitted
+		if verifySubmit && !submitted {
+			content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+			if err == nil {
+				draft, observed := nudgeComposer(content, t.resolveIdlePromptPrefix(session))
+				clearProvenance = observed && draft == ""
+			} else {
+				log.Printf("tmux nudge: checking completed paste for %q: %v", target, err)
+			}
+		}
+		if clearProvenance {
+			if err := t.clearNudgeDraftProvenance(target, runtime.NudgePayloadDigest(message)); err != nil {
 				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
 			}
 		}
@@ -2971,6 +2993,15 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 					deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
 				}
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
+			}
+			if collapsed {
+				shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft rendering: %w", deferred, err)
+				}
+				if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); !owned {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: placeholder differs from the observed paste", deferred)
+				}
 			}
 			attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
 			if err != nil {
@@ -3069,6 +3100,11 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
+	if verifySubmit && !resumeDraft {
+		if err := t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session)); err != nil {
+			log.Printf("tmux nudge: recording pasted rendering for %q: %v", target, err)
+		}
+	}
 
 	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat

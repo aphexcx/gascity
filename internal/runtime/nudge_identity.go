@@ -2,6 +2,38 @@ package runtime
 
 import "context"
 
+// NudgeReservationProvider retires a delivery's retry reservation without
+// modifying composer input. Providers without reservations need no operation.
+type NudgeReservationProvider interface {
+	ReleaseNudgeReservation(name, id string) error
+}
+
+// ReleaseNudgeReservation releases an optional provider reservation by identity.
+func ReleaseNudgeReservation(p Provider, name, id string) error {
+	if id == "" {
+		return nil
+	}
+	if rp, ok := p.(NudgeReservationProvider); ok {
+		return rp.ReleaseNudgeReservation(name, id)
+	}
+	return nil
+}
+
+// NudgeRetryOwnerError identifies the queued delivery that must run before this
+// caller can use the composer. Cause retains the transport's deferred sentinel.
+type NudgeRetryOwnerError struct {
+	ID    string
+	Cause error
+}
+
+// Error describes the reservation blocking this delivery.
+func (e *NudgeRetryOwnerError) Error() string {
+	return "composer reserved by retry owner " + e.ID + ": " + e.Cause.Error()
+}
+
+// Unwrap preserves the delivery deferral classification.
+func (e *NudgeRetryOwnerError) Unwrap() error { return e.Cause }
+
 type nudgeIdentityKey struct{}
 
 // WithNudgeIdentity carries a caller's stable retry identity through session

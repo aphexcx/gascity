@@ -2904,12 +2904,17 @@
         },
         "nudge_own_paste_age": {
           "type": "string",
-          "description": "NudgeOwnPasteAge is the minimum age before the next nudge can submit an\nearlier one-shot owned Claude paste while idle. Caller-owned queued retries\nretain their retry owner. Defaults to \"5s\".",
-          "default": "5s"
+          "description": "NudgeOwnPasteAge is the minimum age before the next nudge can submit an\nearlier owned Claude paste while idle. The default \"15s\" exceeds the\nsender's submit window. Queued retries retain ownership until released\nor nudge_reservation_age expires.",
+          "default": "15s"
+        },
+        "nudge_reservation_age": {
+          "type": "string",
+          "description": "NudgeReservationAge bounds a retry caller's exclusive ownership of its\npaste, measured from the paste time. Defaults to \"10m\". A dead, expired,\ndropped or withdrawn queue item releases ownership immediately; this\nbound covers a lost caller or failed release. Recovery still requires\nmatching paste provenance, a detached pane and an idle composer.",
+          "default": "10m"
         },
         "nudge_opaque_paste_recovery": {
           "type": "boolean",
-          "description": "NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its\nrecorded line count while ownership remains intact. Defaults to true.",
+          "description": "NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its\nexact observed placeholder, or inline text to match its recorded digest,\nwhile ownership remains intact. Defaults to true. False also disables\nsame-message retries of collapsed pastes.",
           "default": true
         },
         "debounce_ms": {

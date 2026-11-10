@@ -15,12 +15,12 @@ const (
 	nudgeHeldOption       = "@gc-nudge-held"
 )
 
-// ownedPasteShape requires both a confirmed pane digest and its matching shape.
-// Pending, legacy digest-only, invalidated and edited pastes cannot recover a
-// different payload: there is no evidence of their shape and age.
+// ownedPasteShape requires a pane digest and a rendering observed after the full
+// paste. Legacy line counts cannot establish which opaque paste is in the pane.
 func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 	parts := strings.Split(shape, ":")
-	if len(parts) != 3 || parts[0] != stored || len(stored) != len(runtime.NudgePayloadDigest("")) {
+	stored = strings.TrimPrefix(stored, "pending:")
+	if len(parts) != 5 || parts[0] != stored || len(stored) != len(runtime.NudgePayloadDigest("")) || parts[4] == "" {
 		return time.Time{}, false
 	}
 	if _, err := strconv.ParseUint(stored, 16, 64); err != nil {
@@ -34,41 +34,21 @@ func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 	if err != nil || lines < 0 {
 		return time.Time{}, false
 	}
-	match := claudeCollapsedPaste.FindStringSubmatch(draft)
-	if match == nil {
-		return time.Time{}, false
+	if strings.Contains(draft, "[Pasted text #") {
+		return time.UnixMilli(at), claudeCollapsedPaste.MatchString(draft) && runtime.NudgePayloadDigest(draft) == parts[4]
 	}
-	shown := 0
-	if match[1] != "" {
-		shown, err = strconv.Atoi(match[1])
-		if err != nil {
-			return time.Time{}, false
-		}
-	}
-	return time.UnixMilli(at), shown == lines
+	return time.UnixMilli(at), normalizedNudgeDigest(draft) == parts[3]
 }
 
-// recoverEarlierNudgePaste submits an earlier one-shot owned placeholder, never
-// another caller's queued retry. Activity with the placeholder still visible is
-// a hold, not an acknowledgement, and recoverStagedDraft checks before every Enter.
+// recoverEarlierNudgePaste submits a proven earlier paste once its age and retry
+// reservation permit recovery. Activity with the paste still visible is a hold,
+// not an acknowledgement, and recoverStagedDraft checks before every Enter.
 func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message, requestedID string) (bool, time.Time, error) {
-	if !claudeCollapsedPaste.MatchString(draft) {
-		return false, time.Time{}, nil
-	}
 	stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: reading paste ownership: %w", ErrNudgeDraftDeferred, err)
 	}
 	stored = strings.TrimSpace(stored)
-	if stored == runtime.NudgePayloadDigest(message) {
-		id, _, err := t.nudgeDraftIdentity(target, stored)
-		if err != nil {
-			return false, time.Time{}, err
-		}
-		if id == "" || requestedID == id {
-			return false, time.Time{}, nil
-		}
-	}
 	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: reading paste shape: %w", ErrNudgeDraftDeferred, err)
@@ -77,6 +57,7 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	if !owned {
 		return false, time.Time{}, nil
 	}
+	digest := strings.TrimPrefix(stored, "pending:")
 	if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: %w: checking earlier paste ownership: %w", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned, err)
 	}
@@ -87,12 +68,27 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	if strings.TrimSpace(attached) != "0" {
 		return false, time.Time{}, fmt.Errorf("%w: %w: earlier paste is not confirmed detached", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
 	}
-	id, known, err := t.nudgeDraftIdentity(target, stored)
+	id, known, err := t.nudgeDraftIdentity(target, digest)
 	if err != nil {
 		return false, since, fmt.Errorf("%w: %w", ErrNudgeDraftDeferred, err)
 	}
-	if !known || id != "" {
+	if !known {
 		return false, since, fmt.Errorf("%w: earlier paste has another or unknown retry owner", ErrNudgeDraftDeferred)
+	}
+	if strings.HasPrefix(stored, "pending:") {
+		if err := t.confirmNudgeDraftDigest(target, digest); err != nil {
+			return false, since, fmt.Errorf("%w: promoting pending paste: %w", ErrNudgeDraftDeferred, err)
+		}
+	}
+	if digest == runtime.NudgePayloadDigest(message) && (id == "" || requestedID == id) {
+		return false, since, nil
+	}
+	reservationAge := t.cfg.NudgeReservationAge
+	if reservationAge <= 0 {
+		reservationAge = DefaultConfig().NudgeReservationAge
+	}
+	if id != "" && time.Since(since) < reservationAge {
+		return false, since, &runtime.NudgeRetryOwnerError{ID: id, Cause: ErrNudgeDraftDeferred}
 	}
 	age := t.cfg.NudgeOwnPasteAge
 	if age <= 0 {
@@ -103,7 +99,7 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	}
 	var observeErr error
 	observe := func() (paneSubmitObservation, error) {
-		lines, err := t.captureOwnedNudgeDraftInput(target, stored)
+		lines, err := t.captureOwnedNudgeDraftInput(target, digest)
 		if err != nil {
 			observeErr = err
 			return paneSubmitObservation{}, err
@@ -117,7 +113,7 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current != ""}, nil
 	}
 	send := func() error {
-		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, stored, t.nudgeSubmitKeySequence(target))
+		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target))
 		observeErr = err
 		return err
 	}
@@ -128,7 +124,18 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 		}
 		return false, since, fmt.Errorf("%w: own paste remains held (%s)", ErrNudgeDraftDeferred, outcome)
 	}
+	if id != "" {
+		// Expiry may overtake a live queue owner whose retry was delayed. Keep
+		// its acknowledgement until that owner terminalizes, so it cannot paste
+		// again after another caller recovered its input.
+		if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), recoveredNudgeOption(id), digest); err != nil {
+			return false, since, fmt.Errorf("%w: recording recovered owner receipt: %w", ErrNudgeDraftDeferred, err)
+		}
+	}
 	log.Printf("nudge: own paste held since %s submitted target=%q", since.UTC().Format(time.RFC3339Nano), target)
+	if err := t.clearNudgeDraftProvenance(target, digest); err != nil {
+		return false, since, fmt.Errorf("%w: clearing recovered paste: %w", ErrNudgeDraftDeferred, err)
+	}
 	return true, since, nil
 }
 

@@ -1611,11 +1611,20 @@ type SessionConfig struct {
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
 	// NudgeOwnPasteAge is the minimum age before the next nudge can submit an
-	// earlier one-shot owned Claude paste while idle. Caller-owned queued retries
-	// retain their retry owner. Defaults to "5s".
-	NudgeOwnPasteAge string `toml:"nudge_own_paste_age,omitempty" jsonschema:"default=5s"`
+	// earlier owned Claude paste while idle. The default "15s" exceeds the
+	// sender's submit window. Queued retries retain ownership until released
+	// or nudge_reservation_age expires.
+	NudgeOwnPasteAge string `toml:"nudge_own_paste_age,omitempty" jsonschema:"default=15s"`
+	// NudgeReservationAge bounds a retry caller's exclusive ownership of its
+	// paste, measured from the paste time. Defaults to "10m". A dead, expired,
+	// dropped or withdrawn queue item releases ownership immediately; this
+	// bound covers a lost caller or failed release. Recovery still requires
+	// matching paste provenance, a detached pane and an idle composer.
+	NudgeReservationAge string `toml:"nudge_reservation_age,omitempty" jsonschema:"default=10m"`
 	// NudgeOpaquePasteRecovery allows a collapsed Claude paste to match its
-	// recorded line count while ownership remains intact. Defaults to true.
+	// exact observed placeholder, or inline text to match its recorded digest,
+	// while ownership remains intact. Defaults to true. False also disables
+	// same-message retries of collapsed pastes.
 	NudgeOpaquePasteRecovery *bool `toml:"nudge_opaque_paste_recovery,omitempty" jsonschema:"default=true"`
 	// DebounceMs is the default debounce interval in milliseconds for send-keys.
 	// Defaults to 500.
@@ -1729,9 +1738,14 @@ func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
 	return durationOr(s.NudgeLockTimeout, 30*time.Second)
 }
 
-// NudgeOwnPasteAgeDuration returns the owned-paste recovery age, defaulting to 5s.
+// NudgeOwnPasteAgeDuration returns the owned-paste recovery age, defaulting to 15s.
 func (s *SessionConfig) NudgeOwnPasteAgeDuration() time.Duration {
-	return durationOr(s.NudgeOwnPasteAge, 5*time.Second)
+	return durationOr(s.NudgeOwnPasteAge, 15*time.Second)
+}
+
+// NudgeReservationAgeDuration returns the retry reservation bound, defaulting to 10m.
+func (s *SessionConfig) NudgeReservationAgeDuration() time.Duration {
+	return durationOr(s.NudgeReservationAge, 10*time.Minute)
 }
 
 // NudgeOpaquePasteRecoveryEnabled reports whether collapsed-paste matching is enabled.

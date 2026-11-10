@@ -1513,9 +1513,12 @@ export type InboundDelivery = {
     expected_bytes: number;
     members?: Array<InboundDeliveryMember> | null;
     receipt_id: string;
+    /**
+     * One of delivered, no_route, partial, failed, held, pending. When held, no complete copy landed: retain the message and retry after the composer clears. Held members carry state, since and age_ms. Never automatically redeliver pending.
+     */
     status: string;
     /**
-     * When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds.
+     * When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. This restriction does not apply to held: retain the message and retry after the composer clears.
      */
     terminal?: boolean;
 };
@@ -1528,9 +1531,12 @@ export type InboundDeliveryMember = {
     held?: NudgeHeld;
     selector?: string;
     session_id: string;
+    /**
+     * One of delivered, no_route, partial, failed, held, pending. When held, nothing landed: retain the message and retry after the composer clears. The held object carries state, since and age_ms. Never automatically redeliver pending.
+     */
     status: string;
     /**
-     * When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds.
+     * When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. This restriction does not apply to held: retain the message and retry after the composer clears.
      */
     terminal?: boolean;
 };

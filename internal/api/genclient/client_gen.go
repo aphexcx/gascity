@@ -2320,9 +2320,11 @@ type InboundDelivery struct {
 	ExpectedBytes  int64                    `json:"expected_bytes"`
 	Members        *[]InboundDeliveryMember `json:"members,omitempty"`
 	ReceiptId      string                   `json:"receipt_id"`
-	Status         string                   `json:"status"`
 
-	// Terminal When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds.
+	// Status One of delivered, no_route, partial, failed, held, pending. When held, no complete copy landed: retain the message and retry after the composer clears. Held members carry state, since and age_ms. Never automatically redeliver pending.
+	Status string `json:"status"`
+
+	// Terminal When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. This restriction does not apply to held: retain the message and retry after the composer clears.
 	Terminal *bool `json:"terminal,omitempty"`
 }
 
@@ -2335,9 +2337,11 @@ type InboundDeliveryMember struct {
 	Held           *NudgeHeld `json:"held,omitempty"`
 	Selector       *string    `json:"selector,omitempty"`
 	SessionId      string     `json:"session_id"`
-	Status         string     `json:"status"`
 
-	// Terminal When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds.
+	// Status One of delivered, no_route, partial, failed, held, pending. When held, nothing landed: retain the message and retry after the composer clears. The held object carries state, since and age_ms. Never automatically redeliver pending.
+	Status string `json:"status"`
+
+	// Terminal When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. This restriction does not apply to held: retain the message and retry after the composer clears.
 	Terminal *bool `json:"terminal,omitempty"`
 }
 

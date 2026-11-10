@@ -26,12 +26,12 @@ func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
 	if cfg.SocketName != "city" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
 	}
-	if cfg.NudgeOwnPasteAge != 5*time.Second || cfg.DisableOpaquePasteRecovery {
+	if cfg.NudgeOwnPasteAge != 15*time.Second || cfg.NudgeReservationAge != 10*time.Minute || cfg.DisableOpaquePasteRecovery {
 		t.Fatalf("recovery defaults not wired: %+v", cfg)
 	}
 	disabled := false
-	cfg = tmuxConfigFromSession(config.SessionConfig{NudgeOwnPasteAge: "30s", NudgeOpaquePasteRecovery: &disabled}, "city", "")
-	if cfg.NudgeOwnPasteAge != 30*time.Second || !cfg.DisableOpaquePasteRecovery {
+	cfg = tmuxConfigFromSession(config.SessionConfig{NudgeOwnPasteAge: "30s", NudgeReservationAge: "20m", NudgeOpaquePasteRecovery: &disabled}, "city", "")
+	if cfg.NudgeOwnPasteAge != 30*time.Second || cfg.NudgeReservationAge != 20*time.Minute || !cfg.DisableOpaquePasteRecovery {
 		t.Fatalf("recovery overrides not wired: %+v", cfg)
 	}
 }

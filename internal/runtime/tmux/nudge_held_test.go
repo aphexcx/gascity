@@ -30,7 +30,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 				prior := runtime.NudgePayloadDigest("one\ntwo\nthree")
 				options := map[string]string{
 					nudgeDraftPayloadOption:    prior,
-					"@gc-nudge-draft-shape":    fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli()),
+					"@gc-nudge-draft-shape":    fmt.Sprintf("%s:%d:2:%s:%s", prior, time.Now().Add(-time.Minute).UnixMilli(), runtime.NudgePayloadDigest("onetwothree"), runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")),
 					"@gc-nudge-draft-identity": prior + ":",
 				}
 				if strings.HasPrefix(scenario, "retry owner") {
@@ -50,7 +50,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					busy = true
 				}
 				if scenario == "young" {
-					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2", prior, time.Now().UnixMilli())
+					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2:%s:%s", prior, time.Now().UnixMilli(), runtime.NudgePayloadDigest("onetwothree"), runtime.NudgePayloadDigest(draft))
 				}
 				if scenario == "disabled" {
 					tm.cfg.DisableOpaquePasteRecovery = true
@@ -151,7 +151,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 					stagingStartup, pastes = false, 0
 					busy = false
 					options[nudgeDraftPayloadOption] = prior
-					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2", prior, time.Now().Add(-time.Minute).UnixMilli())
+					options[nudgeDraftShapeOption] = fmt.Sprintf("%s:%d:2:%s:%s", prior, time.Now().Add(-time.Minute).UnixMilli(), runtime.NudgePayloadDigest("onetwothree"), runtime.NudgePayloadDigest(draft))
 				}
 				message, identity := "next nudge", ""
 				if scenario == "retry owner identical" {
@@ -213,7 +213,7 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 
 func TestOwnedPasteShape(t *testing.T) {
 	digest := runtime.NudgePayloadDigest("one\ntwo\nthree")
-	shape := digest + ":1700000000000:2"
+	shape := digest + ":1700000000000:2:" + runtime.NudgePayloadDigest("onetwothree") + ":" + runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")
 	for _, tc := range []struct {
 		name, stored, shape, draft string
 		want                       bool
@@ -221,7 +221,10 @@ func TestOwnedPasteShape(t *testing.T) {
 		{"owned", digest, shape, "[Pasted text #12 +2 lines]", true},
 		{"wrong count", digest, shape, "[Pasted text #12 +3 lines]", false},
 		{"no provenance", "", shape, "[Pasted text #12 +2 lines]", false},
-		{"pending", "pending:" + digest, shape, "[Pasted text #12 +2 lines]", false},
+		{"pending observed", "pending:" + digest, shape, "[Pasted text #12 +2 lines]", true},
+		{"different counter", digest, shape, "[Pasted text #13 +2 lines]", false},
+		{"inline whitespace", digest, shape, "one two\nthree", true},
+		{"unobserved pending", "pending:" + digest, digest + ":1700000000000:2:" + runtime.NudgePayloadDigest("onetwothree") + ":", "[Pasted text #12 +2 lines]", false},
 		{"different digest", runtime.NudgePayloadDigest("another"), shape, "[Pasted text #12 +2 lines]", false},
 		{"legacy no shape", digest, "", "[Pasted text #12 +2 lines]", false},
 		{"edited", digest, shape, "[Pasted text #12 +2 lines] human", false},

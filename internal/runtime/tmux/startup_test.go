@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -1452,6 +1453,36 @@ func TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline(t *testing.
 // integration proof: doStartSession's Step 6 wires sendKeys through
 // sendStartupNudgeWithRetry, so a nudge that confirms on retry still lets the
 // session start succeed. Backoffs are shrunk to keep the test fast.
+func TestStartupNudgeReservationReleasedOnFailure(t *testing.T) {
+	for _, cancelSend := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cancel=%t", cancelSend), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				hardErr := errors.New("send failed")
+				ops := &fakeStartOps{hasSessionResult: true, sendKeysErrs: []error{ErrNudgeSubmitUnconfirmed, hardErr}}
+				if cancelSend {
+					ops.sendKeysHook = cancel
+				}
+				released := 0
+				ops.releaseNudgeHook = func(name, message string) {
+					if name != "test" || message != "start working" {
+						t.Fatalf("release(%q, %q)", name, message)
+					}
+					released++
+				}
+				err := launchOrchestration(ctx, ops, "test", runtime.Config{Nudge: "start working"}, time.Second)
+				if err == nil || (cancelSend && !errors.Is(err, context.Canceled)) || (!cancelSend && !errors.Is(err, hardErr)) {
+					t.Fatalf("launch error = %v", err)
+				}
+				if released != 1 {
+					t.Fatalf("released reservation %d times, want once", released)
+				}
+			})
+		})
+	}
+}
+
 func TestDoStartSession_RetriesUnconfirmedStartupNudge(t *testing.T) {
 	origBackoffs := startupNudgeRetryBackoffs
 	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}

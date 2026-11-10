@@ -1776,6 +1776,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
+		defer ops.releaseNudge(name, cfg.Nudge)
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
@@ -1816,9 +1817,6 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if cfg.Nudge != "" {
-		ops.releaseNudge(name, cfg.Nudge)
 	}
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 

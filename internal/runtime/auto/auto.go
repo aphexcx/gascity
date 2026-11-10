@@ -310,6 +310,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
 }
 
+// ReleaseNudgeReservation forwards cleanup to the session's routed provider.
+func (p *Provider) ReleaseNudgeReservation(name, id string) error {
+	return runtime.ReleaseNudgeReservation(p.route(name), name, id)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {

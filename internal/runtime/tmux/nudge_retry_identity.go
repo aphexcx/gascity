@@ -10,6 +10,37 @@ import (
 
 const nudgeDraftIdentityOption = "@gc-nudge-draft-identity"
 
+func recoveredNudgeOption(id string) string {
+	return "@gc-nudge-recovered-" + runtime.NudgePayloadDigest(id)
+}
+
+// ReleaseNudgeReservation retires only the named caller's reservation. It never
+// sends keys or clears input, including when the pane has changed owners.
+func (p *Provider) ReleaseNudgeReservation(name, id string) error {
+	if id == "" {
+		return nil
+	}
+	target := name
+	if pane, err := p.tm.FindAgentPane(name); err == nil && pane != "" {
+		target = pane
+	}
+	if _, err := p.tm.run("set-option", "-p", "-u", "-t", exactPaneTarget(target), recoveredNudgeOption(id)); err != nil {
+		return err
+	}
+	value, err := p.tm.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftIdentityOption)
+	if err != nil {
+		return err
+	}
+	parts := strings.SplitN(strings.TrimSpace(value), ":", 2)
+	if len(parts) != 2 || parts[1] != id {
+		return nil
+	}
+	_, err = p.tm.run("if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{==:#{%s},%s}", nudgeDraftIdentityOption, strings.TrimSpace(value)),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftIdentityOption, parts[0] + ":"}))
+	return err
+}
+
 // A nonempty identity reserves submission for the caller that owns retries.
 // A known empty identity permits recovery of a one-shot delivery. Missing
 // provenance is unknown, so a different payload cannot recover it.

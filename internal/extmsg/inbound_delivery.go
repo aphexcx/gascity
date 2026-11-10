@@ -72,12 +72,12 @@ type InboundDeliveryMember struct {
 	// because it is what an operator recognizes in a transcript membership
 	// list when SessionID is an opaque id.
 	Selector string                `json:"selector,omitempty"`
-	Status   InboundDeliveryStatus `json:"status"`
+	Status   InboundDeliveryStatus `json:"status" doc:"One of delivered, no_route, partial, failed, held, pending. When held, nothing landed: retain the message and retry after the composer clears. The held object carries state, since and age_ms. Never automatically redeliver pending."`
 	// Held identifies the composer hold and its age when Status is held.
 	Held *runtime.NudgeHeld `json:"held,omitempty"`
 	// Terminal marks a pending hold that cannot progress automatically.
 	// Stop polling and do not redeliver; operator attention is required.
-	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds."`
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. This restriction does not apply to held: retain the message and retry after the composer clears."`
 	// DeliveredBytes/ExpectedBytes are for THIS member's reminder, which is
 	// not the same string as any other member's — see [InboundDelivery].
 	DeliveredBytes int `json:"delivered_bytes"`
@@ -132,11 +132,11 @@ type InboundDelivery struct {
 	// ReceiptID identifies this fan-out, so two deliveries of identical text
 	// are distinguishable in logs. Non-empty whenever the object is present.
 	ReceiptID string                `json:"receipt_id"`
-	Status    InboundDeliveryStatus `json:"status"`
+	Status    InboundDeliveryStatus `json:"status" doc:"One of delivered, no_route, partial, failed, held, pending. When held, no complete copy landed: retain the message and retry after the composer clears. Held members carry state, since and age_ms. Never automatically redeliver pending."`
 	// Terminal marks a pending hold with at least one terminal member.
 	// Stop polling and do not redeliver; no sibling can repair that loss.
 	// Omission preserves the status-only contract for older readers.
-	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds."`
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. This restriction does not apply to held: retain the message and retry after the composer clears."`
 	// DeliveredBytes is summed over members; see the type doc. 0 for no_route.
 	DeliveredBytes int                     `json:"delivered_bytes"`
 	ExpectedBytes  int                     `json:"expected_bytes"`

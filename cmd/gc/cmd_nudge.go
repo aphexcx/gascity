@@ -123,6 +123,7 @@ var (
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
+	nudgeReleaseEndedReservations            = releaseEndedNudgeReservations
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
@@ -264,6 +265,7 @@ func (t nudgeTarget) providerName() string {
 type queuedNudgeOptions struct {
 	ID                string
 	SessionID         string
+	SessionName       string
 	ContinuationEpoch string
 	Reference         *nudgeReference
 }
@@ -855,6 +857,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
 	return queuedNudgeOptions{
 		SessionID:         target.sessionID,
+		SessionName:       target.sessionName,
 		ContinuationEpoch: target.continuationEpoch,
 	}
 }
@@ -1523,6 +1526,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 		item, _ = failedQueuedNudge(item, runtime.ErrNudgeSubmitUnconfirmed, now)
 	}
 	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
+		err = errors.Join(err, releaseLiveNudgeReservation(target, sp, item.ID))
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1674,7 +1678,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return nil
 	}
 	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
-		return err
+		return errors.Join(err, releaseLiveNudgeReservation(target, sp, item.ID))
 	}
 	if obs.Running {
 		maybeStartNudgePoller(target)
@@ -2336,8 +2340,10 @@ func newQueuedNudgeWithOptions(agentName, message, source string, now time.Time,
 	}
 	return queuedNudge{
 		ID:                id,
+		ReservationID:     id,
 		Agent:             agentName,
 		SessionID:         opts.SessionID,
+		SessionName:       opts.SessionName,
 		ContinuationEpoch: opts.ContinuationEpoch,
 		Source:            source,
 		Message:           message,
@@ -2555,10 +2561,10 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 	}
 	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item, liveSessions)
-	})
+	}, target.sessionName)
 }
 
-func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool, sessionName ...string) ([]queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
@@ -2573,6 +2579,13 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		}
 		if err := pruneDeadQueuedNudges(cityPath, state, front, now, deadline); err != nil {
 			return err
+		}
+		if len(sessionName) > 0 && sessionName[0] != "" {
+			for i := range state.Pending {
+				if match(state.Pending[i]) {
+					state.Pending[i].SessionName = sessionName[0]
+				}
+			}
 		}
 		claimed = nudgequeue.ClaimDueBatch(state, now, defaultQueuedNudgeClaimTTL, match)
 		return nil
@@ -3113,6 +3126,11 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
+	item.BlockedBy = ""
+	var owner *runtime.NudgeRetryOwnerError
+	if errors.As(cause, &owner) {
+		item.BlockedBy = owner.ID
+	}
 	if item.FirstAttemptAt.IsZero() && item.LastAttemptAt.IsZero() && item.Attempts == 0 && !errors.Is(cause, errNudgeSessionFenceMismatch) {
 		item.FirstAttemptAt = now.UTC()
 	}
@@ -3431,13 +3449,35 @@ func sortQueuedNudges(state *nudgeQueueState) {
 
 func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
 	var newlyDead, lost []queuedNudge
+	var ended []queuedNudge
 	err := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
+		active := make(map[string]queuedNudge, len(state.Pending)+len(state.InFlight))
+		for _, items := range [][]queuedNudge{state.Pending, state.InFlight} {
+			for _, item := range items {
+				if item.SessionName != "" && item.ReservationID != "" && !item.LastAttemptAt.IsZero() {
+					active[item.ID] = item
+				}
+			}
+		}
 		previous := make(map[string]queuedNudge, len(state.Dead))
 		for _, item := range state.Dead {
 			previous[item.ID] = item
 		}
 		if err := fn(state); err != nil {
 			return err
+		}
+		for _, items := range [][]queuedNudge{state.Pending, state.InFlight} {
+			for _, item := range items {
+				delete(active, item.ID)
+			}
+		}
+		seen := make(map[string]bool)
+		for _, item := range active {
+			key := item.SessionName + "\x00" + item.ReservationID
+			if !seen[key] {
+				ended = append(ended, item)
+				seen[key] = true
+			}
 		}
 		for _, item := range state.Dead {
 			if _, ok := previous[item.ID]; !ok {
@@ -3454,6 +3494,9 @@ func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error
 		return nil
 	})
 	if err == nil {
+		if releaseErr := nudgeReleaseEndedReservations(cityPath, ended); releaseErr != nil && nudgeWarningWriter != nil {
+			fmt.Fprintf(nudgeWarningWriter, "gc nudge: terminal queue state saved; reservation cleanup failed: %v\n", releaseErr) //nolint:errcheck
+		}
 		notifyNudgeDeadLetters(cityPath, newlyDead, lost)
 	}
 	return err

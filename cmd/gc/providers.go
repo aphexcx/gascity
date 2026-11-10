@@ -98,6 +98,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		NudgeRetryInterval:         sc.NudgeRetryIntervalDuration(),
 		NudgeLockTimeout:           sc.NudgeLockTimeoutDuration(),
 		NudgeOwnPasteAge:           sc.NudgeOwnPasteAgeDuration(),
+		NudgeReservationAge:        sc.NudgeReservationAgeDuration(),
 		DisableOpaquePasteRecovery: !sc.NudgeOpaquePasteRecoveryEnabled(),
 		DebounceMs:                 sc.DebounceMsOrDefault(),
 		DisplayMs:                  sc.DisplayMsOrDefault(),

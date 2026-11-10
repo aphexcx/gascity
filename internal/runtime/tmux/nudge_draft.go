@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -85,7 +86,7 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 	// Shape contains no payload text. It is useful only beside the matching,
 	// confirmed digest, which the attachment hooks invalidate atomically.
 	if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftShapeOption,
-		fmt.Sprintf("%s:%d:%d", runtime.NudgePayloadDigest(message), time.Now().UnixMilli(), strings.Count(message, "\n"))); err != nil {
+		fmt.Sprintf("%s:%d:%d:%s:", runtime.NudgePayloadDigest(message), time.Now().UnixMilli(), strings.Count(message, "\n"), normalizedNudgeDigest(message))); err != nil {
 		return err
 	}
 	set := fmt.Sprintf("set-option -p -t %q %s ", pane, nudgeDraftPayloadOption)
@@ -97,10 +98,58 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 // confirmNudgeDraftProvenance promotes a full paste only if no attachment
 // invalidated its pending marker. The comparison and update run in tmux.
 func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
-	digest := runtime.NudgePayloadDigest(message)
+	return t.confirmNudgeDraftDigest(pane, runtime.NudgePayloadDigest(message))
+}
+
+func (t *Tmux) confirmNudgeDraftDigest(pane, digest string) error {
 	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane),
 		fmt.Sprintf("#{==:#{%s},pending:%s}", nudgeDraftPayloadOption, digest),
 		fmt.Sprintf("set-option -p -t %q %s %s", pane, nudgeDraftPayloadOption, digest))
+	return err
+}
+
+func normalizedNudgeDigest(message string) string {
+	return runtime.NudgePayloadDigest(strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, message))
+}
+
+// recordNudgeDraftRendering binds recovery to what the completed paste actually
+// displayed. An opaque placeholder needs its counter as well as its line count.
+func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) error {
+	content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+	if err != nil {
+		return err
+	}
+	draft, observed := nudgeComposer(content, prefix)
+	if !observed || draft == "" {
+		return nil
+	}
+	if !collapsedNudgeDraftMatches(draft, message) && normalizedNudgeDigest(draft) != normalizedNudgeDigest(message) {
+		return fmt.Errorf("pasted composer does not match the payload")
+	}
+	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(strings.TrimSpace(shape), ":")
+	if len(parts) != 5 || parts[0] != runtime.NudgePayloadDigest(message) {
+		return fmt.Errorf("paste shape changed before rendering observation")
+	}
+	parts[4] = runtime.NudgePayloadDigest(draft)
+	_, err = t.run("if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{==:#{%s},%s}", nudgeDraftShapeOption, strings.TrimSpace(shape)),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}))
+	return err
+}
+
+func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {
+	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{||:#{==:#{%s},%s},#{==:#{%s},pending:%s}}", nudgeDraftPayloadOption, digest, nudgeDraftPayloadOption, digest),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""}))
 	return err
 }
 

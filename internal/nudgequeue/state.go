@@ -39,6 +39,9 @@ type Item struct {
 	DismissedAt       time.Time  `json:"dismissed_at,omitempty"`
 	Agent             string     `json:"agent"`
 	SessionID         string     `json:"session_id,omitempty"`
+	SessionName       string     `json:"session_name,omitempty"`
+	ReservationID     string     `json:"reservation_id,omitempty"`
+	BlockedBy         string     `json:"blocked_by,omitempty"`
 	ContinuationEpoch string     `json:"continuation_epoch,omitempty"`
 	Source            string     `json:"source"`
 	Message           string     `json:"message"`
@@ -166,6 +169,20 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 			retryAt = item.LastAttemptAt
 		}
 	}
+	// A deferred batch names the retry owner holding its composer. Give that
+	// owner's intact batch the next turn, retaining both batches' identities.
+	for _, item := range state.Pending {
+		if !match(item) || !item.LastAttemptAt.Equal(retryAt) || item.BlockedBy == "" {
+			continue
+		}
+		for _, owner := range state.Pending {
+			if match(owner) && (owner.ReservationID == item.BlockedBy || owner.ID == item.BlockedBy) {
+				retryAt = owner.LastAttemptAt
+				break
+			}
+		}
+		break
+	}
 	var claimed []Item
 	ids := make(map[string]bool)
 	for _, item := range state.Pending {
@@ -205,6 +222,10 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 		}
 	}
 	state.Pending = pending
+	identity := DeliveryIdentity(claimed)
+	for i := range claimed {
+		claimed[i].ReservationID = identity
+	}
 	state.InFlight = append(state.InFlight, claimed...)
 	SortState(state)
 	return claimed

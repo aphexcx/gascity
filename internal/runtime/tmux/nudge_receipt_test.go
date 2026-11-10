@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -347,8 +348,14 @@ func TestNudgeDeliveryHandlesCollapsedDraft(t *testing.T) {
 					case slices.Contains(args, "show-hooks"):
 						return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
 					case slices.Contains(args, "show-options") && tc.owned:
+						if args[len(args)-1] == nudgeDraftShapeOption && tc.accept {
+							return fmt.Sprintf("%s:%d:%d:%s:%s", runtime.NudgePayloadDigest(tc.message), time.Now().UnixMilli(), strings.Count(tc.message, "\n"), normalizedNudgeDigest(tc.message), runtime.NudgePayloadDigest(tc.draft)), nil
+						}
+						if args[len(args)-1] == nudgeDraftIdentityOption {
+							return runtime.NudgePayloadDigest(tc.message) + ":", nil
+						}
 						return runtime.NudgePayloadDigest(tc.message), nil
-					case slices.Contains(args, "if-shell"), slices.Contains(args, "send-keys"):
+					case slices.Contains(args, "send-keys") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ")):
 						submits++
 					}
 					return "", nil
