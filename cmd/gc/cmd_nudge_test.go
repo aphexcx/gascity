@@ -3961,6 +3961,17 @@ func testQueuedNudgeRetryOwner(t *testing.T, backed bool) {
 }
 
 func TestTerminalNudgeOwnersReleaseReservations(t *testing.T) {
+	t.Run("lookup failure is not proof of session absence", func(t *testing.T) {
+		sp := &retryOwnerFake{Fake: runtime.NewFake(), releaseErr: errors.New("tmux executable not found")}
+		item := nudgeReservationRelease{SessionName: "session-worker", ReservationID: "owner", Invalidate: true, RetireReceipt: true}
+		if err := releaseQueuedNudgeReservation(sp, item); err == nil {
+			t.Fatal("lookup failure erased durable cancellation intent")
+		}
+		sp.releaseErr = runtime.ErrSessionNotFound
+		if err := releaseQueuedNudgeReservation(sp, item); err != nil {
+			t.Fatalf("definitive session absence retained stale cleanup: %v", err)
+		}
+	})
 	for _, ending := range []string{"dead-letter", "withdrawn", "expired", "dropped", "fence-mismatch", "release-failure"} {
 		t.Run(ending, func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")

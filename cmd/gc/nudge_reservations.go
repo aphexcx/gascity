@@ -58,15 +58,22 @@ func releaseEndedNudgeReservations(cityPath string, items []nudgeReservationRele
 	}
 	var result error
 	for _, item := range items {
-		err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID, item.Invalidate)
-		if err == nil && item.RetireReceipt {
-			// Revoke recovery first. Retiring the receipt cannot make a
-			// canceled paste recoverable if the second provider call fails.
-			err = releaseLiveNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID)
-		}
-		if !runtime.IsSessionGone(err) {
-			result = errors.Join(result, err)
-		}
+		result = errors.Join(result, releaseQueuedNudgeReservation(sp, item))
 	}
 	return result
+}
+
+func releaseQueuedNudgeReservation(sp runtime.Provider, item nudgeReservationRelease) error {
+	err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID, item.Invalidate)
+	if err == nil && item.RetireReceipt {
+		// Revoke recovery first. Retiring the receipt cannot make a
+		// canceled paste recoverable if the second provider call fails.
+		err = releaseLiveNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID)
+	}
+	// A lookup or executable failure containing "not found" is not proof
+	// that the session is gone. Only the provider's typed absence is final.
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		return nil
+	}
+	return err
 }
