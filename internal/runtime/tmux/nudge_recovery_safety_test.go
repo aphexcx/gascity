@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -209,6 +210,40 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 }
 
 func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
+	for _, next := range []string{"first\nremaining", "remaining", "unrelated"} {
+		for _, failure := range []string{"pending", "unreadable", "before-enter"} {
+			t.Run(fmt.Sprintf("durable invalidation %q %s", next, failure), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, p := newRecoveryPane(t)
+					p.loseEnter = true
+					original := "[Pasted text #12 +1 lines]"
+					if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "first\nremaining", "batch-owner", p.paste(original)); err != nil {
+						t.Fatal(err)
+					}
+					checks := 0
+					tm.cfg.NudgeReservationInvalidated = func(session, id string) (bool, error) {
+						if session != t.Name() || id != "batch-owner" {
+							t.Fatalf("checked wrong owner: %q %q", session, id)
+						}
+						checks++
+						if failure == "before-enter" && checks == 1 {
+							return false, nil
+						}
+						if failure == "unreadable" {
+							return false, errors.New("queue unreadable")
+						}
+						return true, nil
+					}
+					p.agePaste(t, 11*time.Minute)
+					p.loseEnter, p.enters = false, 0
+					d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), next, "batch-owner", p.paste(""))
+					if !errors.Is(err, runtime.ErrNudgeDraftUnowned) || p.enters != 0 || p.draft != original || d.Held == nil || d.Held.State != "unowned_draft" {
+						t.Fatalf("durably canceled paste recovered: delivery=%+v err=%v enters=%d draft=%q", d, err, p.enters, p.draft)
+					}
+				})
+			})
+		}
+	}
 	t.Run("partial batch invalidates automatic recovery", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			tm, p := newRecoveryPane(t)

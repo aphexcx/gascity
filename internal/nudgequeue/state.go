@@ -104,10 +104,12 @@ type Tombstone struct {
 
 // State is the persisted nudge queue snapshot.
 type State struct {
-	Pending    []Item      `json:"pending,omitempty"`
-	InFlight   []Item      `json:"in_flight,omitempty"`
-	Dead       []Item      `json:"dead,omitempty"`
-	Tombstones []Tombstone `json:"tombstones,omitempty"`
+	Pending               []Item               `json:"pending,omitempty"`
+	InFlight              []Item               `json:"in_flight,omitempty"`
+	Dead                  []Item               `json:"dead,omitempty"`
+	Tombstones            []Tombstone          `json:"tombstones,omitempty"`
+	ReservationReleases   []ReservationRelease `json:"reservation_releases,omitempty"`
+	ReservationGeneration uint64               `json:"reservation_generation,omitempty"`
 
 	// DispatchSkips counts, by reason, how many times the supervisor
 	// dispatch tick's per-session loop has silently skipped a target
@@ -117,6 +119,87 @@ type State struct {
 	// stays visible to a `gc nudge status` invocation running in a
 	// different process than the supervisor that incremented it.
 	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
+}
+
+// ReservationRelease is durable cleanup intent for an ended retry owner.
+// Invalidate revokes recovery of a paste whose attempted batch lost members.
+type ReservationRelease struct {
+	SessionName   string `json:"session_name"`
+	ReservationID string `json:"reservation_id"`
+	Invalidate    bool   `json:"invalidate,omitempty"`
+	Generation    uint64 `json:"generation"`
+}
+
+// ReservationInvalidated checks durable cancellation before a provider recovers
+// an earlier paste. Read failures must prevent automatic submission.
+func ReservationInvalidated(cityPath, session, id string) (bool, error) {
+	state, err := LoadState(cityPath)
+	if err != nil {
+		return false, err
+	}
+	for _, release := range state.ReservationReleases {
+		if release.SessionName == session && release.ReservationID == id && release.Invalidate {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AcknowledgeReservationReleases retires successful cleanups without erasing a
+// newer request that arrived while the provider was processing the snapshot.
+func AcknowledgeReservationReleases(cityPath string, completed []ReservationRelease) error {
+	return WithState(cityPath, func(state *State) error {
+		remaining := state.ReservationReleases[:0]
+		for _, release := range state.ReservationReleases {
+			matched := false
+			for _, done := range completed {
+				matched = matched || release == done
+			}
+			if !matched {
+				remaining = append(remaining, release)
+			}
+		}
+		state.ReservationReleases = remaining
+		return nil
+	})
+}
+
+func recordEndedReservations(state *State, previous []Item) {
+	type member struct {
+		id, session, reservation string
+		created                  time.Time
+	}
+	key := func(item Item) member { return member{item.ID, item.SessionName, item.ReservationID, item.CreatedAt} }
+	active := make(map[member]bool)
+	owners := make(map[string]bool)
+	for _, items := range [][]Item{state.Pending, state.InFlight} {
+		for _, item := range items {
+			active[key(item)] = true
+			owners[item.SessionName+"\x00"+item.ReservationID] = true
+		}
+	}
+	seen := make(map[string]bool)
+	for _, item := range previous {
+		owner := item.SessionName + "\x00" + item.ReservationID
+		if active[key(item)] || seen[owner] || item.SessionName == "" || item.ReservationID == "" || item.LastAttemptAt.IsZero() {
+			continue
+		}
+		seen[owner] = true
+		state.ReservationGeneration++
+		release := ReservationRelease{SessionName: item.SessionName, ReservationID: item.ReservationID, Invalidate: owners[owner], Generation: state.ReservationGeneration}
+		found := false
+		for i, pending := range state.ReservationReleases {
+			if pending.SessionName == release.SessionName && pending.ReservationID == release.ReservationID {
+				release.Invalidate = release.Invalidate || pending.Invalidate
+				state.ReservationReleases[i] = release
+				found = true
+				break
+			}
+		}
+		if !found {
+			state.ReservationReleases = append(state.ReservationReleases, release)
+		}
+	}
 }
 
 // Tombstone returns the retained terminalization intent for an expired payload.
@@ -308,9 +391,11 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 	if err != nil {
 		return err
 	}
+	previous := append(append([]Item(nil), state.Pending...), state.InFlight...)
 	if err := fn(&state); err != nil {
 		return err
 	}
+	recordEndedReservations(&state, previous)
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal nudge queue: %w", err)

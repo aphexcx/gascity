@@ -3449,40 +3449,13 @@ func sortQueuedNudges(state *nudgeQueueState) {
 
 func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error {
 	var newlyDead, lost []queuedNudge
-	var ended []nudgeReservationRelease
 	err := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
-		active := make(map[string]queuedNudge, len(state.Pending)+len(state.InFlight))
-		for _, items := range [][]queuedNudge{state.Pending, state.InFlight} {
-			for _, item := range items {
-				if item.SessionName != "" && item.ReservationID != "" && !item.LastAttemptAt.IsZero() {
-					active[item.ID] = item
-				}
-			}
-		}
 		previous := make(map[string]queuedNudge, len(state.Dead))
 		for _, item := range state.Dead {
 			previous[item.ID] = item
 		}
 		if err := fn(state); err != nil {
 			return err
-		}
-		remaining := make(map[string]bool)
-		for _, items := range [][]queuedNudge{state.Pending, state.InFlight} {
-			for _, item := range items {
-				delete(active, item.ID)
-				remaining[item.SessionName+"\x00"+item.ReservationID] = true
-			}
-		}
-		seen := make(map[string]bool)
-		for _, item := range active {
-			key := item.SessionName + "\x00" + item.ReservationID
-			if !seen[key] {
-				// A changed attempted batch cannot be submitted as the surviving
-				// subset. Preserve its text but revoke automatic recovery; its
-				// remaining members retain the original idempotency identity.
-				ended = append(ended, nudgeReservationRelease{SessionName: item.SessionName, ReservationID: item.ReservationID, Invalidate: remaining[key]})
-				seen[key] = true
-			}
 		}
 		for _, item := range state.Dead {
 			if _, ok := previous[item.ID]; !ok {
@@ -3499,7 +3472,7 @@ func withNudgeQueueState(cityPath string, fn func(*nudgeQueueState) error) error
 		return nil
 	})
 	if err == nil {
-		if releaseErr := nudgeReleaseEndedReservations(cityPath, ended); releaseErr != nil && nudgeWarningWriter != nil {
+		if releaseErr := retryNudgeReservationReleases(cityPath); releaseErr != nil && nudgeWarningWriter != nil {
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: terminal queue state saved; reservation cleanup failed: %v\n", releaseErr) //nolint:errcheck
 		}
 		notifyNudgeDeadLetters(cityPath, newlyDead, lost)

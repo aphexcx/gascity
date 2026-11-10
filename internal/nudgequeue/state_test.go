@@ -12,6 +12,45 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
+func TestReservationCleanupSurvivesSharedWithdrawal(t *testing.T) {
+	dir := t.TempDir()
+	if err := WithState(dir, func(state *State) error {
+		for _, id := range []string{"a", "b"} {
+			state.Pending = append(state.Pending, Item{ID: id, SessionName: "session", ReservationID: "batch", LastAttemptAt: time.Unix(1, 0)})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithdrawWaitNudges(nil, dir, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadState(dir)
+	if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].Invalidate {
+		t.Fatalf("partial withdrawal lost cleanup intent: state=%+v err=%v", state, err)
+	}
+	first := state.ReservationReleases[0]
+	if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || !invalid {
+		t.Fatalf("recovery allowed before cleanup: invalid=%v err=%v", invalid, err)
+	}
+	if err := WithdrawWaitNudges(nil, dir, []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AcknowledgeReservationReleases(dir, []ReservationRelease{first}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = LoadState(dir)
+	if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].Invalidate || state.ReservationReleases[0].Generation == first.Generation {
+		t.Fatalf("stale acknowledgement erased newer invalidation: state=%+v err=%v", state, err)
+	}
+	if err := AcknowledgeReservationReleases(dir, state.ReservationReleases); err != nil {
+		t.Fatal(err)
+	}
+	if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || invalid {
+		t.Fatalf("successful cleanup not acknowledged: invalid=%v err=%v", invalid, err)
+	}
+}
+
 func TestClaimDueBatchKeepsRetryPayloadStable(t *testing.T) {
 	t.Run("partial retry retains attempted identity", func(t *testing.T) {
 		original := DeliveryIdentity([]Item{{ID: "a"}, {ID: "b"}})

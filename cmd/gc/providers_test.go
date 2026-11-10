@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -42,6 +43,23 @@ func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
 	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
 	if cfg.SocketName != "custom-socket" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "custom-socket")
+	}
+}
+
+func TestTmuxConfigChecksDurableReservationCancellation(t *testing.T) {
+	dir := t.TempDir()
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.ReservationReleases = []nudgequeue.ReservationRelease{{SessionName: "session", ReservationID: "batch", Invalidate: true, Generation: 1}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := tmuxConfigFromSession(config.SessionConfig{}, "city", dir)
+	if cfg.NudgeReservationInvalidated == nil {
+		t.Fatal("missing cancellation reader")
+	}
+	if invalid, err := cfg.NudgeReservationInvalidated("session", "batch"); err != nil || !invalid {
+		t.Fatalf("cancellation reader not wired to city queue: invalid=%v err=%v", invalid, err)
 	}
 }
 

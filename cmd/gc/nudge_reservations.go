@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -27,15 +28,22 @@ func releaseNudgeReservation(target nudgeTarget, sp runtime.Provider, id string,
 	return nil
 }
 
-type nudgeReservationRelease struct {
-	SessionName   string
-	ReservationID string
-	Invalidate    bool
+type nudgeReservationRelease = nudgequeue.ReservationRelease
+
+func retryNudgeReservationReleases(cityPath string) error {
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil || len(state.ReservationReleases) == 0 {
+		return err
+	}
+	if err := nudgeReleaseEndedReservations(cityPath, state.ReservationReleases); err != nil {
+		return err
+	}
+	return nudgequeue.AcknowledgeReservationReleases(cityPath, state.ReservationReleases)
 }
 
 // Release occurs after the queue commit and outside its lock. A cleanup failure
-// is reported without reversing a terminal queue transition; the pane's expiry
-// remains the backstop for a failed provider call or a process death here.
+// is reported without reversing a terminal queue transition. Durable intent
+// blocks unsafe recovery and remains pending until cleanup succeeds.
 func releaseEndedNudgeReservations(cityPath string, items []nudgeReservationRelease) error {
 	if len(items) == 0 {
 		return nil
@@ -50,7 +58,10 @@ func releaseEndedNudgeReservations(cityPath string, items []nudgeReservationRele
 	}
 	var result error
 	for _, item := range items {
-		result = errors.Join(result, releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID, item.Invalidate))
+		err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, sp, item.ReservationID, item.Invalidate)
+		if !runtime.IsSessionGone(err) {
+			result = errors.Join(result, err)
+		}
 	}
 	return result
 }

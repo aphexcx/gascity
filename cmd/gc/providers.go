@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
@@ -93,13 +94,19 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
 	return sessiontmux.Config{
-		SetupTimeout:               sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:            sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:          sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval:         sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:           sc.NudgeLockTimeoutDuration(),
-		NudgeOwnPasteAge:           sc.NudgeOwnPasteAgeDuration(),
-		NudgeReservationAge:        sc.NudgeReservationAgeDuration(),
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		NudgeOwnPasteAge:    sc.NudgeOwnPasteAgeDuration(),
+		NudgeReservationAge: sc.NudgeReservationAgeDuration(),
+		NudgeReservationInvalidated: func(session, id string) (bool, error) {
+			if cityPath == "" {
+				return false, nil
+			}
+			return nudgequeue.ReservationInvalidated(cityPath, session, id)
+		},
 		DisableOpaquePasteRecovery: !sc.NudgeOpaquePasteRecoveryEnabled(),
 		DebounceMs:                 sc.DebounceMsOrDefault(),
 		DisplayMs:                  sc.DisplayMsOrDefault(),

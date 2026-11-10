@@ -130,6 +130,9 @@ type Config struct {
 	NudgeOwnPasteAge time.Duration
 	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
 	NudgeReservationAge time.Duration
+	// NudgeReservationInvalidated checks durable cancellation before recovering
+	// an owned retry paste. Errors hold the draft; nil means no external ledger.
+	NudgeReservationInvalidated func(session, id string) (bool, error)
 	// DisableOpaquePasteRecovery disables recovery of owned Claude paste
 	// placeholders. The zero value keeps recovery enabled.
 	DisableOpaquePasteRecovery bool
@@ -2846,6 +2849,9 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	var heldSince time.Time
 	defer func() {
 		if errors.Is(deliveryErr, ErrNudgeDraftDeferred) && !delivery.Landed() && (heldDraft != "" || heldState == "unreadable_composer") {
+			if errors.Is(deliveryErr, runtime.ErrNudgeDraftUnowned) {
+				heldState, heldSince = "unowned_draft", time.Time{}
+			}
 			held, err := t.nudgeHeldReceipt(target, heldDraft, heldState, heldSince, time.Now())
 			delivery.Held = held
 			deliveryErr = errors.Join(deliveryErr, err)
@@ -3026,7 +3032,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			}
 			resumeOwnedDraft = true
 			resumeDraft = true
-			if id, _, err := t.nudgeDraftIdentity(target, runtime.NudgePayloadDigest(message)); err != nil {
+			if id, _, err := t.nudgeDraftIdentity(session, target, runtime.NudgePayloadDigest(message)); err != nil {
 				return runtime.NudgeDelivery{}, err
 			} else if id != "" && id != deliveryID {
 				heldState = "own_paste"
@@ -3145,6 +3151,11 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error {
+		if verifySubmit && t.cfg.NudgeReservationInvalidated != nil {
+			if _, _, err := t.nudgeDraftIdentity(session, target, runtime.NudgePayloadDigest(message)); err != nil {
+				return err
+			}
+		}
 		if resumeOwnedDraft {
 			if ownershipLost {
 				return ErrNudgeDraftDeferred

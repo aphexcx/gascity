@@ -65,7 +65,7 @@ func (t *Tmux) recoveredNudgeAcknowledged(target, id string) (bool, error) {
 // A nonempty identity reserves submission for the caller that owns retries.
 // A known empty identity permits recovery of a one-shot delivery. Missing
 // provenance is unknown, so a different payload cannot recover it.
-func (t *Tmux) nudgeDraftIdentity(target, digest string) (string, bool, error) {
+func (t *Tmux) nudgeDraftIdentity(session, target, digest string) (string, bool, error) {
 	value, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftIdentityOption)
 	if err != nil {
 		return "", false, fmt.Errorf("reading draft retry identity: %w", err)
@@ -73,6 +73,15 @@ func (t *Tmux) nudgeDraftIdentity(target, digest string) (string, bool, error) {
 	parts := strings.SplitN(strings.TrimSpace(value), ":", 2)
 	if len(parts) != 2 || parts[0] != digest {
 		return "", false, nil
+	}
+	if id := parts[1]; id != "" && t.cfg.NudgeReservationInvalidated != nil {
+		invalid, err := t.cfg.NudgeReservationInvalidated(session, id)
+		if err != nil {
+			return "", false, fmt.Errorf("%w: %w: reading reservation cancellation: %w", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned, err)
+		}
+		if invalid {
+			return "", false, fmt.Errorf("%w: %w: retry batch was canceled", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+		}
 	}
 	return parts[1], true, nil
 }

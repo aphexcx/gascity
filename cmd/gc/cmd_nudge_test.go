@@ -4167,7 +4167,7 @@ func (p *preservedBatchFake) NudgeDelivered(_ string, content []runtime.ContentB
 }
 
 func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
-	for _, removal := range []string{"expired", "withdrawn", "dropped"} {
+	for _, removal := range []string{"expired", "withdrawn", "dropped", "wait-withdrawn", "failed-invalidation"} {
 		t.Run(removal, func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
@@ -4181,8 +4181,12 @@ func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
 				}
 			}
 			fake := &preservedBatchFake{Fake: runtime.NewFake()}
+			failRelease := removal == "failed-invalidation"
 			previousRelease := nudgeReleaseEndedReservations
 			nudgeReleaseEndedReservations = func(_ string, ended []nudgeReservationRelease) error {
+				if failRelease && len(ended) > 0 {
+					return errors.New("cleanup temporarily unavailable")
+				}
 				for _, item := range ended {
 					if err := releaseNudgeReservation(nudgeTarget{sessionName: item.SessionName}, fake, item.ReservationID, item.Invalidate); err != nil {
 						return err
@@ -4202,7 +4206,12 @@ func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
 				t.Fatalf("first delivery=%v, %v", delivered, err)
 			}
 			original := fake.draft
-			if removal == "withdrawn" {
+			if removal == "wait-withdrawn" || removal == "failed-invalidation" {
+				if err := withdrawQueuedWaitNudges(dir, []string{a.ID}); err != nil {
+					t.Fatal(err)
+				}
+				failRelease = false
+			} else if removal == "withdrawn" {
 				if err := terminalizeBlockedQueuedNudges(dir, map[string][]queuedNudge{"mail-already-read": {a}}); err != nil {
 					t.Fatal(err)
 				}

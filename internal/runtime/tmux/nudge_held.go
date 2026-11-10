@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -68,9 +69,9 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	if strings.TrimSpace(attached) != "0" {
 		return false, time.Time{}, fmt.Errorf("%w: %w: earlier paste is not confirmed detached", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
 	}
-	id, known, err := t.nudgeDraftIdentity(target, digest)
+	id, known, err := t.nudgeDraftIdentity(session, target, digest)
 	if err != nil {
-		return false, since, fmt.Errorf("%w: %w", ErrNudgeDraftDeferred, err)
+		return false, time.Time{}, fmt.Errorf("%w: %w", ErrNudgeDraftDeferred, err)
 	}
 	if !known {
 		return false, since, fmt.Errorf("%w: earlier paste has another or unknown retry owner", ErrNudgeDraftDeferred)
@@ -113,6 +114,10 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current != ""}, nil
 	}
 	send := func() error {
+		if _, _, err := t.nudgeDraftIdentity(session, target, digest); err != nil {
+			observeErr = err
+			return err
+		}
 		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target))
 		observeErr = err
 		return err
@@ -120,6 +125,9 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	outcome := recoverStagedDraft(send, func() { t.WakePaneIfDetached(session) }, observe, time.Sleep)
 	if outcome != stagedDraftCleared && outcome != stagedDraftSubmittedBusy {
 		if observeErr != nil {
+			if errors.Is(observeErr, runtime.ErrNudgeDraftUnowned) {
+				since = time.Time{}
+			}
 			return false, since, fmt.Errorf("%w: recovering own paste: %w", ErrNudgeDraftDeferred, observeErr)
 		}
 		return false, since, fmt.Errorf("%w: own paste remains held (%s)", ErrNudgeDraftDeferred, outcome)
