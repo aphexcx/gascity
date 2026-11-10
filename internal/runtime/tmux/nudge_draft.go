@@ -115,31 +115,50 @@ func normalizedNudgeDigest(message string) string {
 
 // recordNudgeDraftRendering binds recovery to what the completed paste actually
 // displayed. An opaque placeholder needs its counter as well as its line count.
-func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) error {
+func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, error) {
+	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+	if err != nil {
+		return false, err
+	}
+	parts := strings.Split(strings.TrimSpace(shape), ":")
+	digest := runtime.NudgePayloadDigest(message)
+	if len(parts) != 5 || parts[0] != digest {
+		return false, fmt.Errorf("paste shape changed before rendering observation")
+	}
+	if parts[4] != "" {
+		return true, nil
+	}
+	payload, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+	if err != nil {
+		return false, err
+	}
+	payload = strings.TrimSpace(payload)
+	if payload != digest && payload != "pending:"+digest {
+		return false, fmt.Errorf("paste ownership changed before rendering observation")
+	}
 	content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
-		return err
+		return false, err
 	}
 	draft, observed := nudgeComposer(content, prefix)
 	if !observed || draft == "" {
-		return nil
+		return false, nil
 	}
 	if !collapsedNudgeDraftMatches(draft, message) && normalizedNudgeDigest(draft) != normalizedNudgeDigest(message) {
-		return fmt.Errorf("pasted composer does not match the payload")
-	}
-	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
-	if err != nil {
-		return err
-	}
-	parts := strings.Split(strings.TrimSpace(shape), ":")
-	if len(parts) != 5 || parts[0] != runtime.NudgePayloadDigest(message) {
-		return fmt.Errorf("paste shape changed before rendering observation")
+		return false, fmt.Errorf("pasted composer does not match the payload")
 	}
 	parts[4] = runtime.NudgePayloadDigest(draft)
-	_, err = t.run("if-shell", "-F", "-t", exactPaneTarget(target),
-		fmt.Sprintf("#{==:#{%s},%s}", nudgeDraftShapeOption, strings.TrimSpace(shape)),
-		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}))
-	return err
+	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}}", nudgeDraftShapeOption, strings.TrimSpace(shape), nudgeDraftPayloadOption, payload),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}),
+		"display-message -p draft-ownership-changed")
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(out) != "" {
+		return false, fmt.Errorf("paste ownership changed during rendering observation")
+	}
+	return true, nil
 }
 
 func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {

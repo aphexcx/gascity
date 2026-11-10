@@ -798,10 +798,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if len(blocked) > 0 {
 		if err := terminalizeBlockedQueuedNudges(target.cityPath, blocked); err != nil {
-			// Best-effort: blocked-item bookkeeping must not abort delivery
-			// of the remaining items. The blocked items stay in-flight and
-			// lease expiry returns them to pending for a later pass.
-			fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", err) //nolint:errcheck
+			// A surviving subset may share an earlier paste with the canceled
+			// items. Do not deliver it until withdrawal revokes that paste.
+			relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
+			fmt.Fprintf(stderr, "gc nudge drain: withdrawing blocked nudges: %v\n", errors.Join(err, relErr)) //nolint:errcheck
+			if inject {
+				return 0
+			}
+			return 1
 		}
 	}
 	if len(items) == 0 {
@@ -1879,10 +1883,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		// provider's session-addressing half reuses the session store resolved above.
 		deliveryMailProvider = newMailProviderWithSessionStore(cliMailStore(deliveryStore, target.cfg, target.cityPath).Store, deliverySessStore)
 	}
-	// Bookkeeping for fence-mismatched and blocked items is best-effort: a
-	// failure there must not abort delivery of the remaining claimable items.
-	// Items whose bookkeeping failed stay in-flight; lease expiry returns
-	// them to pending and a later pass retries.
+	// Fence-mismatched items retain their lease when bookkeeping fails.
+	// Blocked items must be withdrawn before a surviving subset can recover
+	// an earlier shared paste.
 	var bookkeepErr error
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
@@ -1898,7 +1901,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	if len(blocked) > 0 {
 		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, blocked); termErr != nil {
-			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr))
+			relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(candidates))
+			return false, errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr), relErr)
 		}
 	}
 	if len(items) == 0 {

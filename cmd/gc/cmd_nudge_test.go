@@ -4166,6 +4166,40 @@ func (p *preservedBatchFake) NudgeDelivered(_ string, content []runtime.ContentB
 	return runtime.NudgeDelivery{Delivered: true, Submit: runtime.NudgeSubmitConfirmed}, nil
 }
 
+func TestQueuedNudgeWithdrawalFailureDoesNotSubmitSubset(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore(), terminalOnly: true}
+	previous := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) { return beads.NudgesStore{Store: store}, store }
+	t.Cleanup(func() { openOwnedNudgeBeadStore = previous })
+	now := time.Now().Add(-11 * time.Minute)
+	a := newQueuedNudgeWithOptions("worker", "canceled wait", "wait", now, queuedNudgeOptions{SessionName: "sess-worker", Reference: &nudgeReference{Kind: "bead", ID: "missing-wait"}})
+	b := newQueuedNudgeWithOptions("worker", "remaining", "session", now, queuedNudgeOptions{SessionName: "sess-worker"})
+	a.ReservationID, b.ReservationID = "old-batch", "old-batch"
+	a.LastAttemptAt, b.LastAttemptAt = now, now
+	for _, item := range []queuedNudge{a, b} {
+		if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shadow, found, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(a.ID)
+	if err != nil || !found {
+		t.Fatalf("shadow missing: found=%v err=%v", found, err)
+	}
+	store.failID = shadow.BeadID
+	original := formatNudgeInjectOutput([]queuedNudge{a, b})
+	fake := &preservedBatchFake{Fake: runtime.NewFake(), draft: original, accept: true, recoverable: true}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionName: "sess-worker"}
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 0, worker.LiveObservation{Running: true})
+	if delivered || err == nil || store.terminalFailures == 0 || len(fake.submitted) != 0 || fake.draft != original {
+		t.Fatalf("failed withdrawal submitted batch: delivered=%v err=%v failures=%d submitted=%q", delivered, err, store.terminalFailures, fake.submitted)
+	}
+}
+
 func TestQueuedNudgeChangedBatchPreservesInvalidatedDraft(t *testing.T) {
 	for _, removal := range []string{"expired", "withdrawn", "dropped", "wait-withdrawn", "failed-invalidation"} {
 		t.Run(removal, func(t *testing.T) {

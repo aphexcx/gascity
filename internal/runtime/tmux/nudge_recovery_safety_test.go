@@ -185,6 +185,34 @@ func TestNudgeRecoveryRequiresExactObservedPlaceholder(t *testing.T) {
 }
 
 func TestNudgeRecoveryInlineAndPending(t *testing.T) {
+	for _, transient := range []string{"late rendering", "capture failure"} {
+		t.Run(transient, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, p := newRecoveryPane(t)
+				p.loseEnter = true
+				missed := false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					if slices.Contains(args, "capture-pane") && p.options[nudgeDraftShapeOption] != "" && !missed {
+						missed = true
+						if transient == "capture failure" {
+							return "", errors.New("capture temporarily unavailable")
+						}
+						return "────\n❯ \n────", nil
+					}
+					return p.exec(args)
+				}}
+				if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo", "", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+					t.Fatal(err)
+				}
+				p.agePaste(t, time.Minute)
+				p.loseEnter = false
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next", "", p.paste(""))
+				if err != nil || !d.Landed() || len(p.submitted) != 2 {
+					t.Fatalf("transient observation stranded paste: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+				}
+			})
+		})
+	}
 	for _, rendering := range []string{"earlier short nudge", "[Pasted text #12 +2 lines]"} {
 		t.Run(rendering, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -210,6 +238,72 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 }
 
 func TestNudgeReservationExpiresAfterAbandonedHandoff(t *testing.T) {
+	t.Run("pending recovery resumes unchanged draft", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			message := "one\ntwo"
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+				t.Fatal(err)
+			}
+			p.options[recoveredNudgeOption("owner")] = "pending:" + runtime.NudgePayloadDigest(message)
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter = false
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste(""))
+			if err != nil || !d.Landed() || d.Submit != runtime.NudgeSubmitConfirmed || len(p.submitted) != 1 {
+				t.Fatalf("pending recovery stranded intact paste: delivery=%+v err=%v submitted=%q", d, err, p.submitted)
+			}
+		})
+	})
+	t.Run("pending recovery write failure sends no Enter", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "one\ntwo", "owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter, p.enters = false, 0
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				if slices.Contains(args, "set-option") && args[len(args)-2] == recoveredNudgeOption("owner") {
+					return "", errors.New("pending receipt unavailable")
+				}
+				return p.exec(args)
+			}}
+			_, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next", "", p.paste(""))
+			if err == nil || p.enters != 0 || p.draft != "[Pasted text #12 +1 lines]" {
+				t.Fatalf("sent before durable intent: err=%v enters=%d draft=%q", err, p.enters, p.draft)
+			}
+		})
+	})
+	t.Run("recovery receipt finalization failure prevents replay", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, p := newRecoveryPane(t)
+			p.loseEnter = true
+			message := "one\ntwo"
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste("[Pasted text #12 +1 lines]")); err != nil {
+				t.Fatal(err)
+			}
+			p.agePaste(t, 11*time.Minute)
+			p.loseEnter = false
+			failed := false
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				if slices.Contains(args, "set-option") && args[len(args)-2] == recoveredNudgeOption("owner") && len(p.submitted) > 0 && !failed {
+					failed = true
+					return "", errors.New("receipt write unavailable")
+				}
+				return p.exec(args)
+			}}
+			if _, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "next", "", p.paste("")); err == nil || !failed || len(p.submitted) != 1 {
+				t.Fatalf("receipt failure not exercised: err=%v failed=%v submitted=%q", err, failed, p.submitted)
+			}
+			p.busy = false
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste(""))
+			if err != nil || !d.Landed() || d.Submit != runtime.NudgeSubmitUnverified || len(p.submitted) != 1 || p.draft != "" {
+				t.Fatalf("uncertain recovery replayed: delivery=%+v err=%v submitted=%q draft=%q", d, err, p.submitted, p.draft)
+			}
+		})
+	})
 	for _, next := range []string{"first\nremaining", "remaining", "unrelated"} {
 		for _, failure := range []string{"pending", "unreadable", "before-enter"} {
 			t.Run(fmt.Sprintf("durable invalidation %q %s", next, failure), func(t *testing.T) {

@@ -113,10 +113,18 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 		}
 		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current != ""}, nil
 	}
+	recoveryStarted := false
 	send := func() error {
 		if _, _, err := t.nudgeDraftIdentity(session, target, digest); err != nil {
 			observeErr = err
 			return err
+		}
+		if id != "" && !recoveryStarted {
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), recoveredNudgeOption(id), "pending:"+digest); err != nil {
+				observeErr = fmt.Errorf("recording pending recovery: %w", err)
+				return observeErr
+			}
+			recoveryStarted = true
 		}
 		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target))
 		observeErr = err

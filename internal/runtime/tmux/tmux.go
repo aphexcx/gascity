@@ -2840,10 +2840,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
-	if acknowledged, err := t.recoveredNudgeAcknowledged(target, deliveryID); err != nil {
+	if status, err := t.recoveredNudgeStatus(session, target, deliveryID); err != nil {
 		return runtime.NudgeDelivery{}, err
-	} else if acknowledged {
-		return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
+	} else if status != "" {
+		return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: status}, nil
 	}
 	heldDraft, heldState := "", "unowned_draft"
 	var heldSince time.Time
@@ -2959,10 +2959,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				return runtime.NudgeDelivery{}, err
 			}
 			if recovered {
-				if acknowledged, err := t.recoveredNudgeAcknowledged(target, deliveryID); err != nil {
+				if status, err := t.recoveredNudgeStatus(session, target, deliveryID); err != nil {
 					return runtime.NudgeDelivery{}, err
-				} else if acknowledged {
-					return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: runtime.NudgeSubmitConfirmed}, nil
+				} else if status != "" {
+					return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: status}, nil
 				}
 				heldState, heldSince = "unowned_draft", time.Time{}
 				content, err = t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
@@ -3107,8 +3107,11 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
+	renderingRecorded := false
 	if verifySubmit && !resumeDraft {
-		if err := t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session)); err != nil {
+		var err error
+		renderingRecorded, err = t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session))
+		if err != nil {
 			log.Printf("tmux nudge: recording pasted rendering for %q: %v", target, err)
 		}
 	}
@@ -3177,6 +3180,13 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	delivered = true
 	if verifySubmit {
 		capture := func() ([]string, error) {
+			if !resumeDraft && !renderingRecorded {
+				var err error
+				renderingRecorded, err = t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session))
+				if err != nil {
+					log.Printf("tmux nudge: observing delayed paste rendering for %q: %v", target, err)
+				}
+			}
 			if resumeOwnedDraft {
 				if ownershipLost {
 					return nil, ErrNudgeDraftDeferred

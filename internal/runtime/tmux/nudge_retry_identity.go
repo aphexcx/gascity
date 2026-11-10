@@ -49,17 +49,48 @@ func (p *Provider) ReleaseNudgeReservation(name, id string, invalidate bool) err
 	return err
 }
 
-func (t *Tmux) recoveredNudgeAcknowledged(target, id string) (bool, error) {
+func (t *Tmux) recoveredNudgeStatus(session, target, id string) (runtime.NudgeSubmit, error) {
 	if id == "" {
-		return false, nil
+		return "", nil
 	}
 	value, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), recoveredNudgeOption(id))
 	if err != nil {
-		return false, fmt.Errorf("reading recovered nudge receipt: %w", err)
+		return "", fmt.Errorf("reading recovered nudge receipt: %w", err)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(value, "pending:") {
+		// A crash or failed acknowledgement after Enter cannot license a fresh
+		// paste. Only the unchanged owned draft can resume a pending recovery.
+		digest := strings.TrimPrefix(value, "pending:")
+		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+		if err != nil {
+			return "", fmt.Errorf("observing pending recovery: %w", err)
+		}
+		draft, observed := nudgeComposer(content, t.resolveIdlePromptPrefix(session))
+		if !observed {
+			return "", fmt.Errorf("%w: pending recovery composer is unreadable", ErrNudgeDraftDeferred)
+		}
+		if draft != "" {
+			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+			if err != nil {
+				return "", err
+			}
+			shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+			if err != nil {
+				return "", err
+			}
+			if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); owned && strings.TrimPrefix(strings.TrimSpace(stored), "pending:") == digest {
+				return "", nil
+			}
+		}
+		return runtime.NudgeSubmitUnverified, nil
 	}
 	// Queue survivors keep their attempted batch's identity even when its
 	// payload has shrunk. The original submission already included them.
-	return strings.TrimSpace(value) != "", nil
+	return runtime.NudgeSubmitConfirmed, nil
 }
 
 // A nonempty identity reserves submission for the caller that owns retries.
