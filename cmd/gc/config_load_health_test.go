@@ -45,6 +45,28 @@ func TestConfigLoadHealthDeduplicatesUntilRecovery(t *testing.T) {
 	}
 }
 
+func TestConfigReloadHealthLogsDistinctWarnings(t *testing.T) {
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr, logPrefix: "gc reload", configLoadHealth: &configLoadHealth{}}
+	reply := reloadControlReply{Outcome: reloadOutcomeFailed, Error: "strict mode: 1 collision", Warnings: []string{"first collision"}}
+	cr.finishConfigReloadHealth(reply)
+	since := cr.configLoadHealth.snapshot().Since
+	reply.Warnings = []string{"second collision"}
+	cr.finishConfigReloadHealth(reply)
+	cr.finishConfigReloadHealth(reply)
+	if strings.Count(stderr.String(), "strict mode: 1 collision") != 1 || strings.Count(stderr.String(), "first collision") != 1 || strings.Count(stderr.String(), "second collision") != 1 {
+		t.Fatalf("distinct diagnostics were lost or repeated: %s", stderr.String())
+	}
+	if !cr.configLoadHealth.snapshot().Since.Equal(since) {
+		t.Fatal("new warning changed the failure's first-seen time")
+	}
+	cr.finishConfigReloadHealth(reloadControlReply{Outcome: reloadOutcomeNoChange})
+	cr.finishConfigReloadHealth(reply)
+	if strings.Count(stderr.String(), "strict mode: 1 collision") != 2 || strings.Count(stderr.String(), "second collision") != 2 {
+		t.Fatalf("recovery did not reset diagnostic deduplication: %s", stderr.String())
+	}
+}
+
 func TestControllerConfigLoadStatusWithoutReconcile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

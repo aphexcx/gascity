@@ -22,9 +22,10 @@ type configLoadStatusReply struct {
 // configLoadHealth is shared by the serial reconcile loop and socket readers.
 // It lives with the runtime, so a stopped controller cannot leave stale health.
 type configLoadHealth struct {
-	mu      sync.Mutex
-	failure *configLoadFailure
-	seen    map[string]time.Time
+	mu           sync.Mutex
+	failure      *configLoadFailure
+	seen         map[string]time.Time
+	seenWarnings map[string]struct{}
 }
 
 func (h *configLoadHealth) snapshot() *configLoadFailure {
@@ -56,6 +57,17 @@ func (h *configLoadHealth) record(err error, now time.Time) bool {
 	return !seen
 }
 
+func (h *configLoadHealth) recordWarning(message string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.seenWarnings == nil {
+		h.seenWarnings = make(map[string]struct{})
+	}
+	_, seen := h.seenWarnings[message]
+	h.seenWarnings[message] = struct{}{}
+	return !seen
+}
+
 func (h *configLoadHealth) clear() {
 	if h == nil {
 		return
@@ -64,6 +76,7 @@ func (h *configLoadHealth) clear() {
 	defer h.mu.Unlock()
 	h.failure = nil
 	h.seen = nil
+	h.seenWarnings = nil
 }
 
 var readConfigLoadFailureHook = readConfigLoadFailure
@@ -93,16 +106,18 @@ func (cr *CityRuntime) finishConfigReloadHealth(reply reloadControlReply) {
 		if cr.configLoadHealth == nil {
 			cr.configLoadHealth = &configLoadHealth{}
 		}
-		if !cr.configLoadHealth.record(errors.New(reply.Error), time.Now()) {
-			return
+		if cr.configLoadHealth.record(errors.New(reply.Error), time.Now()) {
+			fmt.Fprintf(cr.stderr, "%s: %s\n", cr.logPrefix, configLoadFailureMessage(cr.configLoadHealth.snapshot())) //nolint:errcheck // best-effort stderr
 		}
-		fmt.Fprintf(cr.stderr, "%s: %s\n", cr.logPrefix, configLoadFailureMessage(cr.configLoadHealth.snapshot())) //nolint:errcheck // best-effort stderr
 	case reloadOutcomeApplied, reloadOutcomeNoChange:
 		cr.configLoadHealth.clear()
 	default:
 		return
 	}
 	for _, warning := range reply.Warnings {
+		if reply.Outcome == reloadOutcomeFailed && !cr.configLoadHealth.recordWarning(warning) {
+			continue
+		}
 		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
 	}
 }
