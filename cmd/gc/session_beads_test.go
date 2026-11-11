@@ -901,6 +901,65 @@ func TestSyncSessionBeads_SetsManagedAlias(t *testing.T) {
 	}
 }
 
+func TestSyncSessionBeads_AliasSyncPreservesSuccessorRuntime(t *testing.T) {
+	for _, path := range []string{"create", "update", "clear"} {
+		t.Run(path, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+			const name = "s-runtime"
+			if path != "create" {
+				if _, err := store.Create(beads.Bead{
+					Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{"session_name": name, "template": "rig/helper", "alias": "old-alias", "state": "active"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			wantMeta := map[string]string{"GC_SESSION_ID": "successor-id", "GC_ALIAS": "successor", "GC_AGENT": "successor", "BEADS_ACTOR": "successor"}
+			for key, value := range wantMeta {
+				if err := sp.SetMeta(name, key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			alias := "rig/helper"
+			if path == "clear" {
+				alias = ""
+			}
+			ds := map[string]TemplateParams{name: {TemplateName: "rig/helper", InstanceName: "rig/helper", Alias: alias, Command: "claude"}}
+			firstCall := len(sp.SnapshotCalls())
+			var stderr bytes.Buffer
+			syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+			if stderr.Len() != 0 {
+				t.Fatalf("sync: %s", stderr.String())
+			}
+			all, err := store.ListByLabel(sessionBeadLabel, 0)
+			if err != nil || len(all) != 1 {
+				t.Fatalf("session beads = %v, %v; want one", all, err)
+			}
+			if all[0].Metadata["alias"] != alias {
+				t.Fatalf("bead alias = %q, want %q", all[0].Metadata["alias"], alias)
+			}
+			for _, call := range sp.SnapshotCalls()[firstCall:] {
+				if call.Name == name && (call.Method == "SetMeta" || call.Method == "RemoveMeta" || call.Method == "Stop") {
+					t.Errorf("alias sync touched successor: %+v", call)
+				}
+			}
+			if !sp.IsRunning(name) {
+				t.Error("successor runtime stopped")
+			}
+			for key, want := range wantMeta {
+				if got, err := sp.GetMeta(name, key); err != nil || got != want {
+					t.Errorf("successor %s = %q, %v; want %q", key, got, err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

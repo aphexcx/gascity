@@ -131,9 +131,18 @@ func SyncRuntimeSessionKey(sp runtime.Provider, info Info) error {
 // SyncRuntimeAlias updates live runtime metadata from the session's current
 // public alias and durable ownership identity. Clearing an alias therefore
 // falls back to the same raw session name or bead ID that API assignment uses.
+// A runtime owned by another session is left unchanged; unowned runtimes retain
+// legacy synchronization behavior.
 func SyncRuntimeAlias(sp runtime.Provider, info Info) error {
 	sessionName := strings.TrimSpace(info.SessionName)
 	if sp == nil || sessionName == "" {
+		return nil
+	}
+	id, err := sp.GetMeta(sessionName, "GC_SESSION_ID")
+	if err != nil {
+		return fmt.Errorf("reading runtime session identity: %w", err)
+	}
+	if id != "" && id != info.ID {
 		return nil
 	}
 	type metaUpdate struct {

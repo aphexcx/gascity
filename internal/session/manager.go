@@ -1303,6 +1303,16 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		// close produces impossible status=closed + live-state rows.
 		if b.Status == "closed" {
 			if intent == suspendIntentShutdown {
+				liveID, err := m.sp.GetMeta(sessName, "GC_SESSION_ID")
+				if err != nil {
+					if runtime.IsSessionGone(err) {
+						return nil
+					}
+					return fmt.Errorf("reading runtime session identity before shutdown: %w", err)
+				}
+				if liveID != "" && liveID != b.ID {
+					return nil
+				}
 				return m.tearDownRuntimeForSuspend(sessName, true)
 			}
 			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
@@ -1748,7 +1758,7 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 				runtimeInfo.SessionName = sessName
 				nextRuntimeInfo := runtimeInfo
 				nextRuntimeInfo.Alias = nextAlias
-				runtimeRunning := sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
+				runtimeRunning := b.Status != "closed" && sessName != "" && m.sp != nil && m.sp.IsRunning(sessName)
 				if runtimeRunning {
 					if err := SyncRuntimeAlias(m.sp, nextRuntimeInfo); err != nil {
 						return fmt.Errorf("updating runtime alias: %w", err)
