@@ -109,6 +109,8 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 						}
 						submits++
 						draft, busy = "", true
+					case slices.Contains(args, "if-shell"):
+						return (&recoveryPane{options: options}).exec(args)
 					}
 					return "", nil
 				}}

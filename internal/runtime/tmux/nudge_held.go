@@ -108,7 +108,7 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 	}
 	var observeErr error
 	observe := func() (paneSubmitObservation, error) {
-		lines, err := t.captureOwnedNudgeDraftInput(target, digest)
+		lines, err := t.captureOwnedNudgeDraftInput(target, digest, true)
 		if err != nil {
 			observeErr = err
 			return paneSubmitObservation{}, err
@@ -126,7 +126,7 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 			observeErr = err
 			return err
 		}
-		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target))
+		_, err := t.sendOwnedNudgeDraftSubmitSequence(target, digest, t.nudgeSubmitKeySequence(target), true)
 		observeErr = err
 		return err
 	}

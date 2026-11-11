@@ -197,11 +197,11 @@ func TestExactSessionTargetsRealTmux(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, tm.stageNudgeDraftProvenance(pane, "DRAFT_MARKER"))
 				require.NoError(t, tm.confirmNudgeDraftProvenance(pane, "DRAFT_MARKER"))
-				owned, err := tm.sendNudgeDraftSubmitSequence("abc", "DRAFT_MARKER", []string{"x"})
+				owned, err := tm.sendNudgeDraftSubmitSequence("abc", "DRAFT_MARKER", []string{"x"}, true)
 				require.NoError(t, err)
 				require.True(t, owned)
 				awaitText("=abc:", "x")
-				_, err = tm.captureNudgeDraftSubmit("abc", "DRAFT_MARKER")
+				_, err = tm.captureNudgeDraftSubmit("abc", "DRAFT_MARKER", true)
 				require.NoError(t, err)
 				_, err = tm.nudgeDraftOwnershipHook("abc", "abc", false)
 				require.NoError(t, err)
@@ -245,7 +245,7 @@ func TestExactSessionTargetsRealTmux(t *testing.T) {
 						return err
 					}},
 					{"if-shell", func() error {
-						_, err := tm.sendNudgeDraftSubmitSequence("abc", "MARKER", []string{"x"})
+						_, err := tm.sendNudgeDraftSubmitSequence("abc", "MARKER", []string{"x"}, true)
 						return err
 					}},
 					{"created", func() error { _, err := tm.GetSessionCreatedUnix("abc"); return err }},

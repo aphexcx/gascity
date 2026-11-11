@@ -106,16 +106,20 @@ func (t *Tmux) recoveredNudgeStatus(session, target, id string) (runtime.NudgeSu
 		if !observed {
 			return "", fmt.Errorf("%w: pending recovery composer is unreadable", ErrNudgeDraftDeferred)
 		}
+		stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+		if err != nil {
+			return "", fmt.Errorf("reading pending recovery ownership: %w", err)
+		}
+		stored = strings.TrimSpace(stored)
+		if stored != digest && stored != "pending:"+digest {
+			return runtime.NudgeSubmitOwnershipLost, nil
+		}
 		if draft != "" {
-			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
-			if err != nil {
-				return "", err
-			}
 			shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 			if err != nil {
 				return "", err
 			}
-			if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); owned && strings.TrimPrefix(strings.TrimSpace(stored), "pending:") == digest {
+			if _, owned := ownedPasteShape(stored, strings.TrimSpace(shape), draft); owned {
 				return "", nil
 			}
 			// Input still present without ownership proof is not evidence of
@@ -123,6 +127,8 @@ func (t *Tmux) recoveredNudgeStatus(session, target, id string) (runtime.NudgeSu
 			// of acknowledging a reminder whose recovery never submitted.
 			return runtime.NudgeSubmitOwnershipLost, nil
 		}
+		// An intact marker permits a late original Enter. An attachment or
+		// withdrawal invalidates that marker, checked above.
 		return runtime.NudgeSubmitUnverified, nil
 	}
 	// Queue survivors keep their attempted batch's identity even when its
