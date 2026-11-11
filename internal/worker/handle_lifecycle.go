@@ -31,27 +31,33 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 // command and hints. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
-func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) (err error) {
+func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) error {
+	_, err := h.StartResolvedWithPreparation(ctx, startCommand, hints, nil)
+	return err
+}
+
+// StartResolvedWithPreparation prepares only an actual launch and reports whether
+// it started a runtime. Reusing an already-running session skips preparation.
+func (h *SessionHandle) StartResolvedWithPreparation(ctx context.Context, startCommand string, hints runtime.Config, prepare func(runtime.Config) (runtime.Config, error)) (started bool, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
 	id, err := h.ensureSessionID()
 	if err != nil {
-		return err
+		return false, err
 	}
 	command := strings.TrimSpace(startCommand)
 	if command == "" {
 		command, err = h.startCommand(id)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 	startHints := hints
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	err = h.manager.StartRuntimeOnly(ctx, id, command, startHints)
-	return err
+	return h.manager.StartRuntimeOnlyWithPreparation(ctx, id, command, startHints, prepare)
 }
 
 // Attach ensures the worker runtime is live and then attaches the caller's

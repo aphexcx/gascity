@@ -32,6 +32,7 @@ type StateHandle interface {
 type LifecycleHandle interface {
 	Start(context.Context) error
 	StartResolved(context.Context, string, runtime.Config) error
+	StartResolvedWithPreparation(context.Context, string, runtime.Config, func(runtime.Config) (runtime.Config, error)) (bool, error)
 	Attach(context.Context) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error

@@ -228,14 +228,16 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	fingerprintConfig runtime.Config
-	candidate         startCandidate
-	cfg               runtime.Config
-	coreHash          string
-	coreBreakdown     runtime.BreakdownV1
-	liveHash          string
-	provisionHash     string
-	launchHash        string
+	fingerprintConfig      runtime.Config
+	candidate              startCandidate
+	cfg                    runtime.Config
+	coreHash               string
+	coreBreakdown          runtime.BreakdownV1
+	liveHash               string
+	provisionHash          string
+	launchHash             string
+	startupContentPrevious string
+	startupContentPrepared bool
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -267,6 +269,7 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	reusedRuntime   bool
 	// diedDuringStartup is true when the session started and then died
 	// before it was confirmed alive, detected either of two ways: (1) the
 	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
@@ -1715,11 +1718,6 @@ func runPreparedStartCandidate(
 	warmClaim warmClaimTriggerProbe,
 ) (result startResult) {
 	started := time.Now()
-	if store != nil {
-		if err := prepareStartupContent(&item, cityPath, sessionFrontDoor(store)); err != nil {
-			return startResult{prepared: item, started: started, finished: time.Now(), err: err}
-		}
-	}
 	result = startResult{
 		prepared: item,
 		started:  started,
@@ -1746,7 +1744,13 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startPreparedStartCandidate(startCtx, &item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	reusedRuntime := !startedFresh && (err == nil || errors.Is(err, runtime.ErrSessionExists))
+	if reusedRuntime && store != nil {
+		if restoreErr := restoreReusedStartupContent(&item, sessionFrontDoor(store)); restoreErr != nil {
+			return startResult{prepared: item, started: started, finished: time.Now(), err: restoreErr}
+		}
+	}
 	startCtxErr := startCtx.Err()
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
@@ -1821,6 +1825,7 @@ func runPreparedStartCandidate(
 			started:           started,
 			finished:          finished,
 			rollbackPending:   false,
+			reusedRuntime:     reusedRuntime,
 			diedDuringStartup: diedDuringStartup,
 			phases:            phases,
 		}
@@ -1872,6 +1877,7 @@ func runPreparedStartCandidate(
 		started:           started,
 		finished:          finished,
 		rollbackPending:   rollbackPending,
+		reusedRuntime:     reusedRuntime,
 		rateLimitScreen:   rateLimitScreen,
 		diedDuringStartup: diedDuringStartup,
 		provider:          sp,
@@ -2262,7 +2268,7 @@ func clonePreparedStartForAsync(item preparedStart) preparedStart {
 
 func startPreparedStartCandidate(
 	ctx context.Context,
-	item preparedStart,
+	item *preparedStart,
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
@@ -2315,6 +2321,15 @@ func startPreparedStartCandidate(
 			}
 		}
 	}
+	prepare := func(actual runtime.Config) (runtime.Config, error) {
+		item.cfg = actual
+		if store != nil {
+			if err := prepareStartupContent(item, cityPath, sessionFrontDoor(store)); err != nil {
+				return actual, err
+			}
+		}
+		return item.cfg, nil
+	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
@@ -2329,13 +2344,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+		return handle.StartResolvedWithPreparation(ctx, item.cfg.Command, item.cfg, prepare)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+	return handle.StartResolvedWithPreparation(ctx, item.cfg.Command, item.cfg, prepare)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -2622,7 +2637,7 @@ func commitStartResultTraced(
 	} else if info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
 		sessionpkg.ClearStoredMCPMetadata(metadata)
 	}
-	content, err := finishStartupContent(&result.prepared, metadata, true)
+	content, err := finishStartupContent(&result.prepared, metadata, !result.reusedRuntime)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording startup content for %s: %v\n", name, err) //nolint:errcheck
 		return false
@@ -2647,7 +2662,9 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
-	logStartupContent(name, content, stderr)
+	if !result.reusedRuntime {
+		logStartupContent(name, content, stderr)
+	}
 	removeStartupReceipt(info, stderr)
 	// A successful, durably-committed start clears any accrued startup-health
 	// episode for this session name (ga-o04bfr.1.1). Skipped when there is

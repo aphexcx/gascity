@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // startupMaterializingRuntime retains the fake's runtime observations while
@@ -29,6 +30,81 @@ func (sp *startupMaterializingRuntime) Start(ctx context.Context, name string, c
 		return err
 	}
 	return sp.Fake.Start(ctx, name, cfg)
+}
+
+type startupReuseRuntime struct {
+	*runtime.Fake
+	hidden int
+}
+
+func (sp *startupReuseRuntime) IsRunning(name string) bool {
+	if sp.hidden > 0 {
+		sp.hidden--
+		return false
+	}
+	return sp.Fake.IsRunning(name)
+}
+
+func TestStartupContentRuntimeReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hidden     int
+		lateRecord bool
+	}{
+		{name: "warm"},
+		{name: "worker_shortcut", hidden: 1},
+		{name: "provider_collision", hidden: 2},
+		{name: "warm_late_record", lateRecord: true},
+		{name: "worker_shortcut_late_record", hidden: 1, lateRecord: true},
+		{name: "provider_collision_late_record", hidden: 2, lateRecord: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCachedImportFixture(t)
+			sp := &startupReuseRuntime{Fake: f.sp, hidden: tc.hidden}
+			front := sessionFrontDoor(f.store)
+			info, err := front.Get(f.beadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tp := f.cr.buildFn(f.cfg, f.sp, f.store).State["worker"]
+			prepared, _, err := buildPreparedStart(startCandidate{info: info, tp: tp}, f.cfg, f.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := info.StartupContent
+			if tc.lateRecord {
+				patch := sessionpkg.StartupContentPatch(sessionpkg.StartupContent{
+					Skipped: true, Reason: "earlier startup", Baseline: startupContentBaseline(prepared.fingerprintConfig),
+				})
+				if err := front.ApplyPatch(info.ID, patch); err != nil {
+					t.Fatal(err)
+				}
+				expected = patch[sessionpkg.StartupContentMetadataKey]
+			}
+			path := filepath.Join(f.cacheDirs[1], "skills", "plan", "stray")
+			if err := os.WriteFile(path, []byte("dirty"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result := runPreparedStartCandidate(context.Background(), *prepared, f.cityPath, sp, f.store, f.cfg, time.Minute,
+				immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			if !commitStartResultTraced(result, front, clock.Real{}, events.Discard, 1, f.stdout, f.stderr, nil) {
+				t.Fatal("reused runtime did not commit")
+			}
+			got, err := front.Get(f.beadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.StartupContent != expected {
+				t.Fatalf("runtime reuse changed startup delivery state: before=%q after=%q", expected, got.StartupContent)
+			}
+			if strings.Contains(f.stderr.String(), "startup-content: session") {
+				t.Fatal("runtime reuse logged a dirty startup")
+			}
+		})
+	}
 }
 
 // A session must receive accepted fingerprint content or be restarted once

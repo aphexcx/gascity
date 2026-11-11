@@ -91,7 +91,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 
 	usedWorker, err := startPreparedStartCandidate(
 		context.Background(),
-		preparedStart{
+		&preparedStart{
 			candidate: startCandidate{
 				info: sessionpkg.Info{SessionName: "legacy-runtime-only", SessionNameMetadata: "legacy-runtime-only"},
 				tp:   TemplateParams{TemplateName: "worker"},
@@ -143,7 +143,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 
 	started, err := startPreparedStartCandidate(
 		context.Background(),
-		preparedStart{
+		&preparedStart{
 			candidate: startCandidate{
 				info: sessionpkg.Info{SessionName: "legacy-runtime-only", SessionNameMetadata: "legacy-runtime-only"},
 				tp:   TemplateParams{TemplateName: "worker"},
@@ -176,7 +176,7 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 	sp := &startConfirmedAbsentProvider{Fake: runtime.NewFake()}
 	started, err := startPreparedStartCandidate(
 		context.Background(),
-		preparedStart{
+		&preparedStart{
 			candidate: startCandidate{
 				info: sessionpkg.Info{SessionName: "worker", SessionNameMetadata: "worker"},
 				tp:   TemplateParams{TemplateName: "worker"},

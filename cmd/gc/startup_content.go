@@ -67,6 +67,12 @@ func prepareStartupContent(item *preparedStart, cityPath string, store *sessionp
 	if store == nil || item.candidate.info.ID == "" {
 		return nil
 	}
+	info, err := store.Get(item.candidate.info.ID)
+	if err != nil {
+		return fmt.Errorf("reading startup content before launch: %w", err)
+	}
+	item.candidate.info = info
+	item.startupContentPrevious = info.StartupContent
 	content := sessionpkg.StartupContent{Sources: changedStartupSources(item.candidate.tp.StartupContentSources)}
 	for _, command := range item.cfg.PreStart {
 		if !strings.Contains(command, " internal materialize-skills ") {
@@ -98,11 +104,43 @@ func prepareStartupContent(item *preparedStart, cityPath string, store *sessionp
 	}
 	content.Baseline = startupContentBaseline(item.fingerprintConfig)
 	content.Pending = true
-	info, err := store.RecordStartupContent(item.candidate.info, content)
+	info, err = store.RecordStartupContent(item.candidate.info, content)
 	if err != nil {
 		return fmt.Errorf("recording startup content: %w", err)
 	}
 	item.candidate.info = info
+	item.startupContentPrepared = true
+	return nil
+}
+
+func restoreReusedStartupContent(item *preparedStart, store *sessionpkg.Store) error {
+	if item.candidate.info.ID == "" {
+		return nil
+	}
+	current, err := store.Get(item.candidate.info.ID)
+	if err != nil {
+		return fmt.Errorf("reading reused startup content: %w", err)
+	}
+	if !item.startupContentPrepared {
+		item.candidate.info = current
+		return nil
+	}
+	content, err := sessionpkg.DecodeStartupContent(item.candidate.info.StartupContent)
+	if err != nil {
+		return err
+	}
+	if current.StartupContent == item.candidate.info.StartupContent {
+		current, err = store.UpdateMetadataInfo(current, sessionpkg.MetadataPatch{sessionpkg.StartupContentMetadataKey: item.startupContentPrevious})
+		if err != nil {
+			return fmt.Errorf("restoring reused startup content: %w", err)
+		}
+	}
+	item.candidate.info = current
+	if content.Receipt != "" {
+		if err := os.Remove(content.Receipt); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing unused startup receipt: %w", err)
+		}
+	}
 	return nil
 }
 
