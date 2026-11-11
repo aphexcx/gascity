@@ -136,7 +136,8 @@ func TestStartupContentRepairCheckPerPass(t *testing.T) {
 			config.ResetRemoteCacheValidationCache()
 			check := func(label string, unlock func()) {
 				t.Helper()
-				before, begin := loadCityConfigCalls.Load(), time.Now()
+				before := loadCityConfigCalls.Load() + loadPrematerializedCityConfigCalls.Load()
+				begin := time.Now()
 				if unlock == nil {
 					h.tick(t)
 				} else {
@@ -160,7 +161,7 @@ func TestStartupContentRepairCheckPerPass(t *testing.T) {
 						}
 					}
 				}
-				loads := loadCityConfigCalls.Load() - before
+				loads := loadCityConfigCalls.Load() + loadPrematerializedCityConfigCalls.Load() - before
 				t.Logf("%s: marked=%d elapsed=%s config_loads=%d", label, count, time.Since(begin), loads)
 				wantLoads := int64(0)
 				if count > 0 {
