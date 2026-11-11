@@ -27,6 +27,10 @@ import (
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
 var loadCityConfigCalls atomic.Int64
 
+// loadPrematerializedCityConfigCalls counts full TOML loads that skip builtin
+// pack refresh, including non-blocking advisory loads.
+var loadPrematerializedCityConfigCalls atomic.Int64
+
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
 
 Describe what this agent should do here.
@@ -93,6 +97,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
+	loadPrematerializedCityConfigCalls.Add(1)
 	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err

@@ -680,21 +680,21 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	return nil
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, prepare func(runtime.Config) (runtime.Config, error)) (bool, error) {
 	// StartResolved uses Config.Command to distinguish a caller-prepared launch
 	// from cached handle hints. Preserve its full prompt/setup/environment while
 	// still validating the replacement provider and migrating stored settings.
 	refreshLaunch := strings.TrimSpace(hints.Command) == ""
 	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints, refreshLaunch); err != nil {
-		return err
+		return false, err
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
-		return nil
+		return false, nil
 	}
 	if resumeCommand == "" {
-		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+		return false, fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
 	cfg := hints
@@ -708,13 +708,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
-		return err
+		return false, err
 	}
 	instanceToken := b.Metadata["instance_token"]
 	if instanceToken == "" {
 		instanceToken = NewInstanceToken()
 		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
+			return false, fmt.Errorf("storing instance token: %w", err)
 		}
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string)
@@ -734,6 +734,15 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	if prepare != nil {
+		cfg, err = prepare(cfg)
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, err
+		}
+	}
 	started := false
 	// Refuse to respawn if a prior escaped process for this session could not
 	// be confirmed dead: a survivor would race this replacement for the same
@@ -743,14 +752,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		if unroute != nil {
 			unroute()
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if retryErr != nil {
-				return retryErr
+				return false, retryErr
 			}
 			if !retried {
 				// The recovery declined: nothing to strip, so a relaunch would
@@ -758,16 +767,16 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 				if unroute != nil {
 					unroute()
 				}
-				return sessionStartError("resuming session", b, cfg, transport, err)
+				return false, sessionStartError("resuming session", b, cfg, transport, err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
-			return err
+			return false, err
 		default:
 			if unroute != nil {
 				unroute()
 			}
-			return sessionStartError("resuming session", b, cfg, transport, err)
+			return false, sessionStartError("resuming session", b, cfg, transport, err)
 		}
 	} else {
 		started = true
@@ -777,15 +786,15 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 			if unroute != nil {
 				unroute()
 			}
-			return err
+			return started, err
 		}
 		if !m.sp.IsRunning(sessName) {
 			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
-				return err
+				return started, err
 			}
 		}
 	}
-	return nil
+	return started, nil
 }
 
 func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
@@ -1074,13 +1083,23 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+	_, err := m.StartRuntimeOnlyWithPreparation(ctx, id, resumeCommand, hints, nil)
+	return err
+}
+
+// StartRuntimeOnlyWithPreparation prepares under the session mutation lock after
+// the live-session shortcut and reports whether a runtime was actually started.
+func (m *Manager) StartRuntimeOnlyWithPreparation(ctx context.Context, id, resumeCommand string, hints runtime.Config, prepare func(runtime.Config) (runtime.Config, error)) (bool, error) {
+	var started bool
+	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints)
+		started, err = m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints, prepare)
+		return err
 	})
+	return started, err
 }
 
 // Send resumes a suspended session if needed, then nudges the runtime with a

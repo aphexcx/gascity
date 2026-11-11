@@ -49,6 +49,17 @@ func (s *getCountingStore) count() int {
 // regressive re-Get sneaking onto the hot path.
 func TestReconcileSessionBeadsFastPathGetBudget(t *testing.T) {
 	env, session, sessionName := newProgressStallTestEnv(t)
+	// The progress fixture uses a legacy placeholder hash. Establish a current
+	// baseline so this measures a steady tick, not the migration write boundary.
+	info, err := sessionFrontDoor(env.store).Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := sessionHashRebaselineMetadata(sessionCoreConfigWithOverrides(env.desiredState[sessionName], info))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.setSessionMetadata(&session, baseline)
 	// Recent activity so the healthy running session is neither progress-stalled
 	// nor idle-killed — a clean steady-state fast-path tick.
 	env.sp.SetActivity(sessionName, env.clk.Now())

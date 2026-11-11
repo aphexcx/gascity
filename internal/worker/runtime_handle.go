@@ -87,12 +87,19 @@ func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
 }
 
 // StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) (err error) {
+func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) error {
+	_, err := h.StartResolvedWithPreparation(ctx, startCommand, cfg, nil)
+	return err
+}
+
+// StartResolvedWithPreparation prepares only an actual launch and reports whether
+// it started a runtime. Reusing an already-running session skips preparation.
+func (h *RuntimeHandle) StartResolvedWithPreparation(ctx context.Context, startCommand string, cfg runtime.Config, prepare func(runtime.Config) (runtime.Config, error)) (started bool, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
 	if h.provider.IsRunning(h.sessionName) {
-		return nil
+		return false, nil
 	}
 	startCfg := cfg
 	if strings.TrimSpace(startCfg.Command) == "" {
@@ -100,10 +107,16 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 	}
 	if strings.TrimSpace(startCfg.Command) == "" {
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
-		return err
+		return false, err
+	}
+	if prepare != nil {
+		startCfg, err = prepare(startCfg)
+		if err != nil {
+			return false, err
+		}
 	}
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
-	return err
+	return err == nil, err
 }
 
 // Attach attaches to the live runtime session if it is currently running.

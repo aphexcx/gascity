@@ -70,6 +70,46 @@ func TestFingerprintContentLocalChangeAndUnavailableHash(t *testing.T) {
 	}
 }
 
+func TestFingerprintAgentCatalogRelockAndLocalMembership(t *testing.T) {
+	c := fingerprintContentForConfig(t.TempDir(), &config.City{}, io.Discard)
+	locked, next, local := t.TempDir(), t.TempDir(), t.TempDir()
+	c.rememberRoot(locked)
+	c.rememberRoot(next)
+	writeSkill := func(root, name string) {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("A skill"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(root string) int {
+		t.Helper()
+		cat, err := c.agentCatalog(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(cat.Entries)
+	}
+	for _, root := range []string{locked, local} {
+		writeSkill(root, "first")
+		if count(root) != 1 {
+			t.Fatal("missing accepted skill")
+		}
+		writeSkill(root, "second")
+	}
+	if count(locked) != 1 || count(local) != 2 {
+		t.Fatal("locked and local catalog views did not retain their distinct membership contracts")
+	}
+	writeSkill(next, "first")
+	writeSkill(next, "second")
+	if count(next) != 2 {
+		t.Fatal("relocked agent catalog did not expose new membership")
+	}
+}
+
 func TestFingerprintPromptSourceSnapshot(t *testing.T) {
 	root := t.TempDir()
 	c := fingerprintContentForConfig(t.TempDir(), &config.City{}, io.Discard)

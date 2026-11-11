@@ -76,8 +76,9 @@ func formatSoftReloadFailedSessions(names []string) string {
 //     next tick)
 //   - the recomputed current hash already equals the stored hash
 //
-// The hash computation uses sessionCoreConfigForHash, the same canonical
-// reconciler drift-hash helper used by live and asleep drift detection.
+// The hash computation shares the reconciler's canonical override assembly.
+// Pending startup-content repairs retain their fingerprint input:
+// accepting unrelated config does not acknowledge undelivered content.
 //
 // Returns accepted-session, failed-session, stale-drain-cancellation, and
 // empty-desired-state diagnostics for the controller reply.
@@ -127,9 +128,27 @@ func acceptConfigDriftAcrossSessions(
 		if !ok {
 			continue
 		}
-		agentCfg := sessionCoreConfigForHashInfo(tp, info)
+		agentCfg := sessionCoreConfigForRebaselineInfo(tp, info)
 		currentHash := runtime.CoreFingerprint(agentCfg)
 		if storedHash == currentHash {
+			continue
+		}
+		// A start may have finalized delivery since the tick took its snapshot.
+		// Re-read only the sessions selected for a write, through the tick's store.
+		fresh, resolved, err := sessionInfoAtRebaseline(sessFront, info.ID)
+		if err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: reading startup content for %s: %v\n", name, err) //nolint:errcheck
+			continue
+		}
+		if !resolved {
+			continue
+		}
+		info = fresh
+		agentCfg = sessionCoreConfigForRebaselineInfo(tp, info)
+		currentHash = runtime.CoreFingerprint(agentCfg)
+		if strings.TrimSpace(info.StartedConfigHash) == currentHash {
 			continue
 		}
 		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {

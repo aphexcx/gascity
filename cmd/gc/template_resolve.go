@@ -94,6 +94,8 @@ type TemplateParams struct {
 	FPExtra map[string]string
 	// OverlaySourceHashes carries accepted source hashes into runtime diagnostics.
 	OverlaySourceHashes map[string]string
+	// StartupContentSources are accepted locked inputs to verify at delivery.
+	StartupContentSources []session.StartupContentSource
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).
 	ResolvedProvider *config.ResolvedProvider
 	// TemplateName is the config template name (pool base name or qualified name).
@@ -486,7 +488,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 					// The error is already surfaced via
 					// effectiveSkillsForAgent's stderr path earlier in
 					// the call graph.
-					if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
+					if c, err := p.fingerprintContent.agentCatalog(cfgAgent.SkillsDir); err == nil {
 						agentCat = c
 					}
 				}
@@ -632,6 +634,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.
+	var startupSources []session.StartupContentSource
 	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
 		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
@@ -640,9 +643,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			wsProvider = p.workspace.Provider
 		}
 		sharedCatalog := p.sharedSkillCatalogSnapshotForAgent(cfgAgent)
-		desired := effectiveSkillsForAgent(sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
+		desired := effectiveSkillsForAgent(p.fingerprintContent, sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
 			fpExtra = mergeSkillFingerprintEntriesWithHash(fpExtra, desired, p.fingerprintContent.hashPath)
+			for _, entry := range desired {
+				if source, ok := p.fingerprintContent.lockedSource(entry.Source, false); ok {
+					startupSources = append(startupSources, source)
+				}
+			}
 			if canonWorkDir != scopeRoot {
 				// Pool instances inherit their skill catalog from the
 				// template, not the instance — namepool members (e.g.
@@ -776,6 +784,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		entry := &hints.CopyFiles[i]
 		if entry.Probed {
 			entry.ContentHash = p.fingerprintContent.hash(entry.Src, "copy:"+entry.RelDst, func() string { return entry.ContentHash })
+			if source, ok := p.fingerprintContent.lockedSource(entry.Src, entry.RelDst == path.Join(".gc", "scripts")); ok {
+				startupSources = append(startupSources, source)
+			}
 		}
 	}
 	overlayHashes := runtime.OverlaySourceHashes(hints.ToRuntimeConfig())
@@ -783,25 +794,26 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		overlayHashes[source] = p.fingerprintContent.hash(source, "overlay", func() string { return value })
 	}
 	params := TemplateParams{
-		Command:          command,
-		Prompt:           prompt,
-		Env:              env,
-		OperatorEnv:      operatorEnv,
-		Upstream:         cfgAgent.Upstream,
-		Hints:            hints,
-		WorkDir:          workDir,
-		SessionName:      sessName,
-		Alias:            qualifiedName,
-		FPExtra:          fpExtra,
-		ResolvedProvider: resolved,
-		TemplateName:     templateNameFor(cfgAgent, qualifiedName),
-		InstanceName:     qualifiedName,
-		RigName:          rigName,
-		RigRoot:          rigRoot,
-		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == config.SessionTransportACP,
-		HookEnabled:      hasHooks,
-		MCPServers:       mcpServers,
+		StartupContentSources: startupSources,
+		Command:               command,
+		Prompt:                prompt,
+		Env:                   env,
+		OperatorEnv:           operatorEnv,
+		Upstream:              cfgAgent.Upstream,
+		Hints:                 hints,
+		WorkDir:               workDir,
+		SessionName:           sessName,
+		Alias:                 qualifiedName,
+		FPExtra:               fpExtra,
+		ResolvedProvider:      resolved,
+		TemplateName:          templateNameFor(cfgAgent, qualifiedName),
+		InstanceName:          qualifiedName,
+		RigName:               rigName,
+		RigRoot:               rigRoot,
+		WakeMode:              cfgAgent.WakeMode,
+		IsACP:                 sessionTransport == config.SessionTransportACP,
+		HookEnabled:           hasHooks,
+		MCPServers:            mcpServers,
 
 		OverlaySourceHashes: overlayHashes,
 	}

@@ -171,6 +171,7 @@ func resolveReloadSessionTemplates(bp *agentBuildParams, cfg *config.City, infos
 
 func reloadSessionChanges(infos []session.Info, desired map[string]TemplateParams, cfg *config.City, soft bool) []reloadChange {
 	var changes []reloadChange
+	startupCheck := &startupContentCheck{}
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionNameMetadata)
 		if info.Closed || name == "" {
@@ -189,7 +190,12 @@ func reloadSessionChanges(infos []session.Info, desired map[string]TemplateParam
 			if !ok || info.StartedConfigHash == "" {
 				continue
 			}
-			current := sessionCoreConfigForHashInfo(tp, info)
+			var current runtime.Config
+			if soft {
+				current = sessionCoreConfigForRebaselineInfo(tp, info)
+			} else {
+				current = startupCheck.coreConfigForHashInfo(tp, info)
+			}
 			if info.StartedConfigHash == runtime.CoreFingerprint(current) {
 				continue
 			}

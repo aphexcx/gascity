@@ -70,7 +70,7 @@ func newInternalMaterializeSkillsCmd(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				if bestEffort {
 					fmt.Fprintf(stderr, "gc internal materialize-skills: city config unavailable: %v; skipping (best-effort)\n", err) //nolint:errcheck // best-effort stderr
-					return nil
+					return reportSkippedSkillMaterialization(err)
 				}
 				fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit

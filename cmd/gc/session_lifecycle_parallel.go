@@ -228,13 +228,16 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	fingerprintConfig      runtime.Config
+	candidate              startCandidate
+	cfg                    runtime.Config
+	coreHash               string
+	coreBreakdown          runtime.BreakdownV1
+	liveHash               string
+	provisionHash          string
+	launchHash             string
+	startupContentPrevious string
+	startupContentPrepared bool
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -266,6 +269,7 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	reusedRuntime   bool
 	// diedDuringStartup is true when the session started and then died
 	// before it was confirmed alive, detected either of two ways: (1) the
 	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
@@ -1074,6 +1078,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// they stay consistent with the started_config_hash the reconciler compares.
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
+	fingerprintConfig := agentCfg
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -1310,15 +1315,16 @@ func buildPreparedStartWithWorkDirResolver(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
+		fingerprintConfig: fingerprintConfig,
+		candidate:         candidate,
+		cfg:               agentCfg,
+		coreHash:          coreHash,
+		coreBreakdown:     coreBreakdown,
+		liveHash:          liveHash,
+		provisionHash:     provisionHash,
+		launchHash:        launchHash,
+		promptDelivered:   promptDelivered,
+		promptHash:        promptHash,
 	}, candidate.info, nil
 }
 
@@ -1738,7 +1744,13 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startPreparedStartCandidate(startCtx, &item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	reusedRuntime := !startedFresh && (err == nil || errors.Is(err, runtime.ErrSessionExists))
+	if reusedRuntime && store != nil {
+		if restoreErr := restoreReusedStartupContent(&item, sessionFrontDoor(store)); restoreErr != nil {
+			return startResult{prepared: item, started: started, finished: time.Now(), err: restoreErr}
+		}
+	}
 	startCtxErr := startCtx.Err()
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
@@ -1813,6 +1825,7 @@ func runPreparedStartCandidate(
 			started:           started,
 			finished:          finished,
 			rollbackPending:   false,
+			reusedRuntime:     reusedRuntime,
 			diedDuringStartup: diedDuringStartup,
 			phases:            phases,
 		}
@@ -1857,6 +1870,16 @@ func runPreparedStartCandidate(
 	if err == nil {
 		rateLimitScreen = false
 	}
+	if err != nil && item.startupContentPrepared {
+		// An absent runtime cannot consume this attempt's receipt. Unknown
+		// liveness or a running process still needs it for crash recovery.
+		running, _, observeErr := observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+		if observeErr != nil {
+			err = errors.Join(err, fmt.Errorf("checking failed startup receipt owner: %w", observeErr))
+		} else if !running {
+			err = errors.Join(err, restoreReusedStartupContent(&item, sessionFrontDoor(store)))
+		}
+	}
 	return startResult{
 		prepared:          item,
 		err:               err,
@@ -1864,6 +1887,7 @@ func runPreparedStartCandidate(
 		started:           started,
 		finished:          finished,
 		rollbackPending:   rollbackPending,
+		reusedRuntime:     reusedRuntime,
 		rateLimitScreen:   rateLimitScreen,
 		diedDuringStartup: diedDuringStartup,
 		provider:          sp,
@@ -2254,7 +2278,7 @@ func clonePreparedStartForAsync(item preparedStart) preparedStart {
 
 func startPreparedStartCandidate(
 	ctx context.Context,
-	item preparedStart,
+	item *preparedStart,
 	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
@@ -2307,6 +2331,15 @@ func startPreparedStartCandidate(
 			}
 		}
 	}
+	prepare := func(actual runtime.Config) (runtime.Config, error) {
+		item.cfg = actual
+		if store != nil {
+			if err := prepareStartupContent(item, cityPath, sessionFrontDoor(store)); err != nil {
+				return actual, err
+			}
+		}
+		return item.cfg, nil
+	}
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
@@ -2321,13 +2354,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+		return handle.StartResolvedWithPreparation(ctx, item.cfg.Command, item.cfg, prepare)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+	return handle.StartResolvedWithPreparation(ctx, item.cfg.Command, item.cfg, prepare)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -2614,6 +2647,11 @@ func commitStartResultTraced(
 	} else if info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
 		sessionpkg.ClearStoredMCPMetadata(metadata)
 	}
+	content, err := finishStartupContent(&result.prepared, metadata, !result.reusedRuntime)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording startup content for %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2634,6 +2672,10 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	if !result.reusedRuntime {
+		logStartupContent(name, content, stderr)
+	}
+	removeStartupReceipt(info, stderr)
 	// A successful, durably-committed start clears any accrued startup-health
 	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
 	// nothing to clear so a healthy session's first-ever start does not mint
@@ -2920,6 +2962,11 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+	content, contentErr := finishStartupContent(prepared, metadata, false)
+	if contentErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: recovering startup content for %s: %v\n", info.ID, contentErr) //nolint:errcheck
+		return false, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, metadata); err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -2930,6 +2977,8 @@ func recoverRunningPendingCreate(
 		// mint) are on prepared.candidate.info — fold the residue from there.
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
+	logStartupContent(info.SessionName, content, stderr)
+	removeStartupReceipt(info, stderr)
 	// buildPreparedStart mints instance_token onto the twin + store (SetMarker) when
 	// it was empty — a residue outside CommitStartedPatch. Carry it in the returned
 	// fold batch so the caller's snapshot reflects it: the Phase-2 drain scan reads

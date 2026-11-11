@@ -2346,7 +2346,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			changed = true
 		}
 
+		var aliasRebaseline func()
 		applyBatch := func() {
+			if aliasRebaseline != nil {
+				aliasRebaseline()
+			}
 			if len(batch) > 0 {
 				batch["synced_at"] = now.Format("2006-01-02T15:04:05Z07:00")
 				if setMetaBatch(sessFront, b.ID, batch, stderr) == nil {
@@ -2469,7 +2473,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						for key, value := range session.UpdatedAliasMetadata(b.Metadata, managedAlias) {
 							queueMeta(key, value)
 						}
-						queueAliasChangeDriftRebaseline(sessFront, b, tp, queueMeta, stderr)
+						aliasRebaseline = queueAliasChangeDriftRebaseline(sessFront, b, tp, queueMeta, stderr)
 					}
 					mergeAliasGuardedBatch()
 				}
@@ -2576,34 +2580,33 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	return openIndex, snap
 }
 
-// queueAliasChangeDriftRebaseline moves a started pool session's config-drift
-// baseline onto its post-rename config. A pool alias change re-renders the
+// queueAliasChangeDriftRebaseline defers a started pool session's config-drift
+// rebaseline until its metadata batch is ready to persist. A pool alias change re-renders the
 // alias-derived pre_start, which would otherwise trip the reconciler's
 // CoreFingerprint drift check and drain the session. Unstarted sessions (no
 // started_config_hash) are skipped — the start path baselines them.
 // See gastownhall/gascity#2234.
-func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) {
+func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp TemplateParams, queueMeta func(key, value string), stderr io.Writer) func() {
 	if strings.TrimSpace(b.Metadata["started_config_hash"]) == "" {
-		return
+		return nil
 	}
-	// Rare alias-CHANGE lane (only when a started pool session's alias is renamed):
-	// re-read the session through the front door for its typed Info. The Get contract
-	// (ErrSessionNotFound / "loading session %q" wrap / non-IsSessionBeadOrRepairable
-	// rejection) is bridged as a best-effort skip — a vanished or damaged bead simply
-	// forgoes the rebaseline, matching this lane's existing best-effort stderr
-	// semantics. Off the pinned tick fast path.
-	info, err := sessFront.Get(b.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: loading session %s for alias-change drift rebaseline: %v\n", b.ID, err) //nolint:errcheck
-		return
-	}
-	rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForHashInfo(tp, info))
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: rebaselining drift baseline after alias change for %s: %v\n", b.ID, err) //nolint:errcheck
-		return
-	}
-	for key, value := range rebaseline {
-		queueMeta(key, value)
+	return func() {
+		info, resolved, err := sessionInfoAtRebaseline(sessFront, b.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: loading session %s for alias-change drift rebaseline: %v\n", b.ID, err) //nolint:errcheck
+			return
+		}
+		if !resolved {
+			return
+		}
+		rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForRebaselineInfo(tp, info))
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: rebaselining drift baseline after alias change for %s: %v\n", b.ID, err) //nolint:errcheck
+			return
+		}
+		for key, value := range rebaseline {
+			queueMeta(key, value)
+		}
 	}
 }
 
