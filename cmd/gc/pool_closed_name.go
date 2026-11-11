@@ -108,7 +108,7 @@ func printClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr i
 	case output := <-done:
 		fmt.Fprint(stderr, output) //nolint:errcheck
 	case <-timer.C:
-		fmt.Fprintf(stderr, "warning: pool-name check was skipped after %s\n", closedPoolSessionNameTimeout) //nolint:errcheck
+		fmt.Fprintf(stderr, "warning: pool-name check was skipped after %s; run gc doctor to check session names\n", closedPoolSessionNameTimeout) //nolint:errcheck
 	}
 }
 

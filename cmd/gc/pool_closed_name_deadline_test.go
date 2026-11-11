@@ -44,7 +44,7 @@ func TestClosedPoolSlingDeadline(t *testing.T) {
 		if elapsed > 3*time.Second {
 			t.Errorf("blocked advisory delayed sling by %s, want at most 3s", elapsed)
 		}
-		if strings.Count(before, "\n") != 1 || !strings.Contains(before, "pool-name check was skipped") {
+		if before != "warning: pool-name check was skipped after 3s; run gc doctor to check session names\n" {
 			t.Errorf("deadline must print one skipped warning, got %q", before)
 		}
 		if stderr.String() != before {
@@ -71,7 +71,7 @@ func TestClosedPoolSlingStoreOpenDeadline(t *testing.T) {
 		elapsed := time.Since(start)
 		<-finished
 		synctest.Wait()
-		if elapsed > 3*time.Second || stderr.String() != "warning: pool-name check was skipped after 3s\n" {
+		if elapsed > 3*time.Second || stderr.String() != "warning: pool-name check was skipped after 3s; run gc doctor to check session names\n" {
 			t.Fatalf("store open delayed sling by %s or leaked a late error: %q", elapsed, stderr.String())
 		}
 	})
