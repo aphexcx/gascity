@@ -228,13 +228,14 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	fingerprintConfig runtime.Config
+	candidate         startCandidate
+	cfg               runtime.Config
+	coreHash          string
+	coreBreakdown     runtime.BreakdownV1
+	liveHash          string
+	provisionHash     string
+	launchHash        string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1074,6 +1075,7 @@ func buildPreparedStartWithWorkDirResolver(
 	// they stay consistent with the started_config_hash the reconciler compares.
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
+	fingerprintConfig := agentCfg
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -1310,15 +1312,16 @@ func buildPreparedStartWithWorkDirResolver(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
+		fingerprintConfig: fingerprintConfig,
+		candidate:         candidate,
+		cfg:               agentCfg,
+		coreHash:          coreHash,
+		coreBreakdown:     coreBreakdown,
+		liveHash:          liveHash,
+		provisionHash:     provisionHash,
+		launchHash:        launchHash,
+		promptDelivered:   promptDelivered,
+		promptHash:        promptHash,
 	}, candidate.info, nil
 }
 
@@ -1712,6 +1715,11 @@ func runPreparedStartCandidate(
 	warmClaim warmClaimTriggerProbe,
 ) (result startResult) {
 	started := time.Now()
+	if store != nil {
+		if err := prepareStartupContent(&item, cityPath, sessionFrontDoor(store)); err != nil {
+			return startResult{prepared: item, started: started, finished: time.Now(), err: err}
+		}
+	}
 	result = startResult{
 		prepared: item,
 		started:  started,
@@ -2614,6 +2622,11 @@ func commitStartResultTraced(
 	} else if info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
 		sessionpkg.ClearStoredMCPMetadata(metadata)
 	}
+	content, err := finishStartupContent(&result.prepared, metadata, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording startup content for %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
 	if err := sessFront.ApplyPatch(info.ID, metadata); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -2634,6 +2647,8 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_batch_failed", result.started, result.finished, err, result.phases)
 		return false
 	}
+	logStartupContent(name, content, stderr)
+	removeStartupReceipt(info, stderr)
 	// A successful, durably-committed start clears any accrued startup-health
 	// episode for this session name (ga-o04bfr.1.1). Skipped when there is
 	// nothing to clear so a healthy session's first-ever start does not mint
@@ -2920,6 +2935,11 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+	content, contentErr := finishStartupContent(prepared, metadata, false)
+	if contentErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: recovering startup content for %s: %v\n", info.ID, contentErr) //nolint:errcheck
+		return false, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, metadata); err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{
@@ -2930,6 +2950,8 @@ func recoverRunningPendingCreate(
 		// mint) are on prepared.candidate.info — fold the residue from there.
 		return false, pendingCreateResidueFold(prepared.candidate.info)
 	}
+	logStartupContent(info.SessionName, content, stderr)
+	removeStartupReceipt(info, stderr)
 	// buildPreparedStart mints instance_token onto the twin + store (SetMarker) when
 	// it was empty — a residue outside CommitStartedPatch. Carry it in the returned
 	// fold batch so the caller's snapshot reflects it: the Phase-2 drain scan reads

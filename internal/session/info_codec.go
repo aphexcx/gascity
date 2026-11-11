@@ -162,6 +162,7 @@ var infoKeyCodec = []infoKeySpec{
 	{ResetCommittedAtKey, func(i *Info, v string) { i.ResetCommittedAt = v }},
 	{"generation", func(i *Info, v string) { i.Generation = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
+	{StartupContentMetadataKey, func(i *Info, v string) { i.StartupContent = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
 
 	// reconciler decision-read cluster (front-door Phase 5)

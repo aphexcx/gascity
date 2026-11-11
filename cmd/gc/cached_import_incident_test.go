@@ -45,7 +45,7 @@ type cachedImportFixture struct {
 
 // newCachedImportFixture boots two locked imports, one running session, and
 // one accepted fingerprint with a warm cache-validation memo.
-func newCachedImportFixture(t *testing.T) *cachedImportFixture {
+func newCachedImportFixture(t *testing.T, configure ...func(*cachedImportFixture)) *cachedImportFixture {
 	t.Helper()
 	clearGCEnv(t)
 	f := &cachedImportFixture{t: t, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, dirty: &atomic.Bool{}, lastProviderName: "tmux"}
@@ -66,6 +66,7 @@ func newCachedImportFixture(t *testing.T) *cachedImportFixture {
 		write(filepath.Join(repo, "skills", "plan", "SKILL.md"), "---\nname: plan\ndescription: Plan work\n---\nPlan carefully.\n")
 		write(filepath.Join(repo, "prompt.template.md"), "Accepted prompt for {{.AgentName}}.\n")
 		write(filepath.Join(repo, "settings.json"), "{\"accepted\":true}\n")
+		write(filepath.Join(repo, "scripts", "helper.sh"), "#!/bin/sh\necho accepted\n")
 		write(filepath.Join(repo, "overlay", "per-provider", "claude", "instructions.md"), "Accepted overlay.\n")
 		mustGitImport(t, repo, "add", ".")
 		mustGitImport(t, repo, "commit", "-m", "add skill")
@@ -92,6 +93,9 @@ func newCachedImportFixture(t *testing.T) *cachedImportFixture {
 	f.tomlPath = filepath.Join(f.cityPath, "city.toml")
 	write(f.tomlPath, "[workspace]\nname = \"test-city\"\nprovider = \"claude\"\n[beads]\nprovider = \"file\"\n[session]\nprovider = \"tmux\"\n[providers.claude]\ncommand = \"echo\"\nprompt_mode = \"none\"\n[[agent]]\nname = \"worker\"\nscope = \"city\"\n"+imports.String()+fmt.Sprintf("\n[[agent]]\nname = %q\nscope = \"city\"\n", config.ControlDispatcherAgentName))
 	f.cfg, f.revision = loadCityRuntimeControllerConfig(t, f.cityPath)
+	for _, configure := range configure {
+		configure(f)
+	}
 	f.store = beads.NewMemStore()
 	f.sp = runtime.NewFake()
 	build := func(c *config.City, sp runtime.Provider, _ beads.Store) DesiredStateResult {
@@ -249,10 +253,16 @@ func TestCityRuntimeRejectedReloadKeepsWorking(t *testing.T) {
 }
 
 func TestCityRuntimeRejectedReloadRetainsSkillMembership(t *testing.T) {
-	for _, change := range []string{"delete", "add"} {
-		t.Run(change, func(t *testing.T) {
-			f := newCachedImportFixture(t)
-			if change == "delete" {
+	for _, tc := range []struct {
+		catalog, change string
+	}{{"shared", "delete"}, {"shared", "add"}, {"agent", "delete"}, {"agent", "add"}} {
+		t.Run(tc.catalog+"/"+tc.change, func(t *testing.T) {
+			f := newCachedImportFixture(t, func(f *cachedImportFixture) {
+				if tc.catalog == "agent" {
+					f.cfg.Agents[0].SkillsDir = filepath.Join(f.cacheDirs[0], "skills")
+				}
+			})
+			if tc.change == "delete" {
 				if err := os.Remove(filepath.Join(f.cacheDirs[0], "skills", "plan", "SKILL.md")); err != nil {
 					t.Fatal(err)
 				}

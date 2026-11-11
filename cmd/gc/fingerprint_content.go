@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -147,6 +148,14 @@ func (c *fingerprintContent) hash(path, variant string, compute func() string) s
 
 func (c *fingerprintContent) hashPath(path string) string {
 	return c.hash(path, "content", func() string { return runtime.HashPathContent(path) })
+}
+
+func (c *fingerprintContent) agentCatalog(path string) (materialize.AgentCatalog, error) {
+	var fs fsys.FS = fsys.OSFS{}
+	if c != nil {
+		fs = fingerprintFS{FS: fs, content: c}
+	}
+	return materialize.LoadAgentCatalogFS(fs, path)
 }
 
 // fingerprintFS freezes prompt source bytes and fragment membership under

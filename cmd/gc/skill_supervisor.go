@@ -73,7 +73,7 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 			continue
 		}
 
-		agentCat, lerr := materialize.LoadAgentCatalog(agent.SkillsDir)
+		agentCat, lerr := fingerprintContentForConfig(cityPath, cfg, stderr).agentCatalog(agent.SkillsDir)
 		if lerr != nil {
 			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q: LoadAgentCatalog %q: %v\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), agent.SkillsDir, lerr)

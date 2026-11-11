@@ -370,6 +370,7 @@ type CommitStartedPatchInput struct {
 // configuration hashes that future drift checks use.
 func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	patch := MetadataPatch{
+		StartupContentMetadataKey:    "",
 		"started_config_hash":        input.CoreHash,
 		"live_hash":                  input.LiveHash,
 		"started_live_hash":          input.LiveHash,
@@ -575,10 +576,11 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
-		"state":        stateCode,
-		"close_reason": CanonicalCloseReason(stateCode),
-		"closed_at":    ts,
-		"synced_at":    ts,
+		StartupContentMetadataKey: "",
+		"state":                   stateCode,
+		"close_reason":            CanonicalCloseReason(stateCode),
+		"closed_at":               ts,
+		"synced_at":               ts,
 	}
 }
 

@@ -316,10 +316,15 @@ func LoadCityCatalogFS(fs fsys.FS, packSkillsDir string, imported ...config.Disc
 // Pass "" when the agent has no local skills; the result is a
 // zero-value AgentCatalog.
 func LoadAgentCatalog(agentSkillsDir string) (AgentCatalog, error) {
+	return LoadAgentCatalogFS(fsys.OSFS{}, agentSkillsDir)
+}
+
+// LoadAgentCatalogFS discovers agent-local skills through the supplied view.
+func LoadAgentCatalogFS(fs fsys.FS, agentSkillsDir string) (AgentCatalog, error) {
 	if agentSkillsDir == "" {
 		return AgentCatalog{}, nil
 	}
-	entries, err := readSkillDir(agentSkillsDir, "agent")
+	entries, err := readSkillDirFS(fs, agentSkillsDir, "agent")
 	if err != nil {
 		return AgentCatalog{}, fmt.Errorf("reading agent skills %q: %w", agentSkillsDir, err)
 	}

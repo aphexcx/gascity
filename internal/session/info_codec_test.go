@@ -117,6 +117,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ResetCommittedAt:           b.Metadata[ResetCommittedAtKey],
 		Generation:                 b.Metadata["generation"],
 		StartedConfigHash:          b.Metadata["started_config_hash"],
+		StartupContent:             b.Metadata[StartupContentMetadataKey],
 		PinAwake:                   b.Metadata["pin_awake"],
 
 		HeldUntil:                      b.Metadata["held_until"],

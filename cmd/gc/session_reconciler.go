@@ -3326,6 +3326,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			tick.apply(id, commitBatch)
 		}
 
+		if alive && !pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout) && infoByID[id].StartupContent != "" {
+			updated, err := recoverStartupContent(infoByID[id], sessFront, stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "session reconciler: recovering startup content for %s: %v\n", name, err) //nolint:errcheck
+				continue
+			}
+			tick.set(id, updated)
+		}
+
 		// driftRestartedInPlace tracks whether the alive-restart branch ran
 		// the named-session in-place restart on this tick. Hoisted out of
 		// the inner block so the downstream asleep-named-session drift

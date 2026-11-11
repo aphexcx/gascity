@@ -343,10 +343,11 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":        "orphaned",
-				"close_reason": "session orphaned: configured agent removed",
-				"closed_at":    now.Format(time.RFC3339),
-				"synced_at":    now.Format(time.RFC3339),
+				StartupContentMetadataKey: "",
+				"state":                   "orphaned",
+				"close_reason":            "session orphaned: configured agent removed",
+				"closed_at":               now.Format(time.RFC3339),
+				"synced_at":               now.Format(time.RFC3339),
 			},
 		},
 		{
@@ -600,6 +601,7 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 		"continuation_reset_pending": "",
 		ResetCommittedAtKey:          "",
 		"core_hash_breakdown":        `{"command":"core-hash"}`,
+		StartupContentMetadataKey:    "",
 		"state":                      string(StateActive),
 		"state_reason":               "creation_complete",
 		"creation_complete_at":       now.Format(time.RFC3339),
@@ -694,6 +696,7 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 		"continuation_reset_pending": "",
 		ResetCommittedAtKey:          "",
 		"sleep_reason":               "",
+		StartupContentMetadataKey:    "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)

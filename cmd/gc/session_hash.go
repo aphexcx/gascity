@@ -14,5 +14,6 @@ import (
 func sessionCoreConfigForHashInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
 	agentCfg := templateParamsToConfig(tp)
 	applyTemplateOverridesToConfigInfo(&agentCfg, info, tp)
+	retainStartupContentFingerprint(&agentCfg, info)
 	return agentCfg
 }

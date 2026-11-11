@@ -222,7 +222,7 @@ func effectiveAgentProviderFamily(agent *config.Agent, workspaceProvider string,
 // city-catalog pattern in newAgentBuildParams) so a permissions
 // glitch on an agent's skills_dir is observable rather than silently
 // dropping agent-local skills.
-func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec, stderr io.Writer) []materialize.SkillEntry {
+func effectiveSkillsForAgent(content *fingerprintContent, city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec, stderr io.Writer) []materialize.SkillEntry {
 	if agent == nil {
 		return nil
 	}
@@ -233,7 +233,7 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 
 	var agentCat materialize.AgentCatalog
 	if agent.SkillsDir != "" {
-		c, err := materialize.LoadAgentCatalog(agent.SkillsDir)
+		c, err := content.agentCatalog(agent.SkillsDir)
 		switch {
 		case err != nil:
 			if stderr != nil {
