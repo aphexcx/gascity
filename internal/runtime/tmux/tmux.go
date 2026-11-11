@@ -3178,7 +3178,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			if ownershipLost {
 				return ErrNudgeDraftDeferred
 			}
-			_, err := t.sendNudgeDraftSubmitSequence(target, message, submitKeys)
+			_, err := t.sendNudgeDraftSubmitSequence(target, message, submitKeys, resumeDraft)
 			ownershipLost = errors.Is(err, ErrNudgeDraftDeferred)
 			return err
 		}
@@ -3206,7 +3206,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if ownershipLost {
 					return nil, ErrNudgeDraftDeferred
 				}
-				lines, err := t.captureNudgeDraftSubmit(target, message)
+				lines, err := t.captureNudgeDraftSubmit(target, message, resumeDraft)
 				ownershipLost = errors.Is(err, ErrNudgeDraftDeferred)
 				return lines, err
 			}

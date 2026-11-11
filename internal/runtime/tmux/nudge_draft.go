@@ -22,7 +22,7 @@ const nudgeDraftPayloadOption = "@gc-nudge-draft-payload"
 // payload and retry owner are unchanged. Cleanup compares it atomically.
 const nudgeDraftGenerationOption = "@gc-nudge-draft-generation"
 
-// nudgeDraftOwnershipHook binds provenance to uninterrupted detached input.
+// nudgeDraftOwnershipHook invalidates provenance when a client attaches or switches sessions.
 // Invalidation runs before user hooks, which may block. Checking that ordering
 // on retry also detects another caller replacing or moving the clear.
 func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (string, error) {
@@ -76,8 +76,8 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 	return pane, nil
 }
 
-// stageNudgeDraftProvenance marks a paste as pending only while detached.
-// An attachment clears the marker even if it occurs during the paste.
+// stageNudgeDraftProvenance marks this call's fresh paste as pending.
+// A later attachment clears the marker even if it occurs during the paste.
 func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...string) error {
 	id := ""
 	if len(deliveryID) > 0 {
@@ -96,16 +96,9 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 		fmt.Sprintf("%s:%d:%d:%s:", runtime.NudgePayloadDigest(message), time.Now().UnixMilli(), strings.Count(message, "\n"), normalizedNudgeDigest(message))); err != nil {
 		return err
 	}
-	set := fmt.Sprintf("set-option -p -t %q %s ", pane, nudgeDraftPayloadOption)
-	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane), "#{==:#{session_attached},0}",
-		set+"pending:"+runtime.NudgePayloadDigest(message), set+"'' ; display-message -p draft-ownership-changed")
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(out) != "" {
-		return fmt.Errorf("%w: target %q is attached before paste", ErrNudgeDraftDeferred, pane)
-	}
-	return nil
+	_, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftPayloadOption,
+		"pending:"+runtime.NudgePayloadDigest(message))
+	return err
 }
 
 // confirmNudgeDraftProvenance promotes a full paste only if no attachment
@@ -200,12 +193,12 @@ func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {
 
 // sendNudgeDraftSubmitSequence checks ownership in the same tmux command that
 // sends each key, so an attachment during the debounce cannot reuse an old read.
-func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string) (bool, error) {
-	return t.sendOwnedNudgeDraftSubmitSequence(target, runtime.NudgePayloadDigest(message), keys)
+func (t *Tmux) sendNudgeDraftSubmitSequence(target, message string, keys []string, requireDetached bool) (bool, error) {
+	return t.sendOwnedNudgeDraftSubmitSequence(target, runtime.NudgePayloadDigest(message), keys, requireDetached)
 }
 
-func (t *Tmux) sendOwnedNudgeDraftSubmitSequence(target, digest string, keys []string) (bool, error) {
-	condition := nudgeDraftDigestCondition(digest)
+func (t *Tmux) sendOwnedNudgeDraftSubmitSequence(target, digest string, keys []string, requireDetached bool) (bool, error) {
+	condition := nudgeDraftDigestCondition(digest, requireDetached)
 	sent := false
 	for i, key := range keys {
 		if i > 0 {
@@ -225,23 +218,29 @@ func (t *Tmux) sendOwnedNudgeDraftSubmitSequence(target, digest string, keys []s
 	return sent, nil
 }
 
-func nudgeDraftDigestCondition(digest string) string {
-	return fmt.Sprintf("#{&&:#{||:#{==:#{%s},%s},#{==:#{%s},pending:%s}},#{==:#{session_attached},0}}", nudgeDraftPayloadOption, digest, nudgeDraftPayloadOption, digest)
+func nudgeDraftDigestCondition(digest string, requireDetached bool) string {
+	condition := fmt.Sprintf("#{||:#{==:#{%s},%s},#{==:#{%s},pending:%s}}", nudgeDraftPayloadOption, digest, nudgeDraftPayloadOption, digest)
+	// A fresh paste can be delivered while a client is already attached.
+	// Resuming or recovering an earlier paste still requires a detached pane.
+	if requireDetached {
+		condition = fmt.Sprintf("#{&&:%s,#{==:#{session_attached},0}}", condition)
+	}
+	return condition
 }
 
 // captureNudgeDraftSubmit observes acceptance only while the draft still belongs
 // to this payload. Ownership and capture share a tmux command so a later attach
 // cannot invalidate the snapshot that already established confirmation.
-func (t *Tmux) captureNudgeDraftSubmit(target, message string) ([]string, error) {
-	lines, err := t.captureOwnedNudgeDraftInput(target, runtime.NudgePayloadDigest(message))
+func (t *Tmux) captureNudgeDraftSubmit(target, message string, requireDetached bool) ([]string, error) {
+	lines, err := t.captureOwnedNudgeDraftInput(target, runtime.NudgePayloadDigest(message), requireDetached)
 	if err != nil {
 		return nil, err
 	}
 	return strings.Split(runtime.RenderPeek(strings.Join(lines, "\n")).Output, "\n"), nil
 }
 
-func (t *Tmux) captureOwnedNudgeDraftInput(target, digest string) ([]string, error) {
-	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target), nudgeDraftDigestCondition(digest),
+func (t *Tmux) captureOwnedNudgeDraftInput(target, digest string, requireDetached bool) ([]string, error) {
+	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target), nudgeDraftDigestCondition(digest, requireDetached),
 		shellquote.Join([]string{"capture-pane", "-p", "-e", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines)}),
 		"display-message -p draft-ownership-changed")
 	if err != nil {

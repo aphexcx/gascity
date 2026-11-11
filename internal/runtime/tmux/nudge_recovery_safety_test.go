@@ -260,11 +260,9 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 	}
 }
 
-// A withdrawn batch cannot send another submit or acknowledge a survivor on
-// any reservation-bearing route, regardless of where cleanup overtakes it.
-func TestNudgeReservationInvalidationBoundaries(t *testing.T) {
+func TestNudgeAttachedEmptyComposer(t *testing.T) {
 	for _, id := range []string{"", "owner"} {
-		t.Run("attached empty composer/"+id, func(t *testing.T) {
+		t.Run(id, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				tm, p := newRecoveryPane(t)
 				p.attached = true
@@ -274,17 +272,99 @@ func TestNudgeReservationInvalidationBoundaries(t *testing.T) {
 					return p.paste("")(target, text, timeout)
 				}
 				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), "reminder", id, paste)
-				if !errors.Is(err, ErrNudgeDraftDeferred) || d.Landed() || pastes != 0 || p.enters != 0 || p.draft != "" {
-					t.Fatalf("attached input changed: delivery=%+v err=%v pastes=%d Enters=%d draft=%q", d, err, pastes, p.enters, p.draft)
-				}
-				p.attached = false
-				d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), "reminder", id, paste)
-				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 1 || !slices.Equal(p.submitted, []string{"reminder"}) {
-					t.Fatalf("detached retry lost: delivery=%+v err=%v pastes=%d submitted=%v", d, err, pastes, p.submitted)
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 1 || p.enters != 1 || !slices.Equal(p.submitted, []string{"reminder"}) {
+					t.Fatalf("attached nudge lost: delivery=%+v err=%v pastes=%d Enters=%d submitted=%v", d, err, pastes, p.enters, p.submitted)
 				}
 			})
 		})
 	}
+}
+
+func TestNudgeAttachedEarlierPaste(t *testing.T) {
+	for _, path := range []string{"resume", "recovery"} {
+		t.Run(path, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, p := newRecoveryPane(t)
+				const message = "earlier paste"
+				p.loseEnter = true
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", p.paste(""))
+				if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed {
+					t.Fatalf("seed paste: delivery=%+v err=%v", d, err)
+				}
+				text, owner := message, "owner"
+				if path == "recovery" {
+					p.agePaste(t, 11*time.Minute)
+					text, owner = "next paste", "next-owner"
+				}
+				enters, attachedAtGuard := p.enters, false
+				p.loseEnter = false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					joined := strings.Join(args, " ")
+					if slices.Contains(args, "if-shell") && (strings.Contains(joined, "send-keys") || strings.Contains(joined, "capture-pane")) {
+						// Attach after the Go-side read, before the hook clears
+						// provenance. The tmux attachment guard must suffice.
+						p.attached, attachedAtGuard = true, true
+					}
+					return p.exec(args)
+				}}
+				d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), text, owner, p.paste(""))
+				if !errors.Is(err, ErrNudgeDraftDeferred) && d.Submit != runtime.NudgeSubmitOwnershipLost {
+					t.Fatalf("attached earlier paste not held: delivery=%+v err=%v", d, err)
+				}
+				if !attachedAtGuard || p.enters != enters || len(p.submitted) != 0 || p.draft != message {
+					t.Fatalf("attached earlier paste submitted: reached=%t Enters=%d submitted=%v draft=%q", attachedAtGuard, p.enters-enters, p.submitted, p.draft)
+				}
+			})
+		})
+	}
+}
+
+func TestNudgeAttachedStartupPrompt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, p := newRecoveryPane(t)
+		p.attached = true
+		const prompt = "startup prompt"
+		pastes := 0
+		p.onPaste = func() {
+			pastes++
+			p.draft = prompt
+		}
+		startup := newTmuxStartOps(tm, "", 0, runtime.Config{}, false)
+		ops := &fakeStartOps{hasSessionResult: true}
+		ops.sendKeysHook = func() {
+			call := ops.calls[len(ops.calls)-1]
+			ops.sendKeysErr = startup.sendKeys(call.name, call.command)
+		}
+		ops.releaseNudgeHook = startup.releaseNudge
+		cfg := runtime.Config{Command: "claude", ReadyPromptPrefix: "❯", Nudge: prompt}
+		if err := doStartSession(context.Background(), ops, t.Name(), cfg, DefaultConfig().SetupTimeout); err != nil {
+			t.Fatal(err)
+		}
+		if sent := callsByMethod(t, ops, "sendKeys", 1)[0].command; sent != prompt {
+			t.Fatalf("startup sent %q, want %q", sent, prompt)
+		}
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 0)
+		methods := ops.callMethods()
+		if ready, send := methodIndex(methods, "waitForReady"), methodIndex(methods, "sendKeys"); ready < 0 || send <= ready {
+			t.Fatalf("startup nudge did not follow readiness: %v", methods)
+		}
+		if pastes != 1 || p.enters != 1 || !slices.Equal(p.submitted, []string{prompt}) {
+			t.Fatalf("startup prompt lost: pastes=%d Enters=%d submitted=%v", pastes, p.enters, p.submitted)
+		}
+	})
+}
+
+// These cells cover distinct fences, not twenty independent tmux guards:
+//   - before paste: the pending-cleanup callback or the provenance read on an
+//     existing draft/receipt; cleanup deliberately remains unacknowledged.
+//   - after paste before Enter and between Enter resends: the tmux payload
+//     condition on submit/observation, after cleanup has cleared provenance.
+//   - after failed recovery and manual clear: every route converges on the same
+//     pending-recovery receipt and its provenance read in recoveredNudgeStatus.
+//
+// Acknowledged cleanup before staging is outside these fences: a fresh stage
+// can recreate provenance for the withdrawn retry (the queue contract in gf-ko8c).
+func TestNudgeReservationInvalidationBoundaries(t *testing.T) {
 	for _, path := range []string{"fresh paste", "resume", "recovery", "survivor retry"} {
 		for _, boundary := range []string{"before paste", "after paste before Enter", "between Enter resends", "after failed recovery", "manual clear"} {
 			t.Run(path+"/"+boundary, func(t *testing.T) {
