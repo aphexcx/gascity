@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // NudgeSubmit is a vouching runtime's verdict on the submit keypress that
@@ -70,6 +71,16 @@ var ErrNudgeDraftUnmatched = errors.New("nudge: owned draft does not match the p
 // lost ownership before acceptance was established. Preserve it; never replay.
 var ErrNudgeDraftOwnershipLost = errors.New("nudge: draft ownership lost before acceptance; preserved input requires attention, automatic replay stopped")
 
+// NudgeHeld describes a composer that prevented this payload from landing.
+// Since is the first observation of this hold (or the owned paste's time).
+// A consumer preserves the message and surfaces the hold; after the composer
+// clears it may retry. This differs from a pending, possibly landed payload.
+type NudgeHeld struct {
+	State string    `json:"state" enum:"unowned_draft,own_paste,unreadable_composer"`
+	Since time.Time `json:"since"`
+	AgeMS int64     `json:"age_ms" minimum:"0"`
+}
+
 // NudgeDelivery is a vouching runtime's evidence about ONE nudge. It is the
 // typed answer behind [NudgeVouchingProvider]: the fields are independent
 // observations, not projections of one another, so a consumer classifying the
@@ -108,6 +119,8 @@ type NudgeDelivery struct {
 	// by a caller that only had [Provider.Nudge]); otherwise one of the
 	// NudgeSubmit constants.
 	Submit NudgeSubmit
+	// Held is present when preserved composer input prevented delivery.
+	Held *NudgeHeld
 }
 
 // Landed is the ONE definition of "the runtime says something reached the

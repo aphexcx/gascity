@@ -2471,7 +2471,7 @@ func TestNudgeStartupWithoutProviderUsesOrdinaryDelivery(t *testing.T) {
 		t.Fatalf("waiting for pane command: %v", err)
 	}
 
-	if err := tm.nudgeStartupSession(sessionName, "startup prompt"); err != nil {
+	if err := tm.nudgeStartupSession(sessionName, "startup prompt", "startup-test"); err != nil {
 		t.Fatalf("nudgeStartupSession without GC_PROVIDER: %v", err)
 	}
 }

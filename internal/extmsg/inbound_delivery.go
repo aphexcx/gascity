@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // InboundDeliveryStatus is the closed set of outcomes gc reports for an
@@ -35,6 +37,10 @@ const (
 	// InboundDeliveryFailed means no member took the payload, though at least
 	// one was supposed to. Nothing was delivered, so a retry is clean.
 	InboundDeliveryFailed InboundDeliveryStatus = "failed"
+	// InboundDeliveryHeld means preserved composer input prevented delivery.
+	// Surface the hold and retain the message; retry when the composer clears.
+	// No complete copy landed, unlike pending's possibly delivered payload.
+	InboundDeliveryHeld InboundDeliveryStatus = "held"
 	// InboundDeliveryPending means the outcome is not concluded in a way a
 	// redelivery could safely repair. It is NOT a failure claim and NOT a
 	// success claim, and a consumer must HOLD on it — never re-post. It
@@ -66,10 +72,12 @@ type InboundDeliveryMember struct {
 	// because it is what an operator recognizes in a transcript membership
 	// list when SessionID is an opaque id.
 	Selector string                `json:"selector,omitempty"`
-	Status   InboundDeliveryStatus `json:"status"`
+	Status   InboundDeliveryStatus `json:"status" doc:"One of delivered, no_route, partial, failed, held, pending. When held, nothing landed: retain the message and retry after the composer clears. The held object carries state, since and age_ms. Never automatically redeliver pending."`
+	// Held identifies the composer hold and its age when Status is held.
+	Held *runtime.NudgeHeld `json:"held,omitempty"`
 	// Terminal marks a pending hold that cannot progress automatically.
 	// Stop polling and do not redeliver; operator attention is required.
-	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. Omitted for unconcluded holds."`
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means this hold cannot progress automatically. Stop polling, do not redeliver, and require operator attention. This restriction does not apply to held: retain the message and retry after the composer clears."`
 	// DeliveredBytes/ExpectedBytes are for THIS member's reminder, which is
 	// not the same string as any other member's — see [InboundDelivery].
 	DeliveredBytes int `json:"delivered_bytes"`
@@ -124,11 +132,11 @@ type InboundDelivery struct {
 	// ReceiptID identifies this fan-out, so two deliveries of identical text
 	// are distinguishable in logs. Non-empty whenever the object is present.
 	ReceiptID string                `json:"receipt_id"`
-	Status    InboundDeliveryStatus `json:"status"`
+	Status    InboundDeliveryStatus `json:"status" doc:"One of delivered, no_route, partial, failed, held, pending. When held, no complete copy landed: retain the message and retry after the composer clears. Held members carry state, since and age_ms. Never automatically redeliver pending."`
 	// Terminal marks a pending hold with at least one terminal member.
 	// Stop polling and do not redeliver; no sibling can repair that loss.
 	// Omission preserves the status-only contract for older readers.
-	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. Omitted for unconcluded holds."`
+	Terminal bool `json:"terminal,omitempty" doc:"When pending, true means at least one member has a terminal hold. Stop polling and do not redeliver; operator attention is required. This restriction does not apply to held: retain the message and retry after the composer clears."`
 	// DeliveredBytes is summed over members; see the type doc. 0 for no_route.
 	DeliveredBytes int                     `json:"delivered_bytes"`
 	ExpectedBytes  int                     `json:"expected_bytes"`
@@ -151,7 +159,7 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 		out.Status = InboundDeliveryNoRoute
 		return out
 	}
-	delivered, partial, pending := 0, 0, 0
+	delivered, partial, pending, held := 0, 0, 0, 0
 	for _, m := range members {
 		out.DeliveredBytes += m.DeliveredBytes
 		out.ExpectedBytes += m.ExpectedBytes
@@ -163,6 +171,8 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 			partial++
 		case InboundDeliveryPending:
 			pending++
+		case InboundDeliveryHeld:
+			held++
 		}
 	}
 	switch {
@@ -178,6 +188,8 @@ func SummarizeInboundDelivery(receiptID string, members []InboundDeliveryMember)
 		// re-post and are unreachable from here, no matter what the other
 		// members report.
 		out.Status = InboundDeliveryPending
+	case held > 0:
+		out.Status = InboundDeliveryHeld
 	case partial > 0:
 		// Only truncated fragments and failures — no member holds a whole
 		// copy. A redelivery duplicates at most a fragment and is the only

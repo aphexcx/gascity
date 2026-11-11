@@ -9,11 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -25,6 +27,14 @@ func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
 	if cfg.SocketName != "city" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "city")
 	}
+	if cfg.NudgeOwnPasteAge != 15*time.Second || cfg.NudgeReservationAge != 10*time.Minute || cfg.DisableOpaquePasteRecovery {
+		t.Fatalf("recovery defaults not wired: %+v", cfg)
+	}
+	disabled := false
+	cfg = tmuxConfigFromSession(config.SessionConfig{NudgeOwnPasteAge: "30s", NudgeReservationAge: "20m", NudgeOpaquePasteRecovery: &disabled}, "city", "")
+	if cfg.NudgeOwnPasteAge != 30*time.Second || cfg.NudgeReservationAge != 20*time.Minute || !cfg.DisableOpaquePasteRecovery {
+		t.Fatalf("recovery overrides not wired: %+v", cfg)
+	}
 }
 
 func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
@@ -33,6 +43,23 @@ func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
 	cfg := tmuxConfigFromSession(sc, "city", "/tmp/city-a")
 	if cfg.SocketName != "custom-socket" {
 		t.Fatalf("SocketName = %q, want %q", cfg.SocketName, "custom-socket")
+	}
+}
+
+func TestTmuxConfigChecksDurableReservationCancellation(t *testing.T) {
+	dir := t.TempDir()
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.ReservationReleases = []nudgequeue.ReservationRelease{{SessionName: "session", ReservationID: "batch", Invalidate: true, Generation: 1}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := tmuxConfigFromSession(config.SessionConfig{}, "city", dir)
+	if cfg.NudgeReservationInvalidated == nil {
+		t.Fatal("missing cancellation reader")
+	}
+	if invalid, err := cfg.NudgeReservationInvalidated("session", "batch"); err != nil || !invalid {
+		t.Fatalf("cancellation reader not wired to city queue: invalid=%v err=%v", invalid, err)
 	}
 }
 
@@ -1265,9 +1292,10 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })
 
 	calls := 0
+	store := &closeCountingWorkStore{Store: beads.NewMemStore()}
 	openSessionProviderStore = func(string) (beads.Store, error) {
 		calls++
-		return beads.NewMemStore(), nil
+		return store, nil
 	}
 
 	snapshot := loadProviderSessionSnapshot(sessionProviderContext{
@@ -1282,6 +1310,9 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
+	}
+	if store.closes != 1 {
+		t.Fatalf("snapshot store closed %d times, want 1", store.closes)
 	}
 }
 

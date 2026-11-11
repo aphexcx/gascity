@@ -635,7 +635,7 @@ func (p *Provider) NudgeNowDelivered(name string, content []runtime.ContentBlock
 	if message == "" {
 		return runtime.NudgeDelivery{}, nil
 	}
-	return p.nudgeNowDelivered(name, message)
+	return p.nudgeNowDelivered(name, message, runtime.NudgeIdentity(content))
 }
 
 // nudgeNowDelivered is NudgeNow's body plus what NudgeNow's error return
@@ -644,7 +644,7 @@ func (p *Provider) NudgeNowDelivered(name string, content []runtime.ContentBlock
 //
 // Immediate callers retain absence errors. The routine wake-up methods Nudge
 // and NudgeDelivered apply their best-effort absence policy at their boundary.
-func (p *Provider) nudgeNowDelivered(name, message string) (runtime.NudgeDelivery, error) {
+func (p *Provider) nudgeNowDelivered(name, message, deliveryID string) (runtime.NudgeDelivery, error) {
 	if used, delivery, err := p.tm.sendHiddenAttachedText(name, message); used {
 		// The hidden-attach transport reports its own evidence (see
 		// sendHiddenAttachedText): unverified when the Enter went out, since
@@ -655,7 +655,7 @@ func (p *Provider) nudgeNowDelivered(name, message string) (runtime.NudgeDeliver
 		return delivery, err
 	}
 
-	delivery, err := p.tm.nudgeSessionDelivery(name, message)
+	delivery, err := p.tm.nudgeSessionDeliveryWithIdentity(name, message, deliveryID, p.tm.sendKeysLiteralWithRetry)
 	if err != nil {
 		// Whatever evidence the send produced before failing rides along.
 		return delivery, err
@@ -682,7 +682,7 @@ func (p *Provider) NudgeDelivered(name string, content []runtime.ContentBlock) (
 		// either, so it cannot be vouched for as delivered.
 		return runtime.NudgeDelivery{}, nil
 	}
-	delivery, err := p.nudgeNowDelivered(name, message)
+	delivery, err := p.nudgeNowDelivered(name, message, runtime.NudgeIdentity(content))
 	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 		return runtime.NudgeDelivery{}, nil
 	}
@@ -1020,6 +1020,7 @@ type startOps interface {
 	recordStartCrash(name, paneContent string) string
 	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
+	releaseNudge(name, text string)
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
@@ -1032,6 +1033,8 @@ type startOps interface {
 type tmuxStartOps struct {
 	tm         *Tmux
 	runtimeDir string
+	// startupNudgeID keeps every attempt in this startup under one retry owner.
+	startupNudgeID string
 	// setupMaxTimeout enables the activity-aware setup budget
 	// ([session] setup_max_timeout, Config.SetupMaxTimeout): when > 0,
 	// runSetupCommand replaces its fixed wall-clock deadline with
@@ -1076,6 +1079,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 	return &tmuxStartOps{
 		tm:              tm,
 		runtimeDir:      runtimeDir,
+		startupNudgeID:  fmt.Sprintf("startup-%s-%d", nextNudgeReceiptID(), time.Now().UnixNano()),
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
 		freshStart:      freshStart,
@@ -1289,7 +1293,7 @@ func writeSessionDiagnosticFile(runtimeDir, name, filename, content string) (str
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	err := o.tm.nudgeStartupSession(name, text)
+	err := o.tm.nudgeStartupSession(name, text, o.startupNudgeID)
 	if !o.freshStart {
 		// Relaunch and RunLive drive a box this startup did not create, and
 		// Provider.Relaunch documents that a failure leaves it in place. Report
@@ -1304,6 +1308,20 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 		func() error { return o.tm.KillSessionWithProcesses(name) },
 		func() error { return o.tm.KillSession(name) },
 	)
+}
+
+// releaseNudge ends startup's retry ownership when its bounded caller is done.
+// A remaining staged paste can then be recovered by a later nudge.
+func (o *tmuxStartOps) releaseNudge(name, text string) {
+	target := name
+	if pane, err := o.tm.FindAgentPane(name); err == nil && pane != "" {
+		target = pane
+	}
+	if err := o.tm.releaseNudgeDraftIdentity(target, text, o.startupNudgeID); err != nil {
+		cause := fmt.Errorf("retiring startup nudge retry ownership: %w", err)
+		fmt.Fprintf(os.Stderr, "warning: startup nudge to %q: %v\n", name, cause)
+		o.recordUnconfirmedNudge(name, text, cause)
+	}
 }
 
 // paneBusy reports whether the target agent pane is showing a busy/
@@ -1758,6 +1776,7 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
+		defer ops.releaseNudge(name, cfg.Nudge)
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },

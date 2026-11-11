@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func newTestReceiptStore(now *time.Time) *InboundReceiptStore {
@@ -152,15 +154,17 @@ func TestInboundReceiptStoreCopiesMembersInAndOut(t *testing.T) {
 	now := time.Date(2026, 8, 28, 8, 24, 0, 0, time.UTC)
 	s := newTestReceiptStore(&now)
 
-	members := []InboundDeliveryMember{{SessionID: "s1", Status: InboundDeliveryDelivered, DeliveredBytes: 5, ExpectedBytes: 5}}
+	members := []InboundDeliveryMember{{SessionID: "s1", Status: InboundDeliveryHeld, Held: &runtime.NudgeHeld{State: "unowned_draft", Since: now, AgeMS: 5000}, ExpectedBytes: 5}}
 	s.Conclude("c", "ir-1-1", SummarizeInboundDelivery("ir-1-1", members))
 	members[0].Status = InboundDeliveryFailed
+	members[0].Held.AgeMS = 0
 	got := s.Lookup("c", "ir-1-1")
-	if got.Delivery.Members[0].Status != InboundDeliveryDelivered {
+	if got.Delivery.Members[0].Status != InboundDeliveryHeld || got.Delivery.Members[0].Held.AgeMS != 5000 {
 		t.Fatalf("caller's later mutation reached the stored delivery: %+v", got.Delivery.Members[0])
 	}
 	got.Delivery.Members[0].Status = InboundDeliveryFailed
-	if again := s.Lookup("c", "ir-1-1"); again.Delivery.Members[0].Status != InboundDeliveryDelivered {
+	got.Delivery.Members[0].Held.AgeMS = 0
+	if again := s.Lookup("c", "ir-1-1"); again.Delivery.Members[0].Status != InboundDeliveryHeld || again.Delivery.Members[0].Held.AgeMS != 5000 {
 		t.Fatalf("mutating a Lookup result changed the store: %+v", again.Delivery.Members[0])
 	}
 }

@@ -139,11 +139,10 @@ func nudgeSessionSource(t *testing.T) string {
 		t.Fatalf("reading tmux.go: %v", err)
 	}
 	body := string(src)
-	// Since the v1.5.0 rebuild the body is nudgeSessionDeliveryWith (the paste
-	// function is injected so the copilot-chunked startup prompt shares it).
-	start := strings.Index(body, "func (t *Tmux) nudgeSessionDeliveryWith(")
+	// The delivery body accepts identity and an injected paste function.
+	start := strings.Index(body, "func (t *Tmux) nudgeSessionDeliveryWithIdentity(")
 	if start < 0 {
-		t.Fatal("nudgeSessionDeliveryWith (NudgeSession's body) not found in tmux.go")
+		t.Fatal("nudgeSessionDeliveryWithIdentity (NudgeSession's body) not found in tmux.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

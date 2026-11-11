@@ -126,8 +126,19 @@ type Config struct {
 	// sent anyway (immediate fallback). Set to 0 to disable wait-idle and
 	// always send immediately.
 	NudgeIdleTimeout time.Duration
-	DebounceMs       int
-	DisplayMs        int
+	// NudgeOwnPasteAge is the minimum age for recovery of an earlier one-shot owned paste.
+	NudgeOwnPasteAge time.Duration
+	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
+	NudgeReservationAge time.Duration
+	// NudgeReservationInvalidated checks pending cancellation before retry
+	// staging, recovery, or cleanup. Errors preserve input and cleanup intent;
+	// nil means no external ledger.
+	NudgeReservationInvalidated func(session, id string) (bool, error)
+	// DisableOpaquePasteRecovery disables recovery of owned Claude paste
+	// placeholders. The zero value keeps recovery enabled.
+	DisableOpaquePasteRecovery bool
+	DebounceMs                 int
+	DisplayMs                  int
 	// SocketName specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
@@ -154,13 +165,15 @@ type Config struct {
 // DefaultConfig returns a Config with the original hardcoded values.
 func DefaultConfig() Config {
 	return Config{
-		SetupTimeout:       10 * time.Second,
-		NudgeReadyTimeout:  10 * time.Second,
-		NudgeRetryInterval: 500 * time.Millisecond,
-		NudgeLockTimeout:   30 * time.Second,
-		NudgeIdleTimeout:   30 * time.Second,
-		DebounceMs:         500,
-		DisplayMs:          5000,
+		SetupTimeout:        10 * time.Second,
+		NudgeReadyTimeout:   10 * time.Second,
+		NudgeRetryInterval:  500 * time.Millisecond,
+		NudgeLockTimeout:    30 * time.Second,
+		NudgeIdleTimeout:    30 * time.Second,
+		NudgeOwnPasteAge:    15 * time.Second,
+		NudgeReservationAge: 10 * time.Minute,
+		DebounceMs:          500,
+		DisplayMs:           5000,
 	}
 }
 
@@ -2798,8 +2811,8 @@ func (t *Tmux) nudgeSessionDelivery(session, message string) (runtime.NudgeDeliv
 // nudgeStartupSession sends the initial startup prompt. Copilot startup
 // prompts use provider-safe paste chunks so its TUI keeps the text inline.
 // Like NudgeSession it owes its caller the retry signal, not evidence.
-func (t *Tmux) nudgeStartupSession(session, message string) error {
-	delivery, err := t.nudgeSessionDeliveryWith(session, message, func(target, text string, timeout time.Duration) (int, error) {
+func (t *Tmux) nudgeStartupSession(session, message, deliveryID string) error {
+	delivery, err := t.nudgeSessionDeliveryWithIdentity(session, message, deliveryID, func(target, text string, timeout time.Duration) (int, error) {
 		return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
 	})
 	if err != nil {
@@ -2811,6 +2824,10 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 // nudgeSessionDeliveryWith is nudgeSessionDelivery with the paste function
 // injected (plain nudges paste whole; startup prompts may chunk for copilot).
 func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
+	return t.nudgeSessionDeliveryWithIdentity(session, message, "", sendText)
+}
+
+func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2824,6 +2841,23 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
+	if status, err := t.recoveredNudgeStatus(session, target, deliveryID); err != nil {
+		return runtime.NudgeDelivery{}, err
+	} else if status != "" {
+		return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: status}, nil
+	}
+	heldDraft, heldState := "", "unowned_draft"
+	var heldSince time.Time
+	defer func() {
+		if errors.Is(deliveryErr, ErrNudgeDraftDeferred) && !delivery.Landed() && (heldDraft != "" || heldState == "unreadable_composer") {
+			if errors.Is(deliveryErr, runtime.ErrNudgeDraftUnowned) {
+				heldState, heldSince = "unowned_draft", time.Time{}
+			}
+			held, err := t.nudgeHeldReceipt(target, heldDraft, heldState, heldSince, time.Now())
+			delivery.Held = held
+			deliveryErr = errors.Join(deliveryErr, err)
+		}
+	}()
 
 	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
 	// only once delivery is actually confirmed (see delivered below). This
@@ -2841,6 +2875,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// submit-verified and the best-effort arm.
 	payloadBytes := 0
 	submitted := false
+	verifySubmit := false
 	resumeOwnedDraft := false
 	ownershipLost := false
 	defer func() {
@@ -2861,8 +2896,26 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		if delivery.Submit == runtime.NudgeSubmitOwnershipLost {
 			log.Printf("tmux nudge: target=%q digest=%s reason=draft_ownership_lost; draft preserved, automatic replay stopped", target, runtime.NudgePayloadDigest(message))
 		}
-		if submitted {
-			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+		if verifySubmit && deliveryID != "" && delivery.Submit == runtime.NudgeSubmitUnverified {
+			if err := t.releaseNudgeDraftIdentity(target, message, deliveryID); err != nil {
+				// Terminal delivery must not become replayable because metadata
+				// failed: the harness may already have consumed this payload.
+				// Preserve any held draft and surface the failed cleanup to operators.
+				log.Printf("tmux nudge: retiring nudge retry ownership for %q: %v; any remaining owned draft requires attention", target, err)
+			}
+		}
+		clearProvenance := submitted
+		if verifySubmit && !submitted {
+			content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+			if err == nil {
+				draft, observed := nudgeComposer(content, t.resolveIdlePromptPrefix(session))
+				clearProvenance = observed && draft == ""
+			} else {
+				log.Printf("tmux nudge: checking completed paste for %q: %v", target, err)
+			}
+		}
+		if clearProvenance {
+			if err := t.clearNudgeDraftProvenance(target, runtime.NudgePayloadDigest(message)); err != nil {
 				log.Printf("tmux nudge: clearing submitted draft provenance for %q: %v", target, err)
 			}
 		}
@@ -2880,7 +2933,7 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 
 	// Capture the baseline before the paste: a running turn may briefly lose
 	// its busy indicator at a tool boundary while the new input is staged.
-	verifySubmit := t.submitVerifyEligible(target)
+	verifySubmit = t.submitVerifyEligible(target)
 	idleBeforePaste := false
 	resumeDraft := false
 	if verifySubmit {
@@ -2893,57 +2946,106 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 			prefix = marker.promptPrefix
 		}
 		draft, observed := nudgeComposer(content, prefix)
+		heldDraft = draft
 		if !observed {
+			heldState = "unreadable_composer"
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
+		}
+		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, prefix, message, deliveryID)
+			if !since.IsZero() {
+				heldState, heldSince = "own_paste", since
+			}
+			if err != nil {
+				return runtime.NudgeDelivery{}, err
+			}
+			if recovered {
+				if status, err := t.recoveredNudgeStatus(session, target, deliveryID); err != nil {
+					return runtime.NudgeDelivery{}, err
+				} else if status != "" {
+					return runtime.NudgeDelivery{Delivered: true, Bytes: len(message), Submit: status}, nil
+				}
+				heldState, heldSince = "unowned_draft", time.Time{}
+				content, err = t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("reading composer after recovery: %w", err)
+				}
+				draft, observed = nudgeComposer(content, prefix)
+				heldDraft = draft
+				if !observed {
+					heldState = "unreadable_composer"
+				}
+				if !observed || draft != "" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: composer changed after recovery", ErrNudgeDraftDeferred)
+				}
+			}
 		}
 		if draft != "" {
 			collapsed := strings.Contains(draft, "[Pasted text #")
 			deferred := ErrNudgeDraftDeferred
 			if collapsed {
 				deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
-				if !collapsedNudgeDraftMatches(draft, message) {
+				if t.cfg.DisableOpaquePasteRecovery || !collapsedNudgeDraftMatches(draft, message) {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q holds a collapsed paste with a different or ambiguous shape", deferred, target)
 				}
 			}
-			if collapsed || !nudgeDraftMatches(draft, message, 0) {
-				if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
-				}
-				stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
-				if err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
-				}
-				if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
-					if strings.TrimSpace(stored) == "" {
-						deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
-					}
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
-				}
-				attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
-				if err != nil {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
-				}
-				if strings.TrimSpace(attached) != "0" {
-					return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
-				}
-				if !collapsed {
-					widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
-					if err != nil {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
-					}
-					width, err := strconv.Atoi(strings.TrimSpace(widthText))
-					if err != nil || width <= 2 {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
-					}
-					if !nudgeDraftMatches(draft, message, width-2) {
-						return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
-					}
-				}
-				resumeOwnedDraft = true
+			if _, err := t.nudgeDraftOwnershipHook(session, target, false); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: checking draft ownership for %q: %w", deferred, runtime.ErrNudgeDraftUnowned, target, err)
 			}
+			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
+			}
+			if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
+				if strings.TrimSpace(stored) == "" {
+					deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
+				}
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
+			}
+			if collapsed {
+				shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft rendering: %w", deferred, err)
+				}
+				if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); !owned {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: placeholder differs from the observed paste", deferred)
+				}
+			}
+			attached, err := t.run("display-message", "-t", exactPaneTarget(session), "-p", "#{session_attached}")
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading attached clients for %q: %w", deferred, session, err)
+			}
+			if strings.TrimSpace(attached) != "0" {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
+			}
+			if !collapsed && !nudgeDraftMatches(draft, message, 0) {
+				widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
+				if err != nil {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
+				}
+				width, err := strconv.Atoi(strings.TrimSpace(widthText))
+				if err != nil || width <= 2 {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
+				}
+				if !nudgeDraftMatches(draft, message, width-2) {
+					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
+				}
+			}
+			resumeOwnedDraft = true
 			resumeDraft = true
+			if id, _, err := t.nudgeDraftIdentity(session, target, runtime.NudgePayloadDigest(message)); err != nil {
+				return runtime.NudgeDelivery{}, err
+			} else if id != "" && id != deliveryID {
+				heldState = "own_paste"
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: draft belongs to another retry owner", ErrNudgeDraftDeferred)
+			}
 		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+		}
+		if draft == "" {
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
+			}
 		}
 		idleBeforePaste = !paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n"))
 	}
@@ -2977,14 +3079,26 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 		// retries enter here; they may repeat the submit, never the paste.
 		payloadBytes = len(message)
 	} else {
+		if verifySubmit && deliveryID != "" && t.cfg.NudgeReservationInvalidated != nil {
+			pending, err := t.cfg.NudgeReservationInvalidated(session, deliveryID)
+			if err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pending reservation cleanup: %w", ErrNudgeDraftDeferred, err)
+			}
+			if pending {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: retry reservation cleanup is pending", ErrNudgeDraftDeferred)
+			}
+		}
 		provenancePane := ""
 		if verifySubmit {
 			pane, err := t.nudgeDraftOwnershipHook(session, target, true)
 			if err == nil {
-				err = t.stageNudgeDraftProvenance(pane, message)
+				err = t.stageNudgeDraftProvenance(pane, message, deliveryID)
 			}
 			if err != nil {
 				log.Printf("tmux nudge: cannot establish draft ownership for %q: %v", target, err)
+				if deliveryID != "" {
+					return runtime.NudgeDelivery{}, fmt.Errorf("establishing retry paste ownership: %w", err)
+				}
 			} else {
 				provenancePane = pane
 			}
@@ -3006,6 +3120,14 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
+	renderingRecorded := false
+	if verifySubmit && !resumeDraft {
+		var err error
+		renderingRecorded, err = t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session))
+		if err != nil {
+			log.Printf("tmux nudge: recording pasted rendering for %q: %v", target, err)
+		}
+	}
 
 	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -3045,6 +3167,11 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
 	sendSubmit := func() error {
+		if verifySubmit && t.cfg.NudgeReservationInvalidated != nil {
+			if _, _, err := t.nudgeDraftIdentity(session, target, runtime.NudgePayloadDigest(message)); err != nil {
+				return err
+			}
+		}
 		if resumeOwnedDraft {
 			if ownershipLost {
 				return ErrNudgeDraftDeferred
@@ -3066,6 +3193,13 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	delivered = true
 	if verifySubmit {
 		capture := func() ([]string, error) {
+			if !resumeDraft && !renderingRecorded {
+				var err error
+				renderingRecorded, err = t.recordNudgeDraftRendering(target, message, t.resolveIdlePromptPrefix(session))
+				if err != nil {
+					log.Printf("tmux nudge: observing delayed paste rendering for %q: %v", target, err)
+				}
+			}
 			if resumeOwnedDraft {
 				if ownershipLost {
 					return nil, ErrNudgeDraftDeferred

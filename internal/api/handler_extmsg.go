@@ -261,12 +261,13 @@ func (s *Server) extmsgNotifyMembers(ctx context.Context, b extmsgNotifyBroadcas
 		// 0 bytes for a payload that had landed whole, and the consumer's
 		// clean re-post turned one founder message into six (gp-2io).
 		verdict := extmsg.ClassifyInboundMember(extmsg.InboundMemberEvidence{
-			NudgeDelivery: runtime.NudgeDelivery{Delivered: result.Delivered, Bytes: result.Bytes, Submit: result.Submit},
+			NudgeDelivery: runtime.NudgeDelivery{Delivered: result.Delivered, Bytes: result.Bytes, Submit: result.Submit, Held: result.Held},
 			ExpectedBytes: len(nudge),
 			Err:           err,
 			Undelivered:   string(result.Undelivered),
 		})
 		outcome.Status = verdict.Status
+		outcome.Held = verdict.Held
 		outcome.Terminal = verdict.Terminal
 		outcome.DeliveredBytes = verdict.DeliveredBytes
 		outcome.Error = verdict.Reason

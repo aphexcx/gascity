@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
@@ -92,15 +94,24 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		runtimeDir = citylayout.RuntimePath(cityPath)
 	}
 	return sessiontmux.Config{
-		SetupTimeout:       sc.SetupTimeoutDuration(),
-		SetupMaxTimeout:    sc.SetupMaxTimeoutDuration(),
-		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
-		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
-		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
-		DebounceMs:         sc.DebounceMsOrDefault(),
-		DisplayMs:          sc.DisplayMsOrDefault(),
-		SocketName:         socketName,
-		RuntimeDir:         runtimeDir,
+		SetupTimeout:        sc.SetupTimeoutDuration(),
+		SetupMaxTimeout:     sc.SetupMaxTimeoutDuration(),
+		NudgeReadyTimeout:   sc.NudgeReadyTimeoutDuration(),
+		NudgeRetryInterval:  sc.NudgeRetryIntervalDuration(),
+		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
+		NudgeOwnPasteAge:    sc.NudgeOwnPasteAgeDuration(),
+		NudgeReservationAge: sc.NudgeReservationAgeDuration(),
+		NudgeReservationInvalidated: func(session, id string) (bool, error) {
+			if cityPath == "" {
+				return false, nil
+			}
+			return nudgequeue.ReservationInvalidated(cityPath, session, id)
+		},
+		DisableOpaquePasteRecovery: !sc.NudgeOpaquePasteRecoveryEnabled(),
+		DebounceMs:                 sc.DebounceMsOrDefault(),
+		DisplayMs:                  sc.DisplayMsOrDefault(),
+		SocketName:                 socketName,
+		RuntimeDir:                 runtimeDir,
 	}
 }
 
@@ -224,6 +235,11 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 	if err != nil {
 		return nil
 	}
+	defer func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			log.Printf("session provider: closing snapshot store: %v", err)
+		}
+	}()
 	// This snapshot reads only session-class beads (the gc:session label) to
 	// drive transport/ACP routing decisions, so route through the session
 	// coordination-class store for relocation-safety. openSessionProviderStore

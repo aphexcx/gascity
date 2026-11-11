@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -347,8 +348,14 @@ func TestNudgeDeliveryHandlesCollapsedDraft(t *testing.T) {
 					case slices.Contains(args, "show-hooks"):
 						return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
 					case slices.Contains(args, "show-options") && tc.owned:
+						if args[len(args)-1] == nudgeDraftShapeOption && tc.accept {
+							return fmt.Sprintf("%s:%d:%d:%s:%s", runtime.NudgePayloadDigest(tc.message), time.Now().UnixMilli(), strings.Count(tc.message, "\n"), normalizedNudgeDigest(tc.message), runtime.NudgePayloadDigest(tc.draft)), nil
+						}
+						if args[len(args)-1] == nudgeDraftIdentityOption {
+							return runtime.NudgePayloadDigest(tc.message) + ":", nil
+						}
 						return runtime.NudgePayloadDigest(tc.message), nil
-					case slices.Contains(args, "if-shell"), slices.Contains(args, "send-keys"):
+					case slices.Contains(args, "send-keys") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ")):
 						submits++
 					}
 					return "", nil
@@ -387,6 +394,7 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 				message := tt.message
 				draft := ""
+				stored := ""
 				var history []string
 				pastes := 0
 				accept := false
@@ -396,7 +404,7 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 					switch {
 					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
 						return "GC_PROVIDER=" + tt.provider, nil
-					case slices.Contains(args, "capture-pane"):
+					case slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")):
 						pane := "────\n" + tt.prefix + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────"
 						if tt.provider == "codex" {
 							input := strings.ReplaceAll(draft, "\n", "\n  ")
@@ -409,9 +417,23 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 							pane = "esc to interrupt\n" + pane
 						}
 						return pane, nil
-					case slices.Contains(args, "send-keys") && slices.Contains(args, "Enter") && accept:
-						history = append(history, draft)
-						draft, busy = "", true
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}"):
+						return "%0", nil
+					case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}"):
+						return "0", nil
+					case slices.Contains(args, "show-hooks"):
+						return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
+					case slices.Contains(args, "show-options") && slices.Contains(args, nudgeDraftPayloadOption):
+						return stored, nil
+					case slices.Contains(args, "set-option") && slices.Contains(args, nudgeDraftPayloadOption):
+						stored = args[len(args)-1]
+					case slices.Contains(args, "if-shell") && strings.Contains(args[len(args)-1], "set-option "):
+						stored = runtime.NudgePayloadDigest(message)
+					case (slices.Contains(args, "send-keys") && slices.Contains(args, "Enter")) || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ") && strings.HasSuffix(args[len(args)-2], " Enter")):
+						if accept {
+							history = append(history, draft)
+							draft, busy = "", true
+						}
 					}
 					return "", nil
 				}}
@@ -775,7 +797,19 @@ func claudeNeverBusyExecutor(message string) *fakeExecutor {
 		if slices.Contains(args, "paste-buffer") {
 			draft += message
 		}
-		if slices.Contains(args, "capture-pane") {
+		if slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}") {
+			return "%0", nil
+		}
+		if slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}") {
+			return "0", nil
+		}
+		if slices.Contains(args, "show-hooks") {
+			return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
+		}
+		if slices.Contains(args, "show-options") && slices.Contains(args, nudgeDraftPayloadOption) {
+			return runtime.NudgePayloadDigest(message), nil
+		}
+		if slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")) {
 			return "────\n❯ " + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────", nil
 		}
 		return "", nil

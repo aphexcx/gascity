@@ -1538,7 +1538,11 @@ func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) 
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	err := nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	if releaseErr := retryNudgeReservationReleases(cityPath); releaseErr != nil && nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc wait: reservation cleanup pending: %v\n", releaseErr) //nolint:errcheck
+	}
+	return err
 }
 
 func waitLifecycleEnabled() error {

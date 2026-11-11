@@ -43,6 +43,15 @@ type RuntimeHandle struct {
 
 var _ Handle = (*RuntimeHandle)(nil)
 
+// ReleaseNudgeReservation retires a completed caller's transport reservation.
+// Cleanup does not require a running session or permission to send new input.
+func (h *RuntimeHandle) ReleaseNudgeReservation(ctx context.Context, id string, invalidate bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runtime.ReleaseNudgeReservation(h.provider, h.sessionName, id, invalidate)
+}
+
 // NewRuntimeHandle constructs a worker handle for a runtime-only session.
 func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 	if cfg.Provider == nil {
@@ -252,6 +261,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = runtime.WithNudgeIdentity(ctx, req.DeliveryID)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Landed())
@@ -282,7 +292,7 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		// a successful no-op. Non-vouching providers keep the historical
 		// reading.
 		// reading. Evidence survives the error (see runtime.NudgeDelivery).
-		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.TextContent(req.Text))
+		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.NudgeContent(ctx, req.Text))
 		result = nudgeResultFromDelivery(delivery)
 		if err != nil {
 			return result, err
@@ -292,7 +302,7 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		delivery, err := h.nudgeNow(req.Text)
+		delivery, err := h.nudgeNow(ctx, req.Text)
 		result = nudgeResultFromDelivery(delivery)
 		if err != nil {
 			return result, err
@@ -426,8 +436,8 @@ const runtimeHandleWaitIdleTimeout = 30 * time.Second
 // nudgeNow injects message immediately and returns the runtime's evidence
 // about it together with any error (see runtime.NudgeDelivery: an error never
 // erases evidence).
-func (h *RuntimeHandle) nudgeNow(message string) (runtime.NudgeDelivery, error) {
-	return providerNudgeNowDelivery(h.provider, h.sessionName, runtime.TextContent(message))
+func (h *RuntimeHandle) nudgeNow(ctx context.Context, message string) (runtime.NudgeDelivery, error) {
+	return providerNudgeNowDelivery(h.provider, h.sessionName, runtime.NudgeContent(ctx, message))
 }
 
 // providerNudgeDelivery asks p for delivery evidence when it can vouch and
@@ -466,7 +476,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		ctx = context.Background()
 	}
 	if h.transport == "acp" {
-		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.TextContent(req.Text))
+		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.NudgeContent(ctx, req.Text))
 		result := nudgeResultFromDelivery(delivery)
 		if err != nil {
 			return result, err
@@ -500,7 +510,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
-	delivery, err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text))
+	delivery, err := h.nudgeNow(ctx, formatRuntimeWaitIdleReminder(req.Source, req.Text))
 	result := nudgeResultFromDelivery(delivery)
 	if err != nil {
 		// Evidence survives the error (see runtime.NudgeDelivery).

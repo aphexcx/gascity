@@ -322,6 +322,7 @@ go_library(
         "nudge_dead_letter.go",
         "nudge_dispatcher.go",
         "nudge_mail_sweep.go",
+        "nudge_reservations.go",
         "order_dispatch.go",
         "order_dispatch_seam.go",
         "order_outcome.go",
