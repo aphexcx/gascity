@@ -29,7 +29,13 @@ type fingerprintContent struct {
 	hashes  map[string]string
 	files   map[string][]byte
 	dirs    map[string]fingerprintDir
+	stats   map[string]fingerprintStat
 	aliases map[string]string
+}
+
+type fingerprintStat struct {
+	info os.FileInfo
+	err  error
 }
 
 type fingerprintDir struct {
@@ -148,6 +154,27 @@ func (c *fingerprintContent) hashPath(path string) string {
 type fingerprintFS struct {
 	fsys.FS
 	content *fingerprintContent
+}
+
+func (f fingerprintFS) Stat(path string) (os.FileInfo, error) {
+	c := f.content
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	source := c.identity(path)
+	if !c.locked(source) {
+		return f.FS.Stat(path)
+	}
+	if previous, known := c.stats[source]; known {
+		return previous.info, previous.err
+	}
+	info, err := f.FS.Stat(path)
+	if err == nil || os.IsNotExist(err) {
+		if c.stats == nil {
+			c.stats = make(map[string]fingerprintStat)
+		}
+		c.stats[source] = fingerprintStat{info, err}
+	}
+	return info, err
 }
 
 func (f fingerprintFS) ReadFile(path string) ([]byte, error) {

@@ -355,7 +355,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	sessionBackendEnv, err := sessionBackendEnvWithConfig(p.cityPath, rigRoot, p.rigs, p.city)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
@@ -872,6 +872,18 @@ func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
+	return sessionBackendEnvWithConfig(cityPath, rigRoot, rigs, nil)
+}
+
+// Session construction uses the accepted config for credential selection;
+// rereading rejected TOML here would remove sessions from desired state.
+func sessionBackendEnvWithConfig(cityPath, rigRoot string, rigs []config.Rig, cfg *config.City) (map[string]string, error) {
+	applyCredentials := func(env map[string]string) error {
+		if cfg == nil {
+			return applyHostedBeadsCredentialEnv(env, cityPath)
+		}
+		return applyHostedBeadsCredentialSelection(env, configSelectsHostedBeadsCredentialProvider(cfg))
+	}
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -891,7 +903,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			if err := applyCredentials(env); err != nil {
 				return env, err
 			}
 			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
@@ -916,7 +928,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	}
 
 	if cityUsesBdStoreContract(cityPath) {
-		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		if err := applyCredentials(env); err != nil {
 			return env, err
 		}
 	}

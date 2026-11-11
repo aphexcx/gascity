@@ -676,6 +676,10 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 	if err != nil {
 		return err
 	}
+	return applyHostedBeadsCredentialSelection(env, selected)
+}
+
+func applyHostedBeadsCredentialSelection(env map[string]string, selected bool) error {
 	if selected {
 		// Exact hosted bindings must not inherit any part of the BEADS_*
 		// namespace. Explicit compatibility values below are projected into the

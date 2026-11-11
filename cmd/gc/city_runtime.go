@@ -1551,6 +1551,11 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 }
 
 func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, now time.Time) {
+	// Dispatch the accepted order set while reload is failing. A disk rescan
+	// must not replace it with definitions from the rejected configuration.
+	if cr.configLoadHealth.snapshot() != nil {
+		return
+	}
 	if !cr.orderRescanEnabled || cr.tomlPath == "" || strings.TrimSpace(cityRoot) == "" {
 		return
 	}

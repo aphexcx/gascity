@@ -50,7 +50,6 @@ func newCachedImportFixture(t *testing.T) *cachedImportFixture {
 	clearGCEnv(t)
 	f := &cachedImportFixture{t: t, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, dirty: &atomic.Bool{}, lastProviderName: "tmux"}
 	f.cityPath = t.TempDir()
-	setScopedBeadsProviderForTest(t, f.cityPath, "file")
 	write := func(path, content string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -230,6 +229,9 @@ func TestCityRuntimeRejectedReloadKeepsWorking(t *testing.T) {
 			if cause == "storage_change" && !strings.Contains(f.cr.configLoadHealth.snapshot().Error, "[storage] changed") {
 				t.Fatalf("storage reload failed for the wrong reason: %+v", f.cr.configLoadHealth.snapshot())
 			}
+			if f.draining() || f.storedHash() != f.oldHash {
+				t.Fatalf("rejected config changed the running session: %s", f.stdout.String())
+			}
 			if err := f.sp.Stop("worker"); err != nil {
 				t.Fatal(err)
 			}
@@ -243,5 +245,65 @@ func TestCityRuntimeRejectedReloadKeepsWorking(t *testing.T) {
 				t.Error("orders did not run on retained config")
 			}
 		})
+	}
+}
+
+func TestCityRuntimeRejectedReloadRetainsSkillMembership(t *testing.T) {
+	for _, change := range []string{"delete", "add"} {
+		t.Run(change, func(t *testing.T) {
+			f := newCachedImportFixture(t)
+			if change == "delete" {
+				if err := os.Remove(filepath.Join(f.cacheDirs[0], "skills", "plan", "SKILL.md")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dir := filepath.Join(f.cacheDirs[0], "skills", "extra")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("Unexpected skill"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			config.ResetRemoteCacheValidationCache()
+			f.dirty.Store(true)
+			f.tick("watch")
+			if failure := f.cr.configLoadHealth.snapshot(); failure == nil || !strings.Contains(failure.Error, "local worktree changes") {
+				t.Fatalf("expected dirty-import rejection: %+v", failure)
+			}
+			if f.draining() || f.storedHash() != f.oldHash {
+				t.Fatalf("rejected skill membership changed the session: %s", f.stdout.String())
+			}
+		})
+	}
+}
+
+func TestCityRuntimeRejectedReloadRetainsOrderDispatcher(t *testing.T) {
+	f := newCachedImportFixture(t)
+	f.cr.orderRescanEnabled = true
+	f.cr.orderRescanLast = time.Time{}
+	orderDir := filepath.Join(f.cacheDirs[0], "orders")
+	if err := os.MkdirAll(orderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orderDir, "unexpected.toml"), []byte("[order]\nexec = \"true\"\ntrigger = \"manual\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config.ResetRemoteCacheValidationCache()
+	f.dirty.Store(true)
+	f.tick("watch")
+	if f.cr.configLoadHealth.snapshot() == nil {
+		t.Fatal("expected dirty-import rejection")
+	}
+	if f.cr.od != f.od || f.od.calls.Load() == 0 {
+		t.Fatalf("rejected sources replaced the accepted dispatcher or stopped dispatch: %s", f.stderr.String())
+	}
+	if !f.cr.orderRescanLast.IsZero() {
+		t.Fatal("order rescan adopted rejected sources")
+	}
+	f.cr.configLoadHealth.clear()
+	f.cr.rescanOrderDispatcherIfDue(context.Background(), f.cityPath, time.Now())
+	if f.cr.orderRescanLast.IsZero() {
+		t.Fatal("order rescan did not resume after reload recovery")
 	}
 }
