@@ -1459,6 +1459,7 @@ go_test(
         "split_topology_env_test.go",
         "sql_open_guard_test.go",
         "start_output_test.go",
+        "startup_content_rebaseline_write_test.go",
         "startup_content_repair_test.go",
         "startup_content_test.go",
         "startup_health_materialization_test.go",

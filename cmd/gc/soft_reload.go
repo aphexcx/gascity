@@ -133,6 +133,24 @@ func acceptConfigDriftAcrossSessions(
 		if storedHash == currentHash {
 			continue
 		}
+		// A start may have finalized delivery since the tick took its snapshot.
+		// Re-read only the sessions selected for a write, through the tick's store.
+		fresh, resolved, err := sessionInfoAtRebaseline(sessFront, info.ID)
+		if err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: reading startup content for %s: %v\n", name, err) //nolint:errcheck
+			continue
+		}
+		if !resolved {
+			continue
+		}
+		info = fresh
+		agentCfg = sessionCoreConfigForRebaselineInfo(tp, info)
+		currentHash = runtime.CoreFingerprint(agentCfg)
+		if strings.TrimSpace(info.StartedConfigHash) == currentHash {
+			continue
+		}
 		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
 			result.Failed++
 			result.FailedSessions = append(result.FailedSessions, name)

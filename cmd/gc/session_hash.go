@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"maps"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -30,10 +33,33 @@ func (check *startupContentCheck) coreConfigForHashInfo(tp TemplateParams, info 
 // regardless of current disk readiness, without probing the cache at all.
 func sessionCoreConfigForRebaselineInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
 	agentCfg := sessionCoreConfigWithOverrides(tp, info)
+	return startupContentConfigForRebaseline(agentCfg, info)
+}
+
+func startupContentConfigForRebaseline(agentCfg runtime.Config, info sessionpkg.Info) runtime.Config {
+	// The config may have been built from a snapshot before the delivery commit.
+	// Only the record read at the write boundary supplies this extra input.
+	agentCfg.FingerprintExtra = maps.Clone(agentCfg.FingerprintExtra)
+	delete(agentCfg.FingerprintExtra, "startup-content")
 	if hasObservedStartupContentRepair(info) {
 		applyStartupContentFingerprint(&agentCfg)
 	}
 	return agentCfg
+}
+
+// Re-read only when a writer is about to rebaseline. Pending records belong to
+// the start's commit/recovery; accepting them would acknowledge an unresolved
+// delivery. This uses the tick's store and never probes the import cache.
+func sessionInfoAtRebaseline(sessFront *sessionpkg.Store, id string) (sessionpkg.Info, bool, error) {
+	info, err := sessFront.Get(id)
+	if err != nil {
+		return info, false, err
+	}
+	content, err := sessionpkg.DecodeStartupContent(info.StartupContent)
+	if err != nil {
+		return info, false, fmt.Errorf("decoding startup content for session %s: %w", id, err)
+	}
+	return info, !content.Pending, nil
 }
 
 // Sources and Skipped record delivery observations even before finalization.

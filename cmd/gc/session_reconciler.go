@@ -3670,6 +3670,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
+		if !alive && isNamedSessionInfo(infoAsleepDrift) {
+			if content, err := sessionpkg.DecodeStartupContent(infoAsleepDrift.StartupContent); err == nil && content.Pending {
+				// This start is no longer in flight. Keep its hash untouched,
+				// but let ordinary wake evaluation reach a fresh delivery.
+				skipAsleepDriftRepair = true
+			}
+		}
 		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
@@ -6880,11 +6887,14 @@ func silentRebaselineSessionHashes(info sessionpkg.Info, sessFront *sessionpkg.S
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
-	if hasObservedStartupContentRepair(info) {
-		// A hash-format or generated-hook migration did not deliver content.
-		// Carry the repair input into the new format until a real start does.
-		applyStartupContentFingerprint(&agentCfg)
+	fresh, resolved, err := sessionInfoAtRebaseline(sessFront, id)
+	if err != nil {
+		return nil, fmt.Errorf("reading session for hash rebaseline: %w", err)
 	}
+	if !resolved {
+		return nil, nil
+	}
+	agentCfg = startupContentConfigForRebaseline(agentCfg, fresh)
 	patch, err := sessionHashRebaselineMetadata(agentCfg)
 	if err != nil {
 		return nil, err
@@ -7045,12 +7055,23 @@ func relaunchAgentForLaunchDrift(
 	// provider-independent — any concurrent live drift is re-applied idempotently by
 	// the live-drift clause on the next tick (a redundant SessionLive re-apply is
 	// harmless; a missed one self-heals).
-	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown)
-	if rebaseErr != nil {
+	// Delivery may have committed during preparation or the provider action.
+	// Read at the write, so the runtime call is outside the remaining read/write gap.
+	fresh, resolved, rebaseErr := sessionInfoAtRebaseline(sessFront, info.ID)
+	var launchBatch map[string]string
+	if rebaseErr == nil && resolved {
+		fingerprintCfg := startupContentConfigForRebaseline(prepared.fingerprintConfig, fresh)
+		launchBatch, rebaseErr = rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront,
+			runtime.CoreFingerprint(fingerprintCfg), runtime.ProvisionFingerprint(fingerprintCfg),
+			runtime.LaunchFingerprint(fingerprintCfg), runtime.CoreFingerprintBreakdown(fingerprintCfg))
+	}
+	if rebaseErr != nil || !resolved {
 		// The agent is already relaunched; do not trigger a second restart. The
-		// stale Core baseline self-corrects on a later rebaseline tick. Fold the
-		// prepare residue so the snapshot still matches the persisted state.
-		fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, rebaseErr) //nolint:errcheck
+		// baseline waits for commit/recovery or a later rebaseline tick. Fold
+		// the prepare residue so the snapshot matches the persisted state.
+		if rebaseErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: rebaselining launch-drift hashes for %s: %v\n", name, rebaseErr) //nolint:errcheck
+		}
 		launchBatch = pendingCreateResidueFold(preparedInfo)
 	} else if tok := preparedInfo.InstanceToken; tok != "" && launchBatch != nil {
 		// buildPreparedStart may mint instance_token onto the twin + store

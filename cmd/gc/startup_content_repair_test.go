@@ -241,7 +241,7 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 				}
 			case "alias", "alias_dirty_config":
 				patch := sessionpkg.MetadataPatch{}
-				queueAliasChangeDriftRebaseline(front, mustGetBead(t, h.f.store, info.ID), tp, func(k, v string) { patch[k] = v }, h.f.stderr)
+				queueAliasChangeDriftRebaseline(front, mustGetBead(t, h.f.store, info.ID), tp, func(k, v string) { patch[k] = v }, h.f.stderr)()
 				rebaseErr = front.ApplyPatch(info.ID, patch)
 			case "alive_legacy", "asleep_legacy", "alive_version", "asleep_version":
 				hash := "legacy"
@@ -377,7 +377,7 @@ func TestStartupContentCleanPendingRebaseline(t *testing.T) {
 						}
 					case "alias":
 						patch := sessionpkg.MetadataPatch{}
-						queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, info.ID), tp, func(k, v string) { patch[k] = v }, f.stderr)
+						queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, info.ID), tp, func(k, v string) { patch[k] = v }, f.stderr)()
 						err = front.ApplyPatch(info.ID, patch)
 					case "soft_preview":
 						if changes := reloadSessionChanges([]sessionpkg.Info{info}, h.desired, f.cfg, true); len(changes) != 0 {
@@ -496,8 +496,9 @@ func TestStartupContentRepairSurvivesStalePendingRebaseline(t *testing.T) {
 				t.Fatal(err)
 			}
 			aliasPatch := sessionpkg.MetadataPatch{}
+			var aliasRebaseline func()
 			if path == "alias" {
-				queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, f.beadID), tp, func(k, v string) { aliasPatch[k] = v }, f.stderr)
+				aliasRebaseline = queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, f.beadID), tp, func(k, v string) { aliasPatch[k] = v }, f.stderr)
 			}
 			if !commitAsyncStartResultWithContext(context.Background(), result, f.sp, f.store, h.clk, events.Discard, 0, f.stdout, f.stderr, nil) {
 				t.Fatal("dirty async start commit rejected")
@@ -514,6 +515,7 @@ func TestStartupContentRepairSurvivesStalePendingRebaseline(t *testing.T) {
 					t.Fatal("acceptance failed")
 				}
 			case "alias":
+				aliasRebaseline()
 				if err := front.ApplyPatch(f.beadID, aliasPatch); err != nil {
 					t.Fatal(err)
 				}
