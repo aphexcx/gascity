@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,71 @@ func TestStartupContentRuntimeReuse(t *testing.T) {
 				t.Fatal("runtime reuse logged a dirty startup")
 			}
 		})
+	}
+}
+
+func TestStartupContentPreservesAsyncAttempt(t *testing.T) {
+	for _, shape := range []string{"fresh", "warm", "worker_shortcut", "provider_collision"} {
+		for _, mutation := range []string{"command", "token", "claim"} {
+			t.Run(shape+"/"+mutation, func(t *testing.T) {
+				store := beads.NewMemStore()
+				clk := driftNow()
+				b := createDriftedPendingCreate(t, store, clk, map[string]string{"work_dir": t.TempDir()})
+				prepared := driftStartResult(t, b, clk).prepared
+				prepared.candidate.tp.Command = driftPersistedCommand
+				prepared.cfg = runtime.Config{Command: driftPersistedCommand, WorkDir: b.Metadata["work_dir"]}
+				token := driftToken
+				epoch := "3"
+				key, value := "command", driftTemplateCommand
+				switch mutation {
+				case "token":
+					token = "newer-attempt"
+					epoch = "4"
+					key, value = "instance_token", token
+				case "claim":
+					key, value = "pending_create_claim", ""
+				}
+				if err := store.SetMetadata(b.ID, key, value); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.SetMetadata(b.ID, "generation", epoch); err != nil {
+					t.Fatal(err)
+				}
+				sp := &startupReuseRuntime{Fake: runtime.NewFake()}
+				if shape != "fresh" {
+					startDriftRuntimeAtEpoch(t, sp.Fake, b.ID, token, epoch)
+				}
+				switch shape {
+				case "worker_shortcut":
+					sp.hidden = 1
+				case "provider_collision":
+					sp.hidden = 2
+				}
+				result := runPreparedStartCandidate(context.Background(), prepared, "", sp, store, nil, time.Minute,
+					immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+				if result.err != nil && !errors.Is(result.err, runtime.ErrSessionExists) {
+					t.Fatal(result.err)
+				}
+				if shape == "fresh" {
+					for k, v := range map[string]string{"GC_SESSION_ID": b.ID, "GC_INSTANCE_TOKEN": token, "GC_RUNTIME_EPOCH": epoch} {
+						if err := sp.SetMeta(driftSessionName, k, v); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				committed, stderr := commitDrift(t, result, sp, store, clk)
+				if committed {
+					t.Error("stale start attempt committed after its command, token or claim changed")
+				}
+				got := mustGetBead(t, store, b.ID)
+				if got.Status == "closed" {
+					t.Errorf("stale attempt closed the session instead of leaving it for retry: %s", stderr)
+				}
+				if mutation == "token" && !sp.Fake.IsRunning(driftSessionName) {
+					t.Error("stale attempt stopped the newer runtime")
+				}
+			})
+		}
 	}
 }
 

@@ -71,7 +71,9 @@ func prepareStartupContent(item *preparedStart, cityPath string, store *sessionp
 	if err != nil {
 		return fmt.Errorf("reading startup content before launch: %w", err)
 	}
-	item.candidate.info = info
+	// Async commit fences compare the original attempt with current state.
+	// Refresh only delivery facts, retaining its command and ownership snapshot.
+	item.candidate.info.StartupContent = info.StartupContent
 	item.startupContentPrevious = info.StartupContent
 	content := sessionpkg.StartupContent{Sources: changedStartupSources(item.candidate.tp.StartupContentSources)}
 	for _, command := range item.cfg.PreStart {
@@ -108,7 +110,7 @@ func prepareStartupContent(item *preparedStart, cityPath string, store *sessionp
 	if err != nil {
 		return fmt.Errorf("recording startup content: %w", err)
 	}
-	item.candidate.info = info
+	item.candidate.info.StartupContent = info.StartupContent
 	item.startupContentPrepared = true
 	return nil
 }
@@ -122,7 +124,7 @@ func restoreReusedStartupContent(item *preparedStart, store *sessionpkg.Store) e
 		return fmt.Errorf("reading reused startup content: %w", err)
 	}
 	if !item.startupContentPrepared {
-		item.candidate.info = current
+		item.candidate.info.StartupContent = current.StartupContent
 		return nil
 	}
 	content, err := sessionpkg.DecodeStartupContent(item.candidate.info.StartupContent)
@@ -135,7 +137,7 @@ func restoreReusedStartupContent(item *preparedStart, store *sessionpkg.Store) e
 			return fmt.Errorf("restoring reused startup content: %w", err)
 		}
 	}
-	item.candidate.info = current
+	item.candidate.info.StartupContent = current.StartupContent
 	if content.Receipt != "" {
 		if err := os.Remove(content.Receipt); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing unused startup receipt: %w", err)
