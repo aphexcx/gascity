@@ -26,12 +26,19 @@ func (check *startupContentCheck) coreConfigForHashInfo(tp TemplateParams, info 
 	return agentCfg
 }
 
-// Rebaselines accept config without delivering content. Carry the repair input
+// Rebaselines accept config without delivering content. Carry a finalized repair
 // regardless of current disk readiness, without probing the cache at all.
 func sessionCoreConfigForRebaselineInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
 	agentCfg := sessionCoreConfigWithOverrides(tp, info)
-	if info.StartupContent != "" {
+	if hasFinalizedStartupContentRepair(info) {
 		applyStartupContentFingerprint(&agentCfg)
 	}
 	return agentCfg
+}
+
+// A Pending receipt belongs to an in-flight start, whose commit or recovery
+// records delivery. Only a finalized observation establishes a repair obligation.
+func hasFinalizedStartupContentRepair(info sessionpkg.Info) bool {
+	content, err := sessionpkg.DecodeStartupContent(info.StartupContent)
+	return err == nil && !content.Pending && (content.Skipped || len(content.Sources) > 0)
 }

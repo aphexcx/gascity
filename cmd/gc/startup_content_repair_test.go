@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -300,6 +301,143 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 				t.Error("repair record survived clean restart")
 			}
 		})
+	}
+}
+
+// A launch receipt is not a repair: every hash writer must leave a clean
+// in-flight start clean, including when recovery runs before its async commit.
+func TestStartupContentCleanPendingRebaseline(t *testing.T) {
+	for _, shape := range []string{"ordinary", "named"} {
+		for _, path := range []string{"none", "soft_reload", "alias", "soft_preview", "alive_legacy", "asleep_legacy", "alive_version", "asleep_version", "live_hash", "generated_hooks", "warm_relaunch"} {
+			for _, timing := range []string{"after_window", "in_window_then_commit"} {
+				t.Run(shape+"/"+path+"/"+timing, func(t *testing.T) {
+					origProbe := staleResumeKeyProbe
+					staleResumeKeyProbe = func(string, string, string) (bool, bool) { return true, true }
+					t.Cleanup(func() { staleResumeKeyProbe = origProbe })
+					f := newCachedImportFixture(t, func(f *cachedImportFixture) {
+						f.cfg.Agents[0].WorkDir = t.TempDir()
+					})
+					t.Setenv("GC_CITY", f.cityPath)
+					t.Chdir(f.cityPath)
+					if shape == "named" {
+						f.cfg.NamedSessions = []config.NamedSession{{Name: "worker", Template: "worker", Mode: "always"}}
+						if err := f.store.SetMetadataBatch(f.beadID, map[string]string{
+							"configured_named_session": "true", "configured_named_identity": "worker", "pin_awake": "",
+						}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					h := &startupRepairFixture{
+						f: f, clk: &clock.Fake{Time: time.Now()}, drains: newDrainTracker(),
+						desired: f.cr.buildFn(f.cfg, f.sp, f.store).State, names: map[string]bool{"worker": true},
+					}
+					front := sessionFrontDoor(f.store)
+					read := func() sessionpkg.Info {
+						t.Helper()
+						info, err := front.Get(f.beadID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return info
+					}
+					for range 3 {
+						h.tick(t)
+					}
+					clean := read().StartedConfigHash
+					if clean == "" || read().StartupContent != "" || !f.sp.IsRunning("worker") {
+						t.Fatal("fixture has no clean committed baseline")
+					}
+					if err := f.sp.Stop("worker"); err != nil {
+						t.Fatal(err)
+					}
+					if _, _, _, err := preWakeCommit(read(), front, h.clk); err != nil {
+						t.Fatal(err)
+					}
+					tp := h.desired["worker"]
+					prepared, _, err := buildPreparedStart(startCandidate{info: read(), tp: tp}, f.cfg, f.store)
+					if err != nil {
+						t.Fatal(err)
+					}
+					result := runPreparedStartCandidate(context.Background(), *prepared, f.cityPath, f.sp, f.store, f.cfg, time.Minute,
+						immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+					if result.err != nil {
+						t.Fatal(result.err)
+					}
+					info := read()
+					content, err := sessionpkg.DecodeStartupContent(info.StartupContent)
+					if err != nil || !content.Pending || content.Receipt == "" || content.Skipped || len(content.Sources) != 0 || info.StartedConfigHash != clean {
+						t.Fatalf("launch did not leave a clean Pending receipt: content=%+v err=%v hash clean=%t", content, err, info.StartedConfigHash == clean)
+					}
+					starts := f.sp.CountCalls("Start", "worker")
+					switch path {
+					case "soft_reload":
+						accepted := acceptConfigDriftAcrossSessions(front, h.desired, nil, f.sp, h.drains, f.stderr)
+						if accepted.Failed != 0 || accepted.Updated != 0 {
+							t.Errorf("soft reload changed a clean start: %+v", accepted)
+						}
+					case "alias":
+						patch := sessionpkg.MetadataPatch{}
+						queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, info.ID), tp, func(k, v string) { patch[k] = v }, f.stderr)
+						err = front.ApplyPatch(info.ID, patch)
+					case "soft_preview":
+						if changes := reloadSessionChanges([]sessionpkg.Info{info}, h.desired, f.cfg, true); len(changes) != 0 {
+							t.Errorf("soft preview listed a clean start: %+v", changes)
+						}
+					case "alive_legacy", "asleep_legacy", "alive_version", "asleep_version", "live_hash", "generated_hooks":
+						// Exercise the shared write boundary with the snapshot each
+						// caller supplies, before recovery can clear the Pending receipt.
+						if strings.HasSuffix(path, "legacy") {
+							info.StartedConfigHash = "legacy"
+						} else if strings.HasSuffix(path, "version") {
+							info.StartedConfigHash = "v0:old"
+						}
+						if strings.HasPrefix(path, "asleep_") {
+							info.State = "asleep"
+						}
+						_, err = silentRebaselineSessionHashes(info, front, sessionCoreConfigForHashInfo(tp, info), info.CoreHashBreakdown, path == "generated_hooks")
+					case "warm_relaunch":
+						cfg := sessionCoreConfigForHashInfo(tp, info)
+						relaunched, _ := relaunchAgentForLaunchDrift(context.Background(), f.sp, front, info, "worker", tp, f.cityPath, f.cfg, f.store,
+							info.StartedConfigHash, runtime.CoreFingerprint(cfg), runtime.ProvisionFingerprint(cfg), "old-launch", nil, events.Discard, nil, f.stdout, f.stderr)
+						if !relaunched || f.sp.CountCalls("Relaunch", "worker") != 1 {
+							t.Errorf("clean Pending receipt blocked the warm relaunch: %s", f.stderr.String())
+						}
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if read().StartedConfigHash != clean {
+						t.Error("rebaseline stamped a repair fingerprint on a clean Pending receipt")
+					}
+					if timing == "after_window" {
+						h.clk.Advance(3 * time.Minute)
+					}
+					h.tick(t)
+					drains := 0
+					if d := h.drains.get(info.ID); d != nil && d.reason == "config-drift" {
+						drains++
+					}
+					if timing == "in_window_then_commit" {
+						if !commitAsyncStartResultWithContext(context.Background(), result, f.sp, f.store, h.clk, events.Discard, 0, f.stdout, f.stderr, nil) {
+							t.Error("late start commit was rejected")
+						}
+					}
+					for range 8 {
+						h.tick(t)
+						if d := h.drains.get(info.ID); d != nil && d.reason == "config-drift" {
+							drains++
+						}
+					}
+					restarts := f.sp.CountCalls("Start", "worker") - starts
+					driftLines := strings.Count(f.stderr.String(), "config-drift worker")
+					after := read()
+					t.Logf("restarts=%d config-drift drains=%d drift lines=%d hash clean=%t record cleared=%t", restarts, drains, driftLines, after.StartedConfigHash == clean, after.StartupContent == "")
+					if restarts != 0 || drains != 0 || driftLines != 0 || after.StartedConfigHash != clean || after.StartupContent != "" || !f.sp.IsRunning("worker") {
+						t.Errorf("clean launch was not preserved: %s", f.stderr.String())
+					}
+				})
+			}
+		}
 	}
 }
 
