@@ -9,14 +9,18 @@ import (
 
 type nameSnapshotStore struct {
 	beads.Store
-	queries  []beads.ListQuery
-	failRead bool
+	queries       []beads.ListQuery
+	failRead      bool
+	readBothTiers bool
 }
 
 func (s *nameSnapshotStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	s.queries = append(s.queries, q)
 	if s.failRead {
 		return nil, errors.New("reservation source unavailable")
+	}
+	if s.readBothTiers {
+		q.TierMode = beads.TierBoth
 	}
 	return s.Store.List(q)
 }
@@ -70,6 +74,31 @@ func TestNameAvailabilitySnapshotPreservesHolderOrder(t *testing.T) {
 			got := snapshot.Check(nil, "held", "", "")
 			if got == nil || want == nil || got.Error() != want.Error() {
 				t.Fatalf("holder precedence changed: snapshot=%v direct=%v", got, want)
+			}
+		})
+	}
+}
+
+func TestNameAvailabilitySnapshotPreservesCapturedTiers(t *testing.T) {
+	for _, status := range []string{"open", "closed"} {
+		t.Run(status, func(t *testing.T) {
+			source := &nameSnapshotStore{
+				Store: beads.NewMemStoreFrom(0, []beads.Bead{{
+					ID: "ephemeral-holder", Type: BeadType, Status: status, Ephemeral: true,
+					Metadata: map[string]string{"session_name": "held", "session_origin": "unknown"},
+				}}, nil),
+				readBothTiers: true,
+			}
+			// The source's policy includes ephemeral reservations. The snapshot
+			// must retain that visibility when the checker queries its copy.
+			want := EnsureSessionNameAvailableWithConfigForOwner(source, nil, "held", "", "")
+			snapshot, err := NewNameAvailabilitySnapshot(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := snapshot.Check(nil, "held", "", "")
+			if got == nil || want == nil || got.Error() != want.Error() {
+				t.Fatalf("captured tier visibility changed: snapshot=%v direct=%v", got, want)
 			}
 		})
 	}

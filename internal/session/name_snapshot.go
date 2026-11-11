@@ -11,7 +11,18 @@ import (
 // It is advisory only: creation must still check the authoritative store under
 // the identifier locks. Repairs performed by the checker stay in memory.
 type NameAvailabilitySnapshot struct {
-	store *beads.MemStore
+	store *nameAvailabilitySnapshotStore
+}
+
+type nameAvailabilitySnapshotStore struct {
+	*beads.MemStore
+}
+
+func (s *nameAvailabilitySnapshotStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	// The source already selected the visible tiers. Preserve every captured
+	// reservation when the name checker queries the in-memory copy.
+	query.TierMode = beads.TierBoth
+	return s.MemStore.List(query)
 }
 
 // NewNameAvailabilitySnapshot reads reservations once in backend order, keeping
@@ -32,7 +43,9 @@ func NewNameAvailabilitySnapshot(store beads.Store) (*NameAvailabilitySnapshot, 
 			sessions = append(sessions, row)
 		}
 	}
-	return &NameAvailabilitySnapshot{store: beads.NewMemStoreFrom(0, sessions, nil)}, nil
+	return &NameAvailabilitySnapshot{store: &nameAvailabilitySnapshotStore{
+		MemStore: beads.NewMemStoreFrom(0, sessions, nil),
+	}}, nil
 }
 
 // Check applies the authoritative name rules to this snapshot without further
