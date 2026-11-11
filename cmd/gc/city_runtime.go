@@ -115,6 +115,8 @@ type CityRuntime struct {
 	watchMu         sync.Mutex
 	watchCleanup    func()
 
+	configLoadHealth *configLoadHealth
+
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
@@ -301,6 +303,8 @@ type CityRuntimeParams struct {
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
 
+	ConfigLoadHealth *configLoadHealth
+
 	Cfg                     *config.City
 	SP                      runtime.Provider
 	Publication             supervisor.PublicationConfig
@@ -377,6 +381,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if configDirty == nil {
 		configDirty = &atomic.Bool{}
 	}
+	loadHealth := p.ConfigLoadHealth
+	if loadHealth == nil {
+		loadHealth = &configLoadHealth{}
+	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
@@ -433,6 +441,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		configLoadHealth:        loadHealth,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -1144,6 +1153,7 @@ func (cr *CityRuntime) tick(
 	cr.reloadMu.Unlock()
 	if preview != nil && preview.dryRun {
 		reply := cr.previewReload(preview, cityRoot, *lastProviderName)
+		cr.finishConfigReloadHealth(reply)
 		cr.sendReloadReply(preview.doneCh, reply)
 		cr.clearActiveReloadIf(preview)
 		return
@@ -1201,7 +1211,7 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(manualReload)
 	}()
-	configChanged := dirty.Swap(false)
+	configChanged := dirty.Swap(false) || cr.configLoadHealth.snapshot() != nil
 	if configChanged {
 		dirtyCleared = true
 		source := reloadSourceWatch
@@ -1541,6 +1551,11 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 }
 
 func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, now time.Time) {
+	// Dispatch the accepted order set while reload is failing. A disk rescan
+	// must not replace it with definitions from the rejected configuration.
+	if cr.configLoadHealth.snapshot() != nil {
+		return
+	}
 	if !cr.orderRescanEnabled || cr.tomlPath == "" || strings.TrimSpace(cityRoot) == "" {
 		return
 	}
@@ -1997,6 +2012,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 ) (reply reloadControlReply) {
 	var changes []reloadChange
 	defer func() {
+		cr.finishConfigReloadHealth(reply)
 		if reply.Outcome == reloadOutcomeApplied {
 			cr.lastConfigApply = reloadApplyInfo{Source: source, At: time.Now().UTC()}
 		}
@@ -2012,7 +2028,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	var warnings []string
 	appendWarning := func(message string) {
 		warnings = append(warnings, message)
-		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, message) //nolint:errcheck // best-effort stderr
 	}
 
 	configName := cr.configName
@@ -2022,15 +2037,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
 	if err != nil {
 		if result != nil {
-			for _, warning := range result.Warnings {
-				appendWarning(warning)
-			}
+			warnings = append(warnings, result.Warnings...)
 		} else {
-			for _, warning := range reloadWarningsFromError(err) {
-				appendWarning(warning)
-			}
+			warnings = append(warnings, reloadWarningsFromError(err)...)
 		}
-		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
 			trace.RecordConfigReload("", "", TraceOutcomeFailed, source, nil, nil, false, warnings, err)
@@ -2072,7 +2082,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
 		if orderErr != nil {
 			err := fmt.Errorf("order reload: %w", orderErr)
-			fmt.Fprintf(cr.stderr, "%s: %v (keeping old orders)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
 			if trace != nil {
 				trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
@@ -2142,7 +2151,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// booted configuration stays in force until an operator restarts the city.
 	if config.StorageReloadRequiresRestart(cr.cfg, nextCfg) {
 		err := fmt.Errorf("config reload: [storage] changed, and live storage handles cannot be swapped; restart this city to apply it (keeping old config)")
-		fmt.Fprintf(cr.stderr, "%s: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
 			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
@@ -2203,7 +2211,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	if lifecycleErr != nil {
 		err := fmt.Errorf("config reload: %w", lifecycleErr)
-		fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
 			trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
@@ -2243,7 +2250,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 			if runtime.IsPartialListError(lErr) {
 				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
 			}
-			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 			if trace != nil {
 				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)

@@ -40,6 +40,8 @@ type agentBuildParams struct {
 	appendFragments []string // V2: city-level [agents].append_fragments / [agent_defaults].append_fragments
 	stderr          io.Writer
 
+	fingerprintContent *fingerprintContent
+
 	// beadStore is the city-level bead store for session bead lookups.
 	// When non-nil, session names are derived from bead IDs ("s-{beadID}")
 	// instead of the legacy SessionNameFor function.
@@ -173,6 +175,8 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+
+		fingerprintContent: fingerprintContentForConfig(cityPath, cfg, stderr),
 	}
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())

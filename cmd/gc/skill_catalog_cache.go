@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
 )
 
@@ -205,7 +206,12 @@ func loadSharedSkillCatalogWithFallback(cityPath string, cfg *config.City, rigNa
 		storeCached = setCachedRigCatalog
 	}
 	bootstrapState := currentBootstrapCatalogState()
-	cat, err := loadSharedSkillCatalog(cfg, rigName)
+	var cat materialize.CityCatalog
+	var err error
+	if cfg != nil {
+		fs := fingerprintFS{FS: fsys.OSFS{}, content: fingerprintContentForConfig(cityPath, cfg, nil)}
+		cat, err = materialize.LoadCityCatalogFS(fs, cfg.PackSkillsDir, sharedSkillCatalogInputs(cfg, rigName)...)
+	}
 	if err != nil {
 		if cached, ok := loadCached(key); ok && shouldReuseCachedCatalogOnLoadError(cached, bootstrapState) {
 			return sharedCatalogLoadResult{

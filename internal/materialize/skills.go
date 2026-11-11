@@ -201,6 +201,13 @@ type AgentCatalog struct {
 // import launch path this is usually empty because BootstrapPacks is
 // empty, but upgraded installs may still carry compatibility state.
 func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCatalog) (CityCatalog, error) {
+	return LoadCityCatalogFS(fsys.OSFS{}, packSkillsDir, imported...)
+}
+
+// LoadCityCatalogFS loads shared skills using fs for catalog contents. Callers
+// can retain an accepted snapshot of immutable imports while local sources
+// remain live. Bootstrap source discovery still uses the installed pack index.
+func LoadCityCatalogFS(fs fsys.FS, packSkillsDir string, imported ...config.DiscoveredSkillCatalog) (CityCatalog, error) {
 	var (
 		cat       CityCatalog
 		nameOwner = make(map[string]int) // name → index into cat.Entries
@@ -258,7 +265,7 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 	// City pack first — wins precedence over imported and compatibility
 	// bootstrap entries.
 	if packSkillsDir != "" {
-		entries, err := readSkillDir(packSkillsDir, "city")
+		entries, err := readSkillDirFS(fs, packSkillsDir, "city")
 		if err != nil {
 			return cat, fmt.Errorf("reading city pack skills %q: %w", packSkillsDir, err)
 		}
@@ -275,7 +282,7 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 		if origin == "" {
 			origin = "import"
 		}
-		entries, err := readSkillDir(catalog.SourceDir, origin)
+		entries, err := readSkillDirFS(fs, catalog.SourceDir, origin)
 		if err != nil {
 			return cat, fmt.Errorf("reading imported pack %q skills %q: %w", origin, catalog.SourceDir, err)
 		}
@@ -289,7 +296,7 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 	}
 
 	for _, bd := range bootstrapDirs {
-		entries, err := readSkillDir(bd.Dir, bd.Name)
+		entries, err := readSkillDirFS(fs, bd.Dir, bd.Name)
 		if err != nil {
 			return cat, fmt.Errorf("reading compatibility bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)
 		}
@@ -794,7 +801,11 @@ func LegacyStubNames() []string {
 // supported in v0.15.1 and return "" — same end state as a missing
 // description, which the caller handles gracefully.
 func readSkillDescription(path string) string {
-	data, err := os.ReadFile(path)
+	return readSkillDescriptionFS(fsys.OSFS{}, path)
+}
+
+func readSkillDescriptionFS(fs fsys.FS, path string) string {
+	data, err := fs.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -841,7 +852,11 @@ func readSkillDescription(path string) string {
 // counts as a skill iff it contains a SKILL.md file (case-sensitive,
 // matching the vendor convention). Returns nil if root does not exist.
 func readSkillDir(root, origin string) ([]SkillEntry, error) {
-	info, err := os.Stat(root)
+	return readSkillDirFS(fsys.OSFS{}, root, origin)
+}
+
+func readSkillDirFS(fs fsys.FS, root, origin string) ([]SkillEntry, error) {
+	info, err := fs.Stat(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -851,7 +866,7 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 	if !info.IsDir() {
 		return nil, nil
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := fs.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
@@ -866,14 +881,14 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 		}
 		dir := filepath.Join(abs, e.Name())
 		skillMD := filepath.Join(dir, "SKILL.md")
-		if _, statErr := os.Stat(skillMD); statErr != nil {
+		if _, statErr := fs.Stat(skillMD); statErr != nil {
 			continue
 		}
 		out = append(out, SkillEntry{
 			Name:        e.Name(),
 			Source:      dir,
 			Origin:      origin,
-			Description: readSkillDescription(skillMD),
+			Description: readSkillDescriptionFS(fs, skillMD),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

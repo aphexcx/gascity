@@ -797,6 +797,11 @@ type Config struct {
 	// providing additive pack-level file staging with lower priority.
 	PackOverlayDirs []string
 
+	// OverlaySourceHashes holds source hashes captured during config resolution.
+	// Nil leaves discovery to the runtime. This is diagnostic/staging metadata,
+	// not an additional fingerprint component.
+	OverlaySourceHashes map[string]string
+
 	// OverlayDir is the host-side overlay directory whose contents should
 	// be copied into the session's working directory. Used by the exec
 	// provider (e.g., K8s) to kubectl cp overlay files into the pod.

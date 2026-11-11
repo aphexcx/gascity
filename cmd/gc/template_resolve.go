@@ -92,6 +92,8 @@ type TemplateParams struct {
 	ConfiguredNamedMode string
 	// FPExtra carries additional fingerprint data (pool config, etc.).
 	FPExtra map[string]string
+	// OverlaySourceHashes carries accepted source hashes into runtime diagnostics.
+	OverlaySourceHashes map[string]string
 	// ResolvedProvider is the resolved provider spec (for ACP routing, etc.).
 	ResolvedProvider *config.ResolvedProvider
 	// TemplateName is the config template name (pool base name or qualified name).
@@ -353,7 +355,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	sessionBackendEnv, err := sessionBackendEnvWithConfig(p.cityPath, rigRoot, p.rigs, p.city)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
@@ -403,7 +405,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// The controller's own routes are the right source; threading them into
 	// this plumbing is a change to controller wiring, not part of swapping
 	// the reader, so it stays with the claim-routing slice (ga-601v2).
-	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+	promptFS := p.fs
+	if p.fingerprintContent != nil {
+		promptFS = fingerprintFS{FS: p.fs, content: p.fingerprintContent}
+	}
+	prompt = renderPrompt(promptFS, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
 		TemplateName:            cfgAgent.Name,
@@ -636,7 +642,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		sharedCatalog := p.sharedSkillCatalogSnapshotForAgent(cfgAgent)
 		desired := effectiveSkillsForAgent(sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
-			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
+			fpExtra = mergeSkillFingerprintEntriesWithHash(fpExtra, desired, p.fingerprintContent.hashPath)
 			if canonWorkDir != scopeRoot {
 				// Pool instances inherit their skill catalog from the
 				// template, not the instance — namepool members (e.g.
@@ -766,6 +772,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		CopyFiles:              copyFiles,
 	}
 
+	for i := range hints.CopyFiles {
+		entry := &hints.CopyFiles[i]
+		if entry.Probed {
+			entry.ContentHash = p.fingerprintContent.hash(entry.Src, "copy:"+entry.RelDst, func() string { return entry.ContentHash })
+		}
+	}
+	overlayHashes := runtime.OverlaySourceHashes(hints.ToRuntimeConfig())
+	for source, value := range overlayHashes {
+		overlayHashes[source] = p.fingerprintContent.hash(source, "overlay", func() string { return value })
+	}
 	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
@@ -786,6 +802,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IsACP:            sessionTransport == config.SessionTransportACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
+
+		OverlaySourceHashes: overlayHashes,
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.laneContextConfigured = laneContextConfigured(cfgAgent, p.sessionProvider)
@@ -854,6 +872,18 @@ func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
+	return sessionBackendEnvWithConfig(cityPath, rigRoot, rigs, nil)
+}
+
+// Session construction uses the accepted config for credential selection;
+// rereading rejected TOML here would remove sessions from desired state.
+func sessionBackendEnvWithConfig(cityPath, rigRoot string, rigs []config.Rig, cfg *config.City) (map[string]string, error) {
+	applyCredentials := func(env map[string]string) error {
+		if cfg == nil {
+			return applyHostedBeadsCredentialEnv(env, cityPath)
+		}
+		return applyHostedBeadsCredentialSelection(env, configSelectsHostedBeadsCredentialProvider(cfg))
+	}
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -873,7 +903,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			if err := applyCredentials(env); err != nil {
 				return env, err
 			}
 			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
@@ -898,7 +928,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	}
 
 	if cityUsesBdStoreContract(cityPath) {
-		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+		if err := applyCredentials(env); err != nil {
 			return env, err
 		}
 	}
@@ -987,6 +1017,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	}
 	cfg.WorkDir = tp.WorkDir
 	cfg.FingerprintExtra = tp.FPExtra
+	cfg.OverlaySourceHashes = maps.Clone(tp.OverlaySourceHashes)
 	// Prompt delivery may prepend the startup prompt to the configured nudge.
 	cfg.Nudge = nudge
 	// ga-c4w: interactive `gc session new` sessions (session_origin=manual)
