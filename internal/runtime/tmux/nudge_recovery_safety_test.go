@@ -260,6 +260,130 @@ func TestNudgeRecoveryInlineAndPending(t *testing.T) {
 	}
 }
 
+// A paste staged while a person can edit the pane cannot authorize a later call.
+func TestNudgeAttachedStageCannotAuthorizeRetry(t *testing.T) {
+	const message = "please review the open beads"
+	edits := []struct{ name, draft string }{
+		{"newline for a space", "please review\nthe open beads"},
+		{"newline inside a word", "please rev\niew the open beads"},
+		{"words appended", "please review the open beads and also delete the old branch"},
+		{"words replaced", "please ignore the open beads"},
+	}
+	for _, attachment := range []string{"detach", "switch session", "stay attached", "reattach"} {
+		for _, later := range []string{"same nudge", "different nudge"} {
+			for _, id := range []string{"", "owner"} {
+				for _, edit := range edits {
+					t.Run(attachment+"/"+later+"/id="+id+"/"+edit.name, func(t *testing.T) {
+						synctest.Test(t, func(t *testing.T) {
+							tm, p := newRecoveryPane(t)
+							p.attached, p.loseEnter = true, true
+							pastes := 0
+							paste := func(target, text string, timeout time.Duration) (int, error) {
+								pastes++
+								return p.paste("")(target, text, timeout)
+							}
+							d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, id, paste)
+							if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || p.enters != 3 || pastes != 1 {
+								t.Fatalf("fresh attached delivery: %+v err=%v Enters=%d pastes=%d", d, err, p.enters, pastes)
+							}
+							p.draft = edit.draft
+							// Detach fires no ownership hook.
+							p.attached, p.loseEnter = false, false
+							switch attachment {
+							case "switch session":
+								// The installed client-session-changed hook clears provenance.
+								p.options[nudgeDraftPayloadOption] = ""
+							case "stay attached":
+								p.attached = true
+							case "reattach":
+								p.attached = true
+								p.options[nudgeDraftPayloadOption] = ""
+							}
+							enters := p.enters
+							next, nextID := message, id
+							if later == "different nudge" {
+								p.agePaste(t, 11*time.Minute)
+								next = "next nudge"
+								if id != "" {
+									nextID = "next-owner"
+								}
+							}
+							// A new provider instance must not turn the marker into ownership.
+							retry := NewTmux()
+							retry.exec = tm.exec
+							d, err = retry.nudgeSessionDeliveryWithIdentity(t.Name(), next, nextID, paste)
+							if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != enters || pastes != 1 || len(p.submitted) != 0 || p.draft != edit.draft {
+								t.Fatalf("retry touched person's draft: delivery=%+v err=%v Enters=%d pastes=%d submitted=%q draft=%q", d, err, p.enters-enters, pastes, p.submitted, p.draft)
+							}
+						})
+					})
+				}
+			}
+		}
+	}
+	for _, id := range []string{"", "owner"} {
+		for _, outcome := range []string{"second Enter", "third Enter", "paste error", "partial paste", "detach during paste"} {
+			t.Run("fresh call/"+outcome+"/id="+id, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, p := newRecoveryPane(t)
+					p.attached, p.loseEnter = true, true
+					acceptAt := 0
+					if outcome == "second Enter" {
+						acceptAt = 2
+					}
+					if outcome == "third Enter" {
+						acceptAt = 3
+					}
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						if acceptAt > 0 && p.enters == acceptAt-1 {
+							p.loseEnter = false
+						}
+						return p.exec(args)
+					}}
+					pasteErr := errors.New("paste transport failed after writing")
+					pastes := 0
+					paste := func(_, text string, _ time.Duration) (int, error) {
+						pastes++
+						p.draft = text
+						switch outcome {
+						case "paste error":
+							return len(text), pasteErr
+						case "partial paste":
+							p.draft = text[:12]
+							return 12, nil
+						case "detach during paste":
+							p.attached = false
+						}
+						return len(text), nil
+					}
+					d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, id, paste)
+					if pastes != 1 {
+						t.Fatalf("pastes=%d, want 1", pastes)
+					}
+					if acceptAt > 0 {
+						if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || p.enters != acceptAt || !slices.Equal(p.submitted, []string{message}) || p.options[nudgeDraftPayloadOption] != "" {
+							t.Fatalf("fresh delivery retry: %+v err=%v Enters=%d submitted=%q marker=%q", d, err, p.enters, p.submitted, p.options[nudgeDraftPayloadOption])
+						}
+						return
+					}
+					if outcome == "paste error" && !errors.Is(err, pasteErr) {
+						t.Fatalf("paste failure lost: %v", err)
+					}
+					p.attached, p.loseEnter = false, false
+					enters, draft := p.enters, p.draft
+					for _, next := range []string{message, "next nudge"} {
+						p.agePaste(t, 11*time.Minute)
+						d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), next, id, paste)
+						if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != enters || pastes != 1 || p.draft != draft || len(p.submitted) != 0 {
+							t.Fatalf("retry after %s: %+v err=%v Enters=%d pastes=%d draft=%q", outcome, d, err, p.enters-enters, pastes, p.draft)
+						}
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestNudgeAttachedEmptyComposer(t *testing.T) {
 	for _, id := range []string{"", "owner"} {
 		t.Run(id, func(t *testing.T) {

@@ -76,7 +76,8 @@ func (t *Tmux) nudgeDraftOwnershipHook(session, target string, install bool) (st
 	return pane, nil
 }
 
-// stageNudgeDraftProvenance marks this call's fresh paste as pending.
+// stageNudgeDraftProvenance marks a detached fresh paste as pending. An attached
+// stage gets a marker usable only by this call, never by resume or recovery.
 // A later attachment clears the marker even if it occurs during the paste.
 func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...string) error {
 	id := ""
@@ -96,13 +97,16 @@ func (t *Tmux) stageNudgeDraftProvenance(pane, message string, deliveryID ...str
 		fmt.Sprintf("%s:%d:%d:%s:", runtime.NudgePayloadDigest(message), time.Now().UnixMilli(), strings.Count(message, "\n"), normalizedNudgeDigest(message))); err != nil {
 		return err
 	}
-	_, err := t.run("set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftPayloadOption,
-		"pending:"+runtime.NudgePayloadDigest(message))
+	digest := runtime.NudgePayloadDigest(message)
+	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(pane), "#{==:#{session_attached},0}",
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftPayloadOption, "pending:" + digest}),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(pane), nudgeDraftPayloadOption, "attached:" + digest}))
 	return err
 }
 
 // confirmNudgeDraftProvenance promotes a full paste only if no attachment
-// invalidated its pending marker. The comparison and update run in tmux.
+// invalidated its pending marker. Attached-stage markers are never promoted to
+// retry provenance. The comparison and update run in tmux.
 func (t *Tmux) confirmNudgeDraftProvenance(pane, message string) error {
 	return t.confirmNudgeDraftDigest(pane, runtime.NudgePayloadDigest(message))
 }
@@ -186,7 +190,7 @@ func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, 
 
 func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {
 	_, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
-		fmt.Sprintf("#{||:#{==:#{%s},%s},#{==:#{%s},pending:%s}}", nudgeDraftPayloadOption, digest, nudgeDraftPayloadOption, digest),
+		nudgeDraftDigestCondition(digest, false),
 		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""}))
 	return err
 }
@@ -224,6 +228,8 @@ func nudgeDraftDigestCondition(digest string, requireDetached bool) string {
 	// Resuming or recovering an earlier paste still requires a detached pane.
 	if requireDetached {
 		condition = fmt.Sprintf("#{&&:%s,#{==:#{session_attached},0}}", condition)
+	} else {
+		condition = fmt.Sprintf("#{||:%s,#{==:#{%s},attached:%s}}", condition, nudgeDraftPayloadOption, digest)
 	}
 	return condition
 }

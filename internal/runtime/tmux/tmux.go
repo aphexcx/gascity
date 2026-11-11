@@ -2888,7 +2888,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		if guardOwnedDraft && !submitted && delivery.Submit != runtime.NudgeSubmitOwnershipLost {
 			stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 			digest := runtime.NudgePayloadDigest(message)
-			if ownershipLost || err != nil || (strings.TrimSpace(stored) != digest && strings.TrimSpace(stored) != "pending:"+digest) {
+			if ownershipLost || err != nil || (strings.TrimSpace(stored) != digest && strings.TrimSpace(stored) != "pending:"+digest && strings.TrimSpace(stored) != "attached:"+digest) {
 				log.Printf("tmux nudge: cannot retain draft ownership for %q: %v", target, err)
 				delivery.Submit = runtime.NudgeSubmitOwnershipLost
 				deliveryErr = nil
