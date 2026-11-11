@@ -6880,7 +6880,7 @@ func silentRebaselineSessionHashes(info sessionpkg.Info, sessFront *sessionpkg.S
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
-	if hasFinalizedStartupContentRepair(info) {
+	if hasObservedStartupContentRepair(info) {
 		// A hash-format or generated-hook migration did not deliver content.
 		// Carry the repair input into the new format until a real start does.
 		applyStartupContentFingerprint(&agentCfg)
@@ -6955,7 +6955,7 @@ func relaunchAgentForLaunchDrift(
 	trace *sessionReconcilerTraceCycle,
 	stdout, stderr io.Writer,
 ) (bool, map[string]string) {
-	if hasFinalizedStartupContentRepair(info) {
+	if hasObservedStartupContentRepair(info) {
 		// Relaunch does not stage startup content. Let the existing full-start
 		// path perform the pending repair and commit its delivery observation.
 		return false, nil

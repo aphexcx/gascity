@@ -441,6 +441,96 @@ func TestStartupContentCleanPendingRebaseline(t *testing.T) {
 	}
 }
 
+func TestStartupContentRepairSurvivesStalePendingRebaseline(t *testing.T) {
+	for _, path := range []string{"control", "soft_reload", "alias"} {
+		t.Run(path, func(t *testing.T) {
+			oldProbe := staleResumeKeyProbe
+			staleResumeKeyProbe = func(string, string, string) (bool, bool) { return true, true }
+			t.Cleanup(func() { staleResumeKeyProbe = oldProbe })
+			h := newStartupRepairFixture(t)
+			f := h.f
+			t.Setenv("GC_CITY", f.cityPath)
+			t.Chdir(f.cityPath)
+			front := sessionFrontDoor(f.store)
+			read := func() sessionpkg.Info {
+				t.Helper()
+				info, err := front.Get(f.beadID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return info
+			}
+			source := sessionpkg.StartupContentSource{Path: filepath.Join(f.cacheDirs[1], "skills", "plan")}
+			source.Hash = startupSourceHash(source)
+			stray := filepath.Join(source.Path, "stray")
+			if err := os.WriteFile(stray, []byte("dirty delivery"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			markStartupRepair(t, h, f.beadID, "worker", sessionpkg.StartupContent{Sources: []sessionpkg.StartupContentSource{source}})
+			priorRepair := read().StartedConfigHash
+			if err := f.sp.Stop("worker"); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := preWakeCommit(read(), front, h.clk); err != nil {
+				t.Fatal(err)
+			}
+			tp := h.desired["worker"]
+			prepared, _, err := buildPreparedStart(startCandidate{info: read(), tp: tp}, f.cfg, f.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := runPreparedStartCandidate(context.Background(), *prepared, f.cityPath, f.sp, f.store, f.cfg, time.Minute,
+				immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			pending, err := sessionpkg.DecodeStartupContent(read().StartupContent)
+			if err != nil || !pending.Pending || len(pending.Sources) == 0 || read().StartedConfigHash != priorRepair {
+				t.Fatalf("fixture did not launch dirty with a prior repair hash: pending=%t sources=%d sameHash=%t err=%v", pending.Pending, len(pending.Sources), read().StartedConfigHash == priorRepair, err)
+			}
+			if err := os.Remove(stray); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := loadSessionBeadSnapshot(f.store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasPatch := sessionpkg.MetadataPatch{}
+			if path == "alias" {
+				queueAliasChangeDriftRebaseline(front, mustGetBead(t, f.store, f.beadID), tp, func(k, v string) { aliasPatch[k] = v }, f.stderr)
+			}
+			if !commitAsyncStartResultWithContext(context.Background(), result, f.sp, f.store, h.clk, events.Discard, 0, f.stdout, f.stderr, nil) {
+				t.Fatal("dirty async start commit rejected")
+			}
+			finalized, err := sessionpkg.DecodeStartupContent(read().StartupContent)
+			if err != nil || finalized.Pending || len(finalized.Sources) == 0 || read().StartedConfigHash != priorRepair {
+				t.Fatalf("fixture did not finalize dirty: pending=%t sources=%d sameHash=%t err=%v", finalized.Pending, len(finalized.Sources), read().StartedConfigHash == priorRepair, err)
+			}
+			switch path {
+			case "soft_reload":
+				accepted := acceptConfigDriftAcrossSessions(front, h.desired, snapshot, f.sp, h.drains, f.stderr)
+				t.Logf("stale acceptance updated=%d failed=%d", accepted.Updated, accepted.Failed)
+				if accepted.Failed != 0 {
+					t.Fatal("acceptance failed")
+				}
+			case "alias":
+				if err := front.ApplyPatch(f.beadID, aliasPatch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			starts := f.sp.CountCalls("Start", "worker")
+			for range 8 {
+				h.tick(t)
+			}
+			repairs := f.sp.CountCalls("Start", "worker") - starts
+			t.Logf("repair restarts=%d record retained=%t", repairs, read().StartupContent != "")
+			if repairs != 1 {
+				t.Errorf("restored source never repaired the dirty start: got %d restarts, want 1", repairs)
+			}
+		})
+	}
+}
+
 type startupReceiptFailStore struct{ beads.Store }
 
 func (s startupReceiptFailStore) Update(string, beads.UpdateOpts) error {
