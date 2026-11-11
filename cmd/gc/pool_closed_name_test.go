@@ -243,8 +243,20 @@ func TestClosedPoolSessionNameWarningsNextAliasedSlot(t *testing.T) {
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "name \"lane-2\" is held by closed session bead retired-holder") {
 		t.Fatalf("warnings = %v, want the next aliased slot's holder", warnings)
 	}
-	broken := degradedQueryStore{Store: store, err: errors.New("reservation query unavailable")}
+	broken := closedPoolSnapshotFailStore{Store: store, err: errors.New("reservation query unavailable")}
 	if _, err := closedPoolSessionNameWarnings(cfg, "", cfg.Agents, broken, nil); err == nil || !strings.Contains(err.Error(), "reservation query unavailable") {
 		t.Fatalf("reservation query failure was hidden: %v", err)
 	}
+}
+
+type closedPoolSnapshotFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s closedPoolSnapshotFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed {
+		return nil, s.err
+	}
+	return s.Store.List(q)
 }

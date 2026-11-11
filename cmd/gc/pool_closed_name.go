@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -42,6 +44,7 @@ func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []c
 		return nil, err
 	}
 	store := cliSessionStore(cityStore, cfg, cityPath)
+	var reservations *session.NameAvailabilitySnapshot
 	bp := &agentBuildParams{
 		city: cfg, cityName: loadedCityName(cfg, cityPath), cityPath: cityPath, rigs: cfg.Rigs,
 		sessionOccupancyInfos: infos,
@@ -64,8 +67,14 @@ func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []c
 		if err != nil {
 			return warnings, err
 		}
+		if reservations == nil {
+			reservations, err = session.NewNameAvailabilitySnapshot(store)
+			if err != nil {
+				return warnings, err
+			}
+		}
 		for _, name := range identifiers.availabilityNames {
-			err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", identity)
+			err := reservations.Check(cfg, name, "", identity)
 			var owner *session.NameOwnerError
 			if errors.As(err, &owner) && owner.Closed {
 				warnings = append(warnings, fmt.Sprintf("pool %q cannot create its next session: name %q is held by closed session bead %s", a.QualifiedName(), name, owner.BeadID))
@@ -77,10 +86,33 @@ func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []c
 	return warnings, nil
 }
 
+// The work is already routed. Three seconds allows a normal cross-store census
+// while keeping an unavailable advisory backend from holding the CLI open.
+const closedPoolSessionNameTimeout = 3 * time.Second
+
 func printClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr io.Writer) {
 	if opts.Force || deps.Cfg == nil {
 		return
 	}
+	timer := time.NewTimer(closedPoolSessionNameTimeout)
+	defer timer.Stop()
+	done := make(chan string, 1)
+	go func() {
+		// Store.List has no cancellation contract. An abandoned check must
+		// neither write to the command's writer nor block delivering its result.
+		var output bytes.Buffer
+		writeClosedPoolSessionNameWarnings(opts, deps, &output)
+		done <- output.String()
+	}()
+	select {
+	case output := <-done:
+		fmt.Fprint(stderr, output) //nolint:errcheck
+	case <-timer.C:
+		fmt.Fprintf(stderr, "warning: pool-name check was skipped after %s; run gc doctor to check session names\n", closedPoolSessionNameTimeout) //nolint:errcheck
+	}
+}
+
+func writeClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr io.Writer) {
 	target := opts.Target
 	route := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&target))
 	if route != target.QualifiedName() {
