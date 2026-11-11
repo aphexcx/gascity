@@ -1870,6 +1870,16 @@ func runPreparedStartCandidate(
 	if err == nil {
 		rateLimitScreen = false
 	}
+	if err != nil && item.startupContentPrepared {
+		// An absent runtime cannot consume this attempt's receipt. Unknown
+		// liveness or a running process still needs it for crash recovery.
+		running, _, observeErr := observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+		if observeErr != nil {
+			err = errors.Join(err, fmt.Errorf("checking failed startup receipt owner: %w", observeErr))
+		} else if !running {
+			err = errors.Join(err, restoreReusedStartupContent(&item, sessionFrontDoor(store)))
+		}
+	}
 	return startResult{
 		prepared:          item,
 		err:               err,

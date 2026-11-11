@@ -21,7 +21,8 @@ import (
 )
 
 // loadCityConfigCalls counts every full TOML load performed by
-// loadCityConfigFS (city.toml + all pack includes). Store-open call sites on
+// loadCityConfigFS and loadPrematerializedCityConfig (city.toml + all pack
+// includes). Store-open call sites on
 // hot per-tick paths (order dispatch) must reuse an already-resolved
 // *config.City instead of driving this counter once per scope per tick
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
@@ -93,6 +94,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
+	loadCityConfigCalls.Add(1)
 	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err

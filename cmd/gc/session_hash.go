@@ -12,8 +12,12 @@ import (
 // paths may keep their pre-start assembly inline when they need setup-specific
 // diagnostics before storing first-start metadata.
 func sessionCoreConfigForHashInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
+	return (&startupContentCheck{}).coreConfigForHashInfo(tp, info)
+}
+
+func (check *startupContentCheck) coreConfigForHashInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
 	agentCfg := templateParamsToConfig(tp)
 	applyTemplateOverridesToConfigInfo(&agentCfg, info, tp)
-	retainStartupContentFingerprint(&agentCfg, info)
+	check.retainFingerprint(&agentCfg, info)
 	return agentCfg
 }

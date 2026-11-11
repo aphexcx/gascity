@@ -67,6 +67,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 //
 // Sessions are skipped (no metadata write) when:
 //   - the session is closed
+//   - startup content is still awaiting repair
 //   - the session has no session_name metadata
 //   - the session has no started_config_hash yet (the existing drift
 //     check already skips these — the next first-start path will
@@ -112,7 +113,9 @@ func acceptConfigDriftAcrossSessions(
 
 	for i := range openInfos {
 		info := openInfos[i]
-		if info.Closed {
+		if info.Closed || info.StartupContent != "" {
+			// Accepting config cannot acknowledge content this runtime never
+			// received, or cancel its deferred repair drain.
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)

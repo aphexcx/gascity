@@ -2597,6 +2597,9 @@ func queueAliasChangeDriftRebaseline(sessFront *session.Store, b beads.Bead, tp 
 		fmt.Fprintf(stderr, "session beads: loading session %s for alias-change drift rebaseline: %v\n", b.ID, err) //nolint:errcheck
 		return
 	}
+	if info.StartupContent != "" {
+		return // renaming an alias did not deliver the pending startup content
+	}
 	rebaseline, err := sessionHashRebaselineMetadata(sessionCoreConfigForHashInfo(tp, info))
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: rebaselining drift baseline after alias change for %s: %v\n", b.ID, err) //nolint:errcheck

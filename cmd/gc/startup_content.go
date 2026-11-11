@@ -63,7 +63,7 @@ func startupSourceHash(source sessionpkg.StartupContentSource) string {
 // prepareStartupContent persists the first delivery observation and the
 // per-attempt receipt before PreStart. Receipts contain command results, never
 // process liveness; the session bead owns all lasting repair state.
-func prepareStartupContent(item *preparedStart, cityPath string, store *sessionpkg.Store) error {
+func prepareStartupContent(item *preparedStart, cityPath string, store *sessionpkg.Store) (retErr error) {
 	if store == nil || item.candidate.info.ID == "" {
 		return nil
 	}
@@ -76,6 +76,13 @@ func prepareStartupContent(item *preparedStart, cityPath string, store *sessionp
 	item.candidate.info.StartupContent = info.StartupContent
 	item.startupContentPrevious = info.StartupContent
 	content := sessionpkg.StartupContent{Sources: changedStartupSources(item.candidate.tp.StartupContentSources)}
+	defer func() {
+		if retErr != nil && content.Receipt != "" {
+			if err := os.Remove(content.Receipt); err != nil && !os.IsNotExist(err) {
+				retErr = errors.Join(retErr, fmt.Errorf("removing failed startup receipt: %w", err))
+			}
+		}
+	}()
 	for _, command := range item.cfg.PreStart {
 		if !strings.Contains(command, " internal materialize-skills ") {
 			continue
@@ -211,10 +218,17 @@ func startupContentBaseline(cfg runtime.Config) sessionpkg.StartupContentBaselin
 	}
 }
 
+// startupContentCheck shares one lazy advisory load across a reconcile or
+// preview pass, including failed loads. A later pass retries a busy cache.
+type startupContentCheck struct {
+	checked bool
+	ready   bool
+}
+
 // Keep only the marked session's baseline while its delivered sources remain
 // dirty. Recovery removes this extra input and uses ordinary config drift,
 // including the existing attached, active, pending-interaction and work guards.
-func retainStartupContentFingerprint(cfg *runtime.Config, info sessionpkg.Info) {
+func (check *startupContentCheck) retainFingerprint(cfg *runtime.Config, info sessionpkg.Info) {
 	content, err := sessionpkg.DecodeStartupContent(info.StartupContent)
 	if err != nil || content.Pending {
 		return // incomplete starts are recovered through their commit path
@@ -224,7 +238,11 @@ func retainStartupContentFingerprint(cfg *runtime.Config, info sessionpkg.Info) 
 		return
 	}
 	if content.Skipped {
-		if _, err := loadCityConfig(cfg.Env["GC_CITY_PATH"], io.Discard); err != nil {
+		if !check.checked {
+			_, err := loadCityConfigAdvisory(cfg.Env["GC_CITY_PATH"])
+			check.checked, check.ready = true, err == nil
+		}
+		if !check.ready {
 			applyStartupContentFingerprint(cfg)
 		}
 	}
