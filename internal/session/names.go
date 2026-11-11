@@ -40,6 +40,22 @@ var (
 	sessionIDPattern    = regexp.MustCompile(`^gc-[0-9]+$`)
 )
 
+// NameOwnerError identifies the session bead reserving an explicit name.
+// Closed distinguishes a historical reservation from an open session holder.
+type NameOwnerError struct {
+	Name   string
+	BeadID string
+	Closed bool
+}
+
+// Error preserves the name-reservation diagnostic used by CLI callers.
+func (e *NameOwnerError) Error() string {
+	return fmt.Sprintf("%v: %q already belongs to %s", ErrSessionNameExists, e.Name, e.BeadID)
+}
+
+// Unwrap makes ownership conflicts match ErrSessionNameExists.
+func (e *NameOwnerError) Unwrap() error { return ErrSessionNameExists }
+
 const (
 	explicitSessionNameMaxLen = 64
 	autoSessionNamePrefix     = "s-"
@@ -350,8 +366,8 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 		if failedCreateIdentityReleased(b) {
 			continue
 		}
-		// Explicit session names are permanent identities; once claimed by any
-		// session bead, including a closed one, they are never reused.
+		// Explicit session names remain reserved unless a terminal session
+		// qualifies for one of the release rules below.
 		//
 		// Exception: closed beads that belong to a configured named session
 		// release their session_name so the reconciler can re-materialize a
@@ -383,7 +399,12 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 				strings.TrimSpace(b.Metadata["session_origin"]) == "ephemeral" {
 				continue
 			}
-			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
+			// A closed manual session releases its name for a successor too.
+			// An open session keeps the reservation even while asleep.
+			if b.Status == "closed" && strings.TrimSpace(b.Metadata["session_origin"]) == "manual" {
+				continue
+			}
+			return &NameOwnerError{Name: name, BeadID: b.ID, Closed: b.Status == "closed"}
 		}
 		if b.Status == "closed" {
 			continue

@@ -1320,17 +1320,46 @@ func TestEnsureSessionNameAvailable_RetiredPoolSlotReleasesConfiguredName(t *tes
 	}
 }
 
-// TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes guards the
-// no-regression requirement of the retired-pool-slot release: it fires only
-// when the bead is CLOSED and carries BOTH markers (pool_managed=true AND
-// session_origin=ephemeral). Drop any one of the three and the name stays
-// permanently reserved.
-//
-// The third case is the load-bearing one: session_origin=="ephemeral" WITHOUT
-// pool_managed is the legacy manual multi-session shape recognized by
-// isLegacyManualSessionBeadForAgent (cmd/gc/session_origin.go), whose name must
-// stay permanent. Simplifying the release to a single pool_managed check would
-// silently release it — this test fails loudly instead.
+func TestEnsureSessionNameAvailable_ManualSessionRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, poolManaged string
+		closed                   bool
+	}{
+		{name: "closed manual", state: "asleep", closed: true},
+		{name: "closed manual pool marker", state: "asleep", poolManaged: "true", closed: true},
+		{name: "active manual", state: "active"},
+		{name: "asleep manual", state: "asleep"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{
+				Type: BeadType, Labels: []string{LabelSession},
+				Metadata: map[string]string{
+					"session_name": "rig--worker", "session_name_explicit": "true",
+					"session_origin": "manual", "state": tc.state, "pool_managed": tc.poolManaged,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.closed {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = ensureSessionNameAvailable(store, "rig--worker")
+			if tc.closed && err != nil {
+				t.Fatalf("closed manual session still reserves its name: %v", err)
+			}
+			if !tc.closed && !errors.Is(err, ErrSessionNameExists) {
+				t.Fatalf("open manual session lost its name: %v", err)
+			}
+		})
+	}
+}
+
+// Open pool sessions retain their names. Closed unknown origins and ephemeral
+// sessions without pool ownership retain their historical reservations too.
 func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1347,11 +1376,11 @@ func TestEnsureSessionNameAvailable_RejectsNonReleasablePoolSlotShapes(t *testin
 			close: false,
 		},
 		{
-			name: "closed pool-managed non-ephemeral",
+			name: "closed pool-managed unknown origin",
 			metadata: map[string]string{
 				"session_name":   "loial",
 				"pool_managed":   "true",
-				"session_origin": "manual",
+				"session_origin": "unknown",
 			},
 			close: true,
 		},

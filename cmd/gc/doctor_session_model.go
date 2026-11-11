@@ -66,6 +66,13 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	}
 
 	var findings []string
+	if c.cfg != nil {
+		warnings, nameErr := closedPoolSessionNameWarnings(c.cfg, c.cityPath, c.cfg.Agents, store, c.newStore)
+		findings = append(findings, warnings...)
+		if nameErr != nil {
+			findings = append(findings, fmt.Sprintf("checking pool session names: %v", nameErr))
+		}
+	}
 	for _, b := range all {
 		if session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue

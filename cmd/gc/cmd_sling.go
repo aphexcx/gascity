@@ -570,7 +570,11 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 		},
 	}
 
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	code := doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	if code == 0 && !opts.DryRun {
+		printClosedPoolSessionNameWarnings(opts, deps, stderr)
+	}
+	return code
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {

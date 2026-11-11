@@ -3421,6 +3421,43 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	}
 }
 
+func TestBuildDesiredState_ClosedManualSessionReleasesPoolName(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const name = "rig--worker"
+	b, err := store.Create(beads.Bead{
+		Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession},
+		Metadata: map[string]string{
+			"session_name": name, "session_name_explicit": "true",
+			"session_origin": "manual", "state": "asleep", "template": "rig/worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "worker", Dir: "rig", StartCommand: "true", TmuxAlias: name,
+			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1),
+		}},
+	}
+	result := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if _, ok := result.State[name]; !ok {
+		t.Fatalf("desired state omitted pool session %q after manual session %s closed: %v", name, b.ID, result.State)
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].ID == b.ID || open[0].Metadata["session_name"] != name {
+		t.Fatalf("pool successor = %v, want one fresh session under %q", open, name)
+	}
+}
+
 func TestBuildDesiredState_MaxOneAgentDemandUsesCanonicalIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
