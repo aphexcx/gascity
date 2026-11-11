@@ -1231,6 +1231,8 @@ go_test(
         "phase2_reporting_test.go",
         "polecat_report_formula_test.go",
         "pool_assigned_store_ref_test.go",
+        "pool_closed_name_deadline_test.go",
+        "pool_closed_name_scale_test.go",
         "pool_closed_name_test.go",
         "pool_demand_class_binding_test.go",
         "pool_desired_state_asleep_alias_test.go",
