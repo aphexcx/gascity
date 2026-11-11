@@ -18,14 +18,14 @@ func configWithOperatorAuthoredEnv(t *testing.T, cfg Config, env map[string]stri
 	var names []string
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		if field.Type != stringMapType || field.Name == "Env" || field.Name == "FingerprintExtra" {
+		if field.Type != stringMapType || field.Name == "Env" || field.Name == "FingerprintExtra" || field.Name == "OverlaySourceHashes" {
 			continue
 		}
 		candidates = append(candidates, i)
 		names = append(names, field.Name)
 	}
 	if len(candidates) != 1 {
-		t.Fatalf("runtime.Config has config-authored environment identity candidates %v, want exactly one dedicated map[string]string field besides Env and FingerprintExtra", names)
+		t.Fatalf("runtime.Config has config-authored environment identity candidates %v, want exactly one dedicated map[string]string field besides Env, FingerprintExtra and OverlaySourceHashes", names)
 	}
 
 	reflect.ValueOf(&cfg).Elem().Field(candidates[0]).Set(reflect.ValueOf(env))

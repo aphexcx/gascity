@@ -48,10 +48,13 @@ func (h *configLoadHealth) record(err error, now time.Time) bool {
 		h.seen = make(map[string]time.Time)
 	}
 	message := err.Error()
-	since, seen := h.seen[message]
+	_, seen := h.seen[message]
 	if !seen {
-		since = now.UTC()
-		h.seen[message] = since
+		h.seen[message] = now.UTC()
+	}
+	since := now.UTC()
+	if h.failure != nil {
+		since = h.failure.Since
 	}
 	h.failure = &configLoadFailure{Error: message, Since: since}
 	return !seen
@@ -95,11 +98,11 @@ func readConfigLoadFailure(cityPath string) (*configLoadFailure, error) {
 }
 
 func configLoadFailureMessage(failure *configLoadFailure) string {
-	return fmt.Sprintf("config reload failing since %s; keeping last good config, reconciliation and orders paused: %s", failure.Since.UTC().Format(time.RFC3339), failure.Error)
+	return fmt.Sprintf("config reload failing since %s; keeping last good config: %s", failure.Since.UTC().Format(time.RFC3339), failure.Error)
 }
 
-// finishConfigReloadHealth keeps rejected filesystem paths fenced until the
-// replacement is accepted, including failures after parsing and validation.
+// finishConfigReloadHealth reports rejected reloads until a replacement is
+// accepted. Reconciliation continues on the last accepted configuration.
 func (cr *CityRuntime) finishConfigReloadHealth(reply reloadControlReply) {
 	switch reply.Outcome {
 	case reloadOutcomeFailed:

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func TestConfigLoadHealthDeduplicatesUntilRecovery(t *testing.T) {
@@ -33,7 +34,13 @@ func TestConfigLoadHealthDeduplicatesUntilRecovery(t *testing.T) {
 	if !strings.Contains(configLoadFailureMessage(health.snapshot()), "config reload") {
 		t.Fatal("failure diagnostic lost the established config reload marker")
 	}
-	if !health.record(second, start.Add(2*time.Minute)) || health.record(first, start.Add(3*time.Minute)) {
+	if !health.record(second, start.Add(2*time.Minute)) {
+		t.Fatal("new failure should be logged")
+	}
+	if got := health.snapshot(); !got.Since.Equal(start) {
+		t.Fatalf("changed error reset incident start: %+v", got)
+	}
+	if health.record(first, start.Add(3*time.Minute)) {
 		t.Fatal("distinct failures should only be logged once per incident")
 	}
 	if got := health.snapshot(); !got.Since.Equal(start) {
@@ -106,25 +113,41 @@ func TestControllerConfigLoadStatusWithoutReconcile(t *testing.T) {
 func TestCityStatusConfigLoadFailureIncludesSince(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "test"); err != nil {
+		t.Fatal(err)
+	}
+	oldAlive, oldRunning := supervisorAliveHook, supervisorCityRunningHook
+	supervisorAliveHook = func() int { return 4321 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
+	t.Cleanup(func() { supervisorAliveHook, supervisorCityRunningHook = oldAlive, oldRunning })
 	old := readConfigLoadFailureHook
 	t.Cleanup(func() { readConfigLoadFailureHook = old })
-	readConfigLoadFailureHook = func(string) (*configLoadFailure, error) {
+	failureHook := func(string) (*configLoadFailure, error) {
 		return &configLoadFailure{Error: "city import second: dirty; run gc import install", Since: time.Unix(123, 0).UTC()}, nil
 	}
 	for _, content := range []string{"[workspace\n", "[workspace]\nname = \"test\"\n[beads]\nprovider = \"file\"\n[session]\nprovider = \"fake\"\n"} {
 		writeCityToml(t, cityPath, content)
 		for _, jsonOutput := range []bool{false, true} {
+			readConfigLoadFailureHook = func(string) (*configLoadFailure, error) { return nil, nil }
+			var baseline, baselineErr bytes.Buffer
+			baseCode := cmdCityStatus([]string{cityPath}, jsonOutput, &baseline, &baselineErr)
+			readConfigLoadFailureHook = failureHook
 			var stdout, stderr bytes.Buffer
 			code := cmdCityStatus([]string{cityPath}, jsonOutput, &stdout, &stderr)
 			output := stdout.String() + stderr.String()
-			if code == 0 || !strings.Contains(output, "1970-01-01T00:02:03Z") || !strings.Contains(output, "city import second") || !strings.Contains(output, "keeping last good config") {
+			if code != baseCode || !strings.Contains(output, "1970-01-01T00:02:03Z") || !strings.Contains(output, "city import second") || !strings.Contains(output, "keeping last good config") {
 				t.Fatalf("json=%v code=%d output=%s", jsonOutput, code, output)
+			}
+			if strings.Contains(content, "provider = \"fake\"") {
+				if code != 0 || stdout.String() != baseline.String() {
+					t.Fatalf("health replaced normal running-city status: code %d, got %s, want %s", code, stdout.String(), baseline.String())
+				}
 			}
 		}
 	}
 }
 
-func TestCityRuntimeStartupWaitsForAcceptedConfig(t *testing.T) {
+func TestCityRuntimeStartupKeepsAcceptedConfigAfterReloadFailure(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -158,7 +181,7 @@ func TestCityRuntimeStartupWaitsForAcceptedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr.run(ctx)
-	if !waiting || ready || builds != 0 || od.calls.Load() != 0 {
-		t.Fatalf("failed startup load reached work: waiting=%v ready=%v builds=%d orders=%d", waiting, ready, builds, od.calls.Load())
+	if waiting || !ready || builds == 0 || od.calls.Load() == 0 {
+		t.Fatalf("rejected reload stopped startup: waiting=%v ready=%v builds=%d orders=%d", waiting, ready, builds, od.calls.Load())
 	}
 }

@@ -266,6 +266,10 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 // space so entries cannot collide with other fpExtra keys
 // (pool.min/pool.max/wake_mode/etc.).
 func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materialize.SkillEntry) map[string]string {
+	return mergeSkillFingerprintEntriesWithHash(fpExtra, desired, runtime.HashPathContent)
+}
+
+func mergeSkillFingerprintEntriesWithHash(fpExtra map[string]string, desired []materialize.SkillEntry, hashPath func(string) string) map[string]string {
 	if len(desired) == 0 {
 		return fpExtra
 	}
@@ -273,7 +277,7 @@ func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materiali
 		fpExtra = make(map[string]string, len(desired))
 	}
 	for _, e := range desired {
-		fpExtra["skills:"+e.Name] = runtime.HashPathContent(e.Source)
+		fpExtra["skills:"+e.Name] = hashPath(e.Source)
 	}
 	return fpExtra
 }

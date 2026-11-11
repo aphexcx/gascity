@@ -42,6 +42,13 @@ func HashHookSettingsContent(path, relPath string) string {
 // probe can distinguish delayed staging from a source added after startup.
 // Unreadable or absent sources have an empty hash and cannot authorize repair.
 func OverlaySourceHashes(cfg Config) map[string]string {
+	if cfg.OverlaySourceHashes != nil {
+		hashes := make(map[string]string, len(cfg.OverlaySourceHashes))
+		for source, value := range cfg.OverlaySourceHashes {
+			hashes[source] = value
+		}
+		return hashes
+	}
 	dirs := append(append([]string(nil), cfg.PackOverlayDirs...), cfg.OverlayDir)
 	var hashes map[string]string
 	for _, dir := range dirs {

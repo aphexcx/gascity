@@ -233,7 +233,8 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	health := &configLoadHealth{}
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, health)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -259,6 +260,16 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	identity := probeControllerIdentity(cityPath)
 	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
 		t.Fatalf("probeControllerIdentity = %+v, want PID %d hosted standalone", identity, os.Getpid())
+	}
+	cr := &CityRuntime{configLoadHealth: health, stderr: &bytes.Buffer{}}
+	cr.finishConfigReloadHealth(reloadControlReply{Outcome: reloadOutcomeFailed, Error: "import second: dirty"})
+	failure, err := readConfigLoadFailure(cityPath)
+	if err != nil || failure == nil || failure.Error != "import second: dirty" {
+		t.Fatalf("socket lost runtime config health: %+v, %v", failure, err)
+	}
+	cr.finishConfigReloadHealth(reloadControlReply{Outcome: reloadOutcomeNoChange})
+	if failure, err := readConfigLoadFailure(cityPath); err != nil || failure != nil {
+		t.Fatalf("socket retained recovered config health: %+v, %v", failure, err)
 	}
 	resp, err := sendControllerCommand(cityPath, "reload")
 	if err != nil {
@@ -288,7 +299,7 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil, nil)
 		close(done)
 	}()
 
@@ -1280,7 +1291,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh, nil)
 		close(done)
 	}()
 

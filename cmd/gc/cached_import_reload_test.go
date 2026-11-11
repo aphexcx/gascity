@@ -148,12 +148,7 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 		t.Fatal("rejected dry run did not reply")
 	}
 	if cr.configLoadHealth.snapshot() == nil {
-		t.Fatal("rejected dry-run load did not establish the hold before targeted dispatch")
-	}
-	runtimeCalls := len(sp.SnapshotCalls())
-	cr.controlDispatcherTick(context.Background())
-	if len(sp.SnapshotCalls()) != runtimeCalls {
-		t.Fatal("targeted dispatch reached the runtime after a rejected dry-run load")
+		t.Fatal("rejected dry-run load did not report config health")
 	}
 	dirty.Store(true)
 	tick()
@@ -172,8 +167,8 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 	default:
 		t.Fatal("blocked soft reload did not reply")
 	}
-	if builds != cleanBuilds || od.calls.Load() != 0 {
-		t.Fatalf("rejected config reached build/order dispatch: builds=%d, orders=%d", builds-cleanBuilds, od.calls.Load())
+	if builds <= cleanBuilds || od.calls.Load() == 0 {
+		t.Fatalf("retained config stopped build/order dispatch: builds=%d, orders=%d", builds-cleanBuilds, od.calls.Load())
 	}
 	if cr.cfg != cfg || cr.configRev != revision {
 		t.Error("rejected import replaced the resolved config")
@@ -189,7 +184,7 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 	select {
 	case reply := <-previewReplies:
 		if reply.Outcome != reloadOutcomePreview || cr.configLoadHealth.snapshot() == nil {
-			t.Fatalf("successful preview cleared the hold without accepting a config: %+v", reply)
+			t.Fatalf("successful preview cleared health without accepting a config: %+v", reply)
 		}
 	default:
 		t.Fatal("repaired dry run did not reply")
@@ -228,7 +223,7 @@ func TestCityRuntimeDirtyImportPreservesSessionFingerprint(t *testing.T) {
 	dirty.Store(true)
 	tick()
 	if failure := cr.configLoadHealth.snapshot(); failure == nil || !strings.Contains(failure.Error, "fixture lifecycle refused") {
-		t.Fatalf("failed application cleared or hid the hold: %+v", failure)
+		t.Fatalf("failed application cleared or hid health: %+v", failure)
 	}
 	cityRuntimeStartBeadsLifecycle = oldLifecycle
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "watch")

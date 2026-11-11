@@ -182,7 +182,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		if err != nil {
 			err = fmt.Errorf("%s; current load: %w", configLoadFailureMessage(failure), err)
 		} else {
-			err = fmt.Errorf("%s", configLoadFailureMessage(failure))
+			fmt.Fprintf(stderr, "gc status: %s\n", configLoadFailureMessage(failure)) //nolint:errcheck // best-effort diagnostic beside normal status
 		}
 	}
 	if err != nil {

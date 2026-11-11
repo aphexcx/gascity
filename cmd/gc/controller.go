@@ -151,7 +151,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
-	loadHealth ...*configLoadHealth,
+	loadHealth *configLoadHealth,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -172,7 +172,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, loadHealth...)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, loadHealth)
 		}
 	}()
 	return lis, nil
@@ -194,7 +194,7 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
-	loadHealth ...*configLoadHealth,
+	loadHealth *configLoadHealth,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -218,11 +218,7 @@ func handleControllerConn(
 		case line == controllerIdentityCommand:
 			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, ProtocolVersion: controllerProtocolVersion})
 		case line == configLoadStatusCommand:
-			var failure *configLoadFailure
-			if len(loadHealth) > 0 {
-				failure = loadHealth[0].snapshot()
-			}
-			writeJSONLine(conn, configLoadStatusReply{Failure: failure})
+			writeJSONLine(conn, configLoadStatusReply{Failure: loadHealth.snapshot()})
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.

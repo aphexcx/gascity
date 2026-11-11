@@ -674,15 +674,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 
 	configReloadStart := time.Now()
 	cr.applyStartupConfigReload(ctx, dirty, &lastProviderName, cityRoot)
-	for cr.configLoadHealth.snapshot() != nil {
-		if cr.onStatus != nil {
-			cr.onStatus("loading_config")
-		}
-		if !waitForRetry() {
-			return
-		}
-		cr.applyStartupConfigReload(ctx, dirty, &lastProviderName, cityRoot)
-	}
 	logPhaseElapsed("config-reload", configReloadStart)
 	if ctx.Err() != nil {
 		return
@@ -1253,15 +1244,6 @@ func (cr *CityRuntime) tick(
 			}
 		}
 	}
-	// A retained config still points at mutable pack files. Building desired
-	// state here would fingerprint the rejected contents through those paths.
-	// Retry on the next tick; no new watch event is needed to recover.
-	if cr.configLoadHealth.snapshot() != nil {
-		completeManualReload()
-		completion = TraceCompletionCompleted
-		tickCompleted = true
-		return
-	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -1551,7 +1533,7 @@ func (cr *CityRuntime) tick(
 }
 
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
-	if ctx.Err() != nil || cr.configLoadHealth.snapshot() != nil {
+	if ctx.Err() != nil {
 		return
 	}
 	now := time.Now()
@@ -3517,9 +3499,6 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
-	if cr.configLoadHealth.snapshot() != nil {
-		return
-	}
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into
