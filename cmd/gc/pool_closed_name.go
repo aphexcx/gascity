@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -77,8 +78,18 @@ func closedPoolSessionNameWarnings(cfg *config.City, cityPath string, agents []c
 }
 
 func printClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr io.Writer) {
-	if opts.Force {
+	if opts.Force || deps.Cfg == nil {
 		return
+	}
+	target := opts.Target
+	route := agentutil.NormalizePoolRouteTarget(deps.Cfg, agentutil.RoutedToIdentity(&target))
+	if route != target.QualifiedName() {
+		template, ok := findAgentByQualified(deps.Cfg, route)
+		if !ok {
+			fmt.Fprintf(stderr, "warning: checking pool session names: pool template %q is not configured\n", route) //nolint:errcheck
+			return
+		}
+		target = template
 	}
 	store := deps.Store
 	if strings.HasPrefix(deps.StoreRef, "rig:") && deps.CityPath != "" {
@@ -91,7 +102,7 @@ func printClosedPoolSessionNameWarnings(opts slingOpts, deps slingDeps, stderr i
 		}
 		store = cityStore
 	}
-	warnings, err := closedPoolSessionNameWarnings(deps.Cfg, deps.CityPath, []config.Agent{opts.Target}, store, func(path string) (beads.Store, error) {
+	warnings, err := closedPoolSessionNameWarnings(deps.Cfg, deps.CityPath, []config.Agent{target}, store, func(path string) (beads.Store, error) {
 		return openAuthoritativeStoreAtForCity(path, deps.CityPath)
 	})
 	for _, warning := range warnings {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,49 +56,60 @@ func TestSlingHelpersDoNotOpenDiagnosticStores(t *testing.T) {
 }
 
 func TestCmdSlingWarnsAboutClosedPoolSessionName(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BEADS", "file")
-	cityDir := t.TempDir()
-	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
-		t.Fatal(err)
-	}
-	cityToml := `[workspace]
+	for _, tc := range []struct {
+		name, target, heldName string
+		capacity               int
+	}{
+		{name: "singleton", target: "worker", heldName: "worker", capacity: 1},
+		{name: "pool template", target: "worker", heldName: "worker-1-pool", capacity: 2},
+		{name: "pool member", target: "worker-1", heldName: "worker-1-pool", capacity: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			cityDir := t.TempDir()
+			if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+				t.Fatal(err)
+			}
+			cityToml := fmt.Sprintf(`[workspace]
 name = "test-city"
 
 [[agent]]
 name = "worker"
-max_active_sessions = 1
-`
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	holder, err := store.Create(beads.Bead{
-		Type: session.BeadType, Labels: []string{session.LabelSession},
-		Metadata: map[string]string{"session_name": "worker", "session_origin": "unknown", "session_name_explicit": "true"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(holder.ID); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := cmdSling([]string{"worker", "ship feature"}, false, false, false, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdSling=%d: %s", code, stderr.String())
-	}
-	want := "warning: pool \"worker\" cannot create its next session: name \"worker\" is held by closed session bead " + holder.ID
-	if !strings.Contains(stderr.String(), want) {
-		t.Fatalf("command warning missing: %s", stderr.String())
+max_active_sessions = %d
+`, tc.capacity)
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holder, err := store.Create(beads.Bead{
+				Type: session.BeadType, Labels: []string{session.LabelSession},
+				Metadata: map[string]string{"session_name": tc.heldName, "session_origin": "unknown", "session_name_explicit": "true"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(holder.ID); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := cmdSling([]string{tc.target, "ship feature"}, false, false, false, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("cmdSling=%d: %s", code, stderr.String())
+			}
+			want := fmt.Sprintf("warning: pool \"worker\" cannot create its next session: name %q is held by closed session bead %s", tc.heldName, holder.ID)
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("command warning missing: %s", stderr.String())
+			}
+		})
 	}
 }
 
