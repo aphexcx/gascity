@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -326,9 +327,13 @@ func TestExtmsgNotifyMembersReceiptHonorsRuntimeThatDeclinesToVouch(t *testing.T
 type unconfirmedSubmitFakeProvider struct {
 	*runtime.Fake
 	submit runtime.NudgeSubmit
+	held   *runtime.NudgeHeld
 }
 
 func (p *unconfirmedSubmitFakeProvider) NudgeDelivered(name string, content []runtime.ContentBlock) (runtime.NudgeDelivery, error) {
+	if p.held != nil {
+		return runtime.NudgeDelivery{Held: p.held}, errors.New("preserved draft deferred delivery")
+	}
 	if err := p.Nudge(name, content); err != nil {
 		return runtime.NudgeDelivery{}, err
 	}
@@ -341,6 +346,50 @@ func (p *unconfirmedSubmitFakeProvider) NudgeDelivered(name string, content []ru
 		Bytes:     len(runtime.FlattenText(content)),
 		Submit:    submit,
 	}, nil
+}
+
+func TestExtmsgComposerHeldCarriesAgeThroughReceipt(t *testing.T) {
+	fs, srv, ref := notifyDeliveryFixture(t)
+	held := &runtime.NudgeHeld{State: "unowned_draft", Since: time.Unix(1700000000, 0).UTC(), AgeMS: 8000}
+	fs.sessionProvider = &unconfirmedSubmitFakeProvider{Fake: fs.sp, held: held}
+	members, err := srv.extmsgNotifyMembers(context.Background(), extmsgNotifyBroadcast{Conversation: ref, ActorDisplay: "Operator", ActorKind: "human", Text: "new message"})
+	if err != nil || len(members) != 2 {
+		t.Fatalf("notify members=%+v err=%v", members, err)
+	}
+	delivery := extmsg.SummarizeInboundDelivery("held-receipt", members)
+	if delivery.Status != extmsg.InboundDeliveryHeld || delivery.DeliveredBytes != 0 {
+		t.Fatalf("delivery=%+v", delivery)
+	}
+	store := extmsg.NewInboundReceiptStore()
+	store.Conclude(fs.CityName(), delivery.ReceiptID, delivery)
+	sm := &SupervisorMux{inboundReceipts: store}
+	poll, err := sm.humaHandleExtMsgInboundReceipt(context.Background(), &ExtMsgInboundReceiptInput{CityScope: CityScope{CityName: fs.CityName()}, ReceiptID: delivery.ReceiptID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(poll.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded extmsg.InboundReceiptStatus
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range decoded.Delivery.Members {
+		if member.Status != extmsg.InboundDeliveryHeld || member.Held == nil || *member.Held != *held || member.DeliveredBytes != 0 {
+			t.Fatalf("hold lost on wire: %+v", member)
+		}
+	}
+	// A concluded hold has no live copy. A retry after the composer clears
+	// must be able to claim a fresh fan-out, unlike a pending receipt.
+	srv.inboundReceipts = store
+	msg := extmsg.ExternalInboundMessage{Conversation: ref, ProviderMessageID: "held-message", Text: "new message"}
+	id, _, _ := srv.extmsgClaimInboundFanout(&extmsg.InboundResult{}, msg)
+	store.Conclude(fs.CityName(), id, delivery)
+	next, _, retained := srv.extmsgClaimInboundFanout(&extmsg.InboundResult{Duplicate: true}, msg)
+	if retained || next == "" || next == id {
+		t.Fatalf("resolved hold cannot retry: next=%q retained=%t", next, retained)
+	}
 }
 
 // TestExtmsgNotifyMembersReportsUnconfirmedSubmitAsPendingWithFullBytes is

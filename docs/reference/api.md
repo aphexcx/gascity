@@ -152,6 +152,18 @@ The short header uses the provider's display name, such as `Slack` or
 without a message ID, the entire ID line is omitted. Author text, addressing,
 reply instructions, and reminder boundaries are preserved.
 
+### Delivery receipts
+
+Inbound delivery receipts report `delivered`, `no_route`, `partial`, `failed`,
+`held`, or `pending`. A member with `status: "held"` received no input because
+its composer already contained a draft. Retain the message and retry after the
+composer clears. Its `held` object reports `state` (`own_paste`, `unowned_draft`,
+or `unreadable_composer`), `since` (the hold's timestamp), and `age_ms`.
+An aggregate `held` means no member accepted a complete copy; inspect `members`
+for individual outcomes. A `pending` receipt may already have delivered input,
+so never automatically re-post it. When `pending` also has `terminal: true`,
+stop polling and request operator attention.
+
 ## Request and response headers
 
 Every operation's header contract appears in the OpenAPI spec — if a

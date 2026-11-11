@@ -37,6 +37,7 @@ type InboundMemberOutcome struct {
 	Terminal       bool
 	DeliveredBytes int
 	Reason         string
+	Held           *runtime.NudgeHeld
 }
 
 // ClassifyInboundMember is the ONLY place a member's send result becomes a
@@ -50,14 +51,18 @@ type InboundMemberOutcome struct {
 //	partial    part of the payload is in the terminal — a redelivery repairs
 //	           it at the cost of a duplicated fragment.
 //	failed     nothing reached the terminal — a redelivery is clean.
+//	held       preserved composer input prevented delivery — retain the
+//	           message, surface the hold, and retry after the composer clears.
 //
 // The one question asked first is [runtime.NudgeDelivery.Landed]: did the
-// runtime say anything reached the terminal? When it did not, the row is
-// failed and the error (or the downgrade reason) is why. When it did, "failed"
+// runtime say anything reached the terminal? When it did not, a composer hold
+// is reported as held; otherwise the row is failed with its error or downgrade
+// reason. When input landed, "failed"
 // is unreachable — every remaining row is delivered, pending, or partial —
 // and the send path's error, if any, only turns a would-be delivered row into
 // a hold. The table, in evaluation order (the table test is the spec):
 //
+//	not landed, composer hold (before error handling) → held, 0 bytes, hold state and age
 //	not landed, send path errored                      → failed, 0 bytes, the error
 //	not landed, no error                               → failed, 0 bytes, "not delivered live[: reason]"
 //	landed, runtime did not vouch (Submit == "")       → delivered, expected bytes (pre-receipt reading);
@@ -88,6 +93,13 @@ type InboundMemberOutcome struct {
 // is not concluded — that is pending by definition.
 func ClassifyInboundMember(e InboundMemberEvidence) InboundMemberOutcome {
 	if !e.Landed() {
+		if e.Held != nil {
+			reason := fmt.Sprintf("composer holds %s since %s (%dms), delivery held", e.Held.State, e.Held.Since.Format("2006-01-02T15:04:05.999999999Z07:00"), e.Held.AgeMS)
+			if e.Err != nil {
+				reason += ": " + e.Err.Error()
+			}
+			return InboundMemberOutcome{Status: InboundDeliveryHeld, Held: e.Held, Reason: reason}
+		}
 		if e.Err != nil {
 			return InboundMemberOutcome{Status: InboundDeliveryFailed, Reason: e.Err.Error()}
 		}

@@ -768,26 +768,6 @@ export const zHookClaimReclaimedStalePayload = z.object({
     previous_owner: z.string()
 });
 
-export const zInboundDeliveryMember = z.object({
-    delivered_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    digest: z.string(),
-    error: z.string().optional(),
-    expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    selector: z.string().optional(),
-    session_id: z.string(),
-    status: z.string(),
-    terminal: z.boolean().optional()
-});
-
-export const zInboundDelivery = z.object({
-    delivered_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
-    members: z.array(zInboundDeliveryMember).nullish(),
-    receipt_id: z.string(),
-    status: z.string(),
-    terminal: z.boolean().optional()
-});
-
 export const zInboundDroppedEventPayload = z.object({
     actor: z.string(),
     conversation_id: z.string(),
@@ -810,18 +790,6 @@ export const zInboundEventPayload = z.object({
     provider: z.string(),
     target_agent: z.string().optional(),
     target_session: z.string()
-});
-
-export const zInboundReceiptStatus = z.object({
-    begun_at: z.iso.datetime().optional(),
-    concluded_at: z.iso.datetime().optional(),
-    delivery: zInboundDelivery.optional(),
-    receipt_id: z.string(),
-    state: z.enum([
-        'pending',
-        'concluded',
-        'unknown'
-    ])
 });
 
 export const zListBodyBead = z.object({
@@ -966,6 +934,49 @@ export const zFormulaFeedBody = z.object({
 });
 
 export const zNoPayload = z.record(z.string(), z.never());
+
+export const zNudgeHeld = z.object({
+    age_ms: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    since: z.iso.datetime(),
+    state: z.enum([
+        'unowned_draft',
+        'own_paste',
+        'unreadable_composer'
+    ])
+});
+
+export const zInboundDeliveryMember = z.object({
+    delivered_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    digest: z.string(),
+    error: z.string().optional(),
+    expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    held: zNudgeHeld.optional(),
+    selector: z.string().optional(),
+    session_id: z.string(),
+    status: z.string(),
+    terminal: z.boolean().optional()
+});
+
+export const zInboundDelivery = z.object({
+    delivered_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    expected_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    members: z.array(zInboundDeliveryMember).nullish(),
+    receipt_id: z.string(),
+    status: z.string(),
+    terminal: z.boolean().optional()
+});
+
+export const zInboundReceiptStatus = z.object({
+    begun_at: z.iso.datetime().optional(),
+    concluded_at: z.iso.datetime().optional(),
+    delivery: zInboundDelivery.optional(),
+    receipt_id: z.string(),
+    state: z.enum([
+        'pending',
+        'concluded',
+        'unknown'
+    ])
+});
 
 export const zOkResponseBody = z.object({
     status: z.string()

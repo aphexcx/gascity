@@ -340,6 +340,12 @@ func cloneInboundDelivery(d InboundDelivery) InboundDelivery {
 	out := d
 	if d.Members != nil {
 		out.Members = append([]InboundDeliveryMember(nil), d.Members...)
+		for i := range out.Members {
+			if out.Members[i].Held != nil {
+				held := *out.Members[i].Held
+				out.Members[i].Held = &held
+			}
+		}
 	}
 	return out
 }

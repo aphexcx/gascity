@@ -12,7 +12,90 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
+func TestReservationCleanupSurvivesSharedWithdrawal(t *testing.T) {
+	t.Run("whole batch revokes recovery", func(t *testing.T) {
+		for _, ids := range [][]string{{"a"}, {"a", "b"}} {
+			dir := t.TempDir()
+			if err := WithState(dir, func(state *State) error {
+				for _, id := range ids {
+					state.Pending = append(state.Pending, Item{ID: id, SessionName: "session", ReservationID: "batch", LastAttemptAt: time.Unix(1, 0)})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := WithdrawWaitNudges(nil, dir, ids); err != nil {
+				t.Fatal(err)
+			}
+			if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || !invalid {
+				t.Fatalf("whole batch remained recoverable: ids=%v invalid=%v err=%v", ids, invalid, err)
+			}
+			state, err := LoadState(dir)
+			if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].RetireReceipt {
+				t.Fatalf("ended owner retained its receipt: state=%+v err=%v", state, err)
+			}
+		}
+	})
+	dir := t.TempDir()
+	if err := WithState(dir, func(state *State) error {
+		for _, id := range []string{"a", "b"} {
+			state.Pending = append(state.Pending, Item{ID: id, SessionName: "session", ReservationID: "batch", LastAttemptAt: time.Unix(1, 0)})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithdrawWaitNudges(nil, dir, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadState(dir)
+	if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].Invalidate {
+		t.Fatalf("partial withdrawal lost cleanup intent: state=%+v err=%v", state, err)
+	}
+	first := state.ReservationReleases[0]
+	if first.RetireReceipt {
+		t.Fatal("partial withdrawal would erase the survivors' receipt")
+	}
+	if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || !invalid {
+		t.Fatalf("recovery allowed before cleanup: invalid=%v err=%v", invalid, err)
+	}
+	if err := WithdrawWaitNudges(nil, dir, []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := AcknowledgeReservationReleases(dir, []ReservationRelease{first}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = LoadState(dir)
+	if err != nil || len(state.ReservationReleases) != 1 || !state.ReservationReleases[0].Invalidate || state.ReservationReleases[0].Generation == first.Generation {
+		t.Fatalf("stale acknowledgement erased newer invalidation: state=%+v err=%v", state, err)
+	}
+	if err := AcknowledgeReservationReleases(dir, state.ReservationReleases); err != nil {
+		t.Fatal(err)
+	}
+	if invalid, err := ReservationInvalidated(dir, "session", "batch"); err != nil || invalid {
+		t.Fatalf("successful cleanup not acknowledged: invalid=%v err=%v", invalid, err)
+	}
+}
+
 func TestClaimDueBatchKeepsRetryPayloadStable(t *testing.T) {
+	t.Run("partial retry retains attempted identity", func(t *testing.T) {
+		original := DeliveryIdentity([]Item{{ID: "a"}, {ID: "b"}})
+		state := State{Pending: []Item{{ID: "b", ReservationID: original, LastAttemptAt: time.Unix(1, 0)}}}
+		claimed := ClaimDueBatch(&state, time.Unix(100, 0), time.Minute, func(Item) bool { return true })
+		if len(claimed) != 1 || claimed[0].ReservationID != original || DeliveryIdentity(claimed) != original {
+			t.Fatalf("partial batch lost attempted identity: %+v", claimed)
+		}
+	})
+	t.Run("delivery identity", func(t *testing.T) {
+		a := []Item{{ID: "a", Message: "same"}, {ID: "b", Message: "same"}}
+		b := []Item{a[1], a[0]}
+		if DeliveryIdentity(a) != DeliveryIdentity(b) || DeliveryIdentity(a) == DeliveryIdentity(a[:1]) {
+			t.Fatal("batch identity must be stable across order and distinct from a single item")
+		}
+		if DeliveryIdentity(a[:1]) != "a" || DeliveryIdentity(nil) != "" {
+			t.Fatal("single-item delivery must retain its original identity")
+		}
+	})
 	now := time.Unix(100, 0)
 	old := now.Add(-time.Second)
 	future := now.Add(time.Minute)

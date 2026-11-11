@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +39,9 @@ type Item struct {
 	DismissedAt       time.Time  `json:"dismissed_at,omitempty"`
 	Agent             string     `json:"agent"`
 	SessionID         string     `json:"session_id,omitempty"`
+	SessionName       string     `json:"session_name,omitempty"`
+	ReservationID     string     `json:"reservation_id,omitempty"`
+	BlockedBy         string     `json:"blocked_by,omitempty"`
 	ContinuationEpoch string     `json:"continuation_epoch,omitempty"`
 	Source            string     `json:"source"`
 	Message           string     `json:"message"`
@@ -52,6 +56,33 @@ type Item struct {
 	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
 	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
 	DeadAt            time.Time  `json:"dead_at,omitempty"`
+}
+
+// DeliveryIdentity identifies a stable batch independently of its text and
+// ordering. Surviving members retain their already-attempted batch identity.
+func DeliveryIdentity(items []Item) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if id := items[0].ReservationID; id != "" {
+		shared := true
+		for _, item := range items[1:] {
+			shared = shared && item.ReservationID == id
+		}
+		if shared {
+			return id
+		}
+	}
+	if len(items) == 1 {
+		return items[0].ID
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	sort.Strings(ids)
+	digest := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
+	return fmt.Sprintf("batch-%x", digest)
 }
 
 // Tombstone preserves terminalization intent after a dead letter's payload expires.
@@ -73,10 +104,12 @@ type Tombstone struct {
 
 // State is the persisted nudge queue snapshot.
 type State struct {
-	Pending    []Item      `json:"pending,omitempty"`
-	InFlight   []Item      `json:"in_flight,omitempty"`
-	Dead       []Item      `json:"dead,omitempty"`
-	Tombstones []Tombstone `json:"tombstones,omitempty"`
+	Pending               []Item               `json:"pending,omitempty"`
+	InFlight              []Item               `json:"in_flight,omitempty"`
+	Dead                  []Item               `json:"dead,omitempty"`
+	Tombstones            []Tombstone          `json:"tombstones,omitempty"`
+	ReservationReleases   []ReservationRelease `json:"reservation_releases,omitempty"`
+	ReservationGeneration uint64               `json:"reservation_generation,omitempty"`
 
 	// DispatchSkips counts, by reason, how many times the supervisor
 	// dispatch tick's per-session loop has silently skipped a target
@@ -86,6 +119,89 @@ type State struct {
 	// stays visible to a `gc nudge status` invocation running in a
 	// different process than the supervisor that incremented it.
 	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
+}
+
+// ReservationRelease is durable cleanup intent for an ended retry owner.
+// Invalidate revokes recovery of a paste whose attempted batch lost members.
+// RetireReceipt removes its acknowledgement only when no members remain.
+type ReservationRelease struct {
+	SessionName   string `json:"session_name"`
+	ReservationID string `json:"reservation_id"`
+	Invalidate    bool   `json:"invalidate,omitempty"`
+	RetireReceipt bool   `json:"retire_receipt,omitempty"`
+	Generation    uint64 `json:"generation"`
+}
+
+// ReservationInvalidated checks durable cancellation before a provider recovers
+// an earlier paste. Read failures must prevent automatic submission.
+func ReservationInvalidated(cityPath, session, id string) (bool, error) {
+	state, err := LoadState(cityPath)
+	if err != nil {
+		return false, err
+	}
+	for _, release := range state.ReservationReleases {
+		if release.SessionName == session && release.ReservationID == id && release.Invalidate {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AcknowledgeReservationReleases retires successful cleanups without erasing a
+// newer request that arrived while the provider was processing the snapshot.
+func AcknowledgeReservationReleases(cityPath string, completed []ReservationRelease) error {
+	return WithState(cityPath, func(state *State) error {
+		remaining := state.ReservationReleases[:0]
+		for _, release := range state.ReservationReleases {
+			matched := false
+			for _, done := range completed {
+				matched = matched || release == done
+			}
+			if !matched {
+				remaining = append(remaining, release)
+			}
+		}
+		state.ReservationReleases = remaining
+		return nil
+	})
+}
+
+func recordEndedReservations(state *State, previous []Item) {
+	type member struct {
+		id, session, reservation string
+		created                  time.Time
+	}
+	key := func(item Item) member { return member{item.ID, item.SessionName, item.ReservationID, item.CreatedAt} }
+	active := make(map[member]bool)
+	owners := make(map[string]bool)
+	for _, items := range [][]Item{state.Pending, state.InFlight} {
+		for _, item := range items {
+			active[key(item)] = true
+			owners[item.SessionName+"\x00"+item.ReservationID] = true
+		}
+	}
+	seen := make(map[string]bool)
+	for _, item := range previous {
+		owner := item.SessionName + "\x00" + item.ReservationID
+		if active[key(item)] || seen[owner] || item.SessionName == "" || item.ReservationID == "" || item.LastAttemptAt.IsZero() {
+			continue
+		}
+		seen[owner] = true
+		state.ReservationGeneration++
+		release := ReservationRelease{SessionName: item.SessionName, ReservationID: item.ReservationID, Invalidate: true, RetireReceipt: !owners[owner], Generation: state.ReservationGeneration}
+		found := false
+		for i, pending := range state.ReservationReleases {
+			if pending.SessionName == release.SessionName && pending.ReservationID == release.ReservationID {
+				release.Invalidate = release.Invalidate || pending.Invalidate
+				state.ReservationReleases[i] = release
+				found = true
+				break
+			}
+		}
+		if !found {
+			state.ReservationReleases = append(state.ReservationReleases, release)
+		}
+	}
 }
 
 // Tombstone returns the retained terminalization intent for an expired payload.
@@ -147,6 +263,20 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 			retryAt = item.LastAttemptAt
 		}
 	}
+	// A deferred batch names the retry owner holding its composer. Give that
+	// owner's intact batch the next turn, retaining both batches' identities.
+	for _, item := range state.Pending {
+		if !match(item) || !item.LastAttemptAt.Equal(retryAt) || item.BlockedBy == "" {
+			continue
+		}
+		for _, owner := range state.Pending {
+			if match(owner) && (owner.ReservationID == item.BlockedBy || owner.ID == item.BlockedBy) {
+				retryAt = owner.LastAttemptAt
+				break
+			}
+		}
+		break
+	}
 	var claimed []Item
 	ids := make(map[string]bool)
 	for _, item := range state.Pending {
@@ -186,6 +316,10 @@ func ClaimDueBatch(state *State, now time.Time, lease time.Duration, match func(
 		}
 	}
 	state.Pending = pending
+	identity := DeliveryIdentity(claimed)
+	for i := range claimed {
+		claimed[i].ReservationID = identity
+	}
 	state.InFlight = append(state.InFlight, claimed...)
 	SortState(state)
 	return claimed
@@ -259,9 +393,11 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 	if err != nil {
 		return err
 	}
+	previous := append(append([]Item(nil), state.Pending...), state.InFlight...)
 	if err := fn(&state); err != nil {
 		return err
 	}
+	recordEndedReservations(&state, previous)
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal nudge queue: %w", err)

@@ -95,9 +95,10 @@ func IsSessionGone(err error) bool {
 // ContentBlock represents a content element in a message.
 // Type is "text" or "file_path".
 type ContentBlock struct {
-	Type string `json:"type"`           // "text" or "file_path"
-	Text string `json:"text,omitempty"` // for type=text
-	Path string `json:"path,omitempty"` // for type=file_path (server-side path)
+	Type    string `json:"type"`           // "text" or "file_path"
+	Text    string `json:"text,omitempty"` // for type=text
+	Path    string `json:"path,omitempty"` // for type=file_path (server-side path)
+	nudgeID string
 }
 
 // TextContent is a convenience constructor for a single text block.

@@ -17,6 +17,22 @@ func TestSummarizeInboundDeliveryStatusPrecedence(t *testing.T) {
 		why     string
 	}{
 		{
+			name: "held composer", members: []InboundDeliveryMember{member(InboundDeliveryHeld, 0, 10)},
+			want: InboundDeliveryHeld, why: "composer must clear before retrying",
+		},
+		{
+			name: "held and failed", members: []InboundDeliveryMember{member(InboundDeliveryHeld, 0, 10), member(InboundDeliveryFailed, 0, 10)},
+			want: InboundDeliveryHeld, why: "retain and surface the hold",
+		},
+		{
+			name: "held and delivered", members: []InboundDeliveryMember{member(InboundDeliveryHeld, 0, 10), member(InboundDeliveryDelivered, 10, 10)},
+			want: InboundDeliveryPending, why: "a whole live copy forbids fanout replay",
+		},
+		{
+			name: "held and pending", members: []InboundDeliveryMember{member(InboundDeliveryHeld, 0, 10), member(InboundDeliveryPending, 10, 10)},
+			want: InboundDeliveryPending, why: "possibly landed input forbids fanout replay",
+		},
+		{
 			name:    "no members is no_route not failed",
 			members: nil,
 			want:    InboundDeliveryNoRoute,
