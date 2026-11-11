@@ -223,6 +223,9 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 			var rebaseErr error
 			switch path {
 			case "soft_reload", "soft_reload_dirty_config":
+				if dirtyConfig && !beginSessionDrainInfo(info, h.f.sp, h.drains, "config-drift", h.clk, time.Minute) {
+					t.Fatal("could not queue the old config drift")
+				}
 				preview := reloadSessionChanges([]sessionpkg.Info{info}, h.desired, h.f.cfg, true)
 				if dirtyConfig && (len(preview) != 1 || preview[0].Action != "accept") {
 					t.Error("soft reload preview hid an unrelated config acceptance")
@@ -230,6 +233,9 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 				result := acceptConfigDriftAcrossSessions(front, h.desired, nil, h.f.sp, h.drains, h.f.stderr)
 				if result.Failed != 0 {
 					t.Fatalf("soft reload failed: %+v", result)
+				}
+				if dirtyConfig && (result.CanceledDrains != 1 || h.drains.get(info.ID) != nil) {
+					t.Error("accepted config left its obsolete drain queued")
 				}
 			case "alias", "alias_dirty_config":
 				patch := sessionpkg.MetadataPatch{}

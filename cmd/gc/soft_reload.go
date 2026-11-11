@@ -77,7 +77,7 @@ func formatSoftReloadFailedSessions(names []string) string {
 //   - the recomputed current hash already equals the stored hash
 //
 // The hash computation shares the reconciler's canonical override assembly.
-// Pending startup-content repairs retain their fingerprint input and drain:
+// Pending startup-content repairs retain their fingerprint input:
 // accepting unrelated config does not acknowledge undelivered content.
 //
 // Returns accepted-session, failed-session, stale-drain-cancellation, and
@@ -133,13 +133,11 @@ func acceptConfigDriftAcrossSessions(
 		if storedHash == currentHash {
 			continue
 		}
-		if info.StartupContent == "" {
-			if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
-				result.Failed++
-				result.FailedSessions = append(result.FailedSessions, name)
-				fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
-				continue
-			}
+		if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
+			continue
 		}
 		metadata, err := softReloadAcceptedHashMetadata(agentCfg, currentHash)
 		if err != nil {
@@ -154,7 +152,7 @@ func acceptConfigDriftAcrossSessions(
 			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if info.StartupContent == "" && cancelSoftReloadConfigDriftDrainInfo(info, sp, dt) {
+		if cancelSoftReloadConfigDriftDrainInfo(info, sp, dt) {
 			result.CanceledDrains++
 		}
 		result.Updated++
