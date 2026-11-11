@@ -130,28 +130,36 @@ func TestStartupContentRepairCheckPerPass(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				h.f.sp.Attached[name] = true
 				marks[id] = markStartupRepair(t, h, id, name, sessionpkg.StartupContent{Skipped: true, Reason: "dirty import at start"})
 			}
 			stray := filepath.Join(h.f.cacheDirs[1], "unrelated-file")
-			if err := os.WriteFile(stray, []byte("dirty"), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			config.ResetRemoteCacheValidationCache()
 			check := func(label string, unlock func()) {
 				t.Helper()
 				before, begin := loadCityConfigCalls.Load(), time.Now()
-				done := make(chan struct{})
-				go func() { defer close(done); h.tick(t) }()
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-					t.Errorf("%s: reconcile waited on the cache write lock", label)
-				}
-				if unlock != nil {
+				if unlock == nil {
+					h.tick(t)
+				} else {
+					done := make(chan struct{})
+					go func() { defer close(done); h.tick(t) }()
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						t.Errorf("%s: reconcile waited on the cache write lock", label)
+					}
 					unlock()
+					<-done
+					for name := range h.names {
+						if h.f.sp.CountCalls("Start", name) != 1 {
+							t.Errorf("busy cache restarted %s before confirming clean content", name)
+						}
+					}
+					for id := range marks {
+						if h.drains.get(id) != nil {
+							t.Errorf("busy cache started a repair drain for %s", id)
+						}
+					}
 				}
-				<-done
 				loads := loadCityConfigCalls.Load() - before
 				t.Logf("%s: marked=%d elapsed=%s config_loads=%d", label, count, time.Since(begin), loads)
 				wantLoads := int64(0)
@@ -168,6 +176,12 @@ func TestStartupContentRepairCheckPerPass(t *testing.T) {
 				}
 			}
 			check("lock held", holdStartupRepairCache(t))
+			for name := range h.names {
+				h.f.sp.Attached[name] = true
+			}
+			if err := os.WriteFile(stray, []byte("dirty"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			check("dirty import", nil)
 			if err := os.Remove(stray); err != nil {
 				t.Fatal(err)
@@ -178,7 +192,7 @@ func TestStartupContentRepairCheckPerPass(t *testing.T) {
 }
 
 func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
-	for _, path := range []string{"soft_reload", "alias", "alive_legacy", "asleep_legacy", "alive_version", "asleep_version", "live_hash", "generated_hooks", "warm_relaunch"} {
+	for _, path := range []string{"soft_reload", "alias", "soft_reload_dirty_config", "alias_dirty_config", "alive_legacy", "asleep_legacy", "alive_version", "asleep_version", "live_hash", "generated_hooks", "warm_relaunch"} {
 		t.Run(path, func(t *testing.T) {
 			h := newStartupRepairFixture(t)
 			source := sessionpkg.StartupContentSource{Path: filepath.Join(h.f.cacheDirs[1], "skills", "plan")}
@@ -188,25 +202,36 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 				t.Fatal(err)
 			}
 			markStartupRepair(t, h, h.f.beadID, "worker", sessionpkg.StartupContent{Sources: []sessionpkg.StartupContentSource{source}})
-			if err := os.Remove(stray); err != nil {
-				t.Fatal(err)
+			dirtyConfig := path == "soft_reload_dirty_config" || path == "alias_dirty_config"
+			if !dirtyConfig {
+				if err := os.Remove(stray); err != nil {
+					t.Fatal(err)
+				}
 			}
 			front := sessionFrontDoor(h.f.store)
 			h.f.sp.Attached["worker"] = true
 			starts := h.f.sp.CountCalls("Start", "worker")
 			tp := h.desired["worker"]
+			if dirtyConfig {
+				tp.Command += " updated-config"
+				h.desired["worker"] = tp
+			}
 			info, err := front.Get(h.f.beadID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var rebaseErr error
 			switch path {
-			case "soft_reload":
+			case "soft_reload", "soft_reload_dirty_config":
+				preview := reloadSessionChanges([]sessionpkg.Info{info}, h.desired, h.f.cfg, true)
+				if dirtyConfig && (len(preview) != 1 || preview[0].Action != "accept") {
+					t.Error("soft reload preview hid an unrelated config acceptance")
+				}
 				result := acceptConfigDriftAcrossSessions(front, h.desired, nil, h.f.sp, h.drains, h.f.stderr)
 				if result.Failed != 0 {
 					t.Fatalf("soft reload failed: %+v", result)
 				}
-			case "alias":
+			case "alias", "alias_dirty_config":
 				patch := sessionpkg.MetadataPatch{}
 				queueAliasChangeDriftRebaseline(front, mustGetBead(t, h.f.store, info.ID), tp, func(k, v string) { patch[k] = v }, h.f.stderr)
 				rebaseErr = front.ApplyPatch(info.ID, patch)
@@ -246,6 +271,14 @@ func TestStartupContentRepairSurvivesRebaseline(t *testing.T) {
 			}
 			if got := h.f.sp.CountCalls("Start", "worker"); got != starts {
 				t.Fatal("rebaseline restarted a deferred session")
+			}
+			if dirtyConfig {
+				if after.Metadata["started_config_hash"] != runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info)) {
+					t.Error("unrelated config drift remains while startup content is still dirty")
+				}
+				if err := os.Remove(stray); err != nil {
+					t.Fatal(err)
+				}
 			}
 			h.f.sp.Attached["worker"] = false
 			for range 6 {

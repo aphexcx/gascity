@@ -190,10 +190,12 @@ func reloadSessionChanges(infos []session.Info, desired map[string]TemplateParam
 			if !ok || info.StartedConfigHash == "" {
 				continue
 			}
-			if soft && info.StartupContent != "" {
-				continue // soft acceptance preserves this session's pending repair
+			var current runtime.Config
+			if soft {
+				current = sessionCoreConfigForRebaselineInfo(tp, info)
+			} else {
+				current = startupCheck.coreConfigForHashInfo(tp, info)
 			}
-			current := startupCheck.coreConfigForHashInfo(tp, info)
 			if info.StartedConfigHash == runtime.CoreFingerprint(current) {
 				continue
 			}

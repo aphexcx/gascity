@@ -5,19 +5,33 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// sessionCoreConfigForHashInfo builds the canonical config used for session
-// config-drift core hashes from a typed session.Info. Live drift detection, asleep
-// named-session drift detection, drift keys, and soft reload acceptance must use this
-// helper so template_overrides participate in the same fingerprint everywhere. Start
+// sessionCoreConfigWithOverrides builds the canonical config used for session
+// core hashes from a typed session.Info. Drift comparisons and rebaselines share
+// this helper so template_overrides participate in the fingerprint everywhere. Start
 // paths may keep their pre-start assembly inline when they need setup-specific
 // diagnostics before storing first-start metadata.
+func sessionCoreConfigWithOverrides(tp TemplateParams, info sessionpkg.Info) runtime.Config {
+	agentCfg := templateParamsToConfig(tp)
+	applyTemplateOverridesToConfigInfo(&agentCfg, info, tp)
+	return agentCfg
+}
+
 func sessionCoreConfigForHashInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
 	return (&startupContentCheck{}).coreConfigForHashInfo(tp, info)
 }
 
 func (check *startupContentCheck) coreConfigForHashInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
-	agentCfg := templateParamsToConfig(tp)
-	applyTemplateOverridesToConfigInfo(&agentCfg, info, tp)
+	agentCfg := sessionCoreConfigWithOverrides(tp, info)
 	check.retainFingerprint(&agentCfg, info)
+	return agentCfg
+}
+
+// Rebaselines accept config without delivering content. Carry the repair input
+// regardless of current disk readiness, without probing the cache at all.
+func sessionCoreConfigForRebaselineInfo(tp TemplateParams, info sessionpkg.Info) runtime.Config {
+	agentCfg := sessionCoreConfigWithOverrides(tp, info)
+	if info.StartupContent != "" {
+		applyStartupContentFingerprint(&agentCfg)
+	}
 	return agentCfg
 }
