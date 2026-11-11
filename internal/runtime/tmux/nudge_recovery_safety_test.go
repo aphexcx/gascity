@@ -315,6 +315,9 @@ func TestNudgeAttachedStageCannotAuthorizeRetry(t *testing.T) {
 							if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != enters || pastes != 1 || len(p.submitted) != 0 || p.draft != edit.draft {
 								t.Fatalf("retry touched person's draft: delivery=%+v err=%v Enters=%d pastes=%d submitted=%q draft=%q", d, err, p.enters-enters, pastes, p.submitted, p.draft)
 							}
+							if !errors.Is(err, runtime.ErrNudgeDraftUnowned) {
+								t.Fatalf("non-reusable attached draft must spend a bounded queue attempt: %v", err)
+							}
 						})
 					})
 				}
@@ -376,6 +379,9 @@ func TestNudgeAttachedStageCannotAuthorizeRetry(t *testing.T) {
 						d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), next, id, paste)
 						if !errors.Is(err, ErrNudgeDraftDeferred) || p.enters != enters || pastes != 1 || p.draft != draft || len(p.submitted) != 0 {
 							t.Fatalf("retry after %s: %+v err=%v Enters=%d pastes=%d draft=%q", outcome, d, err, p.enters-enters, pastes, p.draft)
+						}
+						if !errors.Is(err, runtime.ErrNudgeDraftUnowned) {
+							t.Fatalf("non-reusable attached draft must spend a bounded queue attempt: %v", err)
 						}
 					}
 				})

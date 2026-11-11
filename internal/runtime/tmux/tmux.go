@@ -2998,7 +2998,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft provenance for %q: %w", deferred, target, err)
 			}
 			if strings.TrimSpace(stored) != runtime.NudgePayloadDigest(message) {
-				if strings.TrimSpace(stored) == "" {
+				if strings.TrimSpace(stored) == "" || strings.HasPrefix(strings.TrimSpace(stored), "attached:") {
 					deferred = errors.Join(deferred, runtime.ErrNudgeDraftUnowned)
 				}
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q has no matching paste provenance", deferred, target)
