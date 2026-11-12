@@ -2962,7 +2962,9 @@ func (s *nativeDoltMemStorage) SearchIssues(_ context.Context, _ string, filter 
 		}
 		issues = append(issues, issue)
 	}
-	return issues, nil
+	pageFilter := filter
+	pageFilter.Limit = 0
+	return backingSortLimitForTest(filterNativeIssuesForTest(issues, pageFilter), filter), nil
 }
 
 func (s *nativeDoltMemStorage) GetReadyWork(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
@@ -3317,6 +3319,20 @@ func filterNativeIssuesForTest(issues []*beadslib.Issue, filter beadslib.IssueFi
 			continue
 		}
 		if filter.Assignee != nil && issue.Assignee != *filter.Assignee {
+			continue
+		}
+		if filter.AfterCreatedAt != nil && (issue.CreatedAt.After(*filter.AfterCreatedAt) ||
+			(issue.CreatedAt.Equal(*filter.AfterCreatedAt) && issue.ID <= filter.AfterID)) {
+			continue
+		}
+		labelsMatch := true
+		for _, label := range filter.Labels {
+			labelsMatch = labelsMatch && slices.Contains(issue.Labels, label)
+		}
+		for _, label := range filter.ExcludeLabels {
+			labelsMatch = labelsMatch && !slices.Contains(issue.Labels, label)
+		}
+		if !labelsMatch {
 			continue
 		}
 		filtered = append(filtered, cloneNativeIssueForTest(issue))
