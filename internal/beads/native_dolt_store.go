@@ -302,6 +302,10 @@ func OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx context.Con
 type NativeDoltStore struct {
 	mu      sync.RWMutex
 	storage beadslib.Storage
+	// readGates serialize each read kind across its entire retry chain. Their
+	// separate mutex never waits for a storage call holding mu.
+	readMu    sync.Mutex
+	readGates map[string]chan struct{}
 	// generation increments on every successful reconnect. A read that fails
 	// with a transient connection error records the generation it observed and
 	// asks reconnect to swap the dead handle only if no other reader already did.
@@ -574,8 +578,9 @@ const (
 	// error, plus the restart) so a read spanning a rebind recovers rather than
 	// failing, while still failing fast for a genuinely down server.
 	nativeReadRetryBudget = 90 * time.Second
-	// nativeReadRetryBackoff spaces reconnect-and-retry passes.
-	nativeReadRetryBackoff = 200 * time.Millisecond
+	// nativeReadRetryBackoff is the initial delay between read attempts.
+	nativeReadRetryBackoff    = 200 * time.Millisecond
+	nativeReadRetryMaxBackoff = 5 * time.Second
 )
 
 // withReadRetry runs a read against the native storage handle, transparently
@@ -587,6 +592,10 @@ const (
 // reopen hook, which re-resolves the CURRENT managed Dolt port (restarting the
 // server if needed) and returns a fresh handle bound to the live server.
 // Reconnect is single-flight across concurrent readers via the generation guard.
+// Calls of the same kind share a gate on this handle. Queue time consumes the
+// same budget as storage, reconnect, and exponentially backed-off retries.
+// This bounds gc callers; retries internal to the storage library and abandoned
+// statements still running on the server are outside this gate's control.
 // The loop is deadline-bounded (nativeReadRetryBudget) rather than a fixed
 // attempt count so it spans the whole rebind window. Non-transient errors
 // (ErrNotFound, decode failures) return immediately, and a store without a
@@ -599,7 +608,7 @@ const (
 // long-lived provider-store handle had no equivalent recovery — so a rig store's
 // reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
 // timeout" after a managed-Dolt rebind instead of recovering.
-func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storage) error) error {
+func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn func(context.Context, beadslib.Storage) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
@@ -607,23 +616,47 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 	if s.readRetryBudgetOverride > 0 {
 		budget = s.readRetryBudgetOverride
 	}
-	// One wall-clock context bounds the WHOLE chain — the read, the reconnect
+	// One wall-clock context bounds the WHOLE chain — queuing, the read, the reconnect
 	// (env re-resolution + recovery + reopen), the retried read, and the backoff.
 	// Every step derives its deadline from this ctx and is canceled in-flight
 	// when it expires, so the total cannot stack per-call timeouts past budget.
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
+	s.readMu.Lock()
+	if s.readGates == nil {
+		s.readGates = make(map[string]chan struct{})
+	}
+	gate := s.readGates[kind]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		s.readGates[kind] = gate
+	}
+	s.readMu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return nativeReadRetryBudgetError(ctx.Err(), nil)
+	}
+	backoff := nativeReadRetryBackoff
 	for {
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
+			return nativeReadRetryBudgetError(ctxErr, nil)
+		}
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
 			return err
+		}
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
+			release()
+			return nativeReadRetryBudgetError(ctxErr, nil)
 		}
 		opErr := fn(ctx, storage)
 		release()
 		if opErr == nil {
 			return nil
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 			return nativeReadRetryBudgetError(ctxErr, opErr)
 		}
 		reopen, closed := s.reopenState()
@@ -638,7 +671,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 			// A reconnect that itself fails transiently (server mid-restart) is
 			// worth another pass while the budget remains; a non-transient
 			// reconnect failure or an exhausted budget is terminal.
-			if ctxErr := ctx.Err(); ctxErr != nil {
+			if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 				return nativeReadRetryBudgetError(ctxErr, reconnectErr)
 			}
 			if !isNativeDoltTransientReadError(rcErr) {
@@ -650,9 +683,22 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		select {
 		case <-ctx.Done():
 			return nativeReadRetryBudgetError(ctx.Err(), opErr)
-		case <-time.After(nativeReadRetryBackoff):
+		case <-time.After(backoff):
 		}
+		backoff = min(backoff*2, nativeReadRetryMaxBackoff)
 	}
+}
+
+func nativeReadContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A queued caller can acquire the gate before the context timer is
+	// scheduled at the same instant. The absolute deadline still applies.
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
@@ -1081,7 +1127,7 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 // Get retrieves a bead by ID from the upstream beads storage layer.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	var out Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "get", func(ctx context.Context, storage beadslib.Storage) error {
 		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
 			IDs:                 []string{id},
 			IncludeDependencies: true,
@@ -1418,31 +1464,131 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "list", func(ctx context.Context, storage beadslib.Storage) error {
 		filter := nativeIssueFilterFromListQuery(query)
-		issues, err := storage.SearchIssues(ctx, "", filter)
-		if err != nil {
-			return err
-		}
-		beads := make([]Bead, 0, len(issues))
-		for _, issue := range issues {
-			bead, err := beadFromNativeIssue(issue)
+		exactPages := query.Sort == SortCreatedDescIDAsc && filter.Limit > 0
+		var rows []Bead
+		for {
+			issues, err := storage.SearchIssues(ctx, "", filter)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
-					continue
-				}
 				return err
 			}
-			beads = append(beads, bead)
+			s.noteRows(len(issues))
+			page := issues
+			var boundary *SeekBoundary
+			if exactPages {
+				page, boundary, err = canonicalNativePage(ctx, storage, issues, filter)
+				if err != nil {
+					return err
+				}
+			}
+			for _, issue := range page {
+				bead, err := beadFromNativeIssue(issue)
+				if err != nil {
+					if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
+						continue
+					}
+					return err
+				}
+				if !exactPages || query.Matches(bead) {
+					rows = append(rows, bead)
+				}
+			}
+			if !exactPages || len(issues) < filter.Limit || len(rows) >= query.Limit {
+				out = ApplyListQuery(rows, query)
+				return nil
+			}
+			// Residual parent filtering and canonical-tier resolution can shorten
+			// a full backing page without exhausting the result. Advance by the
+			// safe physical-table boundary until the page is full or SQL ends.
+			if filter.AfterCreatedAt != nil {
+				previous := SeekBoundary{CreatedAt: *filter.AfterCreatedAt, ID: filter.AfterID}
+				if !previous.After(Bead{CreatedAt: boundary.CreatedAt, ID: boundary.ID}, query.Sort) {
+					return errors.New("native list page did not advance")
+				}
+			}
+			filter.AfterCreatedAt = &boundary.CreatedAt
+			filter.AfterID = boundary.ID
 		}
-		s.noteRows(len(issues))
-		out = ApplyListQuery(beads, query)
-		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// canonicalNativePage resolves cross-table ID collisions before residual
+// filtering. The library limits each physical table before merging. Replacing
+// a durable row with an older canonical wisp can move the merged page's end
+// past unseen durable rows. A full durable page therefore also bounds the
+// safe cursor; canonical rows beyond it wait for a later page.
+// ID-only lookups include every physical copy before applying wisp precedence.
+// A canonical row at a different creation time waits for its own raw boundary.
+// The raw page, not its canonical projection, controls exhaustion.
+func canonicalNativePage(ctx context.Context, storage beadslib.Storage, raw []*beadslib.Issue, filter beadslib.IssueFilter) ([]*beadslib.Issue, *SeekBoundary, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	requested := make(map[string]bool, len(raw))
+	canonical := make(map[string]*beadslib.Issue, len(raw))
+	for _, issue := range raw {
+		if issue == nil {
+			return nil, nil, errors.New("nil issue in native exact page")
+		}
+		requested[issue.ID] = true
+		canonical[issue.ID] = issue
+	}
+	last := raw[len(raw)-1]
+	boundary := &SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+	durableFilter := filter
+	durableFilter.SkipWisps = true
+	durableFilter.IncludeDependencies = false
+	durable, err := storage.SearchIssues(ctx, "", durableFilter)
+	if err != nil {
+		return nil, nil, fmt.Errorf("checking native durable page: %w", err)
+	}
+	var candidates []string
+	for _, issue := range durable {
+		if issue == nil {
+			return nil, nil, errors.New("nil issue in native durable page")
+		}
+		if requested[issue.ID] {
+			candidates = append(candidates, issue.ID)
+			delete(canonical, issue.ID)
+		}
+	}
+	if len(durable) == filter.Limit {
+		last := durable[len(durable)-1]
+		durableBoundary := &SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		if durableBoundary.After(Bead{CreatedAt: boundary.CreatedAt, ID: boundary.ID}, SortCreatedDescIDAsc) {
+			boundary = durableBoundary
+		}
+	}
+	for start := 0; start < len(candidates); start += 1000 {
+		batch := candidates[start:min(start+1000, len(candidates))]
+		rows, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs: batch, Limit: len(batch), SortBy: "created", IncludeDependencies: filter.IncludeDependencies,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolving canonical native page: %w", err)
+		}
+		for _, issue := range rows {
+			if issue == nil {
+				return nil, nil, errors.New("nil issue in canonical native lookup")
+			}
+			if requested[issue.ID] {
+				canonical[issue.ID] = issue
+			}
+		}
+	}
+	page := make([]*beadslib.Issue, 0, len(raw))
+	for _, issue := range raw {
+		if current := canonical[issue.ID]; current != nil && current.CreatedAt.Equal(issue.CreatedAt) &&
+			!boundary.After(Bead{CreatedAt: current.CreatedAt, ID: current.ID}, SortCreatedDescIDAsc) {
+			page = append(page, current)
+		}
+	}
+	return page, boundary, nil
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
@@ -1461,7 +1607,7 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(queries)
 	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "ready", func(ctx context.Context, storage beadslib.Storage) error {
 		var beads []Bead
 		seen := make(map[string]bool)
 		now := time.Now().UTC()
@@ -2091,7 +2237,7 @@ func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
 // DepList returns dependencies for a bead.
 func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
 	var out []Dep
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "dep-list", func(ctx context.Context, storage beadslib.Storage) error {
 		deps, err := s.depList(ctx, storage, id, direction)
 		if err != nil {
 			return err
@@ -2169,7 +2315,7 @@ func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool
 		metadata string
 		carried  bool
 	)
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "dep-metadata", func(ctx context.Context, storage beadslib.Storage) error {
 		querier, ok := beadslib.AsDependentQuerier(storage)
 		if !ok {
 			return fmt.Errorf("reading dependency metadata %s -> %s: backing storage exposes no dependency-record read", issueID, dependsOnID)
@@ -2693,16 +2839,18 @@ func nativeCreatedLimitPushdown(query ListQuery) int {
 	if query.TierMode == TierWisps {
 		return 0
 	}
-	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
-	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
-	// backing limit applied before them would cut rows before the residual filter
-	// runs and silently drop page rows. Fetch the full candidate set for those
-	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
-	// exec.go, bdstore canApplyWispsServerLimit).
-	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+	// Only the native created-desc/ID-asc order can push its exact seek boundary.
+	// Other seeks, UpdatedBefore, and plural Assignees remain Go-side filters;
+	// applying a backing limit before them would silently drop page rows.
+	if (query.SeekAfter != nil && query.Sort != SortCreatedDescIDAsc) || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
 		return 0
 	}
 	switch query.Sort {
+	case SortCreatedDescIDAsc:
+		if len(query.IDs) > 0 || len(query.ParentIDs) > 0 {
+			return 0
+		}
+		return query.Limit
 	case SortCreatedAsc:
 		// The backing renders created-asc ties as `id ASC`, matching the
 		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
@@ -2736,7 +2884,7 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	var sortBy string
 	var sortDesc bool
 	switch query.Sort {
-	case SortCreatedDesc:
+	case SortCreatedDesc, SortCreatedDescIDAsc:
 		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
 	case SortCreatedAsc:
 		sortBy, sortDesc = "created", true // flip the DESC default
@@ -2747,7 +2895,12 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
-		IncludeDependencies: true,
+		IncludeDependencies: !query.SkipDependencies || query.ParentID != "" || len(query.ParentIDs) > 0,
+		ExcludeLabels:       query.ExcludeLabels,
+	}
+	if query.Sort == SortCreatedDescIDAsc && query.SeekAfter != nil {
+		filter.AfterCreatedAt = &query.SeekAfter.CreatedAt
+		filter.AfterID = query.SeekAfter.ID
 	}
 	switch query.TierMode {
 	case TierWisps:

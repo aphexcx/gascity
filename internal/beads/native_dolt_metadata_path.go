@@ -19,19 +19,12 @@ func (s *NativeDoltStore) ReadMetadataPathPage(ctx context.Context, q MetadataPa
 		return MetadataPathPage{}, err
 	}
 	var page MetadataPathPage
-	err = s.withReadRetry(func(readCtx context.Context, storage beadslib.Storage) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	err = s.withReadRetry(ctx, "metadata-path", func(readCtx context.Context, storage beadslib.Storage) error {
 		accessor, ok := storage.(interface{ DB() *sql.DB })
 		if !ok || accessor.DB() == nil {
 			return ErrMetadataPathPagingUnsupported
 		}
-		pageCtx, cancel := context.WithCancel(readCtx)
-		defer cancel()
-		stop := context.AfterFunc(ctx, cancel)
-		defer stop()
-		rows, err := accessor.DB().QueryContext(pageCtx, metadataPathDoltSQL(q, cursor))
+		rows, err := accessor.DB().QueryContext(readCtx, metadataPathDoltSQL(q, cursor))
 		if err != nil {
 			return err
 		}

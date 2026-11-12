@@ -925,7 +925,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		// this fetch; a SQL LIMIT cut before that filter would silently drop
 		// page rows, so seeked reads fetch unbounded and let the Go
 		// filter+sort+limit below cut the exact page.
-		if query.SeekAfter != nil {
+		if query.SeekAfter != nil || len(query.ExcludeLabels) > 0 || query.Sort == SortCreatedDescIDAsc {
 			tableLimit = 0
 		}
 		// A before-filter admits NULL-julianday rows into the SQL result (see
@@ -954,6 +954,15 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		merged = filterDoltliteMetadata(merged, query.Metadata)
 	}
 	merged = filterDoltliteBeforeTimes(merged, query)
+	if len(query.ExcludeLabels) > 0 {
+		kept := merged[:0]
+		for _, row := range merged {
+			if query.Matches(row) {
+				kept = append(kept, row)
+			}
+		}
+		merged = kept
+	}
 	if orderBy == "" {
 		sortBeadsForQuery(merged, doltliteSortOrder(query.Sort))
 	}
@@ -973,6 +982,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 // back to the full-read merge.
 func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extraWhere string, limit int, orderBy string) bool {
 	return limit > 0 &&
+		len(query.ExcludeLabels) == 0 && query.Sort != SortCreatedDescIDAsc &&
 		len(sets) > 1 &&
 		orderBy == "" &&
 		extraWhere == "" &&
@@ -1135,8 +1145,8 @@ func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTab
 }
 
 func doltliteSortOrder(order SortOrder) SortOrder {
-	if order == SortCreatedAsc {
-		return SortCreatedAsc
+	if order == SortCreatedAsc || order == SortCreatedDescIDAsc {
+		return order
 	}
 	return SortCreatedDesc
 }

@@ -402,6 +402,55 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	t.Run("ListExactPagesExcludeVisitedLabels", func(t *testing.T) {
+		s := newStore()
+		var want []beads.Bead
+		for i := 0; i < 7; i++ {
+			labels := []string{"page-test"}
+			if i%3 == 0 {
+				labels = append(labels, "visited")
+			}
+			b, err := s.Create(beads.Bead{Title: "paged record", Labels: labels, Ephemeral: i%2 == 0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i%3 != 0 {
+				want = append(want, b)
+			}
+		}
+		sort.Slice(want, func(i, j int) bool {
+			if want[i].CreatedAt.Equal(want[j].CreatedAt) {
+				return want[i].ID < want[j].ID
+			}
+			return want[i].CreatedAt.After(want[j].CreatedAt)
+		})
+		q := beads.ListQuery{Label: "page-test", ExcludeLabels: []string{"visited"}, TierMode: beads.TierBoth, Sort: beads.SortCreatedDescIDAsc, Limit: 2}
+		var got []beads.Bead
+		for {
+			page, err := s.List(q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, page...)
+			if len(page) < q.Limit {
+				break
+			}
+			if len(got) > len(want) {
+				t.Fatal("pagination did not advance")
+			}
+			last := page[len(page)-1]
+			q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %d rows, want %d", len(got), len(want))
+		}
+		for i, b := range got {
+			if b.ID != want[i].ID {
+				t.Fatalf("row %d=%s, want %s", i, b.ID, want[i].ID)
+			}
+		}
+	})
+
 	t.Run("ListFiltersByQueryFields", func(t *testing.T) {
 		s := newStore()
 		parent, err := s.Create(beads.Bead{

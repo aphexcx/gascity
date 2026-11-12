@@ -2967,7 +2967,7 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if query.TierMode == TierWisps {
 		return true
 	}
-	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
+	if serverQuery.Sort == SortCreatedAsc || serverQuery.Sort == SortCreatedDescIDAsc || len(serverQuery.ExcludeLabels) > 0 || clientFilteredAssignees {
 		return true
 	}
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
@@ -3177,7 +3177,7 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 	// (identical tie-break to the in-memory sort), not via a bd query flag, so
 	// a bd-side limit would cut rows before that filter runs — same class as
 	// CreatedBefore.
-	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
+	return len(query.ExcludeLabels) == 0 && (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
