@@ -1454,24 +1454,44 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	var out []Bead
 	err := s.withReadRetry(context.Background(), "list", func(ctx context.Context, storage beadslib.Storage) error {
 		filter := nativeIssueFilterFromListQuery(query)
-		issues, err := storage.SearchIssues(ctx, "", filter)
-		if err != nil {
-			return err
-		}
-		beads := make([]Bead, 0, len(issues))
-		for _, issue := range issues {
-			bead, err := beadFromNativeIssue(issue)
+		exactPages := query.Sort == SortCreatedDescIDAsc && filter.Limit > 0
+		var rows []Bead
+		for {
+			issues, err := storage.SearchIssues(ctx, "", filter)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
-					continue
-				}
 				return err
 			}
-			beads = append(beads, bead)
+			s.noteRows(len(issues))
+			for _, issue := range issues {
+				bead, err := beadFromNativeIssue(issue)
+				if err != nil {
+					if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
+						continue
+					}
+					return err
+				}
+				if !exactPages || query.Matches(bead) {
+					rows = append(rows, bead)
+				}
+			}
+			if !exactPages || len(issues) < filter.Limit || len(rows) >= query.Limit {
+				out = ApplyListQuery(rows, query)
+				return nil
+			}
+			// Native parent queries include inferred ID-prefix children and all
+			// parent edges, while gc filters the projected ParentID. A short
+			// filtered page therefore does not prove exhaustion. Advance by the
+			// raw page boundary until the requested page is full or SQL ends.
+			last := issues[len(issues)-1]
+			if filter.AfterCreatedAt != nil {
+				boundary := SeekBoundary{CreatedAt: *filter.AfterCreatedAt, ID: filter.AfterID}
+				if !boundary.After(Bead{CreatedAt: last.CreatedAt, ID: last.ID}, query.Sort) {
+					return errors.New("native list page did not advance")
+				}
+			}
+			filter.AfterCreatedAt = &last.CreatedAt
+			filter.AfterID = last.ID
 		}
-		s.noteRows(len(issues))
-		out = ApplyListQuery(beads, query)
-		return nil
 	})
 	if err != nil {
 		return nil, err
