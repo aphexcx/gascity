@@ -79,7 +79,7 @@ func TestNativeExactPagePropagatesLaterReadFailure(t *testing.T) {
 	want := errors.New("later page unavailable")
 	calls := 0
 	storage := &nativeDoltStorageSpy{searchIssues: func(_ context.Context, _ string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-		if len(f.IDs) > 0 {
+		if len(f.IDs) > 0 || f.SkipWisps {
 			return []*beadslib.Issue{{ID: "root.0", Status: beadslib.StatusOpen, CreatedAt: time.Unix(1, 0)}}, nil
 		}
 		calls++

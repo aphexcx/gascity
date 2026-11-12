@@ -1475,8 +1475,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			}
 			s.noteRows(len(issues))
 			page := issues
+			var boundary *SeekBoundary
 			if exactPages {
-				page, err = canonicalNativePage(ctx, storage, issues, filter.IncludeDependencies)
+				page, boundary, err = canonicalNativePage(ctx, storage, issues, filter)
 				if err != nil {
 					return err
 				}
@@ -1499,16 +1500,15 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			}
 			// Residual parent filtering and canonical-tier resolution can shorten
 			// a full backing page without exhausting the result. Advance by the
-			// raw boundary until the requested page is full or SQL ends.
-			last := issues[len(issues)-1]
+			// safe physical-table boundary until the page is full or SQL ends.
 			if filter.AfterCreatedAt != nil {
-				boundary := SeekBoundary{CreatedAt: *filter.AfterCreatedAt, ID: filter.AfterID}
-				if !boundary.After(Bead{CreatedAt: last.CreatedAt, ID: last.ID}, query.Sort) {
+				previous := SeekBoundary{CreatedAt: *filter.AfterCreatedAt, ID: filter.AfterID}
+				if !previous.After(Bead{CreatedAt: boundary.CreatedAt, ID: boundary.ID}, query.Sort) {
 					return errors.New("native list page did not advance")
 				}
 			}
-			filter.AfterCreatedAt = &last.CreatedAt
-			filter.AfterID = last.ID
+			filter.AfterCreatedAt = &boundary.CreatedAt
+			filter.AfterID = boundary.ID
 		}
 	})
 	if err != nil {
@@ -1518,58 +1518,63 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 }
 
 // canonicalNativePage resolves cross-table ID collisions before residual
-// filtering. Only IDs present in the durable table need rehydration. An
-// ID-only lookup capped at its ID count includes every matching copy in each
-// physical table, so the library can apply its wisp precedence.
-// A canonical row at a different creation time belongs to a different page;
-// defer it to that raw boundary instead of moving the caller's cursor past
-// unseen rows. The raw page, not this filtered projection, controls exhaustion.
-func canonicalNativePage(ctx context.Context, storage beadslib.Storage, raw []*beadslib.Issue, includeDependencies bool) ([]*beadslib.Issue, error) {
-	ids := make([]string, 0, len(raw))
+// filtering. The library limits each physical table before merging. Replacing
+// a durable row with an older canonical wisp can move the merged page's end
+// past unseen durable rows. A full durable page therefore also bounds the
+// safe cursor; canonical rows beyond it wait for a later page.
+// ID-only lookups include every physical copy before applying wisp precedence.
+// A canonical row at a different creation time waits for its own raw boundary.
+// The raw page, not its canonical projection, controls exhaustion.
+func canonicalNativePage(ctx context.Context, storage beadslib.Storage, raw []*beadslib.Issue, filter beadslib.IssueFilter) ([]*beadslib.Issue, *SeekBoundary, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
 	requested := make(map[string]bool, len(raw))
+	canonical := make(map[string]*beadslib.Issue, len(raw))
 	for _, issue := range raw {
 		if issue == nil {
-			return nil, errors.New("nil issue in native exact page")
+			return nil, nil, errors.New("nil issue in native exact page")
 		}
-		if !requested[issue.ID] {
-			requested[issue.ID] = true
-			ids = append(ids, issue.ID)
-		}
-	}
-	canonical := make(map[string]*beadslib.Issue, len(ids))
-	for _, issue := range raw {
+		requested[issue.ID] = true
 		canonical[issue.ID] = issue
 	}
-	for start := 0; start < len(ids); start += 1000 {
-		batch := ids[start:min(start+1000, len(ids))]
-		durable, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
-			IDs: batch, Limit: len(batch), SortBy: "created", SkipWisps: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("checking native page durable copies: %w", err)
+	last := raw[len(raw)-1]
+	boundary := &SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+	durableFilter := filter
+	durableFilter.SkipWisps = true
+	durableFilter.IncludeDependencies = false
+	durable, err := storage.SearchIssues(ctx, "", durableFilter)
+	if err != nil {
+		return nil, nil, fmt.Errorf("checking native durable page: %w", err)
+	}
+	var candidates []string
+	for _, issue := range durable {
+		if issue == nil {
+			return nil, nil, errors.New("nil issue in native durable page")
 		}
-		candidates := make([]string, 0, len(durable))
-		for _, issue := range durable {
-			if issue == nil {
-				return nil, errors.New("nil issue in native durable lookup")
-			}
-			if requested[issue.ID] {
-				candidates = append(candidates, issue.ID)
-				delete(canonical, issue.ID)
-			}
+		if requested[issue.ID] {
+			candidates = append(candidates, issue.ID)
+			delete(canonical, issue.ID)
 		}
-		if len(candidates) == 0 {
-			continue
+	}
+	if len(durable) == filter.Limit {
+		last := durable[len(durable)-1]
+		durableBoundary := &SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		if durableBoundary.After(Bead{CreatedAt: boundary.CreatedAt, ID: boundary.ID}, SortCreatedDescIDAsc) {
+			boundary = durableBoundary
 		}
+	}
+	for start := 0; start < len(candidates); start += 1000 {
+		batch := candidates[start:min(start+1000, len(candidates))]
 		rows, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
-			IDs: candidates, Limit: len(candidates), SortBy: "created", IncludeDependencies: includeDependencies,
+			IDs: batch, Limit: len(batch), SortBy: "created", IncludeDependencies: filter.IncludeDependencies,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("resolving canonical native page: %w", err)
+			return nil, nil, fmt.Errorf("resolving canonical native page: %w", err)
 		}
 		for _, issue := range rows {
 			if issue == nil {
-				return nil, errors.New("nil issue in canonical native lookup")
+				return nil, nil, errors.New("nil issue in canonical native lookup")
 			}
 			if requested[issue.ID] {
 				canonical[issue.ID] = issue
@@ -1578,11 +1583,12 @@ func canonicalNativePage(ctx context.Context, storage beadslib.Storage, raw []*b
 	}
 	page := make([]*beadslib.Issue, 0, len(raw))
 	for _, issue := range raw {
-		if current := canonical[issue.ID]; current != nil && current.CreatedAt.Equal(issue.CreatedAt) {
+		if current := canonical[issue.ID]; current != nil && current.CreatedAt.Equal(issue.CreatedAt) &&
+			!boundary.After(Bead{CreatedAt: current.CreatedAt, ID: current.ID}, SortCreatedDescIDAsc) {
 			page = append(page, current)
 		}
 	}
-	return page, nil
+	return page, boundary, nil
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.

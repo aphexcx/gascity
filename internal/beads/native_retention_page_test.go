@@ -85,22 +85,25 @@ func TestNativeExactPageRejectsCorruptRows(t *testing.T) {
 
 func TestNativeCanonicalPageOnlyHydratesDurableCandidates(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	wisp := &beadslib.Issue{ID: "wisp", CreatedAt: at}
+	wisp := &beadslib.Issue{ID: "first", CreatedAt: at}
 	durable := &beadslib.Issue{ID: "overlap", CreatedAt: at}
 	canonical := &beadslib.Issue{ID: durable.ID, CreatedAt: at.Add(-time.Hour)}
 	storage := &nativeDoltStorageSpy{searchIssues: func(_ context.Context, _ string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+		if f.SkipWisps {
+			if f.Limit != 2 {
+				t.Fatalf("durable page lost its bound: %d", f.Limit)
+			}
+			return []*beadslib.Issue{durable}, nil
+		}
 		if f.Limit != len(f.IDs) || f.Limit == 0 {
 			t.Fatalf("lookup is not bounded by requested IDs: %+v", f)
-		}
-		if f.SkipWisps {
-			return []*beadslib.Issue{durable}, nil
 		}
 		if !slices.Equal(f.IDs, []string{durable.ID}) {
 			t.Fatalf("rehydrated rows with no durable copy: %v", f.IDs)
 		}
 		return []*beadslib.Issue{canonical}, nil
 	}}
-	got, err := canonicalNativePage(context.Background(), storage, []*beadslib.Issue{wisp, durable}, false)
+	got, _, err := canonicalNativePage(context.Background(), storage, []*beadslib.Issue{wisp, durable}, beadslib.IssueFilter{Limit: 2, SortBy: "created"})
 	if err != nil {
 		t.Fatal(err)
 	}

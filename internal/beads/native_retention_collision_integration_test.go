@@ -121,6 +121,35 @@ func TestNativeExactPagesCanonicalTiersAgainstRealDolt(t *testing.T) {
 			t.Fatalf("paged %d rows, want %d", len(seen), len(want))
 		}
 	})
+	t.Run("full_durable_leg", func(t *testing.T) {
+		meta := `{"gc.root_bead_id":"durable-scope"}`
+		insert("issues", "labels", "page-x", "closed", now.Add(-time.Hour), now, meta)
+		insert("issues", "labels", "page-a", "closed", now.Add(-2*time.Hour), now, meta)
+		insert("issues", "labels", "page-b", "closed", now.Add(-3*time.Hour), now, meta)
+		insert("wisps", "wisp_labels", "page-x", "closed", now.Add(-4*time.Hour), now, meta)
+		q := ListQuery{Metadata: map[string]string{"gc.root_bead_id": "durable-scope"}, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedDescIDAsc, Limit: 2}
+		var ids []string
+		for {
+			page, err := store.List(q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, b := range page {
+				ids = append(ids, b.ID)
+			}
+			if len(page) < q.Limit {
+				break
+			}
+			if len(ids) > 3 {
+				t.Fatal("page did not advance")
+			}
+			last := page[len(page)-1]
+			q.SeekAfter = &SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		}
+		if fmt.Sprint(ids) != "[page-a page-b page-x]" {
+			t.Fatalf("canonical merge skipped a durable row: %v", ids)
+		}
+	})
 	t.Run("closed_canonical_member", func(t *testing.T) {
 		meta := `{"gc.root_bead_id":"scope"}`
 		insert("issues", "labels", "page-shadow", "open", now, now, meta)
