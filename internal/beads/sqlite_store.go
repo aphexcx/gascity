@@ -1387,6 +1387,8 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		sqlText += " ORDER BY b.created_at ASC, b.id ASC"
 	case SortCreatedDesc:
 		sqlText += " ORDER BY b.created_at DESC, b.id DESC"
+	case SortCreatedDescIDAsc:
+		sqlText += " ORDER BY b.created_at DESC, b.id ASC"
 	}
 	if q.Limit > 0 && sqliteListCanPushLimit(q) {
 		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
@@ -1400,7 +1402,7 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 // seek boundary remain residual filters over decoded Beads. Applying LIMIT
 // before any of those filters can discard a later matching row permanently.
 func sqliteListCanPushLimit(q ListQuery) bool {
-	return q.TierMode != TierWisps && len(q.Assignees) == 0 && q.SeekAfter == nil
+	return q.TierMode != TierWisps && len(q.Assignees) == 0 && len(q.ExcludeLabels) == 0 && q.SeekAfter == nil
 }
 
 // ListOpen returns non-closed beads in creation order by default.

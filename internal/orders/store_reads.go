@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -186,21 +187,91 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
-	list, err := beads.HandlesFor(s.store.Store).Live.List(beads.ListQuery{
-		Status:   "closed",
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return nil, err
+	query := beads.ListQuery{
+		Status:           "closed",
+		Label:            labelOrderTracking,
+		Sort:             beads.SortCreatedDescIDAsc,
+		TierMode:         beads.TierBoth,
+		Limit:            1000,
+		SkipDependencies: true,
 	}
-	out := make([]OrderRun, 0, len(list))
-	for _, b := range list {
+	var out []OrderRun
+	seen := make(map[string]bool)
+	appendRun := func(b beads.Bead) {
+		if seen[b.ID] || !IsTrackingBead(b) {
+			return
+		}
+		seen[b.ID] = true
 		name, _ := NameFromTrackingBead(b)
 		out = append(out, decodeRun(name, b))
 	}
+	// Discover order labels from bounded tracking pages. After visiting an
+	// order, exclude its label from discovery: the next discovery read finds
+	// older/removed orders and legacy title-only records, rather than walking
+	// every already-read run again. Config is not a complete history catalog.
+	visited := make(map[string]bool)
+	for {
+		page, err := beads.HandlesFor(s.store.Store).Live.List(query)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range page {
+			appendRun(b)
+			for _, label := range b.Labels {
+				if !strings.HasPrefix(label, labelOrderRunPrefix) || visited[label] {
+					continue
+				}
+				orderQuery := query
+				orderQuery.Label = label
+				orderQuery.SeekAfter = nil
+				orderQuery.ExcludeLabels = nil
+				if err := s.walkClosedRetentionPages(orderQuery, appendRun); err != nil {
+					return nil, fmt.Errorf("reading retention label %q: %w", label, err)
+				}
+				visited[label] = true
+				query.ExcludeLabels = append(query.ExcludeLabels, label)
+			}
+		}
+		if len(page) < query.Limit {
+			break
+		}
+		last := page[len(page)-1]
+		next := &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		if query.SeekAfter != nil && *next == *query.SeekAfter {
+			return nil, errors.New("retention discovery page did not advance")
+		}
+		query.SeekAfter = next
+	}
+	// Preserve this method's historical public ordering; retention eligibility
+	// itself is ranked by close reference time in each order's bucket.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
+}
+
+func (s *Store) walkClosedRetentionPages(query beads.ListQuery, visit func(beads.Bead)) error {
+	for {
+		page, err := beads.HandlesFor(s.store.Store).Live.List(query)
+		if err != nil {
+			return err
+		}
+		for _, b := range page {
+			visit(b)
+		}
+		if len(page) < query.Limit {
+			return nil
+		}
+		last := page[len(page)-1]
+		next := &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		if query.SeekAfter != nil && *next == *query.SeekAfter {
+			return errors.New("retention page did not advance")
+		}
+		query.SeekAfter = next
+	}
 }
 
 // CloseRuns closes a batch of tracking beads, stamping close_reason so

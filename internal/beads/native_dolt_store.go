@@ -1428,7 +1428,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		for _, issue := range issues {
 			bead, err := beadFromNativeIssue(issue)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
+				if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
 					continue
 				}
 				return err
@@ -2693,16 +2693,18 @@ func nativeCreatedLimitPushdown(query ListQuery) int {
 	if query.TierMode == TierWisps {
 		return 0
 	}
-	// SeekAfter, UpdatedBefore, and plural Assignees are enforced only Go-side in
-	// ApplyListQuery (q.Matches); they are not pushed to the backing search, so a
-	// backing limit applied before them would cut rows before the residual filter
-	// runs and silently drop page rows. Fetch the full candidate set for those
-	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
-	// exec.go, bdstore canApplyWispsServerLimit).
-	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+	// Only the native created-desc/ID-asc order can push its exact seek boundary.
+	// Other seeks, UpdatedBefore, and plural Assignees remain Go-side filters;
+	// applying a backing limit before them would silently drop page rows.
+	if (query.SeekAfter != nil && query.Sort != SortCreatedDescIDAsc) || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
 		return 0
 	}
 	switch query.Sort {
+	case SortCreatedDescIDAsc:
+		if len(query.IDs) > 0 || len(query.ParentIDs) > 0 {
+			return 0
+		}
+		return query.Limit
 	case SortCreatedAsc:
 		// The backing renders created-asc ties as `id ASC`, matching the
 		// canonical (created_at ASC, id ASC) order, so a bounded asc read is exact.
@@ -2736,7 +2738,7 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	var sortBy string
 	var sortDesc bool
 	switch query.Sort {
-	case SortCreatedDesc:
+	case SortCreatedDesc, SortCreatedDescIDAsc:
 		sortBy, sortDesc = "created", false // SortDefs["created"] defaults DESC
 	case SortCreatedAsc:
 		sortBy, sortDesc = "created", true // flip the DESC default
@@ -2747,7 +2749,12 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
-		IncludeDependencies: true,
+		IncludeDependencies: !query.SkipDependencies || query.ParentID != "" || len(query.ParentIDs) > 0,
+		ExcludeLabels:       query.ExcludeLabels,
+	}
+	if query.Sort == SortCreatedDescIDAsc && query.SeekAfter != nil {
+		filter.AfterCreatedAt = &query.SeekAfter.CreatedAt
+		filter.AfterID = query.SeekAfter.ID
 	}
 	switch query.TierMode {
 	case TierWisps:

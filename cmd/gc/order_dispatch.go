@@ -2613,10 +2613,9 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // single-flight is never weakened for un-stamped or partial-stamp data.
 func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
-	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
+	members, err := listOrderWispPages(reader, beads.ListQuery{
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
@@ -2634,7 +2633,7 @@ func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Be
 	if len(open) > 0 {
 		return open, nil
 	}
-	// No OPEN stamped member found. An empty or all-closed membership set does
+	// No OPEN stamped member found. An empty live membership set does
 	// NOT prove the root is idle, because the index may be incomplete for a
 	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
 	// ParentID-only steps do not). Confirm with the authoritative walk before
@@ -2726,11 +2725,36 @@ func orderWispMetadataDescendants(reader beads.LiveReader, rootID string, includ
 }
 
 func orderWispParentChildren(reader beads.LiveReader, parentID string) ([]beads.Bead, error) {
-	return reader.List(beads.ListQuery{
+	return listOrderWispPages(reader, beads.ListQuery{
 		ParentID:      parentID,
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
+}
+
+// listOrderWispPages bounds graph-safety reads as well as retention's history
+// reads. In the native provider a real limit selects IDs before hydration;
+// even an empty membership query otherwise pays the wide history join.
+func listOrderWispPages(reader beads.LiveReader, query beads.ListQuery) ([]beads.Bead, error) {
+	query.Sort = beads.SortCreatedDescIDAsc
+	query.Limit = 1000
+	var rows []beads.Bead
+	for {
+		page, err := reader.List(query)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, page...)
+		if len(page) < query.Limit {
+			return rows, nil
+		}
+		last := page[len(page)-1]
+		next := &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		if query.SeekAfter != nil && *next == *query.SeekAfter {
+			return nil, errors.New("order descendant page did not advance")
+		}
+		query.SeekAfter = next
+	}
 }
 
 // Order-wisp traversal follows structural ParentID children and graph.v2

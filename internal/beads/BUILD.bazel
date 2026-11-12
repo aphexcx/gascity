@@ -134,6 +134,7 @@ go_test(
         "native_dolt_store_reconnect_test.go",
         "native_dolt_store_test.go",
         "native_dolt_store_update_retry_test.go",
+        "native_retention_page_test.go",
         "native_step_topology_test.go",
         "query_ids_test.go",
         "query_seek_test.go",

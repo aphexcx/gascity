@@ -20,6 +20,9 @@ const (
 	SortDefault     SortOrder = ""
 	SortCreatedAsc  SortOrder = "created_asc"
 	SortCreatedDesc SortOrder = "created_desc"
+	// SortCreatedDescIDAsc orders newest first with ascending ID ties. It
+	// matches the native beads keyset order, allowing exact bounded pages.
+	SortCreatedDescIDAsc SortOrder = "created_desc_id_asc"
 )
 
 // TierMode selects which storage tier(s) a List query reads from.
@@ -93,10 +96,12 @@ func TierModeFromOpts(opts []QueryOpt) TierMode {
 // Queries are conjunctive: every populated field must match. A zero-value query
 // is rejected unless AllowScan is true.
 type ListQuery struct {
-	Status   string
-	Type     string
-	Label    string
-	Assignee string
+	Status string
+	Type   string
+	Label  string
+	// ExcludeLabels rejects a row carrying any of these labels.
+	ExcludeLabels []string
+	Assignee      string
 	// Assignees matches beads assigned to any listed assignee.
 	// It is mutually exclusive with Assignee; call Validate to enforce that contract.
 	Assignees []string
@@ -131,6 +136,9 @@ type ListQuery struct {
 	// caller does not need labels for change detection. Stores that cannot
 	// omit labels may ignore it.
 	SkipLabels bool
+	// SkipDependencies allows backends to omit dependency hydration when the
+	// caller does not use ParentID or dependency details from returned beads.
+	SkipDependencies bool
 	// Live bypasses CachingStore and reads from the backing store. Other Store
 	// implementations ignore it. Use it only for lifecycle gates that must
 	// observe external mutations immediately.
@@ -162,14 +170,10 @@ type ListQuery struct {
 	TierMode TierMode
 	// SeekAfter is an exclusive keyset boundary for cursor pagination: only
 	// rows STRICTLY AFTER the boundary in the query's sort order match. It
-	// requires an explicit Sort (Validate enforces this) because a seek
-	// without a total order is meaningless. Every backend resolves the compound
-	// (created_at, id) boundary Go-side via Matches to keep the tie-break
-	// byte-identical to the in-memory sort — a SQL/CLI seek predicate is
-	// expressible but risks collation/precision divergence. Because the filter
-	// is Go-side, it must run BEFORE any native row limit — a limit applied
-	// first silently drops page rows — so seeked reads fetch a superset and cut
-	// the page in Go.
+	// requires an explicit Sort (Validate enforces this). Backends resolve the
+	// compound boundary via Matches before applying a limit unless they can
+	// express the exact order natively. Native Dolt pushes SortCreatedDescIDAsc
+	// and its boundary together; other orders retain their Go-side filtering.
 	SeekAfter *SeekBoundary
 }
 
@@ -185,7 +189,7 @@ func (q ListQuery) Validate() error {
 	if q.Assignee != "" && len(q.Assignees) > 0 {
 		return errors.New("ListQuery: Assignee and Assignees are mutually exclusive")
 	}
-	if q.SeekAfter != nil && q.Sort != SortCreatedAsc && q.Sort != SortCreatedDesc {
+	if q.SeekAfter != nil && q.Sort != SortCreatedAsc && q.Sort != SortCreatedDesc && q.Sort != SortCreatedDescIDAsc {
 		return errors.New("ListQuery: SeekAfter requires an explicit created_at sort order")
 	}
 	return nil
@@ -264,6 +268,11 @@ func (q ListQuery) Matches(b Bead) bool {
 	if q.Label != "" && !beadHasLabel(b, q.Label) {
 		return false
 	}
+	for _, label := range q.ExcludeLabels {
+		if beadHasLabel(b, label) {
+			return false
+		}
+	}
 	if q.Assignee != "" && b.Assignee != q.Assignee {
 		return false
 	}
@@ -326,6 +335,8 @@ func (sb *SeekBoundary) After(b Bead, sort SortOrder) bool {
 			return true
 		}
 		return b.CreatedAt.Equal(sb.CreatedAt) && b.ID < sb.ID
+	case SortCreatedDescIDAsc:
+		return b.CreatedAt.Before(sb.CreatedAt) || (b.CreatedAt.Equal(sb.CreatedAt) && b.ID > sb.ID)
 	default:
 		// Validate rejects this shape; match nothing rather than guess.
 		return false
@@ -486,9 +497,12 @@ func sortBeadsForQuery(items []Bead, order SortOrder) {
 			}
 			return items[i].CreatedAt.Before(items[j].CreatedAt)
 		})
-	case SortCreatedDesc:
+	case SortCreatedDesc, SortCreatedDescIDAsc:
 		sort.Slice(items, func(i, j int) bool {
 			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+				if order == SortCreatedDescIDAsc {
+					return items[i].ID < items[j].ID
+				}
 				return items[i].ID > items[j].ID
 			}
 			return items[i].CreatedAt.After(items[j].CreatedAt)
