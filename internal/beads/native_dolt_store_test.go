@@ -2948,6 +2948,13 @@ func (s *nativeDoltMemStorage) SearchIssues(_ context.Context, _ string, filter 
 	if err != nil {
 		return nil, err
 	}
+	query := ListQuery{IncludeClosed: true, TierMode: TierBoth, IDs: filter.IDs, Metadata: filter.MetadataFields}
+	if filter.IssueType != nil {
+		query.Type = string(*filter.IssueType)
+	}
+	if filter.CreatedBefore != nil {
+		query.CreatedBefore = *filter.CreatedBefore
+	}
 	issues := make([]*beadslib.Issue, 0, len(beads))
 	for _, bead := range beads {
 		issue, err := nativeIssueFromBead(bead)
@@ -2959,6 +2966,19 @@ func (s *nativeDoltMemStorage) SearchIssues(_ context.Context, _ string, filter 
 		}
 		if err != nil {
 			return nil, err
+		}
+		candidate, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return nil, err
+		}
+		if !query.Matches(candidate) {
+			continue
+		}
+		if filter.ParentID != nil && !strings.HasPrefix(issue.ID, *filter.ParentID+".") &&
+			!slices.ContainsFunc(issue.Dependencies, func(dep *beadslib.Dependency) bool {
+				return dep.Type == beadslib.DepParentChild && dep.DependsOnID == *filter.ParentID
+			}) {
+			continue
 		}
 		issues = append(issues, issue)
 	}

@@ -86,3 +86,38 @@ func TestNativeExactPagePropagatesLaterReadFailure(t *testing.T) {
 		t.Fatalf("error=%v, want later-page failure", err)
 	}
 }
+
+func TestNativeFixtureFiltersBeforeLimiting(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := []Bead{
+		{ID: "older", Status: "open", Type: "epic", ParentID: "other", Metadata: map[string]string{"key": "other"}, CreatedAt: at},
+		{ID: "newer", Status: "open", Type: "task", ParentID: "target", Metadata: map[string]string{"key": "value"}, CreatedAt: at.Add(time.Hour)},
+	}
+	for _, tc := range []struct {
+		name  string
+		query ListQuery
+		want  string
+	}{
+		{"type", ListQuery{Type: "task", Sort: SortCreatedAsc}, "newer"},
+		{"parent", ListQuery{ParentID: "target", Sort: SortCreatedAsc}, "newer"},
+		{"metadata", ListQuery{Metadata: map[string]string{"key": "value"}, Sort: SortCreatedAsc}, "newer"},
+		{"created before", ListQuery{AllowScan: true, CreatedBefore: at.Add(time.Minute), Sort: SortCreatedDesc, AllowBackingCreatedLimit: true}, "older"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := newNativeDoltMemStorage()
+			storage.store = NewMemStoreFrom(len(rows), rows, []Dep{
+				{IssueID: "older", DependsOnID: "other", Type: "parent-child"},
+				{IssueID: "newer", DependsOnID: "target", Type: "parent-child"},
+			})
+			q := tc.query
+			q.Limit = 1
+			got, err := newNativeDoltStoreForTest(storage).List(q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ID != tc.want {
+				t.Fatalf("got %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
