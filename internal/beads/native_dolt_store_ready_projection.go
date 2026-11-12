@@ -76,7 +76,7 @@ func (s *NativeDoltStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, e
 	}
 
 	var projection map[string]bool
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "ready-projection", func(ctx context.Context, storage beadslib.Storage) error {
 		querier, ok := beadslib.AsBlockedQuerier(storage)
 		if !ok {
 			return fmt.Errorf("native ready projection: %w: storage %T does not expose beads.BlockedQuerier",

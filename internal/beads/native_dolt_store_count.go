@@ -36,24 +36,9 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
 	}
 	var n int
-	err := s.withReadRetry(func(readCtx context.Context, storage beadslib.Storage) error {
-		// The Counter contract promises the caller's ctx cancels the backing
-		// query, but withReadRetry runs fn under its own retry-budget context.
-		// Derive a context canceled by either, and surface the caller's
-		// cancellation as the context error itself so the retry loop treats
-		// it as terminal instead of reconnect-worthy.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		countCtx, cancel := context.WithCancel(readCtx)
-		defer cancel()
-		stop := context.AfterFunc(ctx, cancel)
-		defer stop()
-		total, err := storage.CountIssues(countCtx, "", nativeIssueFilterFromListQuery(query))
+	err := s.withReadRetry(ctx, "count", func(readCtx context.Context, storage beadslib.Storage) error {
+		total, err := storage.CountIssues(readCtx, "", nativeIssueFilterFromListQuery(query))
 		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
 			return err
 		}
 		n = int(total)

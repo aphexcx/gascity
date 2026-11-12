@@ -302,6 +302,10 @@ func OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx context.Con
 type NativeDoltStore struct {
 	mu      sync.RWMutex
 	storage beadslib.Storage
+	// readGates serialize each read kind across its entire retry chain. Their
+	// separate mutex never waits for a storage call holding mu.
+	readMu    sync.Mutex
+	readGates map[string]chan struct{}
 	// generation increments on every successful reconnect. A read that fails
 	// with a transient connection error records the generation it observed and
 	// asks reconnect to swap the dead handle only if no other reader already did.
@@ -574,8 +578,9 @@ const (
 	// error, plus the restart) so a read spanning a rebind recovers rather than
 	// failing, while still failing fast for a genuinely down server.
 	nativeReadRetryBudget = 90 * time.Second
-	// nativeReadRetryBackoff spaces reconnect-and-retry passes.
-	nativeReadRetryBackoff = 200 * time.Millisecond
+	// nativeReadRetryBackoff is the initial delay between read attempts.
+	nativeReadRetryBackoff    = 200 * time.Millisecond
+	nativeReadRetryMaxBackoff = 5 * time.Second
 )
 
 // withReadRetry runs a read against the native storage handle, transparently
@@ -587,6 +592,10 @@ const (
 // reopen hook, which re-resolves the CURRENT managed Dolt port (restarting the
 // server if needed) and returns a fresh handle bound to the live server.
 // Reconnect is single-flight across concurrent readers via the generation guard.
+// Calls of the same kind share a gate on this handle. Queue time consumes the
+// same budget as storage, reconnect, and exponentially backed-off retries.
+// This bounds gc callers; retries internal to the storage library and abandoned
+// statements still running on the server are outside this gate's control.
 // The loop is deadline-bounded (nativeReadRetryBudget) rather than a fixed
 // attempt count so it spans the whole rebind window. Non-transient errors
 // (ErrNotFound, decode failures) return immediately, and a store without a
@@ -599,7 +608,7 @@ const (
 // long-lived provider-store handle had no equivalent recovery — so a rig store's
 // reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
 // timeout" after a managed-Dolt rebind instead of recovering.
-func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storage) error) error {
+func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn func(context.Context, beadslib.Storage) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
@@ -607,16 +616,40 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 	if s.readRetryBudgetOverride > 0 {
 		budget = s.readRetryBudgetOverride
 	}
-	// One wall-clock context bounds the WHOLE chain — the read, the reconnect
+	// One wall-clock context bounds the WHOLE chain — queuing, the read, the reconnect
 	// (env re-resolution + recovery + reopen), the retried read, and the backoff.
 	// Every step derives its deadline from this ctx and is canceled in-flight
 	// when it expires, so the total cannot stack per-call timeouts past budget.
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
+	s.readMu.Lock()
+	if s.readGates == nil {
+		s.readGates = make(map[string]chan struct{})
+	}
+	gate := s.readGates[kind]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		s.readGates[kind] = gate
+	}
+	s.readMu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return nativeReadRetryBudgetError(ctx.Err(), nil)
+	}
+	backoff := nativeReadRetryBackoff
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nativeReadRetryBudgetError(ctxErr, nil)
+		}
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
 			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			release()
+			return nativeReadRetryBudgetError(ctxErr, nil)
 		}
 		opErr := fn(ctx, storage)
 		release()
@@ -650,8 +683,9 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		select {
 		case <-ctx.Done():
 			return nativeReadRetryBudgetError(ctx.Err(), opErr)
-		case <-time.After(nativeReadRetryBackoff):
+		case <-time.After(backoff):
 		}
+		backoff = min(backoff*2, nativeReadRetryMaxBackoff)
 	}
 }
 
@@ -1081,7 +1115,7 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 // Get retrieves a bead by ID from the upstream beads storage layer.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	var out Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "get", func(ctx context.Context, storage beadslib.Storage) error {
 		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
 			IDs:                 []string{id},
 			IncludeDependencies: true,
@@ -1418,7 +1452,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "list", func(ctx context.Context, storage beadslib.Storage) error {
 		filter := nativeIssueFilterFromListQuery(query)
 		issues, err := storage.SearchIssues(ctx, "", filter)
 		if err != nil {
@@ -1461,7 +1495,7 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(queries)
 	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "ready", func(ctx context.Context, storage beadslib.Storage) error {
 		var beads []Bead
 		seen := make(map[string]bool)
 		now := time.Now().UTC()
@@ -2091,7 +2125,7 @@ func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
 // DepList returns dependencies for a bead.
 func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
 	var out []Dep
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "dep-list", func(ctx context.Context, storage beadslib.Storage) error {
 		deps, err := s.depList(ctx, storage, id, direction)
 		if err != nil {
 			return err
@@ -2169,7 +2203,7 @@ func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool
 		metadata string
 		carried  bool
 	)
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+	err := s.withReadRetry(context.Background(), "dep-metadata", func(ctx context.Context, storage beadslib.Storage) error {
 		querier, ok := beadslib.AsDependentQuerier(storage)
 		if !ok {
 			return fmt.Errorf("reading dependency metadata %s -> %s: backing storage exposes no dependency-record read", issueID, dependsOnID)
