@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -32,11 +33,14 @@ func TestNativeExactPagesFillAfterResidualParentFiltering(t *testing.T) {
 			calls := 0
 			storage := &nativeDoltStorageSpy{searchIssues: func(_ context.Context, _ string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
 				calls++
-				if f.Limit != 2 || f.ParentID == nil || *f.ParentID != "root" {
+				if len(f.IDs) == 0 && (f.Limit != 2 || f.ParentID == nil || *f.ParentID != "root") {
 					t.Fatalf("backing query lost its bound or parent: limit=%d parent=%v", f.Limit, f.ParentID)
 				}
 				var page []*beadslib.Issue
 				for _, b := range candidates {
+					if len(f.IDs) > 0 && !slices.Contains(f.IDs, b.ID) {
+						continue
+					}
 					if f.AfterCreatedAt != nil && (b.CreatedAt.After(*f.AfterCreatedAt) || (b.CreatedAt.Equal(*f.AfterCreatedAt) && b.ID <= f.AfterID)) {
 						continue
 					}
@@ -74,7 +78,10 @@ func TestNativeExactPagesFillAfterResidualParentFiltering(t *testing.T) {
 func TestNativeExactPagePropagatesLaterReadFailure(t *testing.T) {
 	want := errors.New("later page unavailable")
 	calls := 0
-	storage := &nativeDoltStorageSpy{searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+	storage := &nativeDoltStorageSpy{searchIssues: func(_ context.Context, _ string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+		if len(f.IDs) > 0 {
+			return []*beadslib.Issue{{ID: "root.0", Status: beadslib.StatusOpen, CreatedAt: time.Unix(1, 0)}}, nil
+		}
 		calls++
 		if calls == 1 {
 			return []*beadslib.Issue{{ID: "root.0", Status: beadslib.StatusOpen, CreatedAt: time.Unix(1, 0)}}, nil

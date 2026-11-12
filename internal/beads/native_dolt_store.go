@@ -640,14 +640,14 @@ func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn 
 	}
 	backoff := nativeReadRetryBackoff
 	for {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 			return nativeReadRetryBudgetError(ctxErr, nil)
 		}
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
 			return err
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 			release()
 			return nativeReadRetryBudgetError(ctxErr, nil)
 		}
@@ -656,7 +656,7 @@ func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn 
 		if opErr == nil {
 			return nil
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 			return nativeReadRetryBudgetError(ctxErr, opErr)
 		}
 		reopen, closed := s.reopenState()
@@ -671,7 +671,7 @@ func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn 
 			// A reconnect that itself fails transiently (server mid-restart) is
 			// worth another pass while the budget remains; a non-transient
 			// reconnect failure or an exhausted budget is terminal.
-			if ctxErr := ctx.Err(); ctxErr != nil {
+			if ctxErr := nativeReadContextError(ctx); ctxErr != nil {
 				return nativeReadRetryBudgetError(ctxErr, reconnectErr)
 			}
 			if !isNativeDoltTransientReadError(rcErr) {
@@ -687,6 +687,18 @@ func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn 
 		}
 		backoff = min(backoff*2, nativeReadRetryMaxBackoff)
 	}
+}
+
+func nativeReadContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A queued caller can acquire the gate before the context timer is
+	// scheduled at the same instant. The absolute deadline still applies.
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
@@ -1462,7 +1474,14 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 				return err
 			}
 			s.noteRows(len(issues))
-			for _, issue := range issues {
+			page := issues
+			if exactPages {
+				page, err = canonicalNativePage(ctx, storage, issues, filter.IncludeDependencies)
+				if err != nil {
+					return err
+				}
+			}
+			for _, issue := range page {
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
@@ -1478,10 +1497,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 				out = ApplyListQuery(rows, query)
 				return nil
 			}
-			// Native parent queries include inferred ID-prefix children and all
-			// parent edges, while gc filters the projected ParentID. A short
-			// filtered page therefore does not prove exhaustion. Advance by the
-			// raw page boundary until the requested page is full or SQL ends.
+			// Residual parent filtering and canonical-tier resolution can shorten
+			// a full backing page without exhausting the result. Advance by the
+			// raw boundary until the requested page is full or SQL ends.
 			last := issues[len(issues)-1]
 			if filter.AfterCreatedAt != nil {
 				boundary := SeekBoundary{CreatedAt: *filter.AfterCreatedAt, ID: filter.AfterID}
@@ -1497,6 +1515,74 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// canonicalNativePage resolves cross-table ID collisions before residual
+// filtering. Only IDs present in the durable table need rehydration. An
+// ID-only lookup capped at its ID count includes every matching copy in each
+// physical table, so the library can apply its wisp precedence.
+// A canonical row at a different creation time belongs to a different page;
+// defer it to that raw boundary instead of moving the caller's cursor past
+// unseen rows. The raw page, not this filtered projection, controls exhaustion.
+func canonicalNativePage(ctx context.Context, storage beadslib.Storage, raw []*beadslib.Issue, includeDependencies bool) ([]*beadslib.Issue, error) {
+	ids := make([]string, 0, len(raw))
+	requested := make(map[string]bool, len(raw))
+	for _, issue := range raw {
+		if issue == nil {
+			return nil, errors.New("nil issue in native exact page")
+		}
+		if !requested[issue.ID] {
+			requested[issue.ID] = true
+			ids = append(ids, issue.ID)
+		}
+	}
+	canonical := make(map[string]*beadslib.Issue, len(ids))
+	for _, issue := range raw {
+		canonical[issue.ID] = issue
+	}
+	for start := 0; start < len(ids); start += 1000 {
+		batch := ids[start:min(start+1000, len(ids))]
+		durable, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs: batch, Limit: len(batch), SortBy: "created", SkipWisps: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("checking native page durable copies: %w", err)
+		}
+		candidates := make([]string, 0, len(durable))
+		for _, issue := range durable {
+			if issue == nil {
+				return nil, errors.New("nil issue in native durable lookup")
+			}
+			if requested[issue.ID] {
+				candidates = append(candidates, issue.ID)
+				delete(canonical, issue.ID)
+			}
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		rows, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs: candidates, Limit: len(candidates), SortBy: "created", IncludeDependencies: includeDependencies,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resolving canonical native page: %w", err)
+		}
+		for _, issue := range rows {
+			if issue == nil {
+				return nil, errors.New("nil issue in canonical native lookup")
+			}
+			if requested[issue.ID] {
+				canonical[issue.ID] = issue
+			}
+		}
+	}
+	page := make([]*beadslib.Issue, 0, len(raw))
+	for _, issue := range raw {
+		if current := canonical[issue.ID]; current != nil && current.CreatedAt.Equal(issue.CreatedAt) {
+			page = append(page, current)
+		}
+	}
+	return page, nil
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
