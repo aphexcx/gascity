@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // Counts rows returned by the backing command, before BdStore cuts the page.
 func TestClosedRetentionFallbackBackingCost(t *testing.T) {
 	for _, shape := range []struct{ n, orders int }{{500, 5}, {10001, 1}, {61988, 67}} {
 		t.Run(fmt.Sprintf("%d_rows_%d_orders", shape.n, shape.orders), func(t *testing.T) {
-			at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			type issue struct {
 				ID        string    `json:"id"`
 				Title     string    `json:"title"`
@@ -25,9 +25,8 @@ func TestClosedRetentionFallbackBackingCost(t *testing.T) {
 				Labels    []string  `json:"labels"`
 			}
 			rows := make([]issue, shape.n)
-			for i := range rows {
-				name := fmt.Sprintf("sample-%02d", i%shape.orders)
-				rows[i] = issue{fmt.Sprintf("sample-%06d", i), "order:" + name, "closed", "task", at, []string{"order-tracking", "order-run:" + name}}
+			for i, b := range beadstest.RetentionRows(shape.n, shape.orders) {
+				rows[i] = issue{b.ID, b.Title, b.Status, b.Type, b.CreatedAt, b.Labels}
 			}
 			fetched, calls := 0, 0
 			store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
@@ -72,5 +71,18 @@ func TestClosedRetentionFallbackBackingCost(t *testing.T) {
 				t.Fatalf("fallback repeated the backing fetch: rows=%d calls=%d; want at most N=%d rows and 2 tier commands", fetched, calls, shape.n)
 			}
 		})
+	}
+}
+
+func TestClosedRetentionRejectsBdPartialResults(t *testing.T) {
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "query" {
+			return []byte("[]"), nil
+		}
+		return []byte(`[{"id":"valid","title":"order:sample","status":"closed","labels":["order-tracking","order-run:sample"]},{"id":"invalid","title":"order:sample","status":"closed","metadata":[],"labels":["order-tracking","order-run:sample"]}]`), nil
+	})
+	runs, err := NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	if len(runs) != 0 || !beads.IsPartialResult(err) {
+		t.Fatalf("unclassified bd partial result must not authorize retention: runs=%v err=%v", runs, err)
 	}
 }
