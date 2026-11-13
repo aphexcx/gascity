@@ -39,23 +39,50 @@ func (s *queuedOrderListStore) ListWithQueueContext(ctx context.Context, _ beads
 }
 
 func TestOrderGateTimeoutCancelsQueuedDescendantList(t *testing.T) {
+	for name, wrap := range retentionProductionWrappers() {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := &queuedOrderListStore{Store: beads.NewMemStore(), release: make(chan struct{})}
+				idx := newOrderDispatchTrackingIndex(io.Discard)
+				idx.entries["scope"] = map[string]orderTrackingSummary{"sample": {openRoots: []beads.Bead{{ID: "root", Type: "molecule", Status: "open"}}}}
+				m := &memoryOrderDispatcher{stderr: io.Discard}
+				cand := &orderDispatchCandidate{order: orders.Order{Name: "sample"}, scoped: "sample", gateStores: []beads.Store{wrap(store)}, gateStoreKeys: []string{"scope"}}
+				if !m.openWorkGateShut(context.Background(), cand, idx, time.Now()) {
+					t.Error("non-idempotent order must stay blocked on timeout")
+				}
+				synctest.Wait()
+				if !store.exited.Load() {
+					t.Error("timed-out order leaves its list queued on the shared handle")
+				}
+				close(store.release)
+				synctest.Wait()
+				if got := store.backingCalls.Load(); got != 0 {
+					t.Errorf("abandoned gate performed %d backing reads after its timeout", got)
+				}
+			})
+		})
+	}
+}
+
+func TestOrderGateCancellationDoesNotPoisonTrackingIndex(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &queuedOrderListStore{Store: beads.NewMemStore(), release: make(chan struct{})}
 		idx := newOrderDispatchTrackingIndex(io.Discard)
-		idx.entries["scope"] = map[string]orderTrackingSummary{"sample": {openRoots: []beads.Bead{{ID: "root", Type: "molecule", Status: "open"}}}}
-		m := &memoryOrderDispatcher{stderr: io.Discard}
-		cand := &orderDispatchCandidate{order: orders.Order{Name: "sample"}, scoped: "sample", gateStores: []beads.Store{store}, gateStoreKeys: []string{"scope"}}
-		if !m.openWorkGateShut(context.Background(), cand, idx, time.Now()) {
-			t.Error("non-idempotent order must stay blocked on timeout")
+		stores := []beads.Store{store}
+		keys := []string{"scope"}
+		_, err := gateOpenWorkContextBounded(context.Background(), orderGateTimeout, "first", func(ctx context.Context) (bool, error) {
+			return idx.hasOpenTracking(orderGateStoresWithContext(ctx, stores), keys, "first")
+		})
+		if err == nil {
+			t.Fatal("blocked first read must time out")
 		}
 		synctest.Wait()
-		if !store.exited.Load() {
-			t.Error("timed-out order leaves its list queued on the shared handle")
-		}
 		close(store.release)
-		synctest.Wait()
-		if got := store.backingCalls.Load(); got != 0 {
-			t.Errorf("abandoned gate performed %d backing reads after its timeout", got)
+		if has, err := idx.hasOpenTracking(stores, keys, "next"); err != nil || has {
+			t.Fatalf("later order inherited an expired caller's index failure: has=%v err=%v", has, err)
+		}
+		if store.backingCalls.Load() != 1 {
+			t.Errorf("later order did not get a fresh backing read: %d", store.backingCalls.Load())
 		}
 	})
 }

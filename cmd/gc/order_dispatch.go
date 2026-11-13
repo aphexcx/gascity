@@ -1384,6 +1384,11 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-run beads: %w", err)
+		// An expired gate owns this cancellation; the shared store may still
+		// serve later orders in the tick. Do not poison their index entry.
+		if errors.Is(err, context.Canceled) {
+			return nil, wrapped
+		}
 		idx.mu.Lock()
 		_, seen := idx.errs[storeKey]
 		idx.errs[storeKey] = wrapped

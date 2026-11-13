@@ -12,21 +12,23 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/orders"
 	beadslib "github.com/steveyegge/beads"
 )
 
 type retentionNativeStorage struct {
 	beads.NativeStorage
-	rows   map[string]*beadslib.Issue
-	member bool
+	rows        map[string]*beadslib.Issue
+	member      bool
+	largestPage int
 }
 
 func (s *retentionNativeStorage) SearchIssues(_ context.Context, _ string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
 	var out []*beadslib.Issue
-	if f.SkipWisps {
-		return nil, nil
-	}
 	for _, row := range s.rows {
+		if f.SkipWisps && row.Ephemeral || f.Ephemeral != nil && row.Ephemeral != *f.Ephemeral {
+			continue
+		}
 		if len(f.IDs) > 0 && !slices.Contains(f.IDs, row.ID) {
 			continue
 		}
@@ -58,6 +60,18 @@ func (s *retentionNativeStorage) SearchIssues(_ context.Context, _ string, f bea
 		}
 		out = append(out, row)
 	}
+	if !f.SkipWisps {
+		canonical := make(map[string]*beadslib.Issue)
+		for _, row := range out {
+			if prior := canonical[row.ID]; prior == nil || row.Ephemeral {
+				canonical[row.ID] = row
+			}
+		}
+		out = out[:0]
+		for _, row := range canonical {
+			out = append(out, row)
+		}
+	}
 	slices.SortFunc(out, func(a, b *beadslib.Issue) int {
 		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
 			return c
@@ -67,6 +81,7 @@ func (s *retentionNativeStorage) SearchIssues(_ context.Context, _ string, f bea
 	if f.Limit > 0 && len(out) > f.Limit {
 		out = out[:f.Limit]
 	}
+	s.largestPage = max(s.largestPage, len(out))
 	return out, nil
 }
 
@@ -81,6 +96,73 @@ func (s *retentionNativeStorage) GetDependenciesWithMetadata(context.Context, st
 
 func (s *retentionNativeStorage) GetDependentsWithMetadata(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error) {
 	return nil, nil
+}
+
+func retentionProductionWrappers() map[string]func(beads.Store) beads.Store {
+	return map[string]func(beads.Store) beads.Store{
+		"bare":   func(s beads.Store) beads.Store { return s },
+		"policy": func(s beads.Store) beads.Store { return wrapStoreWithBeadPolicies(s, nil) },
+		"sweep":  func(s beads.Store) beads.Store { return orderTrackingSweepScopedStore{Store: s} },
+		"sweep_policy": func(s beads.Store) beads.Store {
+			return orderTrackingSweepScopedStore{Store: wrapStoreWithBeadPolicies(s, nil)}
+		},
+		"policy_cache": func(s beads.Store) beads.Store {
+			return wrapStoreWithBeadPolicies(beads.NewCachingStore(s, nil), nil)
+		},
+		"emitting": func(s beads.Store) beads.Store { return &emittingClassStore{Store: s} },
+		"sweep_policy_cache_emitting": func(s beads.Store) beads.Store {
+			return orderTrackingSweepScopedStore{Store: wrapStoreWithBeadPolicies(beads.NewCachingStore(&emittingClassStore{Store: s}, nil), nil)}
+		},
+	}
+}
+
+func TestRetentionProductionWrappersBoundBackingPages(t *testing.T) {
+	for name, wrap := range retentionProductionWrappers() {
+		t.Run(name, func(t *testing.T) {
+			storage := &retentionNativeStorage{rows: make(map[string]*beadslib.Issue)}
+			for i := 0; i < 1001; i++ {
+				id := fmt.Sprintf("run-%04d", i)
+				storage.rows[id] = &beadslib.Issue{
+					ID: id, Title: "order:sample", Status: beadslib.StatusClosed,
+					IssueType: beadslib.TypeTask, CreatedAt: time.Unix(1, 0), Ephemeral: true,
+					Metadata: []byte("{}"), Labels: []string{"order-tracking", "order-run:sample"},
+					Dependencies: []*beadslib.Dependency{{IssueID: id, DependsOnID: "root", Type: beadslib.DepParentChild}},
+				}
+			}
+			store := wrap(beads.NewNativeDoltStoreWithStorage(storage, "test"))
+			runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+			if err != nil || len(runs) != 1001 {
+				t.Fatalf("history rows=%d err=%v", len(runs), err)
+			}
+			if storage.largestPage > 1000 {
+				t.Errorf("history fetched %d rows in one backing result", storage.largestPage)
+			}
+			storage.largestPage = 0
+			children, err := listOrderWispPages(beads.HandlesFor(store).Live, beads.ListQuery{ParentID: "root", IncludeClosed: true})
+			if err != nil || len(children) != 1001 {
+				t.Fatalf("descendant rows=%d err=%v", len(children), err)
+			}
+			if storage.largestPage > 1000 {
+				t.Errorf("descendant guard fetched %d rows in one backing result", storage.largestPage)
+			}
+			// A closed durable copy must not make its open canonical wisp
+			// eligible for retention when decorators preserve exact paging.
+			now := time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC)
+			storage.rows = make(map[string]*beadslib.Issue)
+			for i := 0; i < 10; i++ {
+				id := fmt.Sprintf("recent-%02d", i)
+				storage.rows[id] = &beadslib.Issue{ID: id, Title: "order:sample", Status: beadslib.StatusClosed, CreatedAt: now.Add(-time.Hour), Metadata: []byte("{}"), Ephemeral: true, Labels: []string{"order-tracking", "order-run:sample"}}
+			}
+			stale := &beadslib.Issue{ID: "overlap", Title: "order:sample", Status: beadslib.StatusClosed, CreatedAt: now.Add(-30 * 24 * time.Hour), Metadata: []byte("{}"), Labels: []string{"order-tracking", "order-run:sample"}}
+			canonical := *stale
+			canonical.Status, canonical.Ephemeral = beadslib.StatusOpen, true
+			storage.rows["durable-copy"], storage.rows["canonical-copy"] = stale, &canonical
+			eligible, err := countClosedOrderTrackingRetentionEligible([]beads.Store{store}, now, orderTrackingRetentionPolicy{retainLast: 10, deleteAfterClose: 7 * 24 * time.Hour}, nil)
+			if err != nil || eligible != 0 {
+				t.Errorf("open canonical wisp became eligible through a stale durable copy: count=%d err=%v", eligible, err)
+			}
+		})
+	}
 }
 
 func TestRetentionCorruptRowsKeepRootsAndContinue(t *testing.T) {

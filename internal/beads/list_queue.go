@@ -9,7 +9,9 @@ type QueuedListReader interface {
 	ListWithQueueContext(context.Context, ListQuery) ([]Bead, error)
 }
 
-func listWithQueueContext(ctx context.Context, reader interface {
+// ListWithQueueContext forwards cancellation through a reader's optional queue
+// capability. Readers without that capability retain their normal List behavior.
+func ListWithQueueContext(ctx context.Context, reader interface {
 	List(ListQuery) ([]Bead, error)
 }, query ListQuery,
 ) ([]Bead, error) {
@@ -38,7 +40,7 @@ type queuedListStore struct {
 }
 
 func (s queuedListStore) List(q ListQuery) ([]Bead, error) {
-	return listWithQueueContext(s.ctx, s.Store, q)
+	return ListWithQueueContext(s.ctx, s.Store, q)
 }
 func (s queuedListStore) BoundsListPages(q ListQuery) bool { return ReaderBoundsListPages(s.Store, q) }
 func (s queuedListStore) Handles() StoreHandles {
@@ -53,7 +55,7 @@ type queuedLiveReader struct {
 }
 
 func (r queuedLiveReader) List(q ListQuery) ([]Bead, error) {
-	return listWithQueueContext(r.ctx, r.LiveReader, q)
+	return ListWithQueueContext(r.ctx, r.LiveReader, q)
 }
 
 func (r queuedLiveReader) BoundsListPages(q ListQuery) bool {
@@ -62,10 +64,10 @@ func (r queuedLiveReader) BoundsListPages(q ListQuery) bool {
 
 func (r logicalLiveStoreReader) ListWithQueueContext(ctx context.Context, q ListQuery) ([]Bead, error) {
 	q.Live, q.TierMode = true, TierBoth
-	return listWithQueueContext(ctx, r.store, q)
+	return ListWithQueueContext(ctx, r.store, q)
 }
 
 func (r liveStoreReader) ListWithQueueContext(ctx context.Context, q ListQuery) ([]Bead, error) {
 	q.Live, q.TierMode = true, TierBoth
-	return listWithQueueContext(ctx, r.store.backing, q)
+	return ListWithQueueContext(ctx, r.store.backing, q)
 }
