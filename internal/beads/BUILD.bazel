@@ -135,6 +135,7 @@ go_test(
         "native_dolt_store_test.go",
         "native_dolt_store_update_retry_test.go",
         "native_read_retry_serial_test.go",
+        "native_retention_corrupt_test.go",
         "native_retention_page_test.go",
         "native_retention_residual_test.go",
         "native_step_topology_test.go",
