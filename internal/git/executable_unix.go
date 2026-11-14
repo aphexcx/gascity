@@ -10,7 +10,9 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
-func configureExecutableProbe(cmd *exec.Cmd) func() error {
+// ConfigureCommandCancellation makes cancellation stop a Git command's process
+// group. Call the returned cleanup after Wait too, to stop surviving descendants.
+func ConfigureCommandCancellation(cmd *exec.Cmd) func() error {
 	processgroup.StartCommandInNewGroup(cmd)
 	cleanup := sync.OnceValue(func() error {
 		if cmd.Process == nil {

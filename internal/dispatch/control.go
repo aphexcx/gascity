@@ -1316,7 +1316,7 @@ func loadAttemptRouteConfigE(cityPath string) (*config.City, error) {
 	if strings.TrimSpace(cityPath) == "" {
 		return nil, nil
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick})
 	if err != nil {
 		return nil, fmt.Errorf("loading attempt-route config from %s: %w", cityPath, err)
 	}

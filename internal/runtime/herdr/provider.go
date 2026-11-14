@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -103,6 +105,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
+		return err
+	}
 	if p.IsRunning(name) {
 		return runtime.ErrSessionExists
 	}
@@ -508,6 +513,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}
+	cacheexec.GuardCachedExecCommand(runCtx, c)
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w

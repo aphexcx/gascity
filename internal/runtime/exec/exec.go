@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 )
 
 // Provider implements [runtime.Provider] by delegating each operation to
@@ -26,6 +28,7 @@ import (
 // operation (treated as success for forward compatibility).
 type Provider struct {
 	script       string
+	cityPath     string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
 
@@ -55,6 +58,14 @@ func NewProvider(script string) *Provider {
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
 	}
+}
+
+// NewProviderForCity binds configuration validation to the city that selected
+// the script, independently of the caller's directory and environment.
+func NewProviderForCity(script, cityPath string) *Provider {
+	p := NewProvider(script)
+	p.cityPath = cityPath
+	return p
 }
 
 // run executes the script with the given args using the default timeout.
@@ -91,6 +102,7 @@ func (p *Provider) runStrictWithContext(parent context.Context, dur time.Duratio
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
 	// Run the adapter in its own process group with interrupt-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -191,6 +203,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
+	cacheexec.GuardConfiguredExecCommandForCity(context.Background(), cmd, p.cityPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -205,6 +218,11 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
+	defer cancel()
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+		return err
+	}
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
@@ -280,6 +298,11 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.)
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
+	defer cancel()
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+		return err
+	}
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
@@ -300,6 +323,11 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
+	defer cancel()
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+		return err
+	}
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
@@ -327,6 +355,11 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
 // degrades to a full reprovision (Stop+Start), which is still correct.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
+	defer cancel()
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+		return err
+	}
 	if p.supportsSeparableLaunch() {
 		return p.launchAgent(ctx, name, cfg)
 	}
@@ -384,6 +417,7 @@ func (p *Provider) startStartupWatch(
 ) (<-chan string, func() error, bool, error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
+	cacheexec.GuardConfiguredExecCommandForCity(watchCtx, cmd, p.cityPath)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -885,8 +919,12 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	command := shellQuote(argv)
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	if err := cacheexec.ValidateConfiguredShellCommand(cacheexec.WithCity(cmdCtx, p.cityPath), command, "", nil); err != nil {
+		return nil, -1, err
+	}
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
+	cacheexec.GuardConfiguredExecCommandForCity(cmdCtx, cmd, p.cityPath)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

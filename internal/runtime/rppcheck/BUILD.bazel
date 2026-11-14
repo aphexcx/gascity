@@ -5,7 +5,10 @@ go_library(
     srcs = ["rppcheck.go"],
     importpath = "github.com/gastownhall/gascity/internal/runtime/rppcheck",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/cacheexec",
+        "//internal/runtime",
+    ],
 )
 
 go_test(

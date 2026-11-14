@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 )
 
 // bdShowWatchInterval is the poll interval bd's own `show --watch` uses
@@ -247,6 +248,7 @@ func (r *bdWatchRunner) run(ctx context.Context, args []string, stdout, stderr i
 	scan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, scan)
 	start := time.Now()
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	err := cmd.Run()
 	exit := 0
 	if err != nil {

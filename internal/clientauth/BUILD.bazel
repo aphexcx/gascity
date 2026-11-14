@@ -5,6 +5,7 @@ go_library(
     srcs = ["clientauth.go"],
     importpath = "github.com/gastownhall/gascity/internal/clientauth",
     visibility = ["//:__subpackages__"],
+    deps = ["//internal/cacheexec"],
 )
 
 go_test(

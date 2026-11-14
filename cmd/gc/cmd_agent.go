@@ -56,17 +56,25 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 //
 // Revision reads from disk for anything the snapshot does not hold, so declining
 // it changes no revision value; see config.LoadOptions.SkipRevisionSnapshot.
-var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true}
+var skipRevisionSnapshot = config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick}
+
+func loadCityConfigFull(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	return loadCityConfigFSWithOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true}, warningWriter...)
+}
 
 // loadCityConfigFS is the testable variant of loadCityConfig that accepts a
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
+	return loadCityConfigFSWithOptions(fs, tomlPath, skipRevisionSnapshot, warningWriter...)
+}
+
+func loadCityConfigFSWithOptions(fs fsys.FS, tomlPath string, opts config.LoadOptions, warningWriter ...io.Writer) (*config.City, error) {
 	loadCityConfigCalls.Add(1)
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +125,7 @@ func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.Load
 // blocking load turns one `gc import install` into a hang for every other gc
 // process on the machine. An advisory load reports config.ErrRepoCacheBusy
 // instead and its caller degrades to "no pack state right now".
-var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true}
+var advisoryLoad = config.LoadOptions{SkipRevisionSnapshot: true, RepoCacheNonBlocking: true, RemoteCacheValidation: config.CacheValidationQuick}
 
 // loadCityConfigAdvisory loads city config for callers that would rather have
 // no answer than a slow one: eager pack-command discovery and shell

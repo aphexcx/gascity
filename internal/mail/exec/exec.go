@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
@@ -21,9 +22,10 @@ const messageNotFoundMarker = "gc-mail-error:not-found"
 
 // Provider implements [mail.Provider] by delegating to a user-supplied script.
 type Provider struct {
-	script  string
-	timeout time.Duration
-	ready   sync.Once // ensure-running called once
+	script   string
+	cityPath string
+	timeout  time.Duration
+	ready    sync.Once // ensure-running called once
 }
 
 // NewProvider returns an exec mail provider that delegates to the given script.
@@ -32,6 +34,13 @@ func NewProvider(script string) *Provider {
 		script:  script,
 		timeout: 30 * time.Second,
 	}
+}
+
+// NewProviderForCity binds configuration validation to the selecting city.
+func NewProviderForCity(script, cityPath string) *Provider {
+	p := NewProvider(script)
+	p.cityPath = cityPath
+	return p
 }
 
 // Send delegates to: script send <to> with JSON {"from":"...","subject":"...","body":"..."} on stdin.
@@ -247,6 +256,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	cmd.Stdin = bytes.NewReader(stdinData) // nil → empty reader → script reads EOF
 
+	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

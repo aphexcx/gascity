@@ -326,7 +326,10 @@ func TestCityRuntimeStartupContentRecovery(t *testing.T) {
 					t.Fatalf("session did not start inside dirty window: got %d, want %d; %s", got, starts+1, f.stderr.String())
 				}
 				acceptedAtStart := deliveredAccepted
-				wantRepair := !acceptedAtStart || !scopeRoot // a skipped PreStart is itself a repair obligation
+				if change == "unrelated_file" && !acceptedAtStart {
+					t.Fatal("QUICK skill materialization rejected an unrelated cache file")
+				}
+				wantRepair := !acceptedAtStart
 				started, err := f.store.Get(f.beadID)
 				if err != nil {
 					t.Fatal(err)

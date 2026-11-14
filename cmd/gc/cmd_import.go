@@ -43,7 +43,7 @@ var (
 	// (and so have no real cache content on disk for the loader to expand)
 	// can stub this too. See #5382.
 	validateComposedConfigAfterInstall = func(cityPath string) error {
-		_, err := loadCityConfig(cityPath, io.Discard)
+		_, err := loadCityConfigFull(cityPath, io.Discard)
 		return err
 	}
 )
@@ -106,6 +106,30 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
+		},
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			switch cmd.Name() {
+			case "list", "why", "status":
+				if cmd.Parent().Name() == "import" {
+					root, err := resolveImportRoot()
+					if err != nil {
+						return err
+					}
+					return config.ValidatePresentRemoteCaches(root)
+				}
+			}
+			return nil
+		},
+		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.HasSubCommands() {
+				return nil // bare command groups print help, without validation
+			}
+			// Mutation commands keep their repair behavior: validate the resulting
+			// caches, rather than refusing the damaged state they are fixing.
+			if root, err := resolveImportRoot(); err == nil {
+				return config.ValidatePresentRemoteCaches(root)
+			}
+			return nil // global credential/prune commands need no city
 		},
 	}
 	cmd.AddCommand(

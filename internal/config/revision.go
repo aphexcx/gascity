@@ -113,7 +113,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string) {
+func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string, mode CacheValidationMode) {
 	if p == nil || cfg == nil {
 		return
 	}
@@ -129,12 +129,12 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false, mode)
 			recordDir("pack:"+r.Name+":"+ref, topoDir)
 		}
 	}
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false, mode)
 		recordDir("city-pack:"+ref, topoDir)
 	}
 	if tracksPackV2Imports(cfg) {

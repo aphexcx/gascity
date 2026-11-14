@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
@@ -29,6 +30,42 @@ func writeScript(t *testing.T, dir, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestCachedPayloadRejectedBeforeAdapter(t *testing.T) {
+	for _, operation := range []string{"start", "provision", "launch", "relaunch", "exec"} {
+		t.Run(operation, func(t *testing.T) {
+			cacheexec.Reset()
+			t.Cleanup(cacheexec.Reset)
+			local, cached := t.TempDir(), t.TempDir()
+			marker := filepath.Join(local, "adapter-ran")
+			script := writeScript(t, local, "touch '"+marker+"'\n"+allOpsScript())
+			dirty := errors.New("dirty cached command payload")
+			cacheexec.Register(cached, func(context.Context) error { return dirty })
+			command := filepath.Join(cached, "run.sh")
+			p := NewProvider(script)
+			cfg := runtime.Config{Command: command, WorkDir: local}
+			var err error
+			switch operation {
+			case "start":
+				err = p.Start(t.Context(), "session", cfg)
+			case "provision":
+				err = p.provisionBox(t.Context(), "session", cfg)
+			case "launch":
+				err = p.launchAgent(t.Context(), "session", cfg)
+			case "relaunch":
+				err = p.Relaunch(t.Context(), "session", cfg)
+			case "exec":
+				_, _, err = p.Exec(t.Context(), "session", []string{command})
+			}
+			if !errors.Is(err, dirty) {
+				t.Errorf("payload was not refused: %v", err)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Errorf("adapter ran before payload validation: %v", err)
+			}
+		})
+	}
 }
 
 // allOpsScript returns a script body that handles all operations with
@@ -1888,7 +1925,7 @@ func TestExecConformance(t *testing.T) {
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
-		return NewSeamBacked(execConformanceScript(caseT, t, &fixture)),
+		return NewSeamBackedForCity(execConformanceScript(caseT, t, &fixture), caseT.TempDir()),
 			runtime.Config{WorkDir: caseT.TempDir()},
 			fmt.Sprintf("exec-conform-%06d", atomic.AddInt64(&counter, 1))
 	})

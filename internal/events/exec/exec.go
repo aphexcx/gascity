@@ -21,15 +21,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
 // Provider implements [events.Provider] by delegating to a user-supplied script.
 type Provider struct {
-	script  string
-	timeout time.Duration
-	ready   sync.Once // ensure-running called once
-	stderr  io.Writer
+	script   string
+	cityPath string
+	timeout  time.Duration
+	ready    sync.Once // ensure-running called once
+	stderr   io.Writer
 }
 
 type listScriptFilter struct {
@@ -47,6 +49,13 @@ func NewProvider(script string, stderr io.Writer) *Provider {
 		timeout: 30 * time.Second,
 		stderr:  stderr,
 	}
+}
+
+// NewProviderForCity binds configuration validation to the selecting city.
+func NewProviderForCity(script string, stderr io.Writer, cityPath string) *Provider {
+	p := NewProvider(script, stderr)
+	p.cityPath = cityPath
+	return p
 }
 
 // Record delegates to: script record with JSON event on stdin.
@@ -114,6 +123,7 @@ func (p *Provider) LatestSeq() (uint64, error) {
 func (p *Provider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
 	p.ensureRunning()
 	cmd := exec.CommandContext(ctx, p.script, "watch", fmt.Sprintf("%d", afterSeq))
+	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("exec events provider: stdout pipe: %w", err)
@@ -158,6 +168,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
 
+	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

@@ -2,10 +2,13 @@ package runtimecapability
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/cacheexec"
 )
 
 // refConfig parameterizes the golden reference runtime: which capabilities it
@@ -136,11 +139,15 @@ esac
 	return path
 }
 
-func run(t *testing.T, path string) Report {
+func run(t *testing.T, path string, wantError ...error) Report {
 	t.Helper()
+	var want error
+	if len(wantError) > 0 {
+		want = wantError[0]
+	}
 	rep, err := Run(context.Background(), path, Options{Command: "true"})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if !errors.Is(err, want) {
+		t.Fatalf("Run error = %v, want %v", err, want)
 	}
 	return rep
 }
@@ -182,6 +189,22 @@ func TestUndeclaredCapabilitiesSkip(t *testing.T) {
 	}
 	if rep.Summary.Skipped != len(catalog) {
 		t.Errorf("skipped %d, want %d", rep.Summary.Skipped, len(catalog))
+	}
+}
+
+func TestDirtyConfigurationCannotBecomeSkippedCapabilities(t *testing.T) {
+	cacheexec.Reset()
+	t.Cleanup(cacheexec.Reset)
+	city, cached := t.TempDir(), t.TempDir()
+	t.Setenv("GC_CITY_PATH", city)
+	dirty := errors.New("dirty configured provider")
+	cacheexec.Register(cached, func(context.Context) error { return dirty })
+	cacheexec.PublishScope(city, []string{cached})
+	cfg := goldenConfig()
+	cfg.caps = nil
+	report := run(t, writeRef(t, cfg), dirty)
+	if len(report.Results) != 0 {
+		t.Fatalf("integrity refusal produced a capability report: %+v", report.Summary)
 	}
 }
 

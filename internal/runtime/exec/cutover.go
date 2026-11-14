@@ -32,7 +32,13 @@ var (
 // NewSeamBacked wraps an exec provider for the given script so it is served
 // through the seams.
 func NewSeamBacked(script string) runtime.Provider {
-	raw := NewProvider(script)
+	return NewSeamBackedForCity(script, "")
+}
+
+// NewSeamBackedForCity binds the exec provider's configuration validation to
+// the selecting city while exposing the same runtime seams.
+func NewSeamBackedForCity(script, cityPath string) runtime.Provider {
+	raw := NewProviderForCity(script, cityPath)
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }

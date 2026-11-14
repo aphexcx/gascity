@@ -10,7 +10,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecapability",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/cacheexec",
+        "//internal/runtime",
+    ],
 )
 
 go_test(
@@ -20,7 +23,10 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":runtimecapability"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/cacheexec",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

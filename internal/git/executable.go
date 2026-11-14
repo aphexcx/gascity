@@ -42,6 +42,14 @@ var executableResolutions sync.Map
 // successful resolution and fallback warning are cached for the process;
 // failed resolutions are retried so repaired installations can recover.
 func ResolveExecutable() (Executable, error) {
+	return ResolveExecutableContext(context.Background())
+}
+
+// ResolveExecutableContext resolves Git with cancellable probes and cache waits.
+func ResolveExecutableContext(ctx context.Context) (Executable, error) {
+	if err := ctx.Err(); err != nil {
+		return Executable{}, err
+	}
 	path, err := exec.LookPath("git")
 	if err != nil {
 		return Executable{}, &ExecutableError{
@@ -53,19 +61,31 @@ func ResolveExecutable() (Executable, error) {
 		fmt.Fprintln(os.Stderr, "warning: "+warning) //nolint:errcheck // diagnostic only
 	})
 	actual, _ := executableResolutions.LoadOrStore(path, resolve)
-	return actual.(func() (Executable, error))()
+	return actual.(func(context.Context) (Executable, error))(ctx)
 }
 
-func cachedExecutableResolution(goos, primary, fallback string, probe func(string) (string, int, error), warn func(string)) func() (Executable, error) {
-	var mu sync.Mutex
+func cachedExecutableResolution(goos, primary, fallback string, probe func(context.Context, string) (string, int, error), warn func(string)) func(context.Context) (Executable, error) {
+	gate := make(chan struct{}, 1)
 	var cached Executable
-	return func() (Executable, error) {
-		mu.Lock()
-		defer mu.Unlock()
+	return func(ctx context.Context) (Executable, error) {
+		select {
+		case gate <- struct{}{}:
+			defer func() { <-gate }()
+		case <-ctx.Done():
+			return Executable{}, ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return Executable{}, err
+		}
 		if cached.Path != "" {
 			return cached, nil
 		}
-		result, err := resolveExecutable(goos, primary, fallback, probe)
+		result, err := resolveExecutable(goos, primary, fallback, func(path string) (string, int, error) {
+			if err := ctx.Err(); err != nil {
+				return "", -1, err
+			}
+			return probe(ctx, path)
+		})
 		if err != nil {
 			return result, err
 		}
@@ -112,8 +132,8 @@ func probeFailure(output string, err error) string {
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-func probeExecutable(path string) (string, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func probeExecutable(parent context.Context, path string) (string, int, error) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	return probeExecutableContext(ctx, path)
 }
@@ -121,7 +141,7 @@ func probeExecutable(path string) (string, int, error) {
 func probeExecutableContext(ctx context.Context, path string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = HermeticEnv()
-	cleanup := configureExecutableProbe(cmd)
+	cleanup := ConfigureCommandCancellation(cmd)
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.CombinedOutput()
 	code := -1

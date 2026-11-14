@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -304,9 +306,19 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	if packDir == "" {
 		packDir = packRootFromEntryDir(entry.SourceDir, "commands")
 	}
+	// The manifest supplies executable instructions even when it redirects
+	// to a local script. Validate its owner before expanding that selection.
+	if err := cacheexec.ValidateCachedExecutable(context.Background(), entry.SourceDir); err != nil {
+		fmt.Fprintln(stderr, err) //nolint:errcheck // command refusal
+		return 1
+	}
 	scriptPath := expandScriptTemplate(entry.RunScript, cityPath, cityName, packDir)
 	if !filepath.IsAbs(scriptPath) {
 		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
+	}
+	if err := cacheexec.ValidateCachedExecutable(context.Background(), scriptPath); err != nil {
+		fmt.Fprintln(stderr, err) //nolint:errcheck // command refusal
+		return 1
 	}
 
 	cmd := exec.Command(scriptPath, args...)
@@ -343,6 +355,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
+	cacheexec.GuardCachedExecCommand(context.Background(), cmd)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError

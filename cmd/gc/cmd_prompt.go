@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -294,6 +295,7 @@ func runDirectSynth(ctx context.Context, opts promptSynthOpts, cityPath, role, r
 	}
 	callCtx, cancel := context.WithTimeout(ctx, synthTimeout)
 	defer cancel()
+	callCtx = cacheexec.WithCity(callCtx, cityPath)
 	out, err := runner(callCtx, resolved, rendered, workDir)
 	if err != nil {
 		return fmt.Errorf("synth via %s: %w", resolved.Command, err)
@@ -659,6 +661,7 @@ func defaultPromptSynthRunner(ctx context.Context, provider *config.ResolvedProv
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

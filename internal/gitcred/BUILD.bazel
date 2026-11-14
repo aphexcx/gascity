@@ -16,6 +16,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/gitcred",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/cacheexec",
         "//internal/gchome",
         "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",

@@ -879,7 +879,8 @@ func newMailProvider(store beads.Store) mail.Provider {
 // beads and its session reads follow their respective backends instead of
 // splitting off one generic store.
 func newMailProviderWithSessionStore(msgStore, sessStore beads.Store) mail.Provider {
-	return newMailProviderNamedWithSessionStore(mailProviderName(), msgStore, sessStore, true)
+	cityPath, _ := resolveCity() // standalone exec providers need no city
+	return newMailProviderNamedWithSessionStore(cityPath, mailProviderName(), msgStore, sessStore, true)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {
@@ -891,12 +892,13 @@ func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
 }
 
 func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
-	return newMailProviderNamedWithSessionStore(v, store, store, cached)
+	cityPath, _ := resolveCity() // standalone exec providers need no city
+	return newMailProviderNamedWithSessionStore(cityPath, v, store, store, cached)
 }
 
-func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
+func newMailProviderNamedWithSessionStore(cityPath, v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
-		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
+		return mailexec.NewProviderForCity(strings.TrimPrefix(v, "exec:"), cityPath)
 	}
 	switch v {
 	case "fake":
@@ -991,7 +993,8 @@ func fastEventsProviderName() string {
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → file-backed JSONL provider
 func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Provider, error) {
-	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
+	cityPath, _ := resolveCity() // standalone exec providers need no city
+	return newEventsProviderForNameWithConfig(cityPath, v, eventsPath, stderr, config.EventsConfig{})
 }
 
 // newEventsProviderForNameWithConfig builds the events provider for an
@@ -999,9 +1002,9 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 // error: the file-backed branch must not hand back the *events.FileRecorder
 // directly, because a failed open boxes a typed nil into the events.Provider
 // interface, where it reads as non-nil to every caller's nil guard.
-func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
+func newEventsProviderForNameWithConfig(cityPath, v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
-		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
+		return eventsexec.NewProviderForCity(strings.TrimPrefix(v, "exec:"), stderr, cityPath), nil
 	}
 	switch v {
 	case "fake":
@@ -1063,7 +1066,7 @@ func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder
 		eventsCfg.Provider = v
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := newCLIFactoryRecorder(eventsCfg, eventsPath)
+	recorder, err := newCLIFactoryRecorder(cityPath, eventsCfg, eventsPath)
 	if err != nil || recorder == nil {
 		return events.Discard
 	}
@@ -1094,10 +1097,10 @@ func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder
 //
 // The exec:/fake/fail branches carry no file handle at all, so they stay on the
 // shared newEventsProviderForNameWithConfig resolution.
-func newCLIFactoryRecorder(eventsCfg config.EventsConfig, eventsPath string) (events.Recorder, error) {
+func newCLIFactoryRecorder(cityPath string, eventsCfg config.EventsConfig, eventsPath string) (events.Recorder, error) {
 	v := eventsCfg.Provider
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		return newEventsProviderForNameWithConfig(v, eventsPath, io.Discard, eventsCfg)
+		return newEventsProviderForNameWithConfig(cityPath, v, eventsPath, io.Discard, eventsCfg)
 	}
 	recorder, err := events.NewFileRecorder(
 		eventsPath,
@@ -1146,7 +1149,10 @@ func usageSinkForCity(cfg *config.City, cityPath string) usage.Sink {
 	if cfg != nil {
 		provider = strings.TrimSpace(cfg.Usage.Provider)
 	}
-	if strings.TrimSpace(cityPath) == "" && !strings.HasPrefix(provider, "exec:") {
+	if strings.HasPrefix(provider, "exec:") {
+		return usage.NewExecSinkForCity(strings.TrimPrefix(provider, "exec:"), cityPath)
+	}
+	if strings.TrimSpace(cityPath) == "" {
 		return usage.Discard
 	}
 	return newUsageSinkByName(provider, filepath.Join(cityPath, ".gc", "usage.jsonl"))
@@ -1257,7 +1263,8 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	eventsCfg := providerConfig()
 	v := eventsCfg.Provider
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		p, err := newEventsProviderForNameWithConfig(v, "", stderr, eventsCfg)
+		cityPath, _ := resolveCity() // standalone exec providers need no city
+		p, err := newEventsProviderForNameWithConfig(cityPath, v, "", stderr, eventsCfg)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return nil, 1
@@ -1271,7 +1278,7 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 		return nil, 1
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	p, err := newEventsProviderForNameWithConfig(v, eventsPath, stderr, eventsCfg)
+	p, err := newEventsProviderForNameWithConfig(cityPath, v, eventsPath, stderr, eventsCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1

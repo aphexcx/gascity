@@ -19,6 +19,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/cacheexec",
         "//internal/citylayout",
         "//internal/config",
         "//internal/execenv",
@@ -42,6 +43,7 @@ go_test(
     embed = [":workspacesvc"],
     deps = [
         "//internal/beads",
+        "//internal/cacheexec",
         "//internal/citylayout",
         "//internal/config",
         "//internal/execenv",

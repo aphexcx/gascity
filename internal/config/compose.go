@@ -93,6 +93,9 @@ type Provenance struct {
 
 // LoadOptions controls optional config-loading behavior.
 type LoadOptions struct {
+	// RemoteCacheValidation defaults to FULL. Read-only callers may explicitly
+	// choose QUICK; lifecycle and execution boundaries retain full validation.
+	RemoteCacheValidation CacheValidationMode
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
@@ -142,6 +145,12 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	registerRemoteCacheRoots()
+	if opts.RemoteCacheValidation != CacheValidationQuick {
+		// A new lifecycle load must inspect edits made since its previous load,
+		// including nested files that do not change the cache root or index.
+		InvalidateRemoteCacheValidations()
+	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -405,14 +414,16 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	root.Include = origInclude
 
+	var remoteFragmentPaths []string
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.RemoteCacheValidation)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
 			fragPath = resolved
+			remoteFragmentPaths = append(remoteFragmentPaths, fragPath)
 		} else {
 			fragPath = resolveConfigPath(inc, cityRoot, cityRoot)
 		}
@@ -473,7 +484,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks, err := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking)
+	existingPacks, err := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking, opts.RemoteCacheValidation)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -563,7 +574,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Anything that would change what composes has already been resolved and
 	// hard-failed upstream by then.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking, opts.RemoteCacheValidation)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -861,9 +872,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
 	// the value is the same either way.
 	if !opts.SkipRevisionSnapshot {
-		prov.captureRevisionSnapshot(fs, root, cityRoot)
+		prov.captureRevisionSnapshot(fs, root, cityRoot, opts.RemoteCacheValidation)
 	}
 
+	publishRemoteCacheScope(cityRoot, append(root.AllPackDirs(), remoteFragmentPaths...))
 	return root, prov, nil
 }
 
@@ -1861,7 +1873,7 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 // short set would inject a builtin the city already has, so it is reported
 // instead — this set decides what gets injected, and a busy cache must never
 // quietly change that.
-func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool, mode ...CacheValidationMode) (map[string]bool, error) {
 	names := make(map[string]bool, len(includes)+len(imports))
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
@@ -1924,7 +1936,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	}
 
 	visitInclude = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking)
+		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking, mode...)
 		if err != nil {
 			noteResolveErr(err)
 			return
@@ -1933,7 +1945,7 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking, mode...)
 		if err != nil {
 			noteResolveErr(err)
 			return
@@ -1970,8 +1982,8 @@ func (c *City) PackDirByName(name string) string {
 // packs (core, and bd for bd-provider cities) are explicitly included.
 // A blocking walk waits out any contention, so the error can only be a busy
 // cache and only a non-blocking caller can see one.
-func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names, _ := resolvedConfigPackNames(cfg, sysFS, cityRoot, false)
+func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string, mode ...CacheValidationMode) map[string]bool {
+	names, _ := resolvedConfigPackNames(cfg, sysFS, cityRoot, false, mode...)
 	return names
 }
 
@@ -1979,8 +1991,8 @@ func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bo
 // rig, and default-rig pack graphs before builtin extra includes are injected.
 // It returns ErrRepoCacheBusy if any graph could not be walked because another
 // process held the repo-cache lock.
-func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
-	names, err := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking)
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool, mode ...CacheValidationMode) (map[string]bool, error) {
+	names, err := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking, mode...)
 	if err != nil {
 		return nil, err
 	}
@@ -1995,15 +2007,15 @@ func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlock
 	}
 
 	for _, rig := range cfg.Rigs {
-		if err := add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking)); err != nil {
+		if err := add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking, mode...)); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking)); err != nil {
+	if err := add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking, mode...)); err != nil {
 		return nil, err
 	}
-	if err := add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking)); err != nil {
+	if err := add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking, mode...)); err != nil {
 		return nil, err
 	}
 

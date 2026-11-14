@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -118,6 +119,7 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
 
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError
