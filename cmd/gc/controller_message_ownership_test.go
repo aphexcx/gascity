@@ -132,7 +132,7 @@ func TestComposedProviderMessageStartsThroughReconciler(t *testing.T) {
 		rec: ep, stdout: io.Discard, stderr: &output,
 	}
 	cr.beadReconcileTick(t.Context(), desired, newSessionBeadSnapshot([]beads.Bead{b}), nil, false)
-	if !cr.asyncStarts.wait(10 * time.Second) {
+	if !cr.asyncStarts.wait(hangBudget) {
 		t.Fatal("reconcile start did not finish")
 	}
 	if !sp.IsRunning(info.SessionName) || sp.CountCalls("Start", info.SessionName) != starts+1 {

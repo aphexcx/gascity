@@ -382,6 +382,57 @@ func TestEntryLaunchPreservesCityPromptDelivery(t *testing.T) {
 	}
 }
 
+func TestEntryLaunchPreservesCityWorkspaceContext(t *testing.T) {
+	for _, provider := range []string{"subprocess", "t3bridge", "tmux"} {
+		t.Run(provider, func(t *testing.T) {
+			cityPath, cfg := entryLaunchContextFixture(t)
+			workDir := t.TempDir()
+			cfg.Session.Provider = provider
+			cfg.Agents[0].WorkDir = workDir
+			cfg.Agents[0].PreStart = []string{"true"}
+			promptFile := filepath.Join(cityPath, "prompt.md")
+			if err := os.WriteFile(promptFile, []byte("fixture prompt"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Agents[0].PromptTemplate = promptFile
+			p := cfg.Providers["test-provider"]
+			p.PromptMode = "arg"
+			cfg.Providers["test-provider"] = p
+			store, sp := beads.NewMemStore(), runtime.NewFake()
+			params := newAgentBuildParams(cfg.EffectiveCityName(), cityPath, cfg, sp, time.Time{}, store, nil)
+			tp, err := resolveTemplate(params, &cfg.Agents[0], "runner", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, _, err := templateParamsToConfigWithDelivery(tp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The provider gained ACP after this terminal session was created.
+			supportsACP := true
+			p.SupportsACP = &supportsACP
+			p.ACPCommand = "/bin/echo"
+			p.ACPArgs = []string{"acp-only"}
+			cfg.Providers["test-provider"] = p
+			info := session.Info{Template: "runner", Provider: "test-provider", WorkDir: workDir, Command: "/bin/echo"}
+			launch, err := buildWorkerEntryLaunch(cityPath, cfg, store, sp, info, "agent", map[string]string{"real_world_app_session_kind": "agent"}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := launch.SessionEnv["GC_DIR"]; got != workDir {
+				t.Errorf("workspace directory=%q, want %q", got, workDir)
+			}
+			if got, want := launch.SessionEnv["GC_PRESTART_LOG"], canonical.Env["GC_PRESTART_LOG"]; got != want {
+				t.Errorf("pre-start log=%q, want %q", got, want)
+			}
+			const workspaceHeading = "## Session workspace paths"
+			if got, want := strings.Contains(launch.Hints.PromptSuffix, workspaceHeading), strings.Contains(canonical.PromptSuffix, workspaceHeading); got != want {
+				t.Errorf("workspace instructions present=%v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestCLIEntryLaunchClearsCallerContext(t *testing.T) {
 	cityPath, cfg := entryLaunchContextFixture(t)
 	keys := []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_SESSION_KEY", "GC_RUNTIME_EPOCH", "GC_CONTINUATION_EPOCH", "GC_INSTANCE_TOKEN", "GC_ALIAS", "GC_TEMPLATE", "GC_SESSION_ORIGIN", "GC_AGENT", "GC_SPAWN_ORIGIN", "GC_WORKTREE_BEAD_ID", "GC_PACKER_PACK", "GC_DIR", "GC_PRESTART_LOG", "GC_STARTUP_PROMPT_DELIVERED", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_FUTURE_KEY", "GC_READY_PROMPT_PREFIX", "GC_WORKTREE_CLAIM_GUARD"}

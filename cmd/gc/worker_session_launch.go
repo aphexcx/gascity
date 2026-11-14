@@ -77,7 +77,11 @@ func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store
 	}
 	if legacyTerminal {
 		// The terminal command still runs on the city's non-ACP backend.
-		tp.EffectiveSessionProvider = effectiveSessionProvider("", params.sessionProvider)
+		launchAgent.Session = transport
+		tp.SessionOverride = transport
+		tp.EffectiveSessionProvider = effectiveSessionProvider(transport, params.sessionProvider)
+		tp.laneContextConfigured = laneContextConfigured(&launchAgent, params.sessionProvider)
+		tp = resolveTemplateWorkDirContext(tp)
 	}
 	if info.SessionOrigin != "" {
 		tp.Env["GC_SESSION_ORIGIN"] = info.SessionOrigin
