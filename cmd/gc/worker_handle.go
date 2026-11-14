@@ -92,6 +92,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		BuildSessionLaunch:      workerEntryLaunchBuilder(cityPath, cfg, store, sp),
 		ControllerRunning:       controllerRunning,
 		PokeController:          pokeCoordinator,
 		WithdrawWaitNudges:      func(ids []string) error { return withdrawQueuedWaitNudges(cityPath, ids) },

@@ -29,9 +29,12 @@ type FactoryConfig struct {
 	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
-	ControllerRunning     func() bool
-	PokeController        func() error
-	WithdrawWaitNudges    func([]string) error
+	// BuildSessionLaunch prepares a full launch only at a start-capable entry,
+	// before the session mutation lock. It is never a resume-config resolver.
+	BuildSessionLaunch SessionRuntimeResolver
+	ControllerRunning  func() bool
+	PokeController     func() error
+	WithdrawWaitNudges func([]string) error
 	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
@@ -57,6 +60,8 @@ type Factory struct {
 	recorder              events.Recorder
 	usageSink             usage.Sink
 	resolveSessionRuntime SessionRuntimeResolver
+	buildSessionLaunch    SessionRuntimeResolver
+	controllerRunning     func() bool
 	pricing               *pricing.Registry
 	// activityMemo is shared by every adapter and handle this factory builds —
 	// and, when the caller injected it, by every other factory that caller
@@ -125,6 +130,8 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		recorder:              cfg.Recorder,
 		usageSink:             usageSink,
 		resolveSessionRuntime: cfg.ResolveSessionRuntime,
+		buildSessionLaunch:    cfg.BuildSessionLaunch,
+		controllerRunning:     cfg.ControllerRunning,
 		pricing:               cfg.Pricing,
 		activityMemo:          memo,
 	}, nil
@@ -148,7 +155,7 @@ func (f *Factory) UsageSink() usage.Sink {
 // Session returns a worker-owned session handle backed by the factory's
 // session manager and transcript search paths.
 func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
-	return NewSessionHandle(SessionHandleConfig{
+	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Adapter:     f.Adapter(),
@@ -157,6 +164,13 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 		Session:     spec,
 		Pricing:     f.pricing,
 	})
+	if err != nil {
+		return nil, err
+	}
+	handle.buildSessionLaunch = f.buildSessionLaunch
+	handle.launchProvider = f.provider
+	handle.controllerRunning = f.controllerRunning
+	return handle, nil
 }
 
 // SessionByID rebuilds a session-backed worker handle from persisted session

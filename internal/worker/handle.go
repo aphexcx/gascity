@@ -365,7 +365,10 @@ type SessionHandle struct {
 	sidecarRetryScheduled bool
 	// resolveStartup delegates launch inputs to the manager's resolver under
 	// the operation lock instead of reusing this handle's construction snapshot.
-	resolveStartup bool
+	resolveStartup     bool
+	buildSessionLaunch SessionRuntimeResolver
+	launchProvider     runtime.Provider
+	controllerRunning  func() bool
 }
 
 var (

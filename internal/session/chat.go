@@ -542,8 +542,14 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
-	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints, true); err != nil {
+	migratedCommand, migratedHints := resumeCommand, hints
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &migratedCommand, &migratedHints, true); err != nil {
 		return err
+	}
+	// Migration still validates and persists the current provider settings.
+	// Only cached launches consume its cheaper command/environment projection.
+	if strings.TrimSpace(hints.Command) == "" {
+		resumeCommand, hints = migratedCommand, migratedHints
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)

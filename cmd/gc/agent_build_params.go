@@ -20,15 +20,18 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
-	city            *config.City
-	cityName        string
-	cityPath        string
-	workspace       *config.Workspace
-	agents          []config.Agent
-	providers       map[string]config.ProviderSpec
-	lookPath        config.LookPathFunc
-	fs              fsys.FS
-	readOnly        bool // resolve existing templates without materializing hooks/settings
+	city      *config.City
+	cityName  string
+	cityPath  string
+	workspace *config.Workspace
+	agents    []config.Agent
+	providers map[string]config.ProviderSpec
+	lookPath  config.LookPathFunc
+	fs        fsys.FS
+	readOnly  bool // resolve existing templates without materializing hooks/settings
+	// passthrough overrides only process inheritance for direct CLI starts.
+	// Nil preserves the reconciler's ambient environment sweep.
+	passthrough     map[string]string
 	sp              runtime.Provider
 	rigs            []config.Rig
 	sessionTemplate string

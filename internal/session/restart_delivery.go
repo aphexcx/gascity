@@ -39,6 +39,17 @@ func (m *Manager) controllerRestartPending(b beads.Bead) bool {
 	return wasConfiguredNamedSession(b) && m.controllerOwnsRestart(b)
 }
 
+// ControllerRestartPending reports whether a direct Start or Attach would wait
+// for the controller. This snapshot is only a preparation-cost hint; the manager
+// repeats the authoritative check under the session mutation lock.
+func (m *Manager) ControllerRestartPending(id string) (bool, error) {
+	b, _, err := m.sessionBead(id)
+	if err != nil {
+		return false, err
+	}
+	return m.controllerRestartPending(b), nil
+}
+
 // controllerDefersMessage is evaluated once at a message entry, under the
 // session lock. A live interrupt can subsequently replace the runtime itself.
 func (m *Manager) controllerDefersMessage(b beads.Bead, sessName string) bool {

@@ -7,6 +7,10 @@ import (
 
 func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 	cfg := s.state.Config()
+	var buildSessionLaunch worker.SessionRuntimeResolver
+	if state, ok := s.state.(SessionLaunchBuilder); ok {
+		buildSessionLaunch = state.SessionLaunchBuilder()
+	}
 	var resolveTransport func(template, provider string) string
 	if cfg != nil {
 		resolveTransport = func(template, provider string) string {
@@ -22,6 +26,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		UsageSink:             s.state.UsageSink(),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
+		BuildSessionLaunch:    buildSessionLaunch,
 		ControllerRunning:     s.controllerRunning,
 		PokeController:        func() error { s.state.Poke(); return nil },
 		WithdrawWaitNudges: func(ids []string) error {
