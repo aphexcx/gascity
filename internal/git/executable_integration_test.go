@@ -98,14 +98,15 @@ func TestExecutableLicenseProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := resolveExecutable("darwin", primary, fallback, probeExecutable)
+	probe := func(path string) (string, int, error) { return probeExecutable(t.Context(), path) }
+	got, err := resolveExecutable("darwin", primary, fallback, probe)
 	if err != nil || got.Path != fallback || !strings.Contains(got.Warning, "exit status 69") {
 		t.Fatalf("fallback: %+v, %v", got, err)
 	}
 	if err := os.Remove(fallback); err != nil {
 		t.Fatal(err)
 	}
-	_, err = resolveExecutable("darwin", primary, fallback, probeExecutable)
+	_, err = resolveExecutable("darwin", primary, fallback, probe)
 	if err == nil || !strings.Contains(err.Error(), "no such file") || strings.ContainsAny(err.Error(), "\r\n") {
 		t.Fatalf("missing fallback: %v", err)
 	}

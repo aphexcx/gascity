@@ -257,7 +257,7 @@ func (r *runner) invoke(ctx context.Context, timeout time.Duration, stdin []byte
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(opCtx, r.path, args...)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(opCtx, cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = r.opEnv()
 	var stdout, stderr strings.Builder

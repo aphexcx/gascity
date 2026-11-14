@@ -105,7 +105,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := cachevalidation.ValidateLaunch(cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
 		return err
 	}
 	if p.IsRunning(name) {
@@ -513,7 +513,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}
-	cacheexec.GuardCachedExecCommand(c)
+	cacheexec.GuardCachedExecCommand(runCtx, c)
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w

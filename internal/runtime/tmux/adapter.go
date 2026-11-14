@@ -82,7 +82,7 @@ func (p *Provider) IsCityScoped(cityName string) bool {
 // and runtime readiness polling. Steps are conditional on Config fields;
 // an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := cachevalidation.ValidateLaunch(cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
 		return err
 	}
 	var err error
@@ -252,7 +252,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := cachevalidation.ValidateLaunch(cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
 		return err
 	}
 	// The runtime dir is what makes the startup-nudge and start-crash
@@ -1386,7 +1386,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.tm.cfg.SocketName != "" {
 		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
 	}
-	cacheexec.GuardCachedExecCommand(c)
+	cacheexec.GuardCachedExecCommand(runCtx, c)
 	stdout := newCommandOutputTail(setupCommandOutputLimit)
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -104,6 +106,82 @@ func TestPackCacheDiscoveryAndOrdinaryLoadDoNotSpawnGit(t *testing.T) {
 	}
 	if calls := f.gitCalls(t); calls != "" {
 		t.Fatalf("discovery/ordinary read spawned Git:\n%s", calls)
+	}
+}
+
+func TestPackCacheShellFlagsRefuseBeforeExecution(t *testing.T) {
+	for _, tc := range []struct{ name, command string }{
+		{"combined", `sh -ec '"$PACK_SCRIPT"'`},
+		{"login", `bash -lc '"$PACK_SCRIPT"'`},
+		{"option-operand", `sh -o errexit -c '"$PACK_SCRIPT"'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := shellExecRunner(context.Background(), tc.command, f.city, []string{"PACK_SCRIPT=" + filepath.Join(f.caches[0], "commands", "report", "run.sh")})
+			if err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
+				t.Fatalf("dirty shell command was not refused: %v", err)
+			}
+			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+				t.Fatalf("dirty script side effect exists: %v", err)
+			}
+		})
+	}
+}
+
+func TestPackCacheExecutionCancellationWhileLockHeld(t *testing.T) {
+	f := newPackCacheFixture(t, 1)
+	if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	locked, release := make(chan struct{}), make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		_, err := config.WithRepoCacheWriteLock(filepath.Dir(f.caches[0]), func() (string, error) {
+			close(locked)
+			<-release
+			return "", nil
+		})
+		writerDone <- err
+	}()
+	select {
+	case <-locked:
+	case err := <-writerDone:
+		t.Fatalf("cache writer failed: %v", err)
+	}
+	done := make(chan error, 1)
+	finished := false
+	defer func() {
+		close(release)
+		if err := <-writerDone; err != nil {
+			t.Error(err)
+		}
+		if !finished {
+			<-done // release the lock before joining a regressed runner
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, err := shellExecRunner(ctx, `"$PACK_SCRIPT"`, f.city, []string{"PACK_SCRIPT=" + filepath.Join(f.caches[0], "commands", "report", "run.sh")})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		finished = true
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("execution error = %v; want deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("execution deadline could not cancel cache validation while lock remained held")
+	}
+	if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+		t.Fatalf("canceled script side effect exists: %v", err)
 	}
 }
 

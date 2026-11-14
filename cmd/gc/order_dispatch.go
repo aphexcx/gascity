@@ -165,7 +165,7 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	processgroup.StartCommandInNewGroup(cmd)
 
 	var output bytes.Buffer

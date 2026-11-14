@@ -660,7 +660,7 @@ func defaultPromptSynthRunner(ctx context.Context, provider *config.ResolvedProv
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

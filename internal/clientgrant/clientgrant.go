@@ -152,7 +152,7 @@ func runGrantCommand(ctx context.Context, command string, info GrantInfo) (strin
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Env = append(strippedEnv(), GrantInfoEnv+"="+string(payload))
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("clientgrant: running grant command: %w", withStderr(err))

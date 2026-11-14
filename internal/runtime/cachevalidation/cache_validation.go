@@ -2,6 +2,7 @@
 package cachevalidation
 
 import (
+	"context"
 	"os"
 
 	"github.com/gastownhall/gascity/internal/cacheexec"
@@ -11,10 +12,10 @@ import (
 // ValidateLaunch checks code launched from a cached import before handing
 // the command to a session carrier. Controller loads already supply a FULL
 // verdict; a fresh CLI process upgrades only the imports it executes.
-func ValidateLaunch(cfg runtime.Config) error {
+func ValidateLaunch(ctx context.Context, cfg runtime.Config) error {
 	env := os.Environ()
 	for key, value := range cfg.Env {
 		env = append(env, key+"="+value)
 	}
-	return cacheexec.ValidateCachedShellCommand(cfg.Command, cfg.WorkDir, env)
+	return cacheexec.ValidateCachedShellCommand(ctx, cfg.Command, cfg.WorkDir, env)
 }

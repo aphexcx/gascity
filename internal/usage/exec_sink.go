@@ -74,7 +74,7 @@ func (s *ExecSink) Record(ctx context.Context, f Fact) error {
 	cmd.Stdin = bytes.NewReader(append(line, '\n'))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("usage exec sink %q timed out after %s: %w", s.script, s.timeout, ctx.Err())

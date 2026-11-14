@@ -873,6 +873,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.captureRevisionSnapshot(fs, root, cityRoot, opts.RemoteCacheValidation)
 	}
 
+	publishRemoteCacheScope(cityRoot, root.AllPackDirs())
 	return root, prov, nil
 }
 

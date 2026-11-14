@@ -115,7 +115,7 @@ func (p *Provider) LatestSeq() (uint64, error) {
 func (p *Provider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
 	p.ensureRunning()
 	cmd := exec.CommandContext(ctx, p.script, "watch", fmt.Sprintf("%d", afterSeq))
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("exec events provider: stdout pipe: %w", err)
@@ -160,7 +160,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
 
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

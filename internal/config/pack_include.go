@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -494,6 +496,10 @@ func InvalidateRemoteCacheValidations() {
 }
 
 func validateInstalledRemoteCache(source, cacheDir, commit string, mode ...CacheValidationMode) error {
+	return validateInstalledRemoteCacheWithGit(source, cacheDir, commit, runRepoCacheGit, mode...)
+}
+
+func validateInstalledRemoteCacheWithGit(source, cacheDir, commit string, runGit func(string, ...string) (string, error), mode ...CacheValidationMode) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
 	if repository, ok := builtinpacks.RepositoryForSource(source); ok && IsBundledSourceAtCanonicalPin(source, commit) {
@@ -516,13 +522,17 @@ func validateInstalledRemoteCache(source, cacheDir, commit string, mode ...Cache
 	if gitStatErr != nil {
 		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)
 	}
-	if err := validateLockedRemoteCache(source, cacheDir, commit, mode...); err != nil {
+	if err := validateLockedRemoteCacheWithGit(source, cacheDir, commit, runGit, mode...); err != nil {
 		return err
 	}
 	return nil
 }
 
 func validateLockedRemoteCache(source, cacheDir, commit string, mode ...CacheValidationMode) error {
+	return validateLockedRemoteCacheWithGit(source, cacheDir, commit, runRepoCacheGit, mode...)
+}
+
+func validateLockedRemoteCacheWithGit(source, cacheDir, commit string, runGit func(string, ...string) (string, error), mode ...CacheValidationMode) error {
 	var head string
 	var err error
 	resolved := false
@@ -530,7 +540,7 @@ func validateLockedRemoteCache(source, cacheDir, commit string, mode ...CacheVal
 		head, resolved = readCacheHEAD(cacheDir)
 	}
 	if !resolved {
-		head, err = runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
+		head, err = runGit(cacheDir, "rev-parse", "HEAD")
 	}
 	if err != nil {
 		var executableErr *gitutil.ExecutableError
@@ -550,7 +560,7 @@ func validateLockedRemoteCache(source, cacheDir, commit string, mode ...CacheVal
 	// stray .DS_Store, etc.) are not local edits to the pack and must not trip
 	// this gate — otherwise the city wedges behind a perpetual "run gc import
 	// install" loop (vp-gny3). Reinstall's `git clean -ffdx` still clears them.
-	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain")
+	status, err := runGit(cacheDir, "status", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
@@ -561,7 +571,11 @@ func validateLockedRemoteCache(source, cacheDir, commit string, mode ...CacheVal
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
-	git, err := gitutil.ResolveExecutable()
+	return defaultRunRepoCacheGitContext(context.Background(), dir, args...)
+}
+
+func defaultRunRepoCacheGitContext(ctx context.Context, dir string, args ...string) (string, error) {
+	git, err := gitutil.ResolveExecutableContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -570,10 +584,16 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.untrackedCache=false",
 	}, args...)
-	cmd := exec.Command(git.Path, cmdArgs...)
+	cmd := exec.CommandContext(ctx, git.Path, cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = gitutil.HermeticEnv()
+	cleanup := gitutil.ConfigureCommandCancellation(cmd)
+	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.CombinedOutput()
+	err = errors.Join(err, cleanup())
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), ctx.Err())
+	}
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}

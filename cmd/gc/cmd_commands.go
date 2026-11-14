@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -309,7 +310,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	if !filepath.IsAbs(scriptPath) {
 		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
 	}
-	if err := cacheexec.ValidateCachedExecutable(scriptPath); err != nil {
+	if err := cacheexec.ValidateCachedExecutable(context.Background(), scriptPath); err != nil {
 		fmt.Fprintln(stderr, err) //nolint:errcheck // command refusal
 		return 1
 	}

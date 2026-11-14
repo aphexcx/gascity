@@ -4,6 +4,7 @@
 package cacheexec
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,11 +22,11 @@ var (
 )
 
 type resolvedRemoteCache struct {
-	validate func() error
+	validate func(context.Context) error
 }
 
 // Register records a resolved checkout and the check required before execution.
-func Register(dir string, validate func() error) {
+func Register(dir string, validate func(context.Context) error) {
 	original := filepath.Clean(dir)
 	if canonical, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = canonical
@@ -46,6 +47,7 @@ func RegisterRoots(roots []string) {
 func Reset() {
 	resolvedRemoteCaches.Clear()
 	cacheRoots.Clear()
+	activeScopes.Clear()
 }
 
 func pathWithinDir(path, dir string) bool {
@@ -57,7 +59,10 @@ func pathWithinDir(path, dir string) bool {
 // before executing it. Local executables keep their existing behavior. Cached
 // executables must have been resolved from a locked import in this process;
 // QUICK discovery supplies that identity but never supplies a FULL verdict.
-func ValidateCachedExecutable(path string) error {
+func ValidateCachedExecutable(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !strings.ContainsAny(path, `/\`) {
 		resolved, err := exec.LookPath(path)
 		if err != nil {
@@ -71,12 +76,12 @@ func ValidateCachedExecutable(path string) error {
 	}
 	// Check the path before following its symlink as well: replacing a cached
 	// script with a link to a local file must not bypass the owning import.
-	if err := validateCachedExecutablePath(abs); err != nil {
+	if err := validateCachedExecutablePath(ctx, abs); err != nil {
 		return err
 	}
 	if canonical, err := filepath.EvalSymlinks(abs); err == nil {
 		if canonical != abs {
-			return validateCachedExecutablePath(canonical)
+			return validateCachedExecutablePath(ctx, canonical)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("resolving cached executable %q: %w", path, err)
@@ -84,7 +89,7 @@ func ValidateCachedExecutable(path string) error {
 	return nil
 }
 
-func validateCachedExecutablePath(abs string) error {
+func validateCachedExecutablePath(ctx context.Context, abs string) error {
 	var owner resolvedRemoteCache
 	var checkout string
 	resolvedRemoteCaches.Range(func(key, value any) bool {
@@ -106,13 +111,13 @@ func validateCachedExecutablePath(abs string) error {
 		})
 		return unresolved
 	}
-	return owner.validate()
+	return owner.validate(ctx)
 }
 
 // GuardCachedExecCommand prevents cmd from starting when its cached code fails
 // FULL validation. Call after setting Dir and Env, before Run, Output or Start.
 // The refusal uses exec.Cmd.Err so existing execution error handling reports it.
-func GuardCachedExecCommand(cmd *exec.Cmd) {
+func GuardCachedExecCommand(ctx context.Context, cmd *exec.Cmd) {
 	if cmd.Err != nil {
 		return
 	}
@@ -120,7 +125,7 @@ func GuardCachedExecCommand(cmd *exec.Cmd) {
 	if cmd.Dir != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(cmd.Dir, path)
 	}
-	cmd.Err = ValidateCachedExecutable(path)
+	cmd.Err = ValidateCachedExecutable(ctx, path)
 	if cmd.Err == nil {
 		args := append([]string(nil), cmd.Args...)
 		if len(args) > 0 {
@@ -128,6 +133,6 @@ func GuardCachedExecCommand(cmd *exec.Cmd) {
 			// must not cause us to validate an executable that will not run.
 			args[0] = path
 		}
-		cmd.Err = validateCachedShellArgs(args, cmd.Dir, cmd.Environ(), 0)
+		cmd.Err = validateCachedShellArgs(ctx, args, cmd.Dir, cmd.Environ(), 0)
 	}
 }

@@ -248,7 +248,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	cmd.Stdin = bytes.NewReader(stdinData) // nil → empty reader → script reads EOF
 
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

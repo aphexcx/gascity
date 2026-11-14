@@ -318,7 +318,7 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 		cmd.Dir = opts.ConditionDir
 	}
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)

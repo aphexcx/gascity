@@ -27,7 +27,7 @@ func runCommand(ctx context.Context, argv []string, stdin []byte, environment []
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = make([]string, len(environment))
 	copy(cmd.Env, environment)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	cmd.Stdin = bytes.NewReader(stdin)
 	stdout := boundedBuffer{limit: maxStdoutBytes}
 	stderr := boundedBuffer{limit: maxStderrBytes}

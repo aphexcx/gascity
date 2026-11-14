@@ -4,4 +4,6 @@ package git
 
 import "os/exec"
 
-func configureExecutableProbe(_ *exec.Cmd) func() error { return func() error { return nil } }
+// ConfigureCommandCancellation retains exec.CommandContext cancellation on
+// Windows, where Git probes do not use Unix process groups.
+func ConfigureCommandCancellation(_ *exec.Cmd) func() error { return func() error { return nil } }

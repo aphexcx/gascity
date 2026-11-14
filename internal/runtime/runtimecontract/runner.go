@@ -129,7 +129,7 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, r.path, args...)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(opCtx, cmd)
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open: a conformance run reports a hang, not
 	// inherits it.

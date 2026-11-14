@@ -1,6 +1,7 @@
 package cacheexec
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,17 +14,20 @@ import (
 // Expansion is read-only: it never evaluates command/process substitutions.
 // Dynamic launchers whose executable cannot be resolved statically retain FULL
 // validation of the resolved imports, rather than silently weakening the guard.
-func ValidateCachedShellCommand(command, dir string, env []string) error {
-	return validateCachedShellCommand(command, dir, env, 0)
+func ValidateCachedShellCommand(ctx context.Context, command, dir string, env []string) error {
+	return validateCachedShellCommand(ctx, command, dir, env, 0)
 }
 
-func validateCachedShellCommand(command, dir string, env []string, depth int) error {
+func validateCachedShellCommand(ctx context.Context, command, dir string, env []string, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if depth >= 32 {
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "launcher")
 	if err != nil {
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	}
 	if env == nil {
 		env = os.Environ()
@@ -57,7 +61,7 @@ func validateCachedShellCommand(command, dir string, env []string, depth int) er
 		// Arguments of readers and shell output builtins are data. Still walk
 		// their substitutions: those contain separate executable call nodes.
 		if command, err := expand.Literal(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args[0]); err == nil && readsShellArguments(filepath.Base(command)) {
-			validationErr = validateCachedShellPath(command, dir, callEnv)
+			validationErr = validateCachedShellPath(ctx, command, dir, callEnv)
 			return true
 		}
 		args, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args...)
@@ -65,23 +69,23 @@ func validateCachedShellCommand(command, dir string, env []string, depth int) er
 			unresolved = true
 			return true
 		}
-		validationErr = validateCachedShellArgs(args, dir, callEnv, depth)
+		validationErr = validateCachedShellArgs(ctx, args, dir, callEnv, depth)
 		return true
 	})
 	if validationErr != nil {
 		return validationErr
 	}
 	if unresolved {
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	}
 	return nil
 }
 
-func validateCachedShellArgs(args []string, dir string, env []string, depth int) error {
+func validateCachedShellArgs(ctx context.Context, args []string, dir string, env []string, depth int) error {
 	if len(args) == 0 {
 		return nil
 	}
-	if err := validateCachedShellPath(args[0], dir, env); err != nil {
+	if err := validateCachedShellPath(ctx, args[0], dir, env); err != nil {
 		return err
 	}
 	name := filepath.Base(args[0])
@@ -89,47 +93,67 @@ func validateCachedShellArgs(args []string, dir string, env []string, depth int)
 	case "exec", "command", "env":
 		for i := 1; i < len(args); i++ {
 			if strings.HasPrefix(args[i], "-") {
-				return validateAllResolvedRemoteCaches()
+				return validateActiveRemoteCaches(ctx, dir, env)
 			}
 			if key, _, ok := strings.Cut(args[i], "="); ok && name == "env" && key != "" {
 				env = append(env, args[i])
 				continue
 			}
-			return validateCachedShellArgs(args[i:], dir, env, depth)
+			return validateCachedShellArgs(ctx, args[i:], dir, env, depth)
 		}
 	case "eval":
-		return validateCachedShellCommand(strings.Join(args[1:], " "), dir, env, depth+1)
+		return validateCachedShellCommand(ctx, strings.Join(args[1:], " "), dir, env, depth+1)
 	case "sh", "bash", "dash", "zsh", "ksh":
 		for i := 1; i < len(args); i++ {
-			if args[i] == "-c" && i+1 < len(args) {
-				return validateCachedShellCommand(args[i+1], dir, env, depth+1)
+			arg := args[i]
+			if arg == "--" {
+				if i+1 < len(args) {
+					return validateCachedScriptPath(ctx, args[i+1], dir)
+				}
+				break
 			}
-			if strings.HasPrefix(args[i], "-") {
+			if arg == "-o" || arg == "+o" || arg == "-O" || arg == "+O" {
+				i++ // the next word is an option name, not a script
 				continue
 			}
-			return validateCachedScriptPath(args[i], dir)
+			if strings.HasPrefix(arg, "--") || arg == "-" {
+				return validateActiveRemoteCaches(ctx, dir, env)
+			}
+			if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+") {
+				if strings.ContainsAny(arg[1:], "oOs") {
+					return validateActiveRemoteCaches(ctx, dir, env)
+				}
+				if strings.HasPrefix(arg, "-") && strings.ContainsRune(arg[1:], 'c') {
+					if i+1 < len(args) {
+						return validateCachedShellCommand(ctx, args[i+1], dir, env, depth+1)
+					}
+					break
+				}
+				continue
+			}
+			return validateCachedScriptPath(ctx, arg, dir)
 		}
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	case "python", "python3", "node", "ruby", "perl", "lua":
 		for _, arg := range args[1:] {
 			if arg == "--" || arg == "-u" || arg == "-B" {
 				continue
 			}
 			if strings.HasPrefix(arg, "-") {
-				return validateAllResolvedRemoteCaches()
+				return validateActiveRemoteCaches(ctx, dir, env)
 			}
-			return validateCachedScriptPath(arg, dir)
+			return validateCachedScriptPath(ctx, arg, dir)
 		}
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	case ".", "source":
 		if len(args) > 1 {
-			if err := validateCachedShellPath(args[1], dir, env); err != nil {
+			if err := validateCachedShellPath(ctx, args[1], dir, env); err != nil {
 				return err
 			}
 		}
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	case "cd", "pushd", "popd", "read", "unset", "set", "shift", "getopts", "trap":
-		return validateAllResolvedRemoteCaches()
+		return validateActiveRemoteCaches(ctx, dir, env)
 	case "cat", "cp", "echo", "printf", "true", "false", "test", "[", ":":
 		// These operations consume file contents without executing them.
 		return nil
@@ -146,7 +170,7 @@ func validateCachedShellArgs(args []string, dir string, env []string, depth int)
 				if _, err := os.Stat(path); err != nil {
 					continue // arguments need not be file names (for example, prompts)
 				}
-				if err := validateCachedShellPath(arg, dir, env); err != nil {
+				if err := validateCachedShellPath(ctx, arg, dir, env); err != nil {
 					return err
 				}
 			}
@@ -163,7 +187,7 @@ func readsShellArguments(command string) bool {
 	return false
 }
 
-func validateCachedScriptPath(path, dir string) error {
+func validateCachedScriptPath(ctx context.Context, path, dir string) error {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(dir, path)
 	}
@@ -173,15 +197,15 @@ func validateCachedScriptPath(path, dir string) error {
 	if err != nil {
 		return err
 	}
-	return ValidateCachedExecutable(abs)
+	return ValidateCachedExecutable(ctx, abs)
 }
 
-func validateCachedShellPath(path, dir string, env []string) error {
+func validateCachedShellPath(ctx context.Context, path, dir string, env []string) error {
 	if strings.ContainsAny(path, `/\`) {
 		if !filepath.IsAbs(path) && dir != "" {
 			path = filepath.Join(dir, path)
 		}
-		return ValidateCachedExecutable(path)
+		return ValidateCachedExecutable(ctx, path)
 	}
 	search := os.Getenv("PATH")
 	for _, pair := range env {
@@ -195,18 +219,8 @@ func validateCachedShellPath(path, dir string, env []string) error {
 		}
 		candidate := filepath.Join(prefix, path)
 		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return ValidateCachedExecutable(candidate)
+			return ValidateCachedExecutable(ctx, candidate)
 		}
 	}
 	return nil
-}
-
-func validateAllResolvedRemoteCaches() error {
-	var result error
-	resolvedRemoteCaches.Range(func(_, value any) bool {
-		owner := value.(resolvedRemoteCache)
-		result = owner.validate()
-		return result == nil
-	})
-	return result
 }

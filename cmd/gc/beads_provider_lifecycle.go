@@ -1602,7 +1602,7 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, args...)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	cmd.Env = environ
@@ -3394,7 +3394,7 @@ func runProviderProbe(script, cityPath, provider string) bool {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, "probe")
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if cityPath != "" {
@@ -3917,7 +3917,7 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, args...)
-	cacheexec.GuardCachedExecCommand(cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if len(environ) > 0 {
