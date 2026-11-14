@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/doltversion"
 )
 
@@ -51,7 +52,9 @@ func probeBinaryVersion(name string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), binaryVersionProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
+	cmd := exec.CommandContext(ctx, path, "version")
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("%s version timed out after %s", name, binaryVersionProbeTimeout)
 	}

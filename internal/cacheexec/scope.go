@@ -19,18 +19,25 @@ var activeScopes sync.Map // canonical city directory -> []resolvedRemoteCache
 func PublishScope(city string, resolvedPaths []string) {
 	owners := make(map[string]resolvedRemoteCache)
 	for _, resolvedPath := range resolvedPaths {
-		resolvedPath = canonicalPath(resolvedPath)
-		var checkout string
-		var owner resolvedRemoteCache
-		resolvedRemoteCaches.Range(func(key, value any) bool {
-			dir := key.(string)
-			if pathWithinDir(resolvedPath, dir) && len(dir) > len(checkout) {
-				checkout, owner = dir, value.(resolvedRemoteCache)
+		original := filepath.Clean(resolvedPath)
+		if abs, err := filepath.Abs(original); err == nil {
+			original = abs
+		}
+		// A changed cached file may point to local configuration. Preserve its
+		// owning checkout as well as any owner of the canonical target.
+		for _, path := range []string{original, canonicalPath(resolvedPath)} {
+			var checkout string
+			var owner resolvedRemoteCache
+			resolvedRemoteCaches.Range(func(key, value any) bool {
+				dir := key.(string)
+				if pathWithinDir(path, dir) && len(dir) > len(checkout) {
+					checkout, owner = dir, value.(resolvedRemoteCache)
+				}
+				return true
+			})
+			if checkout != "" {
+				owners[canonicalPath(checkout)] = owner
 			}
-			return true
-		})
-		if checkout != "" {
-			owners[checkout] = owner
 		}
 	}
 	keys := make([]string, 0, len(owners))

@@ -189,6 +189,33 @@ func TestGuardUsesResolvedExecutableInsteadOfChildPATH(t *testing.T) {
 	}
 }
 
+func TestConfiguredExecutionRetainsSymlinkSourceOwner(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	city, cached := t.TempDir(), t.TempDir()
+	local := filepath.Join(city, "local.toml")
+	if err := os.WriteFile(local, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(cached, "fragment.toml")
+	if err := os.Symlink(local, source); err != nil {
+		t.Fatal(err)
+	}
+	scans := 0
+	dirty := errors.New("dirty cached configuration symlink")
+	Register(cached, func(context.Context) error { scans++; return dirty })
+	PublishScope(city, []string{source})
+	if scans != 0 {
+		t.Fatal("publishing read-only configuration triggered validation")
+	}
+	if err := ValidateConfiguredShellCommand(t.Context(), "printf configured", city, []string{}); !errors.Is(err, dirty) {
+		t.Fatalf("cached source owner was lost through its symlink: %v", err)
+	}
+	if scans != 1 {
+		t.Fatalf("source validation calls = %d, want 1", scans)
+	}
+}
+
 func TestShellFallbackUsesExecutionCityOutsideItsDirectory(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)

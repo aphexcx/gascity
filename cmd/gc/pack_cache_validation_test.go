@@ -311,6 +311,45 @@ func TestPackCacheInlineWorkQueryRefusedBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestPackCacheInterpreterArgumentsValidatedBeforeExecution(t *testing.T) {
+	f := newPackCacheFixture(t, 2)
+	if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.caches[1], ".dirty"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := config.DiscoveredCommand{
+		PackDir: f.caches[0], SourceDir: filepath.Join(f.caches[0], "commands", "report"), RunScript: "/bin/sh",
+	}
+	var stderr bytes.Buffer
+	code := runDiscoveredCommand(entry, f.city, "cache-city", []string{"-c", fmt.Sprintf("%q", filepath.Join(f.caches[1], "commands", "report", "run.sh"))}, nil, io.Discard, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "has local worktree changes") {
+		t.Errorf("interpreter payload was not refused: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+		t.Errorf("interpreter payload executed: %v", err)
+	}
+}
+
+func TestPackCachePromptSynthesisValidatesConfigurationSource(t *testing.T) {
+	f := newPackCacheFixture(t, 1)
+	if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &config.ResolvedProvider{Command: "sh", Args: []string{"-c", fmt.Sprintf("printf dirty > %q", f.marker)}}
+	_, err := defaultPromptSynthRunner(t.Context(), provider, "prompt", f.city)
+	if err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
+		t.Errorf("provider configuration was not refused: %v", err)
+	}
+	if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+		t.Errorf("provider configuration executed: %v", err)
+	}
+}
+
 func TestPackCacheFullLifecycleLoadsRejectDirtyImport(t *testing.T) {
 	for name, load := range map[string]func(string) error{
 		"start":             func(city string) error { _, _, err := loadStartCityConfig(city); return err },
