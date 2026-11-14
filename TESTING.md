@@ -416,9 +416,8 @@ files in the same package, and terminates safely on cycles.
 This is intentionally not a universal hermeticity proof. Cross-package calls,
 method and interface dispatch, package-level callback indirection, and
 resources absent from the catalog remain manual-review boundaries. In
-particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` and
-`TestDoSessionWake_PokesManagedControllerAfterStateChange` have reviewed
-hermetic bodies but still run as Medium because `cmd/gc` owns a process-mutating
+particular, `TestPrepareWaitWakeState_ResolvesRigDependencyBeads` has a reviewed
+hermetic body but still runs as Medium because `cmd/gc` owns a process-mutating
 `TestMain`. `TestDoSessionWait_RegistersReadyWaitForRigDependency` has the same
 reviewed-hermetic guarantee for the wait-registration use case.
 `TestCmdSessionWait_AllowsRigDependencyBeads` remains the singular
@@ -427,6 +426,10 @@ CLI/config/file-store split-store composition proof for wait, while
 managed-provider hard-kill/port-rebind boundary. Likewise,
 `TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart` remains the
 singular CLI/config/file-store/controller-socket composition proof for wake.
+`TestDoSessionWake_PokesManagedControllerAfterStateChange` also remains Medium.
+Its static helper graph reaches the lazy launch callback's canonical builder,
+so it does not carry a reviewed-hermetic-body claim. Entry-launch cost tests
+separately pin zero full builds for handle construction and read/control calls.
 `TestDoMailInbox_RendersMessagesFromReader` owns inbox rendering through the
 consumer's one-method reader port, while
 `TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox` remains
@@ -613,7 +616,6 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- |
 | `cmd/gc` package `main` — TestDoMailInbox_RendersMessagesFromReader | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox |
 | `cmd/gc` package `main` — TestDoSessionWait_RegistersReadyWaitForRigDependency | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
-| `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
 

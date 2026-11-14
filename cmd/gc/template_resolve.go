@@ -507,7 +507,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.workspace != nil {
 		workspaceEnv = p.workspace.Env
 	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	passthrough := p.passthrough
+	if passthrough == nil {
+		passthrough = passthroughEnv()
+	}
+	env := mergeEnv(passthrough, expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	// Workspace bindings belong to this launch, never to the parent process.
 	// resolveTemplateForSessionBeadInfo fills this after resolving its trigger.
 	env["GC_WORKTREE_BEAD_ID"] = ""

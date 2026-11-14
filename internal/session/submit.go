@@ -112,6 +112,13 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		if err != nil {
 			return err
 		}
+		if m.controllerDefersMessage(b, sessName) {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
+				return err
+			}
+			outcome.Queued = true
+			return nil
+		}
 		switch intent {
 		case SubmitIntentFollowUp:
 			if !m.supportsFollowUpLocked(b) {
@@ -585,8 +592,22 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+	if _, err := m.enqueueSubmitLocked(b, message); err != nil {
+		return err
+	}
+	m.activateDeferredSubmitLocked(b, sessName)
+	return nil
+}
+
+func (m *Manager) activateDeferredSubmitLocked(b beads.Bead, sessName string) {
+	if m.supportsFollowUpLocked(b) {
+		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+	}
+}
+
+func (m *Manager) enqueueSubmitLocked(b beads.Bead, message string) (string, error) {
 	if strings.TrimSpace(m.cityPath) == "" {
-		return errors.New("deferred submit is unavailable without a city path")
+		return "", errors.New("deferred submit is unavailable without a city path")
 	}
 	now := time.Now().UTC()
 	item := nudgequeue.Item{
@@ -605,12 +626,9 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		nudgequeue.SortState(state)
 		return nil
 	}); err != nil {
-		return fmt.Errorf("queueing deferred submit: %w", err)
+		return "", fmt.Errorf("queueing deferred submit: %w", err)
 	}
-	if m.supportsFollowUpLocked(b) {
-		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
-	}
-	return nil
+	return item.ID, nil
 }
 
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is

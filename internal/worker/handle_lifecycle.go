@@ -19,11 +19,11 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	startCommand, err := h.startCommand(id)
+	startCommand, hints, err := h.launchForCall(id, entryLaunchRuntime)
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	err = h.manager.Start(ctx, id, startCommand, hints)
 	return err
 }
 
@@ -70,11 +70,11 @@ func (h *SessionHandle) Attach(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	resumeCommand, err := h.startCommand(id)
+	resumeCommand, hints, err := h.launchForCall(id, entryLaunchRuntime)
 	if err != nil {
 		return err
 	}
-	err = h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+	err = h.manager.Attach(ctx, id, resumeCommand, hints)
 	return err
 }
 
@@ -312,11 +312,15 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	resumeCommand, err := h.startCommand(id)
+	kind := entryLaunchMessage
+	if req.Delivery == DeliveryIntentInterruptNow {
+		kind = entryLaunchInterrupt
+	}
+	resumeCommand, hints, err := h.launchForCall(id, kind)
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, hints, submitIntent(req.Delivery))
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -357,7 +361,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	if err != nil {
 		return NudgeResult{}, err
 	}
-	resumeCommand, err := h.startCommand(id)
+	kind := entryLaunchMessage
+	if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
+		kind = entryLaunchLiveOnly
+	}
+	resumeCommand, hints, err := h.launchForCall(id, kind)
 	if err != nil {
 		return NudgeResult{}, err
 	}
@@ -373,7 +381,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivery, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.Send(ctx, id, req.Text, resumeCommand, hints)
 		if err != nil {
 			// Evidence survives the error (see runtime.NudgeDelivery).
 			result = nudgeResultFromDelivery(delivery)
@@ -385,7 +393,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		// payload that reached nothing — which callers gating a dedup claim on
 		// this flag would then commit against. See runtime.NudgeVouchingProvider.
 		result = nudgeResultFromDelivery(delivery)
-		if !delivery.Landed() {
+		if !delivery.Landed() && !delivery.Queued {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil
@@ -400,14 +408,14 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivery, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, hints)
 		if err != nil {
 			// Evidence survives the error (see runtime.NudgeDelivery).
 			result = nudgeResultFromDelivery(delivery)
 			return result, err
 		}
 		result = nudgeResultFromDelivery(delivery)
-		if !delivery.Landed() {
+		if !delivery.Landed() && !delivery.Queued {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil
@@ -422,7 +430,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = nudgeResultFromDelivery(delivery)
 			return result, nil
 		}
-		delivery, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
+		delivery, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, hints)
 		if err != nil {
 			// Evidence survives the error (see runtime.NudgeDelivery).
 			result = nudgeResultFromDelivery(delivery)
@@ -545,15 +553,9 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {
-	switch state {
-	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
-	default:
-		return false
-	}
-	if strings.TrimSpace(metadata["creation_complete_at"]) != "" {
-		return false
-	}
-	return strings.TrimSpace(metadata["started_config_hash"]) == ""
+	return sessionpkg.FirstProviderSessionStart(sessionpkg.Info{
+		State: state, CreationCompleteAt: metadata["creation_complete_at"], StartedConfigHash: metadata["started_config_hash"],
+	})
 }
 
 func (h *SessionHandle) providerLabel() string {

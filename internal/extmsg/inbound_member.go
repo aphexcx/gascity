@@ -92,6 +92,9 @@ type InboundMemberOutcome struct {
 // received whole every time. The payload is in the terminal and the outcome
 // is not concluded — that is pending by definition.
 func ClassifyInboundMember(e InboundMemberEvidence) InboundMemberOutcome {
+	if e.Queued {
+		return InboundMemberOutcome{Status: InboundDeliveryPending, Reason: "queued for the replacement session; do not resend"}
+	}
 	if !e.Landed() {
 		if e.Held != nil {
 			reason := fmt.Sprintf("composer holds %s since %s (%dms), delivery held", e.Held.State, e.Held.Since.Format("2006-01-02T15:04:05.999999999Z07:00"), e.Held.AgeMS)
