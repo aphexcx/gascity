@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -325,6 +326,57 @@ func TestEntryLaunchPreservesStoredTransport(t *testing.T) {
 			}
 			if launch.Command != base.Command {
 				t.Fatalf("transport changed: command=%q base=%q", launch.Command, base.Command)
+			}
+		})
+	}
+}
+
+func TestEntryLaunchPreservesCityPromptDelivery(t *testing.T) {
+	for _, name := range []string{"subprocess", "t3bridge", "subprocess/legacy-acp", "t3bridge/legacy-acp"} {
+		t.Run(name, func(t *testing.T) {
+			provider, _, legacyACP := strings.Cut(name, "/")
+			cityPath, cfg := entryLaunchContextFixture(t)
+			cfg.Session.Provider = provider
+			promptFile := filepath.Join(cityPath, "prompt.md")
+			prompt := strings.Repeat("p", maxPromptSuffixRawBytes)
+			if err := os.WriteFile(promptFile, []byte(prompt), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Agents[0].PromptTemplate = promptFile
+			p := cfg.Providers["test-provider"]
+			p.PromptMode = "arg"
+			cfg.Providers["test-provider"] = p
+			store, sp := beads.NewMemStore(), runtime.NewFake()
+			params := newAgentBuildParams(cfg.EffectiveCityName(), cityPath, cfg, sp, time.Time{}, store, nil)
+			tp, err := resolveTemplate(params, &cfg.Agents[0], "runner", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, _, canonicalErr := templateParamsToConfigWithDelivery(tp)
+			if legacyACP {
+				// The provider gained ACP after this terminal session was created.
+				supportsACP := true
+				p.SupportsACP = &supportsACP
+				p.ACPCommand = "/bin/echo"
+				p.ACPArgs = []string{"acp-only"}
+				cfg.Providers["test-provider"] = p
+			}
+			info := session.Info{Template: "runner", Provider: "test-provider", WorkDir: cityPath, Command: "/bin/echo"}
+			launch, err := buildWorkerEntryLaunch(cityPath, cfg, store, sp, info, "agent", map[string]string{"real_world_app_session_kind": "agent"}, true)
+			if provider == "subprocess" {
+				if !errors.Is(canonicalErr, errOversizedPromptUnsupportedRuntime) {
+					t.Fatalf("canonical oversized guard = %v", canonicalErr)
+				}
+				if !errors.Is(err, errOversizedPromptUnsupportedRuntime) {
+					t.Fatalf("entry oversized guard = %v, want unsupported runtime", err)
+				}
+				return
+			}
+			if canonicalErr != nil || err != nil {
+				t.Fatalf("canonical error=%v; entry error=%v", canonicalErr, err)
+			}
+			if !strings.Contains(canonical.PromptSuffix, prompt) || !strings.Contains(launch.Hints.PromptSuffix, prompt) || strings.Contains(launch.Hints.Nudge, prompt) {
+				t.Fatal("entry launch changed the city's argv-safe prompt delivery")
 			}
 		})
 	}

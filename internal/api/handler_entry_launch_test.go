@@ -26,6 +26,18 @@ type entryLaunchAPIState struct {
 func (*entryLaunchAPIState) ControllerRunning() bool                               { return true }
 func (s *entryLaunchAPIState) SessionLaunchBuilder() worker.SessionRuntimeResolver { return s.builder }
 
+type entryLaunchTranscriptLossProvider struct {
+	*runtime.Fake
+	transcriptPath string
+}
+
+func (p *entryLaunchTranscriptLossProvider) Stop(name string) error {
+	if err := p.Fake.Stop(name); err != nil {
+		return err
+	}
+	return os.Remove(p.transcriptPath)
+}
+
 func TestAPIInterruptReplacementNeedsFullLaunch(t *testing.T) {
 	for _, site := range []string{"interrupt-boundary", "idle-wait", "pi-restart", "pi-restore"} {
 		t.Run(site, func(t *testing.T) {
@@ -68,17 +80,13 @@ prompt_mode = "none"
 			transcriptDir := t.TempDir()
 			if site == "pi-restore" {
 				content := fmt.Sprintf("{\"type\":\"session\",\"id\":\"abc123\",\"cwd\":%q}\n{\"type\":\"message\",\"id\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"pending\"}}\n", info.WorkDir)
-				if err := os.WriteFile(filepath.Join(transcriptDir, "2026-01-01T00-00-00-000Z_abc123.jsonl"), []byte(content), 0o600); err != nil {
+				transcriptPath := filepath.Join(transcriptDir, "2026-01-01T00-00-00-000Z_abc123.jsonl")
+				if err := os.WriteFile(transcriptPath, []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(transcriptDir, 0o500); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					if err := os.Chmod(transcriptDir, 0o700); err != nil {
-						t.Error(err)
-					}
-				})
+				// Lose the discovered transcript at Stop, before reset, regardless
+				// of the process's filesystem privileges.
+				fs.sessionProvider = &entryLaunchTranscriptLossProvider{Fake: fs.sp, transcriptPath: transcriptPath}
 				// This input is present on both the cheap base resolver and the
 				// full launch, so the base reaches the same restore site.
 				p := cfg.Providers["test-launch"]
@@ -111,6 +119,9 @@ prompt_mode = "none"
 			wantFailure := site == "idle-wait" || site == "pi-restore"
 			if wantFailure && failure == nil {
 				t.Fatal("injected failure was not reported")
+			}
+			if site == "pi-restore" && !strings.Contains(failure.ErrorMessage, "discarding pi interrupted turn") {
+				t.Fatalf("failure did not reach transcript reset: %+v", failure)
 			}
 			if !wantFailure && success == nil {
 				t.Fatalf("submit failed: %+v", failure)

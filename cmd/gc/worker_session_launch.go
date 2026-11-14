@@ -61,7 +61,12 @@ func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store
 	}
 	info = session.ResumeInfoForTransport(info, transport, metadata)
 	launchAgent := agentCfg.Clone()
-	launchAgent.Session = firstNonEmptyGCString(transport, config.SessionTransportTmux)
+	launchAgent.Session = transport
+	legacyTerminal := transport == "" && configuredTransport == config.SessionTransportACP
+	if legacyTerminal {
+		// Preserve a legacy terminal session when the provider now defaults to ACP.
+		launchAgent.Session = config.SessionTransportTmux
+	}
 	if workDir := firstNonEmptyGCString(info.WorkDirCanonical, info.WorkDir); workDir != "" {
 		launchAgent.WorkDir = workDir
 	}
@@ -69,6 +74,10 @@ func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store
 	tp, err := resolveTemplateForSessionBeadInfo(params, agentCfg, identity, nil, info)
 	if err != nil {
 		return nil, fmt.Errorf("building launch for session %q: %w", info.ID, err)
+	}
+	if legacyTerminal {
+		// The terminal command still runs on the city's non-ACP backend.
+		tp.EffectiveSessionProvider = effectiveSessionProvider("", params.sessionProvider)
 	}
 	if info.SessionOrigin != "" {
 		tp.Env["GC_SESSION_ORIGIN"] = info.SessionOrigin
