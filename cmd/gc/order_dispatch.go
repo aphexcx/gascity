@@ -2891,6 +2891,11 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	return gateOpenWorkContextBounded(ctx, timeout, scoped, func(context.Context) (bool, error) { return gate() })
 }
 
+// orderGateStoresWithContext binds gate cancellation to the supplied stores.
+//
+// residency:allow — context-only wrappers around the caller's resolved store set.
+// It preserves the input count, order, and backing stores; it consults no binding
+// or namespace and opens no store.
 func orderGateStoresWithContext(ctx context.Context, stores []beads.Store) []beads.Store {
 	bound := make([]beads.Store, len(stores))
 	for i, store := range stores {
