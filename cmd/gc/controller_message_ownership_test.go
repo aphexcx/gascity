@@ -43,7 +43,7 @@ func (e *providerMessageResultEvents) next(t *testing.T, want string) events.Eve
 			t.Fatalf("result event=%s, want %s: %s", event.Type, want, event.Payload)
 		}
 		return event
-	case <-time.After(10 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatalf("no %s result", want)
 		return events.Event{}
 	}

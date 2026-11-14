@@ -145,7 +145,7 @@ TEST_PROVIDER_ENV = "provider"
 						if event.Type != events.RequestResultSessionSubmit {
 							t.Fatalf("submit event=%s", event.Type)
 						}
-					case <-time.After(5 * time.Second):
+					case <-time.After(hangBudget):
 						t.Fatal("submit did not finish")
 					}
 				} else {

@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func installEntryTestBuilder(cfg *FactoryConfig, builder SessionRuntimeResolver) {
@@ -30,7 +31,7 @@ func TestEntryLaunchBuildCostAndLockBoundary(t *testing.T) {
 		go func() { _ = sessionpkg.WithSessionMutationLock(info.ID, func() error { close(locked); return nil }) }()
 		select {
 		case <-locked:
-		case <-time.After(time.Second):
+		case <-time.After(testutil.GoroutineRaceTimeout):
 			t.Error("entry builder holds the session lock")
 		}
 		return nil, buildErr

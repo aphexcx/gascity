@@ -104,6 +104,7 @@ go_test(
         "//internal/sessionlog",
         "//internal/telemetry",
         "//internal/testenv",
+        "//internal/testutil",
         "//internal/transcriptmeta",
         "//internal/usage",
         "//pkg/eventexport",

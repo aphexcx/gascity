@@ -93,7 +93,7 @@ func TestAPIEntryLaunchReleasesSessionLockWhileCacheBlocked(t *testing.T) {
 	case event := <-ep.done:
 		result = &event
 		t.Log("base has no entry builder; lock half passes vacuously")
-	case <-time.After(10 * time.Second):
+	case <-time.After(hangBudget):
 		t.Fatal("neither entry builder nor submit completion observed")
 	}
 	acquired := make(chan struct{})
@@ -102,7 +102,7 @@ func TestAPIEntryLaunchReleasesSessionLockWhileCacheBlocked(t *testing.T) {
 	}()
 	select {
 	case <-acquired:
-	case <-time.After(time.Second):
+	case <-time.After(hangBudget):
 		unlock()
 		t.Fatal("entry launch build held the session mutation lock")
 	}
@@ -111,7 +111,7 @@ func TestAPIEntryLaunchReleasesSessionLockWhileCacheBlocked(t *testing.T) {
 		select {
 		case event := <-ep.done:
 			result = &event
-		case <-time.After(10 * time.Second):
+		case <-time.After(hangBudget):
 			t.Fatal("submit did not finish after cache release")
 		}
 	}
