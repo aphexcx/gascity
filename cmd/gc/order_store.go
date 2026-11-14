@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,23 @@ type orderTrackingSweepScopedStore struct {
 	beads.Store
 	label string
 	key   string
+}
+
+// BoundsListPages preserves the scoped store's backing-page bound.
+func (s orderTrackingSweepScopedStore) BoundsListPages(query beads.ListQuery) bool {
+	return beads.ReaderBoundsListPages(s.Store, query)
+}
+
+// ListWithQueueContext forwards cancellation without changing the scope.
+func (s orderTrackingSweepScopedStore) ListWithQueueContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	return beads.ListWithQueueContext(ctx, s.Store, query)
+}
+
+// Handles preserves explicit read semantics and keeps writes on the scope.
+func (s orderTrackingSweepScopedStore) Handles() beads.StoreHandles {
+	handles := beads.HandlesFor(s.Store)
+	handles.Writer = s
+	return handles
 }
 
 func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {

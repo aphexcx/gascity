@@ -73,13 +73,16 @@ func TestNativeListCanOmitUnusedDependencies(t *testing.T) {
 	}
 }
 
-func TestNativeExactPageRejectsCorruptRows(t *testing.T) {
-	storage := &nativeDoltStorageSpy{searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+func TestNativeExactPageReportsCorruptRows(t *testing.T) {
+	storage := &nativeDoltStorageSpy{searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+		if filter.AfterCreatedAt != nil || filter.SkipWisps {
+			return nil, nil
+		}
 		return []*beadslib.Issue{{ID: "corrupt", Title: "sample", Status: beadslib.StatusClosed, Metadata: []byte("invalid JSON")}}, nil
 	}}
 	_, err := newNativeDoltStoreForTest(storage).List(ListQuery{Status: "closed", Sort: SortCreatedDescIDAsc, Limit: 1, TierMode: TierBoth})
-	if err == nil {
-		t.Fatal("dropping a corrupt row silently turns a full page into a false end of history")
+	if !IsPartialResult(err) || !slices.Equal(SkippedListRowIDs(err), []string{"corrupt"}) {
+		t.Fatalf("corrupt rows must be identified for retention reporting and safety guards: %v", err)
 	}
 }
 

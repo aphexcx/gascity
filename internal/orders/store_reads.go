@@ -183,6 +183,8 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 // (using the legacy bucket for an unresolvable name), keeps the recent-history
 // floor, and deletes the aged remainder. Names are resolved best-effort so an
 // unresolvable-name bead can be routed to the legacy retention bucket.
+// Identified row-decoding warnings accompany the usable runs. Callers must
+// report those warnings; all other errors make the result unusable.
 func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
@@ -195,6 +197,11 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 		Limit:            1000,
 		SkipDependencies: true,
 	}
+	reader := beads.HandlesFor(s.store.Store).Live
+	if !beads.ReaderBoundsListPages(reader, query) {
+		query.Limit = 0
+	}
+	var warnings error
 	var out []OrderRun
 	seen := make(map[string]bool)
 	appendRun := func(b beads.Bead) {
@@ -211,12 +218,16 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 	// every already-read run again. Config is not a complete history catalog.
 	visited := make(map[string]bool)
 	for {
-		page, err := beads.HandlesFor(s.store.Store).Live.List(query)
-		if err != nil {
+		page, err := reader.List(query)
+		if err != nil && len(beads.SkippedListRowIDs(err)) == 0 {
 			return nil, err
 		}
+		warnings = errors.Join(warnings, err)
 		for _, b := range page {
 			appendRun(b)
+			if query.Limit == 0 {
+				continue
+			}
 			for _, label := range b.Labels {
 				if !strings.HasPrefix(label, labelOrderRunPrefix) || visited[label] {
 					continue
@@ -226,13 +237,16 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 				orderQuery.SeekAfter = nil
 				orderQuery.ExcludeLabels = nil
 				if err := s.walkClosedRetentionPages(orderQuery, appendRun); err != nil {
-					return nil, fmt.Errorf("reading retention label %q: %w", label, err)
+					if len(beads.SkippedListRowIDs(err)) == 0 {
+						return nil, fmt.Errorf("reading retention label %q: %w", label, err)
+					}
+					warnings = errors.Join(warnings, err)
 				}
 				visited[label] = true
 				query.ExcludeLabels = append(query.ExcludeLabels, label)
 			}
 		}
-		if len(page) < query.Limit {
+		if query.Limit == 0 || len(page) < query.Limit {
 			break
 		}
 		last := page[len(page)-1]
@@ -250,20 +264,22 @@ func (s *Store) ClosedRunsForRetention() ([]OrderRun, error) {
 		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
-	return out, nil
+	return out, warnings
 }
 
 func (s *Store) walkClosedRetentionPages(query beads.ListQuery, visit func(beads.Bead)) error {
+	var warnings error
 	for {
 		page, err := beads.HandlesFor(s.store.Store).Live.List(query)
-		if err != nil {
+		if err != nil && len(beads.SkippedListRowIDs(err)) == 0 {
 			return err
 		}
+		warnings = errors.Join(warnings, err)
 		for _, b := range page {
 			visit(b)
 		}
 		if len(page) < query.Limit {
-			return nil
+			return warnings
 		}
 		last := page[len(page)-1]
 		next := &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}

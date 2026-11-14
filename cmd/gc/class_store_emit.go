@@ -522,6 +522,23 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 	return closed, nil
 }
 
+// BoundsListPages preserves exact backing pages through class routing.
+func (s *emittingClassStore) BoundsListPages(query beads.ListQuery) bool {
+	return beads.ReaderBoundsListPages(s.Store, query)
+}
+
+// ListWithQueueContext preserves cancellation of queued backing reads.
+func (s *emittingClassStore) ListWithQueueContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	return beads.ListWithQueueContext(ctx, s.Store, query)
+}
+
+// Handles preserves read capabilities while keeping writes on the emitter.
+func (s *emittingClassStore) Handles() beads.StoreHandles {
+	handles := beads.HandlesFor(s.Store)
+	handles.Writer = s
+	return handles
+}
+
 // ReadMetadataPathPage preserves bounded ownership reads through class routing.
 func (s *emittingClassStore) ReadMetadataPathPage(ctx context.Context, query beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
 	reader, ok := s.Store.(beads.MetadataPathPageReader)
