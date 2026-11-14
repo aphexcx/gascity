@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -88,6 +89,7 @@ func runShellCommand(command, dir string, timeout time.Duration, env map[string]
 	if prepare != nil {
 		prepare(cmd)
 	}
+	cacheexec.GuardCachedExecCommand(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)

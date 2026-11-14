@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -204,6 +205,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	cacheexec.GuardCachedExecCommand(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("running %q: %w", command, err)
@@ -578,7 +580,7 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, skipRevisionSnapshot, extraConfigFiles...)
 }
 
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {

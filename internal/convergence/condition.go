@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/gchome"
@@ -389,6 +390,7 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		cmd.Dir = env.WorkDir
 	}
 	cmd.Env = env.Environ()
+	cacheexec.GuardCachedExecCommand(cmd)
 	// WaitDelay ensures cmd.Wait returns promptly after the context
 	// cancels and SIGKILL is sent, even if child I/O pipes are still open.
 	cmd.WaitDelay = time.Second

@@ -20,6 +20,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -1601,6 +1602,7 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	ctx, cancel := providerLifecycleContext(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, args...)
+	cacheexec.GuardCachedExecCommand(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	cmd.Env = environ
@@ -3392,6 +3394,7 @@ func runProviderProbe(script, cityPath, provider string) bool {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, "probe")
+	cacheexec.GuardCachedExecCommand(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if cityPath != "" {
@@ -3914,6 +3917,7 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, script, args...)
+	cacheexec.GuardCachedExecCommand(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if len(environ) > 0 {

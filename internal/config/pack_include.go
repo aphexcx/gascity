@@ -12,6 +12,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	gitutil "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
@@ -97,7 +98,7 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
-func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, error) {
+func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool, mode ...CacheValidationMode) (string, error) {
 	if isGitHubTreeURL(ref) || isRemoteInclude(ref) {
 		// parseRemoteInclude handles GitHub tree/blob URLs too
 		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
@@ -122,7 +123,7 @@ func resolvePackRef(ref, declDir, cityRoot string, nonBlocking bool) (string, er
 			lockKeys = append(lockKeys, source)
 		}
 		for _, key := range lockKeys {
-			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot, nonBlocking); err != nil {
+			if cacheDir, ok, err := resolveLockedRemoteImport(key, cityRoot, nonBlocking, mode...); err != nil {
 				return "", err
 			} else if ok {
 				if subpath != "" {
@@ -151,7 +152,7 @@ type remoteImportLockEntry struct {
 	Commit string `toml:"commit"`
 }
 
-func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (string, bool, error) {
+func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool, mode ...CacheValidationMode) (string, bool, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -175,7 +176,7 @@ func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (strin
 		return "", false, err
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking, mode...); err != nil {
 		return "", false, err
 	}
 	return cacheDir, true, nil
@@ -304,6 +305,7 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking
 		return "", true, fmt.Errorf("resolving bundled repository for %q", source)
 	}
 	if builtinpacks.ValidateSyntheticRepoFast(cacheDir, repository, commit) == nil {
+		rememberRemoteCache(source, cacheRoot, cacheDir, commit)
 		return cacheDir, true, nil
 	}
 	if _, err := withRepoCacheWriteLock(cacheRoot, nonBlocking, func() (string, error) {
@@ -317,10 +319,11 @@ func resolveBundledSourceWithoutLock(source, declaredVersion string, nonBlocking
 		}
 		return "", true, fmt.Errorf("hydrating synthetic repo cache: %w", err)
 	}
+	rememberRemoteCache(source, cacheRoot, cacheDir, commit)
 	return cacheDir, true, nil
 }
 
-func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonBlocking bool) (string, error) {
+func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonBlocking bool, mode ...CacheValidationMode) (string, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -356,7 +359,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string, nonB
 		return "", err
 	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit, nonBlocking, mode...); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
@@ -401,10 +404,12 @@ func remoteCacheFingerprint(cacheDir string) string {
 // validateInstalledRemoteCacheLocked validates the remote cache under the
 // repo-cache read lock, memoizing the success so a warm, unchanged cache skips
 // both the flock and the git execs on subsequent loads.
-func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit string, nonBlocking bool) error {
+func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit string, nonBlocking bool, mode ...CacheValidationMode) error {
+	// Execution needs the lock identity even when a prior FULL check is cached.
+	rememberRemoteCache(source, cacheRoot, cacheDir, commit)
 	key := cacheDir + "\x00" + commit
 	fp := remoteCacheFingerprint(cacheDir)
-	if v, ok := remoteCacheValidationCache.Load(key); ok {
+	if v, ok := remoteCacheValidationCache.Load(key); ok && !quickCacheValidation(mode) {
 		if v.(remoteCacheValidationEntry).fingerprint == fp {
 			return nil
 		}
@@ -414,7 +419,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		readLock = TryWithRepoCacheReadLock
 	}
 	if err := readLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, commit)
+		return validateInstalledRemoteCache(source, cacheDir, commit, mode...)
 	}); err != nil {
 		// A busy cache is not a verdict on this cache's contents, so it must
 		// not trigger the absent-cache rebuild below.
@@ -436,7 +441,9 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		}
 		return err
 	}
-	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
+	if !quickCacheValidation(mode) {
+		remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
+	}
 	return nil
 }
 
@@ -472,16 +479,21 @@ func rematerializeAbsentBundledCache(source, cacheRoot, cacheDir, commit string,
 	return builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit) == nil
 }
 
-// ResetRemoteCacheValidationCache clears memoized remote-cache validations
-// (test isolation; also lets `gc import install` force revalidation in-process).
+// ResetRemoteCacheValidationCache clears validation and ownership state for
+// isolated configuration environments. Runtime invalidation should use
+// InvalidateRemoteCacheValidations so previously loaded executables keep owners.
 func ResetRemoteCacheValidationCache() {
-	remoteCacheValidationCache.Range(func(k, _ any) bool {
-		remoteCacheValidationCache.Delete(k)
-		return true
-	})
+	cacheexec.Reset()
+	InvalidateRemoteCacheValidations()
 }
 
-func validateInstalledRemoteCache(source, cacheDir, commit string) error {
+// InvalidateRemoteCacheValidations forgets FULL verdicts without discarding the
+// lock identities needed to validate code from previously loaded cities.
+func InvalidateRemoteCacheValidations() {
+	remoteCacheValidationCache.Clear()
+}
+
+func validateInstalledRemoteCache(source, cacheDir, commit string, mode ...CacheValidationMode) error {
 	gitPath := filepath.Join(cacheDir, ".git")
 	gitInfo, gitStatErr := os.Stat(gitPath)
 	if repository, ok := builtinpacks.RepositoryForSource(source); ok && IsBundledSourceAtCanonicalPin(source, commit) {
@@ -498,20 +510,28 @@ func validateInstalledRemoteCache(source, cacheDir, commit string) error {
 		// Synthetic cache is invalid but a real git checkout exists at this
 		// path, so validate it with the ordinary remote-cache contract below.
 	}
-	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
+	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) && (!quickCacheValidation(mode) || gitStatErr != nil || !gitInfo.Mode().IsRegular()) {
 		return fmt.Errorf("remote import %s is locked but not cached at %s; %s", source, cacheDir, notCachedRemediation(source, "sha:"+commit))
 	}
 	if gitStatErr != nil {
 		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)
 	}
-	if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
+	if err := validateLockedRemoteCache(source, cacheDir, commit, mode...); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateLockedRemoteCache(source, cacheDir, commit string) error {
-	head, err := runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
+func validateLockedRemoteCache(source, cacheDir, commit string, mode ...CacheValidationMode) error {
+	var head string
+	var err error
+	resolved := false
+	if quickCacheValidation(mode) {
+		head, resolved = readCacheHEAD(cacheDir)
+	}
+	if !resolved {
+		head, err = runRepoCacheGit(cacheDir, "rev-parse", "HEAD")
+	}
 	if err != nil {
 		var executableErr *gitutil.ExecutableError
 		if errors.As(err, &executableErr) {
@@ -521,6 +541,9 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	}
 	if !gitutil.SameCommit(head, commit) {
 		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
+	}
+	if quickCacheValidation(mode) {
+		return nil
 	}
 	// Intentionally NOT --ignored: gitignored build artifacts that land in the
 	// cache in place (Python __pycache__/*.pyc from a cached pack's scripts, a

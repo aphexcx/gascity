@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
@@ -247,6 +248,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	cmd.Stdin = bytes.NewReader(stdinData) // nil → empty reader → script reads EOF
 
+	cacheexec.GuardCachedExecCommand(cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

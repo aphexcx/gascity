@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/cacheexec"
 )
 
 // DefaultExecSinkTimeout bounds a single ExecSink.Record invocation. The [Sink]
@@ -72,6 +74,7 @@ func (s *ExecSink) Record(ctx context.Context, f Fact) error {
 	cmd.Stdin = bytes.NewReader(append(line, '\n'))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	cacheexec.GuardCachedExecCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("usage exec sink %q timed out after %s: %w", s.script, s.timeout, ctx.Err())

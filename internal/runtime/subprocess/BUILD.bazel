@@ -12,6 +12,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/cachevalidation",
         "//internal/runtime/proctable",
     ],
 )

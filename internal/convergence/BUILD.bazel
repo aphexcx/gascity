@@ -30,6 +30,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/cacheexec",
         "//internal/citylayout",
         "//internal/doltauth",
         "//internal/fsys",

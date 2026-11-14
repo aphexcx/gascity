@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -659,6 +660,7 @@ func defaultPromptSynthRunner(ctx context.Context, provider *config.ResolvedProv
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	cacheexec.GuardCachedExecCommand(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

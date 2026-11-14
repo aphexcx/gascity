@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cacheexec",
+    srcs = [
+        "exec.go",
+        "shell.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/cacheexec",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@cc_mvdan_sh_v3//expand",
+        "@cc_mvdan_sh_v3//syntax",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "cacheexec_test",
+    srcs = ["shell_test.go"],
+    embed = [":cacheexec"],
+)

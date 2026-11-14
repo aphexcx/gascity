@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -160,6 +161,7 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, c.path, args...)
+	cacheexec.GuardCachedExecCommand(cmd)
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open; a conformance run should report a hang,
 	// not inherit it.

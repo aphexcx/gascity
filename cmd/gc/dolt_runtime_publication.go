@@ -118,7 +118,7 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		return !ok, nil
 	}
 
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -152,7 +152,7 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 }
 
 func syncManagedDoltPortMirrors(cityPath string) error {
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		removeDoltPortFile(cityPath)
 		return nil

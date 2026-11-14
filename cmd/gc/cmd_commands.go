@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -307,6 +308,10 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	scriptPath := expandScriptTemplate(entry.RunScript, cityPath, cityName, packDir)
 	if !filepath.IsAbs(scriptPath) {
 		scriptPath = filepath.Join(entry.SourceDir, scriptPath)
+	}
+	if err := cacheexec.ValidateCachedExecutable(scriptPath); err != nil {
+		fmt.Fprintln(stderr, err) //nolint:errcheck // command refusal
+		return 1
 	}
 
 	cmd := exec.Command(scriptPath, args...)

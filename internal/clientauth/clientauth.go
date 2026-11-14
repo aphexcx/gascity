@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/cacheexec"
 )
 
 // Version identifies the exec contract. It is echoed to the credential command
@@ -215,6 +217,7 @@ func runCredentialCommand(ctx context.Context, command string, info ExecInfo) (E
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Env = append(strippedEnv(), ExecInfoEnv+"="+string(payload))
+	cacheexec.GuardCachedExecCommand(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("clientauth: running credential command: %w", withStderr(err))

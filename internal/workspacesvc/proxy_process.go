@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -235,6 +236,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	)
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
+	cacheexec.GuardCachedExecCommand(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = proxyProcessSysProcAttr()

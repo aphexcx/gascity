@@ -14,8 +14,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+func loadConfigCommandCityConfig(cityPath string, mode ...config.CacheValidationMode) (*config.City, *config.Provenance, error) {
+	opts := config.LoadOptions{}
+	if len(mode) == 1 {
+		opts.RemoteCacheValidation = mode[0]
+		opts.SkipRevisionSnapshot = mode[0] == config.CacheValidationQuick
+	}
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, opts, extraConfigFiles...)
 }
 
 // loadCityConfigWithBuiltinPacks loads the city config after refreshing the
@@ -23,11 +28,15 @@ func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provena
 // --config files); builtin packs themselves compose only through the explicit
 // city.toml includes written by gc init and repaired by gc doctor --fix.
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{}, includes...)
+}
+
+func loadCityConfigWithBuiltinPacksOptions(cityPath string, opts config.LoadOptions, includes ...string) (*config.City, *config.Provenance, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, opts, includes...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -105,7 +114,11 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		return 1
 	}
 
-	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
+	mode := config.CacheValidationQuick
+	if validate {
+		mode = config.CacheValidationFull
+	}
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath, mode)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -521,7 +534,7 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath, config.CacheValidationQuick)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -663,7 +676,7 @@ func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io
 		}
 	}
 
-	cfg, _, err := loadConfigCommandCityConfig(cityPath)
+	cfg, _, err := loadConfigCommandCityConfig(cityPath, config.CacheValidationQuick)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
 		return 1

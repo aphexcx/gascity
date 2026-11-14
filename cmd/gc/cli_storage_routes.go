@@ -125,7 +125,7 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // 10 s of an 11 s `gc ready` once the bd-env loads were memoized (cherry,
 // 2026-09-23). Same rule as cmd_agent.go and the bd_env.go probe (ga-s3cnmy);
 // TestCLIStorageRoutesDeclineTheRevisionSnapshot pins it.
-var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick}
 
 // resolveCLIStorageRoutes takes the verdict for one city, exactly once, and
 // turns each of its three arms into routes: nil for a city that relocates
