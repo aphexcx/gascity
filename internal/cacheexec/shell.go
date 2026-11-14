@@ -228,7 +228,14 @@ func shellCommandName(path, dir string, env []string) string {
 	}
 	if resolved := resolveShellPath(path, dir, env); resolved != "" {
 		if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
-			return filepath.Base(canonical)
+			resolvedName := filepath.Base(canonical)
+			// Distribution aliases may select a GNU-prefixed reader (cp ->
+			// gnucp) or a multicall applet. Other targets still determine the
+			// behavior, so a reader-named alias to a shell cannot hide code.
+			if readsShellArguments(name) && (resolvedName == "gnu"+name || resolvedName == "coreutils" || resolvedName == "busybox") {
+				return name
+			}
+			return resolvedName
 		}
 	}
 	return name

@@ -82,6 +82,34 @@ func TestShellGlobCannotHideCachedExecution(t *testing.T) {
 	}
 }
 
+func TestShellReaderAliasesKeepArgumentsAsData(t *testing.T) {
+	for _, target := range []string{"gnucp", "coreutils", "busybox"} {
+		t.Run(target, func(t *testing.T) {
+			Reset()
+			t.Cleanup(Reset)
+			local, cached := t.TempDir(), t.TempDir()
+			binary := filepath.Join(local, target)
+			if err := os.WriteFile(binary, nil, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(binary, filepath.Join(local, "cp")); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(cached, "run.sh")
+			if err := os.WriteFile(script, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			Register(cached, func(context.Context) error {
+				return errors.New("copying cached data must not request FULL validation")
+			})
+			env := []string{"PATH=" + local, "SCRIPT=" + script}
+			if err := ValidateCachedShellCommand(t.Context(), `cp "$SCRIPT" copied.sh`, local, env); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestShellInterpreterSymlinkCannotHideCachedExecution(t *testing.T) {
 	shell, err := exec.LookPath("sh")
 	if err != nil {
