@@ -138,6 +138,12 @@ func (f *controllerMessageWakeFixture) setRow(t *testing.T, row string) {
 		patch = session.SleepPatch(now, "idle")
 	case "fresh-drained", "drained-restart":
 		patch = session.AcknowledgeDrainPatch(now, true)
+	case "abandoned-creating":
+		f.setRow(t, "fresh-drained")
+		patch = session.PreWakePatch(session.PreWakePatchInput{
+			Generation: 2, InstanceToken: "abandoned-preparation", ContinuationEpoch: 2,
+			Now: now.Add(-staleCreatingStateTimeout - time.Minute), FreshWake: true,
+		})
 	case "held-restart", "wait-held-restart", "quarantined-restart":
 		patch = session.SleepPatch(now, "idle")
 		switch row {
@@ -176,7 +182,7 @@ func (f *controllerMessageWakeFixture) setRow(t *testing.T, row string) {
 
 func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 	for _, kind := range []string{"on_demand", "always", "manual"} {
-		for _, row := range []string{"idle-asleep", "fresh-drained", "drift-asleep", "healed-runtime-missing", "crashed-active", "crashed-awake", "restart-requested", "handoff-requested", "committed-reset", "drained-restart", "held-restart", "wait-held-restart", "quarantined-restart"} {
+		for _, row := range []string{"idle-asleep", "fresh-drained", "drift-asleep", "healed-runtime-missing", "crashed-active", "crashed-awake", "restart-requested", "handoff-requested", "committed-reset", "drained-restart", "held-restart", "wait-held-restart", "quarantined-restart", "abandoned-creating"} {
 			t.Run(kind+"/"+row, func(t *testing.T) {
 				f := newControllerMessageWakeFixture(t, kind)
 				f.setRow(t, row)

@@ -56,7 +56,7 @@ func TestOrdinaryStartAndAttachSkipControllerProbe(t *testing.T) {
 }
 
 func TestMessagesQueueDuringControllerRestart(t *testing.T) {
-	for _, pending := range []string{"restart", "reset", "kill", "config-drift", "dormant", "crashed", "running-restart", "held"} {
+	for _, pending := range []string{"restart", "reset", "kill", "config-drift", "dormant", "crashed", "running-restart", "held", "creating", "start-pending"} {
 		for _, surface := range []string{"send", "immediate", "wait-idle", "default", "follow_up", "interrupt_now"} {
 			t.Run(pending+"/"+surface, func(t *testing.T) {
 				store, sp := beads.NewMemStore(), runtime.NewFake()
@@ -95,6 +95,12 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 					}
 				case "crashed":
 					patch = MetadataPatch{"state": "active"}
+				case "creating", "start-pending":
+					patch = MetadataPatch{
+						"state": pending, "pending_create_claim": "true",
+						"pending_create_started_at": time.Now().UTC().Format(time.RFC3339),
+						"instance_token":            "controller-incarnation", "continuation_epoch": "2",
+					}
 				case "running-restart":
 					if err := sp.Start(t.Context(), info.SessionName, runtime.Config{Command: "outgoing"}); err != nil {
 						t.Fatal(err)
@@ -159,7 +165,7 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 						t.Errorf("pending marker %s changed", key)
 					}
 				}
-				if pending == "dormant" || pending == "held" || pending == "config-drift" || pending == "crashed" {
+				if pending == "dormant" || pending == "held" || pending == "config-drift" || pending == "crashed" || pending == "creating" || pending == "start-pending" {
 					if b.Metadata["wake_request"] != "explicit" || b.Metadata["held_until"] != "" {
 						t.Error("dormant message did not record an explicit wake and clear the hold")
 					}

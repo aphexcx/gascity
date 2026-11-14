@@ -100,10 +100,11 @@ func (m *Manager) requestControllerWake(b beads.Bead) error {
 	input := LifecycleInputFromMetadata(b.Status, b.Metadata)
 	input.Now = now
 	view := ProjectLifecycle(input)
-	if view.BaseState == BaseStateCreating || view.BaseState == BaseStateStartPending ||
-		KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], now) {
+	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], now) {
 		return nil
 	}
+	// Startup preparation may be abandoned before it produces a runtime. Keep
+	// demand durable through its healing without changing the startup claim.
 	if view.BaseState != BaseStateDrained && len(view.Blockers) == 0 && b.Metadata["wait_hold"] != "true" {
 		if strings.TrimSpace(b.Metadata["restart_requested"]) == "true" || view.HasWakeCause(WakeCauseExplicit) ||
 			(strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" && strings.TrimSpace(b.Metadata[ResetCommittedAtKey]) != "") {
