@@ -258,6 +258,42 @@ func TestEntryLaunchOptionCanRemoveDefaultFlag(t *testing.T) {
 	}
 }
 
+func TestEntryLaunchRetainsLegacyOptionFallback(t *testing.T) {
+	for _, tc := range []struct{ name, overrides string }{
+		{"malformed JSON", `{`},
+		{"unknown option", `{"unknown":"on"}`},
+		{"invalid choice", `{"feature":"missing"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := entryLaunchContextFixture(t)
+			p := cfg.Providers["test-provider"]
+			p.OptionsSchema = []config.ProviderOption{{Key: "feature", Type: "select", Default: "on", Choices: []config.OptionChoice{
+				{Value: "on", FlagArgs: []string{"--feature"}}, {Value: "off"},
+			}}}
+			cfg.Providers["test-provider"] = p
+			metadata := map[string]string{"real_world_app_session_kind": "agent", "template_overrides": tc.overrides}
+			info := session.Info{Template: "runner", Provider: "test-provider", WorkDir: cityPath, Command: "/bin/echo --stored", SessionNameMetadata: "fallback-runtime"}
+			base, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityPath, cfg, info, "agent", metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if base.Command != "/bin/echo --stored" {
+				t.Fatalf("base fallback=%q, want stored command", base.Command)
+			}
+			launch, err := buildWorkerEntryLaunch(cityPath, cfg, beads.NewMemStore(), runtime.NewFake(), info, "agent", metadata, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.Command != base.Command {
+				t.Fatalf("entry command=%q, want base fallback %q", launch.Command, base.Command)
+			}
+			if len(launch.Hints.SessionSetup) == 0 || launch.SessionEnv["GC_AGENT"] == "" {
+				t.Fatal("fallback discarded the full entry launch's setup or environment")
+			}
+		})
+	}
+}
+
 func TestEntryLaunchPreservesStoredTransport(t *testing.T) {
 	for _, stored := range []string{"tmux", "acp"} {
 		t.Run(stored, func(t *testing.T) {

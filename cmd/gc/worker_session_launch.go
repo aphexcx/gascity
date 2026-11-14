@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"strings"
@@ -33,7 +34,7 @@ func workerEntryLaunchBuilder(cityPath string, cfg *config.City, store beads.Sto
 
 func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, info session.Info, kind string, metadata map[string]string, filterCaller bool) (*worker.ResolvedRuntime, error) {
 	base, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityPath, cfg, info, kind, metadata)
-	if err != nil || cfg == nil {
+	if err != nil || base == nil || cfg == nil {
 		return base, err
 	}
 	a, found := resolveAgentIdentity(cfg, info.Template, "")
@@ -58,6 +59,7 @@ func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store
 	if transport == "" && startedConfigHashProvesWorkerACPTransport(cityPath, cfg, info, kind, selectedProvider, metadata, configuredTransport) {
 		transport = config.SessionTransportACP
 	}
+	info = session.ResumeInfoForTransport(info, transport, metadata)
 	launchAgent := agentCfg.Clone()
 	launchAgent.Session = firstNonEmptyGCString(transport, config.SessionTransportTmux)
 	if workDir := firstNonEmptyGCString(info.WorkDirCanonical, info.WorkDir); workDir != "" {
@@ -78,23 +80,24 @@ func buildWorkerEntryLaunch(cityPath string, cfg *config.City, store beads.Store
 	if err != nil {
 		return nil, err
 	}
-	overrides, err := session.ParseTemplateOverrides(metadata)
-	if err != nil {
-		return nil, fmt.Errorf("reading launch options for session %q: %w", info.ID, err)
-	}
+	overrides, optionErr := session.ParseTemplateOverrides(metadata)
 	provider := tp.ResolvedProvider
-	if len(overrides) > 0 && len(provider.OptionsSchema) > 0 {
+	if optionErr == nil && len(overrides) > 0 && len(provider.OptionsSchema) > 0 {
 		options := make(map[string]string)
 		maps.Copy(options, provider.EffectiveDefaults)
 		maps.Copy(options, overrides)
 		delete(options, "initial_message")
 		args, err := config.ResolveExplicitOptions(provider.OptionsSchema, options)
 		if err != nil {
-			return nil, fmt.Errorf("building launch options for session %q: %w", info.ID, err)
+			optionErr = err
+		} else {
+			launch.Command = config.ReplaceSchemaFlags(launch.Command, provider.OptionsSchema, args)
 		}
-		launch.Command = config.ReplaceSchemaFlags(launch.Command, provider.OptionsSchema, args)
 	}
-	if !info.ConfiguredNamedSession && shouldPreserveStoredRuntimeCommandForTransport(info.Command, launch.Command, info.Transport, overrides) {
+	if optionErr != nil {
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); using resolved fallback", info.ID, optionErr)
+		launch.Command = base.Command
+	} else if !info.ConfiguredNamedSession && shouldPreserveStoredRuntimeCommandForTransport(info.Command, launch.Command, info.Transport, overrides) {
 		launch.Command = info.Command
 	}
 	resume := session.ProviderResume{ResumeFlag: provider.ResumeFlag, ResumeStyle: provider.ResumeStyle, ResumeCommand: provider.ResumeCommand, SessionIDFlag: provider.SessionIDFlag}
