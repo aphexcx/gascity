@@ -954,17 +954,16 @@ type bdIssueDep struct {
 	DependencyType string `json:"dependency_type"`
 }
 
-// PartialResultError indicates that a list-style bd command returned at least
-// one usable entry but could not produce a complete result because some entries
-// failed to parse or one underlying tier failed. The successful entries are
-// still returned alongside this error; callers that can surface partial data
+// PartialResultError indicates that a list-style read omitted entries because
+// some entries failed to parse or one underlying tier failed. Any usable entries
+// are still returned alongside this error; callers that can surface partial data
 // may proceed with those rows, while callers that require a complete picture
 // should treat this as a hard failure.
 type PartialResultError struct {
-	// Op identifies the bd subcommand that produced the partial result
-	// (e.g. "bd list", "bd ready").
+	// Op identifies the operation that produced the partial result
+	// (e.g. "bd list", "native list").
 	Op string
-	// Err wraps the joined per-entry parse errors from parseIssuesTolerant.
+	// Err wraps the entry-decoding or underlying tier failures.
 	Err error
 }
 

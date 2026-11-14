@@ -8,6 +8,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+type boundedRetentionSpy struct{ *listSpyStore }
+
+func (s boundedRetentionSpy) BoundsListPages(beads.ListQuery) bool { return true }
+
 // Retention must visit every row across equal-timestamp page boundaries without
 // asking the backing store for an unlimited result.
 func TestClosedRetentionReadsBoundedPages(t *testing.T) {
@@ -18,7 +22,7 @@ func TestClosedRetentionReadsBoundedPages(t *testing.T) {
 		rows = append(rows, beads.Bead{ID: fmt.Sprintf("test-%05d", i), Title: "order:sample", Status: "closed", CreatedAt: at, UpdatedAt: at, Labels: []string{"order-tracking", "order-run:sample"}, Ephemeral: i%2 == 0})
 	}
 	mem := beads.NewMemStoreFrom(count, rows, nil)
-	spy := &listSpyStore{Store: mem}
+	spy := boundedRetentionSpy{&listSpyStore{Store: mem}}
 	runs, err := NewStore(beads.OrdersStore{Store: spy}).ClosedRunsForRetention()
 	if err != nil {
 		t.Fatal(err)

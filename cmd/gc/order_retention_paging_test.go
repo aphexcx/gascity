@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -16,6 +17,42 @@ import (
 
 type retentionBoundedStore struct{ beads.Store }
 
+func TestRetentionFallbackDescendantBackingCost(t *testing.T) {
+	type row struct {
+		beads.Bead
+		IssueType string `json:"issue_type"`
+	}
+	rows := make([]row, 1001)
+	for i := range rows {
+		rows[i] = row{Bead: beads.Bead{ID: fmt.Sprintf("child-%04d", i), ParentID: "root", Status: "open", CreatedAt: time.Unix(1, 0)}, IssueType: "task"}
+	}
+	payload, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := 0
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "query" {
+			return []byte("[]"), nil
+		}
+		if args[0] != "list" {
+			return nil, fmt.Errorf("unexpected command %v", args)
+		}
+		fetched += len(rows)
+		return payload, nil
+	})
+	got, err := listOrderWispPages(beads.HandlesFor(store).Live, beads.ListQuery{ParentID: "root", IncludeClosed: true})
+	if err != nil || len(got) != len(rows) {
+		t.Fatalf("children=%d err=%v", len(got), err)
+	}
+	t.Logf("N=%d fetched=%d", len(rows), fetched)
+	if fetched != len(rows) {
+		t.Fatalf("descendant guard repeated its backing fetch: %d rows, want %d", fetched, len(rows))
+	}
+}
+
+func (s retentionBoundedStore) BoundsListPages(beads.ListQuery) bool { return true }
+
 func (s retentionBoundedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	if q.Status == "closed" && (q.Label == "order-tracking" || strings.HasPrefix(q.Label, "order-run:")) && (q.Limit <= 0 || q.Limit > 1000) {
 		return nil, fmt.Errorf("unbounded retention query: limit %d", q.Limit)
@@ -24,6 +61,8 @@ func (s retentionBoundedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 }
 
 type retentionLiveGuardStore struct{ beads.Store }
+
+func (s retentionLiveGuardStore) BoundsListPages(beads.ListQuery) bool { return true }
 
 func (s retentionLiveGuardStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	if (len(q.Metadata) > 0 || q.ParentID != "") && (q.Limit <= 0 || q.Limit > 1000) {

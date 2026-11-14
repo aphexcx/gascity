@@ -253,6 +253,16 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// BoundsListPages preserves the backing capability after policy tier expansion.
+func (s *beadPolicyStore) BoundsListPages(query beads.ListQuery) bool {
+	return beads.ReaderBoundsListPages(s.Store, expandPolicyReadTier(query))
+}
+
+// ListWithQueueContext preserves cancellation of queued backing reads.
+func (s *beadPolicyStore) ListWithQueueContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	return beads.ListWithQueueContext(ctx, s.Store, expandPolicyReadTier(query))
+}
+
 // ReadMetadataPathPage preserves bounded ownership reads and the policy's
 // both-tier visibility through the production store wrapper.
 func (s *beadPolicyStore) ReadMetadataPathPage(ctx context.Context, query beads.MetadataPathQuery) (beads.MetadataPathPage, error) {
@@ -389,6 +399,16 @@ type beadPolicyLiveReader struct {
 
 func (r beadPolicyLiveReader) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return r.LiveReader.List(expandPolicyReadTier(query))
+}
+
+// BoundsListPages preserves exact pages through the policy-aware live reader.
+func (r beadPolicyLiveReader) BoundsListPages(query beads.ListQuery) bool {
+	return beads.ReaderBoundsListPages(r.LiveReader, expandPolicyReadTier(query))
+}
+
+// ListWithQueueContext preserves queue cancellation and policy tier expansion.
+func (r beadPolicyLiveReader) ListWithQueueContext(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	return beads.ListWithQueueContext(ctx, r.LiveReader, expandPolicyReadTier(query))
 }
 
 func (r beadPolicyLiveReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {

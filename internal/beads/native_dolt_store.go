@@ -414,11 +414,17 @@ var (
 	_ ForeignIDCreator              = (*NativeDoltStore)(nil)
 )
 
-func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
+// NewNativeDoltStoreWithStorage wraps an already-open native storage handle.
+// The resulting store owns the handle and closes it through CloseStore.
+func NewNativeDoltStoreWithStorage(storage NativeStorage, actor string) *NativeDoltStore {
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
 	return &NativeDoltStore{storage: storage, actor: actor, localStrings: newLocalSidecar("")}
+}
+
+func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
+	return NewNativeDoltStoreWithStorage(storage, actor)
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -609,6 +615,10 @@ const (
 // reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
 // timeout" after a managed-Dolt rebind instead of recovering.
 func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn func(context.Context, beadslib.Storage) error) error {
+	return s.withReadRetryQueue(parent, context.Background(), kind, fn)
+}
+
+func (s *NativeDoltStore) withReadRetryQueue(parent, queueContext context.Context, kind string, fn func(context.Context, beadslib.Storage) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
@@ -637,6 +647,11 @@ func (s *NativeDoltStore) withReadRetry(parent context.Context, kind string, fn 
 		defer func() { <-gate }()
 	case <-ctx.Done():
 		return nativeReadRetryBudgetError(ctx.Err(), nil)
+	case <-queueContext.Done():
+		return queueContext.Err()
+	}
+	if err := queueContext.Err(); err != nil {
+		return err
 	}
 	backoff := nativeReadRetryBackoff
 	for {
@@ -1460,11 +1475,20 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 
 // List returns beads matching the query.
 func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
+	return s.ListWithQueueContext(context.Background(), query)
+}
+
+// ListWithQueueContext allows an abandoned caller to leave the list queue.
+// A read that has acquired the gate retains its entire normal retry chain,
+// including backoff, so cancellation cannot overlap two backing reads.
+func (s *NativeDoltStore) ListWithQueueContext(queueContext context.Context, query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	var out []Bead
-	err := s.withReadRetry(context.Background(), "list", func(ctx context.Context, storage beadslib.Storage) error {
+	var decodeErr error
+	err := s.withReadRetryQueue(context.Background(), queueContext, "list", func(ctx context.Context, storage beadslib.Storage) error {
+		decodeErr = nil
 		filter := nativeIssueFilterFromListQuery(query)
 		exactPages := query.Sort == SortCreatedDescIDAsc && filter.Limit > 0
 		var rows []Bead
@@ -1485,7 +1509,10 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			for _, issue := range page {
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
-					if isNativeIssueMetadataParseError(err) && query.Sort != SortCreatedDescIDAsc {
+					if isNativeIssueMetadataParseError(err) {
+						if query.Sort == SortCreatedDescIDAsc {
+							decodeErr = errors.Join(decodeErr, &RowDecodeError{ID: issue.ID, Err: err})
+						}
 						continue
 					}
 					return err
@@ -1498,7 +1525,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 				out = ApplyListQuery(rows, query)
 				return nil
 			}
-			// Residual parent filtering and canonical-tier resolution can shorten
+			// Row decoding, residual filtering, and canonical-tier resolution can shorten
 			// a full backing page without exhausting the result. Advance by the
 			// safe physical-table boundary until the page is full or SQL ends.
 			if filter.AfterCreatedAt != nil {
@@ -1513,6 +1540,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if decodeErr != nil {
+		return out, &PartialResultError{Op: "native list", Err: decodeErr}
 	}
 	return out, nil
 }

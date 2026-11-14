@@ -712,8 +712,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			if m.gateBackoffActive(scoped, now) {
 				continue
 			}
-			hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-				return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
+			hasOpenTracking, err := gateOpenWorkContextBounded(ctx, orderGateTimeout, scoped, func(readContext context.Context) (bool, error) {
+				return trackingIndex.hasOpenTracking(orderGateStoresWithContext(readContext, storesForGate), storeKeysForGate, scoped)
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
@@ -856,8 +856,8 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 	if a.NoWorkGate {
 		return false
 	}
-	hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-		return trackingIndex.hasOpenWork(cand.gateStores, cand.gateStoreKeys, scoped, m.wispRootHasOpenWork, m.hasOpenWorkStrict)
+	hasOpenWork, err := gateOpenWorkContextBounded(ctx, orderGateTimeout, scoped, func(readContext context.Context) (bool, error) {
+		return trackingIndex.hasOpenWork(orderGateStoresWithContext(readContext, cand.gateStores), cand.gateStoreKeys, scoped, m.wispRootHasOpenWork, m.hasOpenWorkStrict)
 	})
 	if err != nil {
 		if m.gateFailClosed(ctx, a, scoped, err) {
@@ -1384,6 +1384,11 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-run beads: %w", err)
+		// An expired gate owns this cancellation; the shared store may still
+		// serve later orders in the tick. Do not poison their index entry.
+		if errors.Is(err, context.Canceled) {
+			return nil, wrapped
+		}
 		idx.mu.Lock()
 		_, seen := idx.errs[storeKey]
 		idx.errs[storeKey] = wrapped
@@ -2736,25 +2741,7 @@ func orderWispParentChildren(reader beads.LiveReader, parentID string) ([]beads.
 // reads. In the native provider a real limit selects IDs before hydration;
 // even an empty membership query otherwise pays the wide history join.
 func listOrderWispPages(reader beads.LiveReader, query beads.ListQuery) ([]beads.Bead, error) {
-	query.Sort = beads.SortCreatedDescIDAsc
-	query.Limit = 1000
-	var rows []beads.Bead
-	for {
-		page, err := reader.List(query)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, page...)
-		if len(page) < query.Limit {
-			return rows, nil
-		}
-		last := page[len(page)-1]
-		next := &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
-		if query.SeekAfter != nil && *next == *query.SeekAfter {
-			return nil, errors.New("order descendant page did not advance")
-		}
-		query.SeekAfter = next
-	}
+	return beads.ListAllPages(reader, query)
 }
 
 // Order-wisp traversal follows structural ParentID children and graph.v2
@@ -2901,13 +2888,32 @@ var errGateTimeout = errors.New("open-work gate timed out")
 // on timeout that goroutine is left to finish on its own (its result is
 // discarded via the buffered channel) rather than blocking the dispatch loop.
 func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped string, gate func() (bool, error)) (bool, error) {
+	return gateOpenWorkContextBounded(ctx, timeout, scoped, func(context.Context) (bool, error) { return gate() })
+}
+
+// orderGateStoresWithContext binds gate cancellation to the supplied stores.
+//
+// residency:allow — context-only wrappers around the caller's resolved store set.
+// It preserves the input count, order, and backing stores; it consults no binding
+// or namespace and opens no store.
+func orderGateStoresWithContext(ctx context.Context, stores []beads.Store) []beads.Store {
+	bound := make([]beads.Store, len(stores))
+	for i, store := range stores {
+		bound[i] = beads.WithListQueueContext(ctx, store)
+	}
+	return bound
+}
+
+func gateOpenWorkContextBounded(ctx context.Context, timeout time.Duration, scoped string, gate func(context.Context) (bool, error)) (bool, error) {
+	readContext, cancel := context.WithCancel(ctx)
+	defer cancel()
 	type gateResult struct {
 		has bool
 		err error
 	}
 	done := make(chan gateResult, 1)
 	go func() {
-		has, err := gate()
+		has, err := gate(readContext)
 		done <- gateResult{has: has, err: err}
 	}()
 	timer := time.NewTimer(timeout)
@@ -3306,6 +3312,8 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, 
 }
 
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	warnings := make(retentionRowWarnings)
+	defer warnings.report()
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -3318,7 +3326,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
 	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
-	if err != nil {
+	if !warnings.accept(err) {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
 
@@ -3349,6 +3357,9 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			// tracking root can still own OPEN steps — the delete refuses
 			// those rather than stranding them (ga-ejwo1q).
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if warnings.accept(err) {
+					continue
+				}
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3380,6 +3391,8 @@ func logRetainedForLiveDescendants(ids []string) {
 // occurred within this store call. On budget exhaustion it returns the partial
 // count with a nil error; delete errors are still propagated.
 func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+	warnings := make(retentionRowWarnings)
+	defer warnings.report()
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
@@ -3390,7 +3403,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
 	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
-	if err != nil {
+	if !warnings.accept(err) {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
 
@@ -3423,6 +3436,9 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				continue
 			}
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if warnings.accept(err) {
+					continue
+				}
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3461,10 +3477,12 @@ func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Ti
 			continue
 		}
 		runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
-		if err != nil {
+		warnings := make(retentionRowWarnings)
+		if !warnings.accept(err) {
 			errs = append(errs, fmt.Errorf("listing closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
 			continue
 		}
+		warnings.report()
 		for _, group := range bucketClosedRetentionRuns(runs, onlyOrders) {
 			sort.Slice(group, func(a, b int) bool {
 				l := orderTrackingClosedReferenceTime(group[a])
