@@ -268,6 +268,30 @@ func TestCachedShellExecutionChecksCodeButNotReadArguments(t *testing.T) {
 	}
 }
 
+func TestShellFallbackIncludesRemoteFragments(t *testing.T) {
+	city, cache := setupQuickCacheLoad(t)
+	writeTestFile(t, cache, "agents.toml", "[[agent]]\nname = \"fragment-worker\"\n")
+	writeTestFile(t, city, "city.toml", "include = [\"https://example.com/pack.git//agents.toml\"]\n[workspace]\nname = \"fragment-city\"\n")
+	if _, _, err := LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(city, "city.toml"), LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: CacheValidationQuick}); err != nil {
+		t.Fatal(err)
+	}
+	scans := 0
+	runRepoCacheGit = func(_ string, args ...string) (string, error) {
+		if args[0] == "rev-parse" {
+			return lockedPackRefCommit, nil
+		}
+		scans++
+		return " M run.sh", nil
+	}
+	env := []string{"PACK_SCRIPT=" + filepath.Join(cache, "run.sh")}
+	if err := cacheexec.ValidateCachedShellCommand(t.Context(), "cat \"$PACK_SCRIPT\"", city, env); err != nil || scans != 0 {
+		t.Fatalf("fragment read must remain QUICK: err=%v scans=%d", err, scans)
+	}
+	if err := cacheexec.ValidateCachedShellCommand(t.Context(), "SCRIPT=\"$PACK_SCRIPT\"; \"$SCRIPT\"", city, env); err == nil || scans != 1 {
+		t.Fatalf("dynamic fragment execution escaped FULL: err=%v scans=%d", err, scans)
+	}
+}
+
 func TestShellFallbackUsesSuccessfulActiveConfiguration(t *testing.T) {
 	for _, scenario := range []string{"removed-import", "other-city", "failed-load"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -136,7 +136,7 @@ func (m *Manager) Reload() error {
 			}
 			// Recreate proxy processes when publication context changes so the
 			// child process sees updated GC_SERVICE_PUBLIC_URL metadata.
-			restarted, err := newProxyProcessInstance(m.rt, svc, base)
+			restarted, err := newProxyProcessInstance(context.Background(), m.rt, svc, base)
 			if err != nil {
 				log.Printf("workspacesvc: refresh proxy process %s on reload: %v", svc.Name, err)
 				next[svc.Name] = existing
@@ -169,7 +169,7 @@ func (m *Manager) Reload() error {
 			base = mergeStatus(base, inst.Status())
 			next[svc.Name] = &entry{spec: svc, status: base, inst: inst}
 		case "proxy_process":
-			inst, err := newProxyProcessInstance(m.rt, svc, base)
+			inst, err := newProxyProcessInstance(context.Background(), m.rt, svc, base)
 			if err != nil {
 				base.State = "degraded"
 				base.LocalState = "config_error"
@@ -238,7 +238,7 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 				continue
 			}
 			base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)
-			inst, err := newProxyProcessInstance(m.rt, e.spec, base)
+			inst, err := newProxyProcessInstance(ctx, m.rt, e.spec, base)
 			if err != nil {
 				m.mu.Lock()
 				if cur, ok := m.entries[e.spec.Name]; ok && cur.inst == nil {
@@ -271,7 +271,7 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 		}
 		base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)
 		if proxyProcessPublicationContextChanged(e.status, base) {
-			restarted, err := newProxyProcessInstance(m.rt, e.spec, base)
+			restarted, err := newProxyProcessInstance(ctx, m.rt, e.spec, base)
 			if err != nil {
 				log.Printf("workspacesvc: refresh proxy process %s on tick: %v", e.spec.Name, err)
 				continue
@@ -447,7 +447,7 @@ func (m *Manager) Restart(name string) error {
 		}
 		newInst, err = factory(m.rt, spec)
 	case "proxy_process":
-		newInst, err = newProxyProcessInstance(m.rt, spec, base)
+		newInst, err = newProxyProcessInstance(context.Background(), m.rt, spec, base)
 	default:
 		return fmt.Errorf("restart service %q: unsupported kind %q", name, spec.Kind)
 	}

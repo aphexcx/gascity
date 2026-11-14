@@ -43,6 +43,7 @@ go_test(
     embed = [":workspacesvc"],
     deps = [
         "//internal/beads",
+        "//internal/cacheexec",
         "//internal/citylayout",
         "//internal/config",
         "//internal/execenv",

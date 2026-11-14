@@ -414,6 +414,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	root.Include = origInclude
 
+	var remoteFragmentPaths []string
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
@@ -422,6 +423,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
 			fragPath = resolved
+			remoteFragmentPaths = append(remoteFragmentPaths, fragPath)
 		} else {
 			fragPath = resolveConfigPath(inc, cityRoot, cityRoot)
 		}
@@ -873,7 +875,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.captureRevisionSnapshot(fs, root, cityRoot, opts.RemoteCacheValidation)
 	}
 
-	publishRemoteCacheScope(cityRoot, root.AllPackDirs())
+	publishRemoteCacheScope(cityRoot, append(root.AllPackDirs(), remoteFragmentPaths...))
 	return root, prov, nil
 }
 

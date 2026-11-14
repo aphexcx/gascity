@@ -68,7 +68,7 @@ type proxyProcessInstance struct {
 	status      Status
 }
 
-func newProxyProcessInstance(rt RuntimeContext, svc config.Service, publication Status) (Instance, error) {
+func newProxyProcessInstance(ctx context.Context, rt RuntimeContext, svc config.Service, publication Status) (Instance, error) {
 	absRoot := svc.StateRootOrDefault()
 	if !filepath.IsAbs(absRoot) {
 		absRoot = filepath.Join(rt.CityPath(), absRoot)
@@ -104,7 +104,7 @@ func newProxyProcessInstance(rt RuntimeContext, svc config.Service, publication 
 			UpdatedAt:   time.Now().UTC(),
 		},
 	}
-	if err := inst.start(time.Now().UTC()); err != nil {
+	if err := inst.start(ctx, time.Now().UTC()); err != nil {
 		if cleanupErr := cleanupProxyProcessSocketPath(socketPath); cleanupErr != nil {
 			return nil, fmt.Errorf("%w; %w", err, cleanupErr)
 		}
@@ -150,7 +150,7 @@ func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request
 	return true
 }
 
-func (p *proxyProcessInstance) Tick(_ context.Context, now time.Time) {
+func (p *proxyProcessInstance) Tick(ctx context.Context, now time.Time) {
 	p.mu.Lock()
 	closed := p.closed
 	shouldStart := p.cmd == nil && (p.nextRestart.IsZero() || !now.Before(p.nextRestart))
@@ -159,7 +159,7 @@ func (p *proxyProcessInstance) Tick(_ context.Context, now time.Time) {
 		return
 	}
 	if shouldStart {
-		if err := p.start(now); err != nil {
+		if err := p.start(ctx, now); err != nil {
 			p.mu.Lock()
 			p.status.State = "degraded"
 			p.status.LocalState = "degraded"
@@ -205,7 +205,12 @@ func (p *proxyProcessInstance) Close() error {
 	return removeErr
 }
 
-func (p *proxyProcessInstance) start(now time.Time) error {
+func (p *proxyProcessInstance) start(ctx context.Context, now time.Time) error {
+	ctx, cancel := context.WithDeadline(ctx, now.Add(proxyProcessReadyTimeout))
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Survivors of a previous supervisor hard exit keep running re-parented
 	// to init; spawning next to them accumulates duplicates (ga-mukg0s).
 	// Best-effort sweep before every spawn, scoped to this instance's state
@@ -236,7 +241,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	)
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
-	cacheexec.GuardCachedExecCommand(context.Background(), cmd)
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = proxyProcessSysProcAttr()

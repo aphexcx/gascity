@@ -16,15 +16,15 @@ var activeScopes sync.Map // canonical city directory -> []resolvedRemoteCache
 // PublishScope replaces a city's active dependencies after a successful load.
 // Failed loads must not publish partial dependencies. Callbacks are snapshotted
 // so a later ownership registration cannot mutate an already loaded scope.
-func PublishScope(city string, packDirs []string) {
+func PublishScope(city string, resolvedPaths []string) {
 	owners := make(map[string]resolvedRemoteCache)
-	for _, packDir := range packDirs {
-		packDir = canonicalPath(packDir)
+	for _, resolvedPath := range resolvedPaths {
+		resolvedPath = canonicalPath(resolvedPath)
 		var checkout string
 		var owner resolvedRemoteCache
 		resolvedRemoteCaches.Range(func(key, value any) bool {
 			dir := key.(string)
-			if pathWithinDir(packDir, dir) && len(dir) > len(checkout) {
+			if pathWithinDir(resolvedPath, dir) && len(dir) > len(checkout) {
 				checkout, owner = dir, value.(resolvedRemoteCache)
 			}
 			return true

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -790,6 +791,57 @@ func TestProxyProcessTickRetriesPublicationRefreshWithoutLosingCurrentURL(t *tes
 	}
 }
 
+func TestProxyProcessCacheValidationUsesStartupContext(t *testing.T) {
+	for _, phase := range []string{"construction", "tick", "canceled-tick"} {
+		t.Run(phase, func(t *testing.T) {
+			cacheexec.Reset()
+			t.Cleanup(cacheexec.Reset)
+			city, cached := t.TempDir(), t.TempDir()
+			rt := &testRuntime{cityPath: city, cityName: "test-city", cfg: &config.City{}}
+			svc := config.Service{Name: "cached-service", Kind: "proxy_process", Process: config.ServiceProcessConfig{Command: []string{filepath.Join(cached, "run")}}}
+			root, err := ensureStateRoot(city, svc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !filepath.IsAbs(root) {
+				root = filepath.Join(city, root)
+			}
+			var deadline time.Time
+			probe := errors.New("stopped after checking validation context")
+			cacheexec.Register(cached, func(ctx context.Context) error {
+				deadline, _ = ctx.Deadline()
+				return probe
+			})
+			now := time.Now().UTC()
+			if phase == "construction" {
+				if _, err := newProxyProcessInstance(t.Context(), rt, svc, Status{}); !errors.Is(err, probe) {
+					t.Fatalf("unexpected construction error: %v", err)
+				}
+			} else {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				if phase == "canceled-tick" {
+					cancel()
+				}
+				p := &proxyProcessInstance{rt: rt, svc: svc, absStateRoot: root, socketPath: filepath.Join(root, "run", "service.sock")}
+				p.Tick(ctx, now)
+				if phase == "canceled-tick" {
+					if !strings.Contains(p.Status().Reason, context.Canceled.Error()) {
+						t.Fatalf("tick ignored cancellation: %s", p.Status().Reason)
+					}
+					return
+				}
+				if !strings.Contains(p.Status().Reason, probe.Error()) {
+					t.Fatalf("tick did not reach validation: %s", p.Status().Reason)
+				}
+			}
+			if deadline.IsZero() || deadline.After(time.Now().Add(proxyProcessReadyTimeout)) {
+				t.Fatalf("cache validation escaped the startup deadline: %v", deadline)
+			}
+		})
+	}
+}
+
 func TestNewProxyProcessInstanceCleansUpSocketDirOnStartFailure(t *testing.T) {
 	requirePython3(t)
 	cityPath := t.TempDir()
@@ -828,7 +880,7 @@ func TestNewProxyProcessInstanceCleansUpSocketDirOnStartFailure(t *testing.T) {
 		t.Fatalf("ensureStateRoot: %v", err)
 	}
 
-	inst, err := newProxyProcessInstance(rt, svc, Status{ServiceName: svc.Name, Kind: svc.Kind})
+	inst, err := newProxyProcessInstance(t.Context(), rt, svc, Status{ServiceName: svc.Name, Kind: svc.Kind})
 	if err == nil {
 		if inst != nil {
 			_ = inst.Close()

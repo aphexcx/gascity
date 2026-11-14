@@ -92,6 +92,6 @@ func RegisterHistoricalRemoteCache(dir string) {
 	})
 }
 
-func publishRemoteCacheScope(city string, packDirs []string) {
-	cacheexec.PublishScope(city, packDirs)
+func publishRemoteCacheScope(city string, resolvedPaths []string) {
+	cacheexec.PublishScope(city, resolvedPaths)
 }
