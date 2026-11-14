@@ -29,6 +29,10 @@ filegroup(
 
 go_test(
     name = "cacheexec_test",
-    srcs = ["shell_test.go"],
+    srcs = [
+        "shell_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":cacheexec"],
+    deps = ["//internal/testenv"],
 )

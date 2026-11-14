@@ -2,7 +2,6 @@ package cacheexec
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,24 +76,19 @@ func validateActiveRemoteCaches(ctx context.Context, dir string, env []string) e
 	}
 	dir = canonicalPath(dir)
 	var nearest string
-	var owners, sole []resolvedRemoteCache
-	count := 0
+	var owners []resolvedRemoteCache
 	activeScopes.Range(func(key, value any) bool {
 		city := key.(string)
-		sole = value.([]resolvedRemoteCache)
-		count++
 		if pathWithinDir(dir, city) && len(city) > len(nearest) {
-			nearest, owners = city, sole
+			nearest, owners = city, value.([]resolvedRemoteCache)
 		}
 		return true
 	})
-	if nearest != "" {
-		return validateScope(ctx, owners)
-	}
-	if count <= 1 {
-		return validateScope(ctx, sole)
-	}
-	return fmt.Errorf("cannot determine active city for dynamic cached execution in %q", dir)
+	// Without an associated loaded city, there are no active configuration
+	// dependencies. Other cities cannot claim this execution merely because
+	// they were loaded in the same process. Explicit cached paths still use
+	// the independent ownership registry before this fallback is reached.
+	return validateScope(ctx, owners)
 }
 
 func validateScope(ctx context.Context, owners []resolvedRemoteCache) error {

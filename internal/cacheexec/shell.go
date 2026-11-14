@@ -60,7 +60,7 @@ func validateCachedShellCommand(ctx context.Context, command, dir string, env []
 		}
 		// Arguments of readers and shell output builtins are data. Still walk
 		// their substitutions: those contain separate executable call nodes.
-		if command, err := expand.Literal(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args[0]); err == nil && readsShellArguments(filepath.Base(command)) {
+		if command, err := expand.Literal(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args[0]); err == nil && readsShellArguments(shellCommandName(command, dir, callEnv)) {
 			validationErr = validateCachedShellPath(ctx, command, dir, callEnv)
 			return true
 		}
@@ -88,7 +88,7 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 	if err := validateCachedShellPath(ctx, args[0], dir, env); err != nil {
 		return err
 	}
-	name := filepath.Base(args[0])
+	name := shellCommandName(args[0], dir, env)
 	switch name {
 	case "exec", "command", "env":
 		for i := 1; i < len(args); i++ {
@@ -200,12 +200,37 @@ func validateCachedScriptPath(ctx context.Context, path, dir string) error {
 	return ValidateCachedExecutable(ctx, abs)
 }
 
+// Interpreter behavior follows the resolved executable, including local aliases.
+// Keep shell builtin names when there is no executable on PATH.
+func shellCommandName(path, dir string, env []string) string {
+	name := filepath.Base(path)
+	// A known invocation also selects interpreter behavior for multicall
+	// binaries and versioned targets (for example sh -> busybox).
+	switch name {
+	case "sh", "bash", "dash", "zsh", "ksh", "python", "python3", "node", "ruby", "perl", "lua":
+		return name
+	}
+	if resolved := resolveShellPath(path, dir, env); resolved != "" {
+		if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
+			return filepath.Base(canonical)
+		}
+	}
+	return name
+}
+
 func validateCachedShellPath(ctx context.Context, path, dir string, env []string) error {
+	if resolved := resolveShellPath(path, dir, env); resolved != "" {
+		return ValidateCachedExecutable(ctx, resolved)
+	}
+	return nil
+}
+
+func resolveShellPath(path, dir string, env []string) string {
 	if strings.ContainsAny(path, `/\`) {
 		if !filepath.IsAbs(path) && dir != "" {
 			path = filepath.Join(dir, path)
 		}
-		return ValidateCachedExecutable(ctx, path)
+		return path
 	}
 	search := os.Getenv("PATH")
 	for _, pair := range env {
@@ -219,8 +244,8 @@ func validateCachedShellPath(ctx context.Context, path, dir string, env []string
 		}
 		candidate := filepath.Join(prefix, path)
 		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return ValidateCachedExecutable(ctx, candidate)
+			return candidate
 		}
 	}
-	return nil
+	return ""
 }

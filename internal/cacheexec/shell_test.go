@@ -3,6 +3,7 @@ package cacheexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,45 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 	}
 }
 
+func TestShellInterpreterSymlinkCannotHideCachedExecution(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh is unavailable")
+	}
+	for _, name := range []string{"launcher", "cat"} {
+		t.Run(name, func(t *testing.T) {
+			Reset()
+			t.Cleanup(Reset)
+			local, cached := t.TempDir(), t.TempDir()
+			launcher := filepath.Join(local, name)
+			if err := os.Symlink(shell, launcher); err != nil {
+				t.Fatal(err)
+			}
+			dirty := errors.New("dirty cached interpreter payload")
+			Register(cached, func(context.Context) error { return dirty })
+			env := []string{"PATH=" + local, "SCRIPT=" + filepath.Join(cached, "run.sh")}
+			for _, command := range []string{name, launcher} {
+				if err := ValidateCachedShellCommand(t.Context(), command+` -c '"$SCRIPT"'`, local, env); !errors.Is(err, dirty) {
+					t.Errorf("shell launcher %q bypassed cached payload validation: %v", command, err)
+				}
+			}
+			cmd := &exec.Cmd{Path: launcher, Args: []string{name, "-c", `"$SCRIPT"`}, Dir: local, Env: env}
+			GuardCachedExecCommand(t.Context(), cmd)
+			if !errors.Is(cmd.Err, dirty) {
+				t.Errorf("direct launcher bypassed cached payload validation: %v", cmd.Err)
+			}
+			if err := ValidateCachedShellCommand(t.Context(), name+" run.sh", cached, env); !errors.Is(err, dirty) {
+				t.Errorf("shell launcher bypassed relative cached script validation: %v", err)
+			}
+			cmd = &exec.Cmd{Path: launcher, Args: []string{name, "run.sh"}, Dir: cached, Env: env}
+			GuardCachedExecCommand(t.Context(), cmd)
+			if !errors.Is(cmd.Err, dirty) {
+				t.Errorf("direct launcher bypassed relative cached script validation: %v", cmd.Err)
+			}
+		})
+	}
+}
+
 func TestGuardUsesResolvedExecutableInsteadOfChildPATH(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
@@ -94,6 +134,28 @@ func TestShellFallbackUsesExecutionCityOutsideItsDirectory(t *testing.T) {
 		if !errors.Is(err, tc.want) {
 			t.Fatalf("execution city %s: %v; want %v", tc.city, err, tc.want)
 		}
+	}
+}
+
+func TestShellFallbackDoesNotClaimUnrelatedExecution(t *testing.T) {
+	for _, cities := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d-cities", cities), func(t *testing.T) {
+			Reset()
+			t.Cleanup(Reset)
+			cached := t.TempDir()
+			dirty := errors.New("unrelated dirty cache")
+			Register(cached, func(context.Context) error { return dirty })
+			for range cities {
+				PublishScope(t.TempDir(), []string{cached})
+			}
+			dir := t.TempDir()
+			if err := ValidateCachedShellCommand(t.Context(), "FLAG=1 /bin/true", dir, []string{}); err != nil {
+				t.Fatalf("unrelated city blocked local execution: %v", err)
+			}
+			if err := ValidateCachedShellCommand(t.Context(), filepath.Join(cached, "run.sh"), dir, []string{}); !errors.Is(err, dirty) {
+				t.Fatalf("explicit cached executable lost its owner: %v", err)
+			}
+		})
 	}
 }
 
