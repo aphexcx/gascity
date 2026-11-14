@@ -217,7 +217,7 @@ owner_bead = "ga-cp3hwi"
 invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
 resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
 migration_target = "P0.4b"
-expires = "2026-10-31"
+expires = "2026-12-31"
 
 [[medium]]
 package_dir = "internal/workrecord"

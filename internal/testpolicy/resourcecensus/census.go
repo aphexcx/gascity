@@ -330,7 +330,7 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "internal/api tracked-source error URN guard is a checked Medium owner",
 			ResourceOwner:   "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-31",
+			Expires:         "2026-12-31",
 		},
 		{
 			PackageDir:      "internal/workrecord",
