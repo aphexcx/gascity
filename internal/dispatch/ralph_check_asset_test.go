@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -98,6 +100,35 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("Outcome = %q (stderr=%q), want pass", result.Outcome, result.Stderr)
+	}
+}
+
+func TestRunRalphCheckRejectsCachedSymlinkToLocalCode(t *testing.T) {
+	cacheexec.Reset()
+	t.Cleanup(cacheexec.Reset)
+	city := t.TempDir()
+	cached := filepath.Join(city, "cached")
+	if err := os.Mkdir(cached, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(city, "executed")
+	localScript := filepath.Join(city, "local.sh")
+	if err := os.WriteFile(localScript, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkPath := filepath.Join(cached, "check.sh")
+	if err := os.Symlink(localScript, checkPath); err != nil {
+		t.Fatal(err)
+	}
+	dirty := errors.New("dirty cached symlink")
+	cacheexec.Register(cached, func(context.Context) error { return dirty })
+	check := beads.Bead{ID: "cached-symlink", Metadata: map[string]string{"gc.check_path": checkPath}}
+	result, err := runRalphCheck(beads.NewMemStore(), check, beads.Bead{ID: "subject"}, 1, ProcessOptions{CityPath: city})
+	if err != nil || result.Outcome != convergence.GateError || !strings.Contains(result.Stderr, dirty.Error()) {
+		t.Errorf("cached symlink must be refused: outcome=%s stderr=%s err=%v", result.Outcome, result.Stderr, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("cached symlink target executed: %v", err)
 	}
 }
 

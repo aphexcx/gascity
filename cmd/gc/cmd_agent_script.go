@@ -723,7 +723,7 @@ func (e agentScriptExecutor) runShellCommand(command string, env []string) error
 	cmd.Env = workQueryEnvForDir(env, "")
 	cmd.Stdout = e.stdout
 	cmd.Stderr = e.stderr
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("shell action timed out after %s", agentScriptActionTimeout)

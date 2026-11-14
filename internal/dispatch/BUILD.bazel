@@ -65,6 +65,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/cacheexec",
         "//internal/config",
         "//internal/convergence",
         "//internal/convoy",

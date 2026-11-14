@@ -205,7 +205,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("running %q: %w", command, err)

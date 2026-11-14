@@ -974,7 +974,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

@@ -114,6 +114,16 @@ func validateCachedExecutablePath(ctx context.Context, abs string) error {
 	return owner.validate(ctx)
 }
 
+// GuardConfiguredExecCommand validates configuration dependencies before running
+// executable instructions whose per-field source was lost during composition.
+// Read-only configuration loading never calls this execution boundary.
+func GuardConfiguredExecCommand(ctx context.Context, cmd *exec.Cmd) {
+	if cmd.Err == nil {
+		cmd.Err = validateActiveRemoteCaches(ctx, cmd.Dir, cmd.Environ())
+	}
+	GuardCachedExecCommand(ctx, cmd)
+}
+
 // GuardCachedExecCommand prevents cmd from starting when its cached code fails
 // FULL validation. Call after setting Dir and Env, before Run, Output or Start.
 // The refusal uses exec.Cmd.Err so existing execution error handling reports it.

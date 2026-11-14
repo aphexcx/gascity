@@ -306,6 +306,12 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	if packDir == "" {
 		packDir = packRootFromEntryDir(entry.SourceDir, "commands")
 	}
+	// The manifest supplies executable instructions even when it redirects
+	// to a local script. Validate its owner before expanding that selection.
+	if err := cacheexec.ValidateCachedExecutable(context.Background(), entry.SourceDir); err != nil {
+		fmt.Fprintln(stderr, err) //nolint:errcheck // command refusal
+		return 1
+	}
 	scriptPath := expandScriptTemplate(entry.RunScript, cityPath, cityName, packDir)
 	if !filepath.IsAbs(scriptPath) {
 		scriptPath = filepath.Join(entry.SourceDir, scriptPath)

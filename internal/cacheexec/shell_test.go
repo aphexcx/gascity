@@ -19,6 +19,10 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 		{"relative-python-script", "python3 first/run.sh", 1},
 		{"combined-shell-flags", `sh -ec '"$SCRIPT"'`, 1},
 		{"login-shell-flags", `bash -lc '"$SCRIPT"'`, 1},
+		{"nohup-shell", `nohup sh -c '"$SCRIPT"'`, 1},
+		{"nice-shell", `nice -n 5 sh -c '"$SCRIPT"'`, 1},
+		{"timeout-shell", `timeout 5s sh -c '"$SCRIPT"'`, 1},
+		{"setsid-shell", `setsid sh -c '"$SCRIPT"'`, 1},
 		{"shell-option-operand", `sh -o errexit -c '"$SCRIPT"'`, 1},
 		{"read-unset-variable", "cat \"$UNSET\"", 0},
 		{"substitution", "echo \"$(\"$SCRIPT\")\"", 1},
@@ -56,6 +60,20 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 				t.Fatalf("scanned %d imports; want %d", scans, tc.wantScans)
 			}
 		})
+	}
+}
+
+func TestShellUnrecognizedInterpreterChecksBareScript(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	cached := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cached, "run.py"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirty := errors.New("dirty interpreter operand")
+	Register(cached, func(context.Context) error { return dirty })
+	if err := ValidateCachedShellCommand(t.Context(), "python3.14 run.py", cached, []string{}); !errors.Is(err, dirty) {
+		t.Fatalf("bare cached script bypassed interpreter validation: %v", err)
 	}
 }
 

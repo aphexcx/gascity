@@ -20,6 +20,20 @@ func ValidateCachedShellCommand(ctx context.Context, command, dir string, env []
 	return validateCachedShellCommand(ctx, command, dir, env, 0)
 }
 
+// ValidateConfiguredShellCommand checks executable configuration instructions.
+// Composition and templating do not retain per-field source ownership. Unlike
+// inspecting a standalone command, executing this text therefore conservatively
+// validates the current city's configuration dependencies, including overrides.
+func ValidateConfiguredShellCommand(ctx context.Context, command, dir string, env []string) error {
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+	if err := validateActiveRemoteCaches(ctx, dir, env); err != nil {
+		return err
+	}
+	return ValidateCachedShellCommand(ctx, command, dir, env)
+}
+
 func validateCachedShellCommand(ctx context.Context, command, dir string, env []string, depth int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -106,6 +120,26 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 	}
 	name := shellCommandName(args[0], dir, env)
 	switch name {
+	case "nohup", "setsid", "nice", "timeout":
+		operand := name == "timeout"
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--" {
+				continue
+			}
+			if name == "nice" && args[i] == "-n" {
+				i++
+				continue
+			}
+			if strings.HasPrefix(args[i], "-") {
+				return validateActiveRemoteCaches(ctx, dir, env)
+			}
+			if operand {
+				operand = false // timeout's duration precedes its command
+				continue
+			}
+			return validateCachedShellArgs(ctx, args[i:], dir, env, depth)
+		}
+		return validateActiveRemoteCaches(ctx, dir, env)
 	case "exec", "command", "env":
 		for i := 1; i < len(args); i++ {
 			if strings.HasPrefix(args[i], "-") {
@@ -178,17 +212,18 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 		// Validate only arguments belonging to resolved caches; ordinary option
 		// strings and paths outside the cache retain their existing behavior.
 		for _, arg := range args[1:] {
-			if strings.ContainsAny(arg, `/\`) {
-				path := arg
-				if !filepath.IsAbs(path) {
-					path = filepath.Join(dir, path)
-				}
-				if _, err := os.Stat(path); err != nil {
-					continue // arguments need not be file names (for example, prompts)
-				}
-				if err := validateCachedShellPath(ctx, arg, dir, env); err != nil {
-					return err
-				}
+			if arg == "-c" || arg == "--command" {
+				return validateActiveRemoteCaches(ctx, dir, env)
+			}
+			path := arg
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(dir, path)
+			}
+			if _, err := os.Stat(path); err != nil {
+				continue // arguments need not be file names (for example, prompts)
+			}
+			if err := validateCachedScriptPath(ctx, arg, dir); err != nil {
+				return err
 			}
 		}
 	}
