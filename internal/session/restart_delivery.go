@@ -38,12 +38,13 @@ func (m *Manager) controllerOwnsRestart(b beads.Bead) bool {
 }
 
 func (m *Manager) controllerRestartPending(b beads.Bead) bool {
-	if !wasConfiguredNamedSession(b) || m.controllerRunning == nil || !m.controllerRunning() {
+	if !wasConfiguredNamedSession(b) {
 		return false
 	}
 	// Preparation consumes restart markers before the runtime starts. These
 	// states retain the controller's ownership across that unlocked interval.
-	return m.restartOrKillPending(b) || b.Metadata["state"] == string(StateCreating) || b.Metadata["state"] == string(StateStartPending)
+	pending := m.restartOrKillPending(b) || b.Metadata["state"] == string(StateCreating) || b.Metadata["state"] == string(StateStartPending)
+	return pending && m.controllerRunning != nil && m.controllerRunning()
 }
 
 // ControllerRestartPending reports whether a direct Start or Attach would wait

@@ -13,6 +13,48 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+func TestOrdinaryStartAndAttachSkipControllerProbe(t *testing.T) {
+	for _, operation := range []string{"start", "attach"} {
+		for _, state := range []string{"live", "asleep"} {
+			t.Run(operation+"/"+state, func(t *testing.T) {
+				store, sp := beads.NewMemStore(), runtime.NewFake()
+				m := NewManagerWithOptions(store, sp)
+				info, err := m.CreateSession(t.Context(), CreateOptions{
+					Template: "runner", Command: "launch", WorkDir: t.TempDir(),
+					ExtraMeta: map[string]string{NamedSessionMetadataKey: "true"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state == "asleep" {
+					if err := sp.Stop(info.SessionName); err != nil {
+						t.Fatal(err)
+					}
+					if err := store.SetMetadataBatch(info.ID, SleepPatch(time.Now(), "idle")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				probes := 0
+				WithRestartCoordinator(func() bool { probes++; return true }, nil)(m)
+				if pending, err := m.ControllerRestartPending(info.ID); err != nil || pending {
+					t.Fatalf("ordinary entry hint: pending=%v err=%v", pending, err)
+				}
+				if operation == "start" {
+					err = m.Start(t.Context(), info.ID, "launch", runtime.Config{})
+				} else {
+					err = m.Attach(t.Context(), info.ID, "launch", runtime.Config{})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if probes != 0 || !sp.IsRunning(info.SessionName) {
+					t.Fatalf("ordinary entry probes=%d running=%v", probes, sp.IsRunning(info.SessionName))
+				}
+			})
+		}
+	}
+}
+
 func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 	for _, pending := range []string{"restart", "reset", "kill", "config-drift", "dormant", "crashed", "running-restart", "held"} {
 		for _, surface := range []string{"send", "immediate", "wait-idle", "default", "follow_up", "interrupt_now"} {
