@@ -10,9 +10,52 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+func TestHistoricalSyntheticCacheBindsPersistedAddress(t *testing.T) {
+	pack := builtinpacks.All()[0]
+	source, ok := builtinpacks.Source(pack.Name)
+	if !ok {
+		t.Fatal("missing bundled source")
+	}
+	for _, source := range []string{source, strings.Replace(source, ".git//", "//", 1)} {
+		t.Run(source, func(t *testing.T) { testHistoricalSyntheticCacheAddress(t, source) })
+	}
+}
+
+func testHistoricalSyntheticCacheAddress(t *testing.T, source string) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+	repository, ok := builtinpacks.RepositoryForSource(source)
+	if !ok {
+		t.Fatal("missing bundled repository")
+	}
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	dir := filepath.Join(t.TempDir(), RepoCacheKey(source, commit))
+	if err := builtinpacks.MaterializeSyntheticRepo(dir, repository, commit); err != nil {
+		t.Fatal(err)
+	}
+	RegisterHistoricalRemoteCache(dir)
+	if err := cacheexec.ValidateCachedExecutable(t.Context(), filepath.Join(dir, "check.sh")); err != nil {
+		t.Fatalf("intact historical bundled cache refused: %v", err)
+	}
+	markerPath := filepath.Join(dir, ".gc-bundled-pack-cache.toml")
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _, _ := strings.Cut(builtinpacks.SyntheticCacheKeyComponent(), "+")
+	changed := strings.ReplaceAll(string(marker), hash, "sha256:"+strings.Repeat("0", 64))
+	if err := os.WriteFile(markerPath, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cacheexec.ValidateCachedExecutable(t.Context(), filepath.Join(dir, "check.sh")); err == nil {
+		t.Fatal("changed historical marker authorized itself at the old address")
+	}
+}
 
 func TestQuickCacheLoadUsesNoGitProcess(t *testing.T) {
 	for _, shape := range []string{"detached", "branch", "packed"} {

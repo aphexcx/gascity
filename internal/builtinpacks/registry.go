@@ -4,6 +4,7 @@ package builtinpacks
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -304,6 +305,53 @@ func MaterializeSyntheticRepo(dst, repository, commit string) error {
 		return fmt.Errorf("writing bundled pack cache marker: %w", err)
 	}
 	return nil
+}
+
+// ValidateHistoricalSyntheticRepo checks an existing bundled cache's marker
+// against its content-addressed directory, including the historical binary's
+// content hash and marker schema. It preserves the marker-only resolution
+// contract of ValidateSyntheticRepoFast without requiring the current binary's
+// content. Callers must separately authorize the historical path from persisted
+// workflow provenance. The boolean reports whether a synthetic marker exists.
+func ValidateHistoricalSyntheticRepo(dir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("reading historical bundled cache marker: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return true, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return true, fmt.Errorf("historical bundled cache %q is not a canonical directory", dir)
+	}
+	var marker syntheticMarker
+	if _, err := toml.Decode(string(data), &marker); err != nil {
+		return true, fmt.Errorf("parsing historical bundled cache marker: %w", err)
+	}
+	if marker.Schema != syntheticMarkerSchema || !KnownRepository(marker.Repository) {
+		return true, fmt.Errorf("historical bundled cache %q has an unsupported identity", dir)
+	}
+	commit, commitErr := hex.DecodeString(marker.Commit)
+	rawHash, prefixed := strings.CutPrefix(marker.ContentHash, "sha256:")
+	content, contentErr := hex.DecodeString(rawHash)
+	if commitErr != nil || (len(commit) != 20 && len(commit) != 32) || !prefixed || contentErr != nil || len(content) != sha256.Size {
+		return true, fmt.Errorf("historical bundled cache %q has an invalid commit or content hash", dir)
+	}
+	component := fmt.Sprintf("%s+schema%d", marker.ContentHash, marker.Schema)
+	// Both accepted URL spellings normalize to the same marker repository,
+	// while the cache address preserves the clone URL's optional .git suffix.
+	for _, source := range []string{marker.Repository, strings.TrimSuffix(marker.Repository, ".git")} {
+		identity := SyntheticCacheNamespace + "\x00" + source + "\x00" + marker.Commit + "\x00" + component
+		key := fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
+		if filepath.Base(dir) == key {
+			return true, nil
+		}
+	}
+	return true, fmt.Errorf("historical bundled cache %q does not match its marker address", dir)
 }
 
 // ValidateSyntheticRepoFast verifies that dir is a synthetic bundled-pack cache

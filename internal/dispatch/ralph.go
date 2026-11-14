@@ -397,6 +397,9 @@ func ralphCheckHistoricalFormulaRoots(store beads.Store, bead beads.Bead, checkP
 			trusted = append(trusted, root)
 		}
 	}
+	if len(trusted) > 0 {
+		config.RegisterHistoricalRemoteCache(sourceEntry)
+	}
 	return trusted
 }
 

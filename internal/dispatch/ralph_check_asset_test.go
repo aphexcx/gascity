@@ -9,8 +9,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // End-to-end for the ../assets check-path feature: a formula authored with the
@@ -99,17 +102,19 @@ path = "../assets/scripts/checks/review-approved.sh"
 }
 
 func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) {
+	config.ResetRemoteCacheValidationCache()
+	t.Cleanup(config.ResetRemoteCacheValidationCache)
 	tmp := t.TempDir()
 	gcHome := filepath.Join(tmp, "gc-home")
 	t.Setenv("GC_HOME", gcHome)
 	cacheRoot := filepath.Join(gcHome, "cache", "repos")
-	historicalEntry := filepath.Join(cacheRoot, strings.Repeat("a", 64))
+	historicalEntry, _ := testutil.InitGitRepo(t)
 	activeEntry := filepath.Join(cacheRoot, strings.Repeat("b", 64))
 	formulaSource := filepath.Join(historicalEntry, "formulas", "review.toml")
 	checkPath := filepath.Join(historicalEntry, "assets", "scripts", "checks", "unit-fast.sh")
 	cityPath := filepath.Join(tmp, "city")
 	storePath := filepath.Join(tmp, "store")
-	for _, dir := range []string{filepath.Dir(formulaSource), filepath.Dir(checkPath), cityPath, storePath} {
+	for _, dir := range []string{filepath.Dir(formulaSource), filepath.Dir(checkPath), cityPath, storePath, cacheRoot} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -120,6 +125,27 @@ func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) 
 	}
 	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write check: %v", err)
+	}
+	const source = "https://example.com/historical.git"
+	testutil.RunGit(t, historicalEntry, "remote", "add", "origin", source)
+	testutil.RunGit(t, historicalEntry, "add", ".")
+	testutil.RunGit(t, historicalEntry, "commit", "-m", "historical formula and check")
+	commit := testutil.RunGit(t, historicalEntry, "rev-parse", "HEAD")
+	cacheDir := filepath.Join(cacheRoot, config.RepoCacheKey(source, commit))
+	if err := os.Rename(historicalEntry, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	historicalEntry = cacheDir
+	formulaSource = filepath.Join(historicalEntry, "formulas", "review.toml")
+	checkPath = filepath.Join(historicalEntry, "assets", "scripts", "checks", "unit-fast.sh")
+	cityFile := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(cityFile, []byte("[workspace]\nname = \"upgraded\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh process loads the current configuration, which no longer names
+	// this historical import, before dispatching the persisted check.
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityFile); err != nil {
+		t.Fatal(err)
 	}
 
 	store := beads.NewMemStore()
@@ -155,6 +181,27 @@ func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) 
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("outcome = %q, want %q; stderr=%q", result.Outcome, convergence.GatePass, result.Stderr)
+	}
+	marker := filepath.Join(tmp, "executed-dirty-check")
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"dirty", "changed-head"} {
+		if state == "changed-head" {
+			testutil.RunGit(t, historicalEntry, "add", ".")
+			testutil.RunGit(t, historicalEntry, "commit", "-m", "change historical checkout")
+		}
+		config.InvalidateRemoteCacheValidations()
+		result, err := runRalphCheck(store, check, beads.Bead{ID: "run-from-previous-pin", Type: "task"}, 1, ProcessOptions{
+			CityPath: cityPath, StorePath: storePath,
+			FormulaSearchPaths: []string{filepath.Join(activeEntry, "formulas")},
+		})
+		if err != nil || result.Outcome != convergence.GateError {
+			t.Fatalf("%s historical cache must be refused: outcome=%q err=%v", state, result.Outcome, err)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("%s historical script executed: %v", state, err)
+		}
 	}
 }
 

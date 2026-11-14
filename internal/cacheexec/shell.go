@@ -2,6 +2,8 @@ package cacheexec
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,13 +60,27 @@ func validateCachedShellCommand(ctx context.Context, command, dir string, env []
 		if len(call.Args) == 0 {
 			return true
 		}
+		expansion := &expand.Config{
+			Env:     expand.ListEnviron(callEnv...),
+			NoUnset: true,
+			// The parser requires this callback for process substitutions.
+			// Walk their commands below without executing or inventing output.
+			ProcSubst: func(*syntax.ProcSubst) (string, error) {
+				return "", errors.New("process substitution requires execution")
+			},
+			// Unexpanded globs can hide symlinks into a cached checkout.
+			// Retain FULL for these dynamic launchers without enumerating files.
+			ReadDir2: func(string) ([]fs.DirEntry, error) {
+				return nil, errors.New("filename glob requires runtime expansion")
+			},
+		}
 		// Arguments of readers and shell output builtins are data. Still walk
 		// their substitutions: those contain separate executable call nodes.
-		if command, err := expand.Literal(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args[0]); err == nil && readsShellArguments(shellCommandName(command, dir, callEnv)) {
+		if command, err := expand.Literal(expansion, call.Args[0]); err == nil && readsShellArguments(shellCommandName(command, dir, callEnv)) {
 			validationErr = validateCachedShellPath(ctx, command, dir, callEnv)
 			return true
 		}
-		args, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(callEnv...), NoUnset: true}, call.Args...)
+		args, err := expand.Fields(expansion, call.Args...)
 		if err != nil {
 			unresolved = true
 			return true

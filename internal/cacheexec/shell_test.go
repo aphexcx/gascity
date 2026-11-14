@@ -23,6 +23,8 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 		{"read-unset-variable", "cat \"$UNSET\"", 0},
 		{"substitution", "echo \"$(\"$SCRIPT\")\"", 1},
 		{"conditional-read", "if test -f \"$SCRIPT\"; then cat \"$SCRIPT\"; fi", 0},
+		{"process-substitution-read", "diff <(printf a) <(printf b)", 0},
+		{"process-substitution-execute", "diff <(\"$SCRIPT\") <(printf b)", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			Reset()
@@ -54,6 +56,29 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 				t.Fatalf("scanned %d imports; want %d", scans, tc.wantScans)
 			}
 		})
+	}
+}
+
+func TestShellGlobCannotHideCachedExecution(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	local, cached := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(cached, "run.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cached, filepath.Join(local, "pack-link")); err != nil {
+		t.Fatal(err)
+	}
+	dirty := errors.New("dirty globbed cache")
+	Register(cached, func(context.Context) error { return dirty })
+	PublishScope(local, []string{cached})
+	for _, command := range []string{"./pack-*/run.sh", "sh ./pack-*/run.sh"} {
+		if err := ValidateCachedShellCommand(t.Context(), command, local, []string{}); !errors.Is(err, dirty) {
+			t.Errorf("globbed execution %q bypassed validation: %v", command, err)
+		}
+	}
+	if err := ValidateCachedShellCommand(t.Context(), "cat ./pack-*/run.sh", local, []string{}); err != nil {
+		t.Fatalf("globbed read must remain QUICK: %v", err)
 	}
 }
 
