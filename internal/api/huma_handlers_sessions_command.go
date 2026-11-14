@@ -941,7 +941,9 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 	}
 	mgr := s.sessionManager(store.Store)
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store.Store, input.ID, apiSessionResolveOptions{
+		materialize: true, materializeMode: worker.CreateModeStarted,
+	})
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
