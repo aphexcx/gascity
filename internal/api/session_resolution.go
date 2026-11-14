@@ -394,7 +394,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return herr
 		}
 		var createErr error
-		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
+		mode := worker.CreateModeStarted
+		if s.controllerRunning() {
+			mode = worker.CreateModeDeferred
+		}
+		info, createErr = handle.Create(ctx, mode)
 		return createErr
 	})
 	if err == nil {

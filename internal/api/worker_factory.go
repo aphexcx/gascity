@@ -22,9 +22,19 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		UsageSink:             s.state.UsageSink(),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
-		Pricing:               cfg.PricingRegistry(),
-		ActivityMemo:          s.activityMemo,
+		ControllerRunning:     s.controllerRunning,
+		PokeController:        func() error { s.state.Poke(); return nil },
+		WithdrawWaitNudges: func(ids []string) error {
+			return withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), ids)
+		},
+		Pricing:      cfg.PricingRegistry(),
+		ActivityMemo: s.activityMemo,
 	})
+}
+
+func (s *Server) controllerRunning() bool {
+	state, ok := s.state.(interface{ ControllerRunning() bool })
+	return ok && state.ControllerRunning()
 }
 
 func (s *Server) workerSessionCatalog(store beads.Store) (*worker.SessionCatalog, error) {

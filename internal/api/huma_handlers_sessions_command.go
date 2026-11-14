@@ -1044,15 +1044,19 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
-	if err != nil {
-		return nil, humaSessionManagerError(err)
-	}
-	go func() {
-		if err := handle.Start(context.Background()); err != nil {
-			log.Printf("gc api: waking session %s: %v", id, err)
+	if s.controllerRunning() {
+		s.state.Poke()
+	} else {
+		handle, err := s.workerHandleForSession(store.Store, id)
+		if err != nil {
+			return nil, humaSessionManagerError(err)
 		}
-	}()
+		go func() {
+			if err := handle.Start(context.Background()); err != nil {
+				log.Printf("gc api: waking session %s: %v", id, err)
+			}
+		}()
+	}
 
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"

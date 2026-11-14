@@ -29,6 +29,9 @@ type FactoryConfig struct {
 	UsageSink             usage.Sink
 	ResolveTransport      func(template, provider string) string
 	ResolveSessionRuntime SessionRuntimeResolver
+	ControllerRunning     func() bool
+	PokeController        func() error
+	WithdrawWaitNudges    func([]string) error
 	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
@@ -66,6 +69,8 @@ type Factory struct {
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	opts = append(opts, sessionpkg.WithRestartCoordinator(cfg.ControllerRunning, cfg.PokeController))
+	opts = append(opts, sessionpkg.WithWaitNudgeWithdrawal(cfg.WithdrawWaitNudges))
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}

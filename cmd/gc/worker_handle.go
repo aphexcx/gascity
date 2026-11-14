@@ -38,9 +38,15 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 	waiter session.StaleKeyDetectionWaiter,
 ) (*worker.Factory, error) {
 	var (
-		resolveTransport func(template, provider string) string
-		searchPaths      []string
+		resolveTransport  func(template, provider string) string
+		searchPaths       []string
+		controllerRunning func() bool
+		pokeCoordinator   func() error
 	)
+	if cityPath != "" {
+		controllerRunning = func() bool { return nudgeCityUsesManagedReconciler(cityPath) }
+		pokeCoordinator = func() error { return nudgePokeController(cityPath) }
+	}
 	if cfg != nil {
 		resolveTransport = func(template, provider string) string {
 			// Persisted templates are canonical identities, independent of cwd.
@@ -86,6 +92,9 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		ControllerRunning:       controllerRunning,
+		PokeController:          pokeCoordinator,
+		WithdrawWaitNudges:      func(ids []string) error { return withdrawQueuedWaitNudges(cityPath, ids) },
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 	})

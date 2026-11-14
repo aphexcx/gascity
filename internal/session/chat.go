@@ -953,7 +953,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 }
 
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (runtime.NudgeDelivery, error) {
-	if !m.sp.IsRunning(sessName) {
+	if !m.sp.IsRunning(sessName) || m.controllerOwnsRestart(b) {
 		return runtime.NudgeDelivery{}, nil
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1040,6 +1040,13 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 		if err != nil {
 			return err
 		}
+		if m.controllerDefersMessage(b, sessName) {
+			if err := m.queueControllerMessage(b, message); err != nil {
+				return err
+			}
+			delivery = runtime.NudgeDelivery{Queued: true}
+			return nil
+		}
 		delivery, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
 		return err
 	})
@@ -1049,11 +1056,11 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (runtime.NudgeDelivery, error) {
 	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		if !m.sp.IsRunning(sessName) || m.controllerOwnsRestart(b) {
 			delivery = runtime.NudgeDelivery{}
 			return nil
 		}
@@ -1069,12 +1076,17 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
-		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+	return m.awaitControllerRestart(ctx, func() error {
+		return withSessionMutationLock(id, func() error {
+			b, sessName, err := m.sessionBead(id)
+			if err != nil {
+				return err
+			}
+			if m.controllerRestartPending(b) {
+				return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+			}
+			return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+		})
 	})
 }
 
@@ -1144,6 +1156,13 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, res
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if m.controllerDefersMessage(b, sessName) {
+			if err := m.queueControllerMessage(b, message); err != nil {
+				return err
+			}
+			delivery = runtime.NudgeDelivery{Queued: true}
+			return nil
 		}
 		delivery, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
 		return err

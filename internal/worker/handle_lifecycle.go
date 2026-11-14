@@ -385,7 +385,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		// payload that reached nothing — which callers gating a dedup claim on
 		// this flag would then commit against. See runtime.NudgeVouchingProvider.
 		result = nudgeResultFromDelivery(delivery)
-		if !delivery.Landed() {
+		if !delivery.Landed() && !delivery.Queued {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil
@@ -407,7 +407,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			return result, err
 		}
 		result = nudgeResultFromDelivery(delivery)
-		if !delivery.Landed() {
+		if !delivery.Landed() && !delivery.Queued {
 			result.Undelivered = NudgeUndeliveredSessionNotLive
 		}
 		return result, nil

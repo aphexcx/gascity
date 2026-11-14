@@ -1247,6 +1247,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if result.Queued {
+		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
+	}
 	if mode == nudgeDeliveryWaitIdle && !result.Landed() {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr, retryID)
 	}

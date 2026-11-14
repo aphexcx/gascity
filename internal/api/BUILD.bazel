@@ -318,6 +318,7 @@ go_test(
         "handler_extmsg_delivery_test.go",
         "handler_extmsg_envelope_test.go",
         "handler_extmsg_receipt_poll_test.go",
+        "handler_extmsg_restart_gap_test.go",
         "handler_extmsg_test.go",
         "handler_formula_write_test.go",
         "handler_formulas_test.go",
