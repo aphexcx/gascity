@@ -1258,12 +1258,12 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 			}
 			if m.controllerRestartPending(b) {
 				waitingForController = true
-				if err := m.requestControllerWake(b); err != nil {
-					return err
-				}
 			}
 			if waitingForController {
 				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					if err := m.requestControllerWake(b); err != nil {
+						return err
+					}
 					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
 				}
 				return m.sp.Attach(sessName)

@@ -250,6 +250,63 @@ func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 	}
 }
 
+func TestStartAndAttachWakeAfterKillFence(t *testing.T) {
+	for _, operation := range []string{"start", "attach"} {
+		for _, completion := range []string{"cleared", "expired"} {
+			t.Run(operation+"/"+completion, func(t *testing.T) {
+				f := newControllerMessageWakeFixture(t, "on_demand")
+				if err := f.sp.Start(t.Context(), f.info.SessionName, runtime.Config{Command: "outgoing"}); err != nil {
+					t.Fatal(err)
+				}
+				f.starts = f.sp.CountCalls("Start", f.info.SessionName)
+				if err := f.store.SetMetadataBatch(f.info.ID, session.KillPendingPatch(time.Now())); err != nil {
+					t.Fatal(err)
+				}
+				pokes := 0
+				m := session.NewManagerWithOptions(f.store, f.sp, session.WithCityPath(f.cityPath), session.WithRestartCoordinator(func() bool { return true }, func() error {
+					pokes++
+					b, err := f.store.Get(f.info.ID)
+					if err != nil {
+						return err
+					}
+					if pokes == 1 {
+						if b.Metadata["wake_request"] != "" || f.sp.CountCalls("Start", f.info.SessionName) != f.starts {
+							t.Fatal("entry must respect the active kill fence")
+						}
+						if err := f.sp.Stop(f.info.SessionName); err != nil {
+							return err
+						}
+						if completion == "cleared" {
+							return f.store.SetMetadata(f.info.ID, "state_reason", "")
+						}
+						return f.store.SetMetadata(f.info.ID, "slept_at", time.Now().Add(-session.KillPendingGrace-time.Second).Format(time.RFC3339))
+					}
+					if b.Metadata["wake_request"] != "explicit" {
+						t.Fatal("controller-owned wait has no wake after the kill fence ended")
+					}
+					f.reconcile(t)
+					return nil
+				}))
+				ctx, cancel := context.WithTimeout(t.Context(), hangBudget)
+				defer cancel()
+				var err error
+				if operation == "start" {
+					err = m.Start(ctx, f.info.ID, "caller-launch", runtime.Config{})
+				} else {
+					err = m.Attach(ctx, f.info.ID, "caller-launch", runtime.Config{})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.reconcile(t)
+				if pokes < 2 || f.sp.CountCalls("Start", f.info.SessionName)-f.starts != 1 || f.sp.LastStartConfig(f.info.SessionName).Command == "caller-launch" {
+					t.Fatal("expected exactly one controller start after the kill fence ended")
+				}
+			})
+		}
+	}
+}
+
 func TestStartAndAttachWakeFreshDrainedNamedSession(t *testing.T) {
 	for _, operation := range []string{"start", "attach"} {
 		t.Run(operation, func(t *testing.T) {

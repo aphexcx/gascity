@@ -1091,12 +1091,12 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 			}
 			if m.controllerRestartPending(b) {
 				waitingForController = true
-				if err := m.requestControllerWake(b); err != nil {
-					return err
-				}
 			}
 			if waitingForController {
 				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					if err := m.requestControllerWake(b); err != nil {
+						return err
+					}
 					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
 				}
 				return nil
