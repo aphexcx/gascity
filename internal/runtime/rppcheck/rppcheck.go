@@ -66,6 +66,8 @@ func (r Result) Failed() bool {
 // for CI: a generated session name, a long-running benign command, and
 // the exec provider's production timeouts.
 type Options struct {
+	// CityPath identifies the city whose configuration selected the executable.
+	CityPath string
 	// SessionName is the session created for the lifecycle round-trip.
 	// Default: a unique generated name.
 	SessionName string
@@ -161,7 +163,7 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, c.path, args...)
-	cacheexec.GuardCachedExecCommand(opCtx, cmd)
+	cacheexec.GuardConfiguredExecCommandForCity(opCtx, cmd, c.opts.CityPath)
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open; a conformance run should report a hang,
 	// not inherit it.

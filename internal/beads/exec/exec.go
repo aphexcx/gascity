@@ -119,7 +119,7 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
 
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

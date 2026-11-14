@@ -50,7 +50,8 @@ any required requirement fails.`,
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}
 
-			report, err := runtimecontract.Run(ctx, target, runtimecontract.Options{})
+			cityPath, _ := resolveCity() // explicit executable checks can run outside a city
+			report, err := runtimecontract.Run(ctx, target, runtimecontract.Options{CityPath: cityPath})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc runtime conformance: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
@@ -81,7 +82,7 @@ any required requirement fails.`,
 			// (RUNTIME-RPP-012): verify the env.* guarantees the runtime
 			// declares in its handshake.
 			if withEnv {
-				capReport, err := runtimecapability.Run(ctx, target, runtimecapability.Options{})
+				capReport, err := runtimecapability.Run(ctx, target, runtimecapability.Options{CityPath: cityPath})
 				if err != nil {
 					fmt.Fprintf(stderr, "gc runtime conformance: capability run: %v\n", err) //nolint:errcheck
 					return errExit

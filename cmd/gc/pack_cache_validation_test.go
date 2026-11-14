@@ -12,7 +12,15 @@ import (
 	"testing"
 	"time"
 
+	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	eventsexec "github.com/gastownhall/gascity/internal/events/exec"
+	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
+	runtimeexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/rppcheck"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
+	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/spf13/cobra"
 )
 
@@ -347,6 +355,170 @@ func TestPackCachePromptSynthesisValidatesConfigurationSource(t *testing.T) {
 	}
 	if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
 		t.Errorf("provider configuration executed: %v", err)
+	}
+}
+
+func TestPackCacheDirectBDRunnersRefuseDirtyExecutable(t *testing.T) {
+	for _, watch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("watch=%t", watch), func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+			var stderr bytes.Buffer
+			var code int
+			if watch {
+				runner := &bdWatchRunner{bdPath: path, dir: f.city, env: os.Environ(), cityPath: f.city, scopeRoot: f.city, stderr: &stderr}
+				code = runner.run(t.Context(), []string{"show", "sample"}, io.Discard, &stderr)
+			} else {
+				code = runBdSubprocess(path, []string{"list"}, f.city, execStoreTarget{ScopeRoot: f.city}, os.Environ(), io.Discard, &stderr)
+			}
+			if code == 0 || !strings.Contains(stderr.String(), "has local worktree changes") {
+				t.Errorf("dirty beads executable was not refused: exit=%d stderr=%q", code, stderr.String())
+			}
+			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+				t.Errorf("dirty beads executable ran: %v", err)
+			}
+		})
+	}
+}
+
+func TestPackCacheConfiguredProviderOperations(t *testing.T) {
+	operations := map[string]func(context.Context, string, string) string{
+		"runtime": func(_ context.Context, script, _ string) string {
+			_, err := runtimeexec.NewProvider(script).ListRunning("")
+			return fmt.Sprint(err)
+		},
+		"beads": func(_ context.Context, script, city string) string {
+			store := beadsexec.NewStore(script)
+			store.SetEnv(map[string]string{"GC_CITY_PATH": city})
+			_, err := store.ListOpen()
+			return fmt.Sprint(err)
+		},
+		"mail": func(_ context.Context, script, _ string) string {
+			_, err := mailexec.NewProvider(script).Send("sender", "recipient", "subject", "body")
+			return fmt.Sprint(err)
+		},
+		"events": func(_ context.Context, script, _ string) string {
+			_, err := eventsexec.NewProvider(script, io.Discard).List(events.Filter{})
+			return fmt.Sprint(err)
+		},
+		"event-watch": func(ctx context.Context, script, _ string) string {
+			watcher, err := eventsexec.NewProvider(script, io.Discard).Watch(ctx, 0)
+			if watcher != nil {
+				_ = watcher.Close()
+			}
+			return fmt.Sprint(err)
+		},
+		"usage": func(ctx context.Context, script, _ string) string {
+			return fmt.Sprint(usage.NewExecSink(script).Record(ctx, usage.Fact{}))
+		},
+		"runtime-check": func(ctx context.Context, script, _ string) string {
+			result, err := rppcheck.Run(ctx, script, rppcheck.Options{})
+			return fmt.Sprintf("%v %v", result, err)
+		},
+		"runtime-contract": func(ctx context.Context, script, city string) string {
+			result, err := runtimecontract.Run(ctx, script, runtimecontract.Options{WorkDir: city})
+			return fmt.Sprintf("%v %v", result, err)
+		},
+	}
+	for name, run := range operations {
+		t.Run(name, func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			t.Setenv("GC_CITY_PATH", f.city)
+			if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(f.city, "local-provider.sh")
+			if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nprintf dirty > %q\n", f.marker)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if result := run(t.Context(), script, f.city); !strings.Contains(result, "has local worktree changes") {
+				t.Error("provider did not report its dirty cached configuration source")
+			}
+			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+				t.Errorf("configuration-selected local provider executed: %v", err)
+			}
+		})
+	}
+}
+
+func TestPackCacheProviderFactoriesRetainExplicitCity(t *testing.T) {
+	for _, kind := range []string{"mail", "events", "usage", "runtime", "pack-runtime", "runtime-check", "runtime-conformance"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			t.Setenv("GC_CITY", "")
+			t.Setenv("GC_CITY_PATH", "")
+			t.Chdir(t.TempDir())
+			cityFlag = f.city
+			if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(f.city, "local-provider.sh")
+			if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nprintf dirty > %q\n", f.marker)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch kind {
+			case "mail":
+				_, err = newCommandMailProviderNamed("exec:"+script, nil).Send("sender", "recipient", "subject", "body")
+			case "events":
+				provider, openErr := newEventsProviderForName("exec:"+script, "", io.Discard)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				_, err = provider.List(events.Filter{})
+			case "usage":
+				cfg := &config.City{}
+				cfg.Usage.Provider = "exec:" + script
+				err = usageSinkForCity(cfg, f.city).Record(t.Context(), usage.Fact{})
+			case "runtime", "pack-runtime":
+				cfg := &config.City{Runtimes: map[string]config.DiscoveredRuntime{
+					"sample-runtime": {Name: "sample-runtime", Command: script, PackName: "sample"},
+				}}
+				reg, registryErr := runtimeRegistryForCity(cfg)
+				if registryErr != nil {
+					t.Fatal(registryErr)
+				}
+				name := "exec:" + script
+				if kind == "pack-runtime" {
+					name = "sample-runtime"
+				}
+				provider, createErr := reg.New(name, config.SessionConfig{}, "cache-city", f.city)
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				_, err = provider.ListRunning("")
+			case "runtime-check", "runtime-conformance":
+				var output bytes.Buffer
+				command := newRuntimeCheckCmd(&output, &output)
+				args := []string{script}
+				if kind == "runtime-conformance" {
+					command = newRuntimeConformanceCmd(&output, &output)
+					args = append(args, "--env")
+				}
+				command.SetArgs(args)
+				if runErr := command.Execute(); runErr != nil {
+					err = fmt.Errorf("%w: %s", runErr, output.String())
+				}
+			}
+			if err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
+				t.Errorf("explicit city's dirty source was not refused: %v", err)
+			}
+			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+				t.Errorf("explicit city's provider executed: %v", err)
+			}
+		})
 	}
 }
 

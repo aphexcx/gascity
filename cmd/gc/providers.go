@@ -896,7 +896,8 @@ func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provide
 
 func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
-		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
+		cityPath, _ := resolveCity() // standalone exec providers need no city
+		return mailexec.NewProviderForCity(strings.TrimPrefix(v, "exec:"), cityPath)
 	}
 	switch v {
 	case "fake":
@@ -1001,7 +1002,8 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 // interface, where it reads as non-nil to every caller's nil guard.
 func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
-		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
+		cityPath, _ := resolveCity() // standalone exec providers need no city
+		return eventsexec.NewProviderForCity(strings.TrimPrefix(v, "exec:"), stderr, cityPath), nil
 	}
 	switch v {
 	case "fake":
@@ -1146,7 +1148,10 @@ func usageSinkForCity(cfg *config.City, cityPath string) usage.Sink {
 	if cfg != nil {
 		provider = strings.TrimSpace(cfg.Usage.Provider)
 	}
-	if strings.TrimSpace(cityPath) == "" && !strings.HasPrefix(provider, "exec:") {
+	if strings.HasPrefix(provider, "exec:") {
+		return usage.NewExecSinkForCity(strings.TrimPrefix(provider, "exec:"), cityPath)
+	}
+	if strings.TrimSpace(cityPath) == "" {
 		return usage.Discard
 	}
 	return newUsageSinkByName(provider, filepath.Join(cityPath, ".gc", "usage.jsonl"))

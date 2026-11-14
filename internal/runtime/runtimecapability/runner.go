@@ -40,6 +40,8 @@ const (
 
 // Options tune a capability run. The zero value is CI-ready.
 type Options struct {
+	// CityPath identifies the city whose configuration selected the executable.
+	CityPath     string
 	SessionName  string
 	Command      string // start-config command; default "sleep 300"
 	OpTimeout    time.Duration
@@ -89,6 +91,16 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	}
 	defer func() { _ = os.RemoveAll(r.transcriptsDest) }()
 
+	// An integrity refusal is a startup failure, not an absent optional
+	// handshake: otherwise the report would silently skip every capability.
+	checkCtx, cancel := context.WithTimeout(ctx, opts.OpTimeout)
+	check := exec.CommandContext(checkCtx, path, "protocol")
+	check.Env = r.opEnv()
+	cacheexec.GuardConfiguredExecCommandForCity(checkCtx, check, opts.CityPath)
+	cancel()
+	if check.Err != nil {
+		return Report{}, check.Err
+	}
 	hs := r.handshake(ctx)
 	declared := map[Code]bool{}
 	for _, c := range hs.Capabilities {
@@ -257,9 +269,9 @@ func (r *runner) invoke(ctx context.Context, timeout time.Duration, stdin []byte
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(opCtx, r.path, args...)
-	cacheexec.GuardCachedExecCommand(opCtx, cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = r.opEnv()
+	cacheexec.GuardConfiguredExecCommandForCity(opCtx, cmd, r.opts.CityPath)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

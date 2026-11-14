@@ -190,29 +190,63 @@ func TestGuardUsesResolvedExecutableInsteadOfChildPATH(t *testing.T) {
 }
 
 func TestConfiguredExecutionRetainsSymlinkSourceOwner(t *testing.T) {
+	for _, cachedTarget := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cached-target=%t", cachedTarget), func(t *testing.T) {
+			Reset()
+			t.Cleanup(Reset)
+			city, cached := t.TempDir(), t.TempDir()
+			target := city
+			if cachedTarget {
+				target = t.TempDir()
+				Register(target, func(context.Context) error { return nil })
+			}
+			local := filepath.Join(target, "local.toml")
+			if err := os.WriteFile(local, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(cached, "fragment.toml")
+			if err := os.Symlink(local, source); err != nil {
+				t.Fatal(err)
+			}
+			scans := 0
+			dirty := errors.New("dirty cached configuration symlink")
+			Register(cached, func(context.Context) error { scans++; return dirty })
+			PublishScope(city, []string{source})
+			if scans != 0 {
+				t.Fatal("publishing read-only configuration triggered validation")
+			}
+			if err := ValidateConfiguredShellCommand(t.Context(), "printf configured", city, []string{}); !errors.Is(err, dirty) {
+				t.Fatalf("cached source owner was lost through its symlink: %v", err)
+			}
+			if scans != 1 {
+				t.Fatalf("source validation calls = %d, want 1", scans)
+			}
+		})
+	}
+}
+
+func TestConfiguredCommandExplicitCityOverridesAmbientScope(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
-	city, cached := t.TempDir(), t.TempDir()
-	local := filepath.Join(city, "local.toml")
-	if err := os.WriteFile(local, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(cached, "fragment.toml")
-	if err := os.Symlink(local, source); err != nil {
-		t.Fatal(err)
-	}
-	scans := 0
-	dirty := errors.New("dirty cached configuration symlink")
-	Register(cached, func(context.Context) error { scans++; return dirty })
-	PublishScope(city, []string{source})
-	if scans != 0 {
-		t.Fatal("publishing read-only configuration triggered validation")
-	}
-	if err := ValidateConfiguredShellCommand(t.Context(), "printf configured", city, []string{}); !errors.Is(err, dirty) {
-		t.Fatalf("cached source owner was lost through its symlink: %v", err)
-	}
-	if scans != 1 {
-		t.Fatalf("source validation calls = %d, want 1", scans)
+	dirtyCity, cleanCity, cached := t.TempDir(), t.TempDir(), t.TempDir()
+	dirty := errors.New("dirty selected city")
+	Register(cached, func(context.Context) error { return dirty })
+	PublishScope(dirtyCity, []string{cached})
+	PublishScope(cleanCity, nil)
+	for _, tc := range []struct {
+		selected, ambient string
+		want              error
+	}{{dirtyCity, cleanCity, dirty}, {cleanCity, dirtyCity, nil}} {
+		cmd := &exec.Cmd{Path: os.Args[0], Args: []string{os.Args[0]}}
+		cmd.Dir = tc.ambient
+		cmd.Env = []string{"GC_CITY_PATH=" + tc.ambient}
+		GuardConfiguredExecCommandForCity(t.Context(), cmd, tc.selected)
+		if !errors.Is(cmd.Err, tc.want) {
+			t.Fatalf("selected city guard = %v, want %v", cmd.Err, tc.want)
+		}
+		if cmd.Dir != tc.ambient || len(cmd.Env) != 1 || cmd.Env[0] != "GC_CITY_PATH="+tc.ambient {
+			t.Fatal("validation changed the child's execution environment")
+		}
 	}
 }
 

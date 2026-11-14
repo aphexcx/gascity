@@ -118,8 +118,19 @@ func validateCachedExecutablePath(ctx context.Context, abs string) error {
 // executable instructions whose per-field source was lost during composition.
 // Read-only configuration loading never calls this execution boundary.
 func GuardConfiguredExecCommand(ctx context.Context, cmd *exec.Cmd) {
+	GuardConfiguredExecCommandForCity(ctx, cmd, "")
+}
+
+// GuardConfiguredExecCommandForCity binds executable configuration to its city
+// even when the caller runs elsewhere. An empty city uses the command's scope.
+// The validation scope does not change the child's environment or directory.
+func GuardConfiguredExecCommandForCity(ctx context.Context, cmd *exec.Cmd, city string) {
 	if cmd.Err == nil {
-		cmd.Err = validateActiveRemoteCaches(ctx, cmd.Dir, cmd.Environ())
+		dir, env := cmd.Dir, cmd.Environ()
+		if city != "" {
+			dir, env = city, []string{"GC_CITY_PATH=" + city}
+		}
+		cmd.Err = validateActiveRemoteCaches(ctx, dir, env)
 	}
 	GuardCachedExecCommand(ctx, cmd)
 }

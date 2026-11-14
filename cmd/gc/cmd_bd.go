@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -924,6 +925,7 @@ func runBdSubprocessTee(bdPath string, bdArgs []string, cityPath string, target 
 	}
 
 	traceStart := time.Now()
+	cacheexec.GuardCachedExecCommand(context.Background(), cmd)
 	runErr := cmd.Run()
 	traceExit := 0
 	if runErr != nil {

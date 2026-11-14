@@ -57,7 +57,9 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 			if note != "" {
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}
+			cityPath, _ := resolveCity() // explicit executable checks can run outside a city
 			res, err := rppcheck.Run(ctx, target, rppcheck.Options{
+				CityPath:     cityPath,
 				Command:      command,
 				SessionName:  sessionName,
 				RequireNudge: promptDelivery == config.PromptDeliveryNudgeFallback,

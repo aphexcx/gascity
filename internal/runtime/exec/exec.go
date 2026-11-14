@@ -28,6 +28,7 @@ import (
 // operation (treated as success for forward compatibility).
 type Provider struct {
 	script       string
+	cityPath     string
 	timeout      time.Duration
 	startTimeout time.Duration // used only for Start(); includes readiness polling
 
@@ -57,6 +58,14 @@ func NewProvider(script string) *Provider {
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
 	}
+}
+
+// NewProviderForCity binds configuration validation to the city that selected
+// the script, independently of the caller's directory and environment.
+func NewProviderForCity(script, cityPath string) *Provider {
+	p := NewProvider(script)
+	p.cityPath = cityPath
+	return p
 }
 
 // run executes the script with the given args using the default timeout.
@@ -93,7 +102,7 @@ func (p *Provider) runStrictWithContext(parent context.Context, dur time.Duratio
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
 	// Run the adapter in its own process group with interrupt-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -194,7 +203,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	cacheexec.GuardCachedExecCommand(context.Background(), cmd)
+	cacheexec.GuardConfiguredExecCommandForCity(context.Background(), cmd, p.cityPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -408,7 +417,7 @@ func (p *Provider) startStartupWatch(
 ) (<-chan string, func() error, bool, error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cacheexec.GuardCachedExecCommand(watchCtx, cmd)
+	cacheexec.GuardConfiguredExecCommandForCity(watchCtx, cmd, p.cityPath)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -915,7 +924,7 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	}
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cacheexec.GuardCachedExecCommand(cmdCtx, cmd)
+	cacheexec.GuardConfiguredExecCommandForCity(cmdCtx, cmd, p.cityPath)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
