@@ -1249,6 +1249,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // suspended, it is resumed first using resumeCommand. If the tmux session
 // died (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
+	waitingForController := false
 	return m.awaitControllerRestart(ctx, func() error {
 		return withSessionMutationLock(id, func() error {
 			b, sessName, err := m.sessionBead(id)
@@ -1256,10 +1257,16 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 				return err
 			}
 			if m.controllerRestartPending(b) {
+				waitingForController = true
 				if err := m.requestControllerWake(b); err != nil {
 					return err
 				}
-				return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+			}
+			if waitingForController {
+				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+				}
+				return m.sp.Attach(sessName)
 			}
 			if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 				return err

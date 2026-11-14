@@ -1082,6 +1082,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+	waitingForController := false
 	return m.awaitControllerRestart(ctx, func() error {
 		return withSessionMutationLock(id, func() error {
 			b, sessName, err := m.sessionBead(id)
@@ -1089,10 +1090,16 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 				return err
 			}
 			if m.controllerRestartPending(b) {
+				waitingForController = true
 				if err := m.requestControllerWake(b); err != nil {
 					return err
 				}
-				return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+			}
+			if waitingForController {
+				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+				}
+				return nil
 			}
 			return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
 		})

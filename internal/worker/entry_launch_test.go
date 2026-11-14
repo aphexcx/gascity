@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -184,6 +185,133 @@ func TestEntryLaunchSkippedWhileControllerOwnsRestart(t *testing.T) {
 				t.Fatalf("error=%v builds=%d starts=%d", err, builds, sp.CountCalls("Start", info.SessionName))
 			}
 		})
+	}
+}
+
+func TestControllerOwnedEntryWaitsThroughPreparation(t *testing.T) {
+	for _, operation := range []string{"start", "attach"} {
+		for _, row := range []string{"fresh-drained", "drift-asleep", "healed-runtime-missing"} {
+			for _, preparation := range []string{"after-wake", "before-entry"} {
+				t.Run(operation+"/"+row+"/"+preparation, func(t *testing.T) {
+					cityPath := t.TempDir()
+					synctest.Test(t, func(t *testing.T) {
+						store, sp := beads.NewMemStore(), runtime.NewFake()
+						mgr := sessionpkg.NewManagerWithOptions(store, sp)
+						info, err := mgr.CreateSession(t.Context(), sessionpkg.CreateOptions{
+							BeadOnly: true, Template: "runner", Command: "caller-launch",
+							ExtraMeta: map[string]string{sessionpkg.NamedSessionMetadataKey: "true"},
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+						patch := sessionpkg.AcknowledgeDrainPatch(time.Now(), true)
+						switch row {
+						case "drift-asleep":
+							patch = sessionpkg.ConfigDriftResetPatch(sessionpkg.StateAsleep, "", time.Now())
+						case "healed-runtime-missing":
+							patch = sessionpkg.MetadataPatch{"state": "asleep", "sleep_reason": "runtime-missing", "continuation_reset_pending": "true"}
+						}
+						if err := store.SetMetadataBatch(info.ID, patch); err != nil {
+							t.Fatal(err)
+						}
+						prepare := func() {
+							t.Helper()
+							// Match the controller's lock boundary: PreWakePatch clears
+							// reset markers before launch preparation outside the lock.
+							if err := sessionpkg.WithSessionMutationLock(info.ID, func() error {
+								return store.SetMetadataBatch(info.ID, sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{
+									Generation: 2, InstanceToken: "controller-incarnation", ContinuationEpoch: 2,
+									Now: time.Now(), FreshWake: true,
+								}))
+							}); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if preparation == "before-entry" {
+							prepare()
+						}
+						builds, pokes := 0, 0
+						poked := make(chan struct{}, 1)
+						factory, err := NewFactory(FactoryConfig{
+							Store: store, Provider: sp, CityPath: cityPath,
+							ControllerRunning: func() bool { return true },
+							PokeController: func() error {
+								pokes++
+								select {
+								case poked <- struct{}{}:
+								default:
+								}
+								return nil
+							},
+							BuildSessionLaunch: func(sessionpkg.Info, string, map[string]string) (*ResolvedRuntime, error) {
+								builds++
+								return nil, errors.New("controller-owned entry must not build a caller launch")
+							},
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+						h, err := factory.SessionByID(info.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						done := make(chan error, 1)
+						go func() {
+							if operation == "start" {
+								done <- h.Start(t.Context())
+							} else {
+								done <- h.Attach(t.Context())
+							}
+						}()
+						synctest.Wait()
+						if preparation == "after-wake" {
+							prepare()
+						}
+						assertWaiting := func() {
+							t.Helper()
+							// Observe a later poll's poke without a fixed sleep.
+							select {
+							case <-poked:
+							default:
+							}
+							select {
+							case <-poked:
+							case err := <-done:
+								t.Fatalf("entry returned before controller startup: %v (caller builds=%d starts=%d)", err, builds, sp.CountCalls("Start", info.SessionName))
+							}
+							synctest.Wait()
+							select {
+							case err := <-done:
+								t.Fatalf("entry returned before controller startup: %v (caller builds=%d starts=%d)", err, builds, sp.CountCalls("Start", info.SessionName))
+							default:
+							}
+							if builds != 0 || sp.CountCalls("Start", info.SessionName) != 0 || pokes == 0 {
+								t.Fatalf("caller builds=%d starts=%d pokes=%d", builds, sp.CountCalls("Start", info.SessionName), pokes)
+							}
+						}
+						assertWaiting()
+						// Even a failed preparation/retry must not transfer ownership
+						// back to an entry that deliberately retained cheap inputs.
+						if err := store.SetMetadata(info.ID, "state", "asleep"); err != nil {
+							t.Fatal(err)
+						}
+						assertWaiting()
+						if err := sp.Start(t.Context(), info.SessionName, runtime.Config{Command: "controller-launch"}); err != nil {
+							t.Fatal(err)
+						}
+						if err := store.SetMetadata(info.ID, "state", "active"); err != nil {
+							t.Fatal(err)
+						}
+						if err := <-done; err != nil {
+							t.Fatal(err)
+						}
+						if sp.CountCalls("Start", info.SessionName) != 1 || builds != 0 {
+							t.Fatalf("expected only the controller start; starts=%d caller builds=%d", sp.CountCalls("Start", info.SessionName), builds)
+						}
+					})
+				})
+			}
+		}
 	}
 }
 
