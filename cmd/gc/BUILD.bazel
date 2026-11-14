@@ -998,6 +998,7 @@ go_test(
         "control_semantic_retry_test.go",
         "controller_hang_deadline_lint_test.go",
         "controller_message_ownership_test.go",
+        "controller_message_wake_test.go",
         "controller_stop_client_test.go",
         "controller_test.go",
         "controller_watcher_fd_test.go",

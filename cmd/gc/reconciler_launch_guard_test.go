@@ -59,7 +59,7 @@ TEST_PROVIDER_ENV = "provider"
 		t.Fatal(err)
 	}
 	info := session.Info{ID: "test-session", Template: "runner", SessionName: "runner", SessionNameMetadata: "runner", SessionOrigin: "named", ConfiguredNamedSession: true}
-	params := newAgentBuildParams(cfg.EffectiveCityName(), cityPath, cfg, runtime.NewFake(), time.Unix(0, 0), beads.NewMemStore(), io.Discard)
+	params := newAgentBuildParams(cfg.EffectiveCityName(), cityPath, cfg, runtime.NewFake(), time.Unix(0, 0).UTC(), beads.NewMemStore(), io.Discard)
 	tp, err := resolveTemplateForSessionBeadInfo(params, &cfg.Agents[0], "runner", nil, info)
 	if err != nil {
 		t.Fatal(err)
@@ -97,8 +97,9 @@ TEST_PROVIDER_ENV = "provider"
 	launchBytes := normalize(launch)
 	fingerprintInputs := normalize(sessionCoreConfigForHashInfo(tp, info))
 	t.Logf("launch_sha256=%x fingerprint_inputs_sha256=%x", sha256.Sum256(launchBytes), sha256.Sum256(fingerprintInputs))
-	// Measured at 647852f60879b62114598e2c0ff9171baf7ec48c before the entry adapter.
-	const wantDigest = "ae04c7707b700b14be99c2d52d741962f04e307bfe2fa58227481f0ed0dadd45"
+	// The base launch with its fixture timestamp in UTC. The startup nudge
+	// includes that timestamp, so the fixture must not inherit time.Local.
+	const wantDigest = "a1498e8e8d01b4511974d6b044f750948033f7faafef55431cb6a573bdde847d"
 	for name, data := range map[string][]byte{"launch": launchBytes, "fingerprint inputs": fingerprintInputs} {
 		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != wantDigest {
 			t.Errorf("%s changed from base: digest=%s, want %s", name, got, wantDigest)

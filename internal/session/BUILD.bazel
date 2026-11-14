@@ -92,6 +92,7 @@ go_test(
         "chat_test.go",
         "circuit_state_test.go",
         "closed_runtime_test.go",
+        "controller_wake_failure_test.go",
         "create_options_test.go",
         "create_test.go",
         "enrich_and_twins_test.go",
