@@ -1249,7 +1249,16 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // suspended, it is resumed first using resumeCommand. If the tmux session
 // died (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
-	waitingForController := false
+	return m.attach(ctx, id, resumeCommand, hints, false)
+}
+
+// AttachControllerOwned waits for controller-owned startup, then attaches the
+// terminal while retaining that ownership across lifecycle changes.
+func (m *Manager) AttachControllerOwned(ctx context.Context, id string) error {
+	return m.attach(ctx, id, "", runtime.Config{}, true)
+}
+
+func (m *Manager) attach(ctx context.Context, id, resumeCommand string, hints runtime.Config, waitingForController bool) error {
 	return m.awaitControllerRestart(ctx, func() error {
 		return withSessionMutationLock(id, func() error {
 			b, sessName, err := m.sessionBead(id)

@@ -19,11 +19,14 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	startCommand, hints, err := h.launchForCall(id, entryLaunchRuntime)
+	launch, err := h.launchForCall(id, entryLaunchRuntime)
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, hints)
+	if launch.controllerOwned {
+		return h.manager.StartControllerOwned(ctx, id)
+	}
+	err = h.manager.Start(ctx, id, launch.command, launch.hints)
 	return err
 }
 
@@ -70,11 +73,14 @@ func (h *SessionHandle) Attach(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	resumeCommand, hints, err := h.launchForCall(id, entryLaunchRuntime)
+	launch, err := h.launchForCall(id, entryLaunchRuntime)
 	if err != nil {
 		return err
 	}
-	err = h.manager.Attach(ctx, id, resumeCommand, hints)
+	if launch.controllerOwned {
+		return h.manager.AttachControllerOwned(ctx, id)
+	}
+	err = h.manager.Attach(ctx, id, launch.command, launch.hints)
 	return err
 }
 
@@ -316,11 +322,11 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if req.Delivery == DeliveryIntentInterruptNow {
 		kind = entryLaunchInterrupt
 	}
-	resumeCommand, hints, err := h.launchForCall(id, kind)
+	launch, err := h.launchForCall(id, kind)
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, hints, submitIntent(req.Delivery))
+	outcome, err := h.manager.Submit(ctx, id, req.Text, launch.command, launch.hints, submitIntent(req.Delivery))
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -365,10 +371,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 		kind = entryLaunchLiveOnly
 	}
-	resumeCommand, hints, err := h.launchForCall(id, kind)
+	launch, err := h.launchForCall(id, kind)
 	if err != nil {
 		return NudgeResult{}, err
 	}
+	resumeCommand, hints := launch.command, launch.hints
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {

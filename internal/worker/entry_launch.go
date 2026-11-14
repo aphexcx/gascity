@@ -16,13 +16,19 @@ const (
 	entryLaunchLiveOnly
 )
 
+type entryLaunch struct {
+	command         string
+	hints           runtime.Config
+	controllerOwned bool
+}
+
 // launchForCall prepares launch inputs before the manager takes the session
-// lock. The manager still makes the authoritative delivery decision under it.
-func (h *SessionHandle) launchForCall(id string, kind entryLaunchKind) (string, runtime.Config, error) {
+// lock. A controller-owned result retains that decision across the boundary.
+func (h *SessionHandle) launchForCall(id string, kind entryLaunchKind) (entryLaunch, error) {
 	if h.buildSessionLaunch != nil && kind != entryLaunchLiveOnly {
 		info, pr, err := sessionRecordViaManager(h.manager, id)
 		if err != nil {
-			return "", runtime.Config{}, err
+			return entryLaunch{}, err
 		}
 		mayStart := kind == entryLaunchInterrupt
 		if !mayStart && h.launchProvider != nil && !h.launchProvider.IsRunning(info.SessionName) {
@@ -30,15 +36,17 @@ func (h *SessionHandle) launchForCall(id string, kind entryLaunchKind) (string, 
 			if kind == entryLaunchRuntime {
 				waiting, err := h.manager.ControllerRestartPending(id)
 				if err != nil {
-					return "", runtime.Config{}, err
+					return entryLaunch{}, err
 				}
-				mayStart = !waiting
+				if waiting {
+					return entryLaunch{controllerOwned: true}, nil
+				}
 			}
 		}
 		if mayStart {
 			resolved, err := h.buildSessionLaunch(info, strings.TrimSpace(pr.Metadata["real_world_app_session_kind"]), cloneStringMap(pr.Metadata))
 			if err != nil {
-				return "", runtime.Config{}, err
+				return entryLaunch{}, err
 			}
 			if resolved != nil {
 				launch := normalizeResolvedRuntimeInput(*resolved)
@@ -60,10 +68,10 @@ func (h *SessionHandle) launchForCall(id string, kind entryLaunchKind) (string, 
 				hints := launch.Hints
 				hints.Command = launch.Command
 				hints.Env = mergeStringMaps(hints.Env, launch.SessionEnv)
-				return command, hints, nil
+				return entryLaunch{command: command, hints: hints}, nil
 			}
 		}
 	}
 	command, err := h.startCommand(id)
-	return command, h.runtimeHints(), err
+	return entryLaunch{command: command, hints: h.runtimeHints()}, err
 }

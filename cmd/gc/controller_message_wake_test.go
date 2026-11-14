@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -247,6 +248,73 @@ func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestWorkerEntryRetainsControllerOwnershipAcrossHeal(t *testing.T) {
+	for _, operation := range []string{"start", "attach"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newControllerMessageWakeFixture(t, "on_demand")
+			f.setRow(t, "fresh-drained")
+			if err := f.store.SetMetadataBatch(f.info.ID, session.PreWakePatch(session.PreWakePatchInput{
+				Generation: 2, InstanceToken: "abandoned-preparation", ContinuationEpoch: 2,
+				Now: time.Now().Add(-staleCreatingStateTimeout - time.Minute), FreshWake: true,
+			})); err != nil {
+				t.Fatal(err)
+			}
+			armed, healed := false, false
+			builds, pokes := 0, 0
+			factory, err := worker.NewFactory(worker.FactoryConfig{
+				Store: f.store, Provider: f.sp, CityPath: f.cityPath,
+				ControllerRunning: func() bool {
+					if armed && !healed {
+						healed = true
+						// The hint has read creating, but the manager has not
+						// entered its first locked operation. Run the real heal.
+						f.reconcile(t)
+						b, err := f.store.Get(f.info.ID)
+						if err != nil || b.Metadata["state"] != "asleep" || b.Metadata["continuation_reset_pending"] != "" || b.Metadata["pending_create_claim"] != "" || b.Metadata["wake_request"] != "" {
+							t.Fatalf("stale preparation did not heal to undemanded asleep: err=%v metadata=%v", err, b.Metadata)
+						}
+						if f.sp.CountCalls("Start", f.info.SessionName) != f.starts {
+							t.Fatal("fixture has independent startup demand")
+						}
+					}
+					return true
+				},
+				PokeController: func() error {
+					pokes++
+					f.reconcile(t)
+					return nil
+				},
+				BuildSessionLaunch: func(session.Info, string, map[string]string) (*worker.ResolvedRuntime, error) {
+					builds++
+					return nil, errors.New("controller-owned entry must not build a caller launch")
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, err := factory.SessionByID(f.info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			armed = true
+			ctx, cancel := context.WithTimeout(t.Context(), hangBudget)
+			defer cancel()
+			if operation == "start" {
+				err = h.Start(ctx)
+			} else {
+				err = h.Attach(ctx)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.reconcile(t)
+			if !healed || builds != 0 || pokes == 0 || f.sp.CountCalls("Start", f.info.SessionName)-f.starts != 1 {
+				t.Fatalf("healed=%v builds=%d pokes=%d starts=%d; want exactly one controller start", healed, builds, pokes, f.sp.CountCalls("Start", f.info.SessionName)-f.starts)
+			}
+		})
 	}
 }
 

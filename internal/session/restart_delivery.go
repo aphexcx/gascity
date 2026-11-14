@@ -48,8 +48,9 @@ func (m *Manager) controllerRestartPending(b beads.Bead) bool {
 }
 
 // ControllerRestartPending reports whether a direct Start or Attach would wait
-// for the controller. This snapshot is only a preparation-cost hint; the manager
-// repeats the authoritative check under the session mutation lock.
+// for the controller. A caller that skips launch preparation on a true result
+// must retain that ownership through StartControllerOwned or AttachControllerOwned.
+// Ordinary Start and Attach also check ownership under the session mutation lock.
 func (m *Manager) ControllerRestartPending(id string) (bool, error) {
 	b, _, err := m.sessionBead(id)
 	if err != nil {
