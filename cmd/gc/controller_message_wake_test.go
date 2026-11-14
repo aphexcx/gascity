@@ -135,8 +135,18 @@ func (f *controllerMessageWakeFixture) setRow(t *testing.T, row string) {
 	switch row {
 	case "idle-asleep":
 		patch = session.SleepPatch(now, "idle")
-	case "fresh-drained":
+	case "fresh-drained", "drained-restart":
 		patch = session.AcknowledgeDrainPatch(now, true)
+	case "held-restart", "wait-held-restart", "quarantined-restart":
+		patch = session.SleepPatch(now, "idle")
+		switch row {
+		case "held-restart":
+			patch["held_until"] = now.Add(time.Hour).Format(time.RFC3339)
+		case "wait-held-restart":
+			patch["wait_hold"] = "true"
+		case "quarantined-restart":
+			patch["quarantined_until"] = now.Add(time.Hour).Format(time.RFC3339)
+		}
 	case "drift-asleep":
 		patch = session.ConfigDriftResetPatch(session.StateAsleep, "", now)
 	case "healed-runtime-missing":
@@ -155,11 +165,17 @@ func (f *controllerMessageWakeFixture) setRow(t *testing.T, row string) {
 	if err := f.store.SetMetadataBatch(f.info.ID, patch); err != nil {
 		t.Fatal(err)
 	}
+	if strings.HasSuffix(row, "-restart") {
+		m := session.NewManagerWithOptions(f.store, f.sp, session.WithCityPath(f.cityPath))
+		if err := m.RequestFreshRestart(f.info.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 	for _, kind := range []string{"on_demand", "always", "manual"} {
-		for _, row := range []string{"idle-asleep", "fresh-drained", "drift-asleep", "healed-runtime-missing", "crashed-active", "crashed-awake", "restart-requested", "handoff-requested", "committed-reset"} {
+		for _, row := range []string{"idle-asleep", "fresh-drained", "drift-asleep", "healed-runtime-missing", "crashed-active", "crashed-awake", "restart-requested", "handoff-requested", "committed-reset", "drained-restart", "held-restart", "wait-held-restart", "quarantined-restart"} {
 			t.Run(kind+"/"+row, func(t *testing.T) {
 				f := newControllerMessageWakeFixture(t, kind)
 				f.setRow(t, row)
@@ -179,12 +195,18 @@ func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if strings.HasSuffix(row, "-restart") && before.Metadata["restart_requested"] != "true" {
+					t.Fatal("message canceled the controller's restart request")
+				}
 				for pass := 0; pass < 3; pass++ {
 					f.reconcile(t)
 				}
 				after, err := f.store.Get(f.info.ID)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if after.Metadata["restart_requested"] == "true" {
+					t.Fatal("controller did not consume the restart request")
 				}
 				starts := f.sp.CountCalls("Start", f.info.SessionName) - f.starts
 				t.Logf("wake=%q starts=%d running=%v epoch=%s->%s", before.Metadata["wake_request"], starts, f.sp.IsRunning(f.info.SessionName), before.Metadata["continuation_epoch"], after.Metadata["continuation_epoch"])

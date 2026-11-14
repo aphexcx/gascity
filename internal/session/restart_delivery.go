@@ -92,20 +92,20 @@ func (m *Manager) queueControllerMessage(b beads.Bead, sessName, message string)
 
 // requestControllerWake supplies demand before handing a session to the
 // controller. A reset alone only promises a fresh conversation at the next
-// wake; a restart request or committed reset already schedules that wake.
+// wake. A restart request or committed reset supplies demand only when wake
+// blockers do not prevent startup.
 func (m *Manager) requestControllerWake(b beads.Bead) error {
 	now := m.now()
 	input := LifecycleInputFromMetadata(b.Status, b.Metadata)
 	input.Now = now
 	view := ProjectLifecycle(input)
-	if strings.TrimSpace(b.Metadata["restart_requested"]) == "true" ||
-		view.BaseState == BaseStateCreating || view.BaseState == BaseStateStartPending ||
+	if view.BaseState == BaseStateCreating || view.BaseState == BaseStateStartPending ||
 		KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], now) {
 		return nil
 	}
-	if len(view.Blockers) == 0 && b.Metadata["wait_hold"] != "true" {
-		if view.HasWakeCause(WakeCauseExplicit) ||
-			(view.BaseState != BaseStateDrained && strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" && strings.TrimSpace(b.Metadata[ResetCommittedAtKey]) != "") {
+	if view.BaseState != BaseStateDrained && len(view.Blockers) == 0 && b.Metadata["wait_hold"] != "true" {
+		if strings.TrimSpace(b.Metadata["restart_requested"]) == "true" || view.HasWakeCause(WakeCauseExplicit) ||
+			(strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" && strings.TrimSpace(b.Metadata[ResetCommittedAtKey]) != "") {
 			return nil
 		}
 	}
