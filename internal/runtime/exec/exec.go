@@ -220,7 +220,7 @@ func (p *Provider) runWithTTY(args ...string) error {
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
 		return err
 	}
 	// Was this name already occupied before we touched it? Asked structurally,
@@ -300,7 +300,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
 		return err
 	}
 	if !p.supportsSeparableLaunch() {
@@ -325,7 +325,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
 		return err
 	}
 	if !p.supportsSeparableLaunch() {
@@ -357,7 +357,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(ctx, cfg); err != nil {
+	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
 		return err
 	}
 	if p.supportsSeparableLaunch() {
@@ -919,7 +919,7 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	command := shellQuote(argv)
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	if err := cacheexec.ValidateConfiguredShellCommand(cmdCtx, command, "", nil); err != nil {
+	if err := cacheexec.ValidateConfiguredShellCommand(cacheexec.WithCity(cmdCtx, p.cityPath), command, "", nil); err != nil {
 		return nil, -1, err
 	}
 

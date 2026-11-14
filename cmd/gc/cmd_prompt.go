@@ -295,6 +295,7 @@ func runDirectSynth(ctx context.Context, opts promptSynthOpts, cityPath, role, r
 	}
 	callCtx, cancel := context.WithTimeout(ctx, synthTimeout)
 	defer cancel()
+	callCtx = cacheexec.WithCity(callCtx, cityPath)
 	out, err := runner(callCtx, resolved, rendered, workDir)
 	if err != nil {
 		return fmt.Errorf("synth via %s: %w", resolved.Command, err)

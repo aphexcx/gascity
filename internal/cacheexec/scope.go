@@ -13,6 +13,18 @@ import (
 // still owns its old executable paths, but cannot block unrelated local code.
 var activeScopes sync.Map // canonical city directory -> []resolvedRemoteCache
 
+type cityContextKey struct{}
+
+// WithCity binds configuration validation to the explicitly selected city.
+// It preserves cancellation and does not change a child command's environment.
+// An empty city retains any existing binding and ordinary scope inference.
+func WithCity(ctx context.Context, city string) context.Context {
+	if city == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, cityContextKey{}, canonicalPath(city))
+}
+
 // PublishScope replaces a city's active dependencies after a successful load.
 // Failed loads must not publish partial dependencies. Callbacks are snapshotted
 // so a later ownership registration cannot mutate an already loaded scope.
@@ -65,6 +77,12 @@ func canonicalPath(path string) string {
 func validateActiveRemoteCaches(ctx context.Context, dir string, env []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if city, ok := ctx.Value(cityContextKey{}).(string); ok {
+		if owners, ok := activeScopes.Load(city); ok {
+			return validateScope(ctx, owners.([]resolvedRemoteCache))
+		}
+		return nil
 	}
 	if env == nil {
 		env = os.Environ()

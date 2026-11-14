@@ -244,6 +244,10 @@ func TestConfiguredCommandExplicitCityOverridesAmbientScope(t *testing.T) {
 		if !errors.Is(cmd.Err, tc.want) {
 			t.Fatalf("selected city guard = %v, want %v", cmd.Err, tc.want)
 		}
+		ctx := WithCity(t.Context(), tc.selected)
+		if err := ValidateConfiguredShellCommand(ctx, "printf configured", cmd.Dir, cmd.Env); !errors.Is(err, tc.want) {
+			t.Fatalf("selected city payload = %v, want %v", err, tc.want)
+		}
 		if cmd.Dir != tc.ambient || len(cmd.Env) != 1 || cmd.Env[0] != "GC_CITY_PATH="+tc.ambient {
 			t.Fatal("validation changed the child's execution environment")
 		}

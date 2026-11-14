@@ -522,6 +522,76 @@ func TestPackCacheProviderFactoriesRetainExplicitCity(t *testing.T) {
 	}
 }
 
+func TestPackCacheExecutionUsesSelectedCity(t *testing.T) {
+	for _, operation := range []string{"mail", "events", "synthesis", "runtime-payload"} {
+		for _, selectDirty := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/selected-dirty=%t", operation, selectDirty), func(t *testing.T) {
+				f := newPackCacheFixture(t, 1)
+				other, rig := t.TempDir(), t.TempDir()
+				script := filepath.Join(other, "local-provider.sh")
+				if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\nprintf '{}\\n'\n", f.marker)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				mailConfig := fmt.Sprintf("\n[mail]\nprovider = %q\n", "exec:"+script)
+				cityConfig, err := os.ReadFile(filepath.Join(f.city, "city.toml"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(f.city, "city.toml"), append(cityConfig, []byte(mailConfig)...), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(other, "city.toml"), []byte("[workspace]\nname = 'other'\n"+mailConfig), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				for _, city := range []string{f.city, other} {
+					if _, err := loadCityConfigWithoutBuiltinPackRefresh(city, io.Discard); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				selected, ambient := other, f.city
+				if selectDirty {
+					selected, ambient = f.city, other
+				}
+				cityFlag, rigFlag = "", ""
+				t.Setenv("GC_CITY_PATH", ambient)
+				t.Setenv("GC_CITY", ambient)
+				t.Setenv("GC_MAIL", "")
+				t.Setenv("GC_EVENTS", "")
+				var runErr error
+				switch operation {
+				case "mail":
+					_, runErr = defaultMailProvider(selected).Send("sender", "recipient", "subject", "body")
+				case "events":
+					cfg := &config.City{}
+					cfg.Events.Provider = "exec:" + script
+					cliFactoryEventsRecorder(selected, cfg).Record(events.Event{})
+				case "synthesis":
+					runErr = runDirectSynth(t.Context(), promptSynthOpts{}, selected, "worker", "prompt",
+						metaPromptCtx{CityPath: selected, ContextType: "rig", RigPath: rig},
+						&config.ResolvedProvider{Command: script}, defaultPromptSynthRunner, io.Discard, io.Discard)
+				case "runtime-payload":
+					_, _, runErr = runtimeexec.NewProviderForCity(script, selected).Exec(t.Context(), "session", []string{"printf", "ok"})
+				}
+				if !selectDirty && runErr != nil {
+					t.Errorf("clean selected city was rejected: %v", runErr)
+				}
+				if selectDirty && operation != "events" && (runErr == nil || !strings.Contains(runErr.Error(), "has local worktree changes")) {
+					t.Errorf("dirty selected city was not refused: %v", runErr)
+				}
+				_, markerErr := os.Stat(f.marker)
+				if selectDirty && !os.IsNotExist(markerErr) {
+					t.Errorf("dirty selected city executed: %v", markerErr)
+				} else if !selectDirty && markerErr != nil {
+					t.Errorf("clean selected city did not execute: %v", markerErr)
+				}
+			})
+		}
+	}
+}
+
 func TestPackCacheFullLifecycleLoadsRejectDirtyImport(t *testing.T) {
 	for name, load := range map[string]func(string) error{
 		"start":             func(city string) error { _, _, err := loadStartCityConfig(city); return err },

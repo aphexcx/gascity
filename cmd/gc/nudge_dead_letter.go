@@ -343,7 +343,7 @@ func sendNudgeDeadLetterMail(cityPath string, item queuedNudge, log io.Writer, l
 		msgStore = resolveMailMessagesStore(cliStorageRoutes(cityPath), workStore, cfg, cityPath, nil)
 		sessStore = cliSessionStore(workStore, cfg, cityPath)
 	}
-	mailer := newMailProviderNamedWithSessionStore(name, msgStore, sessStore, false)
+	mailer := newMailProviderNamedWithSessionStore(cityPath, name, msgStore, sessStore, false)
 	subject, body := nudgeDeadLetterMail(item)
 	if lost {
 		subject, body = nudgeDeadLetterLossMail(item)

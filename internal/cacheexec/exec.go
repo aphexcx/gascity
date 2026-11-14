@@ -125,12 +125,9 @@ func GuardConfiguredExecCommand(ctx context.Context, cmd *exec.Cmd) {
 // even when the caller runs elsewhere. An empty city uses the command's scope.
 // The validation scope does not change the child's environment or directory.
 func GuardConfiguredExecCommandForCity(ctx context.Context, cmd *exec.Cmd, city string) {
+	ctx = WithCity(ctx, city)
 	if cmd.Err == nil {
-		dir, env := cmd.Dir, cmd.Environ()
-		if city != "" {
-			dir, env = city, []string{"GC_CITY_PATH=" + city}
-		}
-		cmd.Err = validateActiveRemoteCaches(ctx, dir, env)
+		cmd.Err = validateActiveRemoteCaches(ctx, cmd.Dir, cmd.Environ())
 	}
 	GuardCachedExecCommand(ctx, cmd)
 }

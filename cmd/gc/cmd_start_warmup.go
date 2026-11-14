@@ -27,7 +27,7 @@ func defaultMailProvider(cityPath string) mail.Provider {
 		name = mailProviderNameForCity(cityPath)
 	}
 	if strings.HasPrefix(name, "exec:") || name == "fake" || name == "fail" {
-		return newCommandMailProviderNamed(name, nil)
+		return newMailProviderNamedWithSessionStore(cityPath, name, nil, nil, true)
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -38,5 +38,5 @@ func defaultMailProvider(cityPath string) mail.Provider {
 	// reads its city.toml itself.
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)
 	sessStore := cliSessionStore(store, nil, cityPath)
-	return newMailProviderNamedWithSessionStore(name, msgStore, sessStore, true)
+	return newMailProviderNamedWithSessionStore(cityPath, name, msgStore, sessStore, true)
 }
