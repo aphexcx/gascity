@@ -53,12 +53,15 @@ func (m *Manager) ControllerRestartPending(id string) (bool, error) {
 // controllerDefersMessage is evaluated once at a message entry, under the
 // session lock. A live interrupt can subsequently replace the runtime itself.
 func (m *Manager) controllerDefersMessage(b beads.Bead, sessName string) bool {
-	return (m.restartOrKillPending(b) || !m.sp.IsRunning(sessName)) &&
+	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
+		return false
+	}
+	return (pendingConversationRestart(b) || !m.sp.IsRunning(sessName)) &&
 		m.controllerRunning != nil && m.controllerRunning()
 }
 
-func (m *Manager) queueControllerMessage(b beads.Bead, message string) error {
-	if err := m.enqueueSubmitLocked(b, message); err != nil {
+func (m *Manager) queueControllerMessage(b beads.Bead, sessName, message string) error {
+	if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 		return err
 	}
 	if !m.restartOrKillPending(b) {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -27,6 +28,16 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				pollerCalls := 0
+				originalPoller := startSessionSubmitPoller
+				startSessionSubmitPoller = func(city, key, name string) error {
+					pollerCalls++
+					if city != cityPath || key != info.ID || name != info.SessionName {
+						t.Errorf("poller identity = (%q, %q, %q), want (%q, %q, %q)", city, key, name, cityPath, info.ID, info.SessionName)
+					}
+					return nil
+				}
+				t.Cleanup(func() { startSessionSubmitPoller = originalPoller })
 				patch := MetadataPatch{"restart_requested": "true", "state": "active"}
 				switch pending {
 				case "reset":
@@ -69,22 +80,34 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 					outcome, err = m.Submit(t.Context(), info.ID, "hello", "launch", runtime.Config{}, SubmitIntent(surface))
 					queued = outcome.Queued
 				}
-				if err != nil {
+				wantQueued, wantActivations := true, 1
+				if pending == "kill" {
+					wantQueued, wantActivations = false, 0
+					if !errors.Is(err, ErrSessionKillPending) {
+						t.Fatalf("message error = %v, want ErrSessionKillPending", err)
+					}
+				} else if err != nil {
 					t.Fatal(err)
 				}
-				if !queued || pokes != 1 || sp.CountCalls("Start", info.SessionName) != starts {
+				if queued != wantQueued || pokes != wantActivations || sp.CountCalls("Start", info.SessionName) != starts {
 					t.Fatalf("queued=%v pokes=%d starts=%d", queued, pokes, sp.CountCalls("Start", info.SessionName))
+				}
+				if pollerCalls != wantActivations {
+					t.Errorf("deferred delivery poller activations = %d, want %d", pollerCalls, wantActivations)
 				}
 				state, err := nudgequeue.LoadState(cityPath)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(state.Pending) != 1 || state.Pending[0].Message != "hello" {
+				if len(state.Pending) != wantActivations || (wantQueued && state.Pending[0].Message != "hello") {
 					t.Fatalf("queue = %+v", state.Pending)
 				}
 				b, err := store.Get(info.ID)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if pending == "kill" && b.Metadata["wake_request"] != "" {
+					t.Error("kill-fenced message recorded a wake")
 				}
 				for key, value := range patch {
 					if pending == "held" && key == "held_until" {
@@ -101,6 +124,44 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestControllerMessageRejectsLiveKillFence(t *testing.T) {
+	city := t.TempDir()
+	store, sp := beads.NewMemStore(), runtime.NewFake()
+	pokes := 0
+	m := NewManagerWithOptions(store, sp, WithCityPath(city), WithRestartCoordinator(func() bool { return true }, func() error { pokes++; return nil }))
+	info, err := m.CreateSession(t.Context(), CreateOptions{BeadOnly: true, Template: "runner", Command: "launch", WorkDir: city})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(t.Context(), info.SessionName, runtime.Config{Command: "outgoing"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(info.ID, KillPendingPatch(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Send(t.Context(), info.ID, "fenced message", "caller-launch", runtime.Config{})
+	if !errors.Is(err, ErrSessionKillPending) {
+		t.Errorf("Send error = %v, want ErrSessionKillPending", err)
+	}
+	state, loadErr := nudgequeue.LoadState(city)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(state.Pending)+len(state.InFlight)+len(state.Dead) != 0 || pokes != 0 {
+		t.Errorf("pending=%d inflight=%d dead=%d pokes=%d", len(state.Pending), len(state.InFlight), len(state.Dead), pokes)
+	}
+	if sp.CountCalls("Start", info.SessionName) != 1 || sp.CountCalls("Nudge", info.SessionName) != 0 {
+		t.Error("fenced Send started or nudged a runtime")
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["wake_request"] != "" {
+		t.Errorf("wake_request=%q", b.Metadata["wake_request"])
 	}
 }
 

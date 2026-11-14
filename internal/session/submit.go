@@ -113,7 +113,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			return err
 		}
 		if m.controllerDefersMessage(b, sessName) {
-			if err := m.queueControllerMessage(b, message); err != nil {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
 				return err
 			}
 			outcome.Queued = true

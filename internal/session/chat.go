@@ -1047,7 +1047,7 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 			return err
 		}
 		if m.controllerDefersMessage(b, sessName) {
-			if err := m.queueControllerMessage(b, message); err != nil {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
 				return err
 			}
 			delivery = runtime.NudgeDelivery{Queued: true}
@@ -1164,7 +1164,7 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, res
 			return err
 		}
 		if m.controllerDefersMessage(b, sessName) {
-			if err := m.queueControllerMessage(b, message); err != nil {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
 				return err
 			}
 			delivery = runtime.NudgeDelivery{Queued: true}
