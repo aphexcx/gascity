@@ -171,6 +171,10 @@ func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 				if !submitted.Queued || f.sp.CountCalls("Start", f.info.SessionName) != f.starts {
 					t.Fatal("message must queue without a caller start")
 				}
+				queued, err := nudgequeue.LoadState(f.cityPath)
+				if err != nil || len(queued.Pending) != 1 || queued.Pending[0].Message != "wake-marker" {
+					t.Fatalf("expected exactly one queued message: err=%v queue=%+v", err, queued)
+				}
 				before, err := f.store.Get(f.info.ID)
 				if err != nil {
 					t.Fatal(err)
@@ -209,6 +213,15 @@ func TestDeferredControllerMessageStartsAndDeliversOnce(t *testing.T) {
 				}
 				if len(q.Pending)+len(q.InFlight)+len(q.Dead) != 0 || f.sp.CountCalls("Nudge", f.info.SessionName)-nudges != 1 {
 					t.Fatal("message was not delivered exactly once with an empty queue")
+				}
+				occurrences := 0
+				for _, call := range f.sp.SnapshotCalls() {
+					if call.Method == "Nudge" && call.Name == f.info.SessionName {
+						occurrences += strings.Count(call.Message, "wake-marker")
+					}
+				}
+				if occurrences != 1 {
+					t.Fatalf("delivered marker %d times", occurrences)
 				}
 			})
 		}

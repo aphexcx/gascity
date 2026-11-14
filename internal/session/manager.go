@@ -1256,6 +1256,9 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 				return err
 			}
 			if m.controllerRestartPending(b) {
+				if err := m.requestControllerWake(b); err != nil {
+					return err
+				}
 				return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
 			}
 			if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {

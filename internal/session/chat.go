@@ -1089,6 +1089,9 @@ func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints run
 				return err
 			}
 			if m.controllerRestartPending(b) {
+				if err := m.requestControllerWake(b); err != nil {
+					return err
+				}
 				return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
 			}
 			return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)

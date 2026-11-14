@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -61,27 +63,66 @@ func (m *Manager) controllerDefersMessage(b beads.Bead, sessName string) bool {
 }
 
 func (m *Manager) queueControllerMessage(b beads.Bead, sessName, message string) error {
-	if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+	itemID, err := m.enqueueSubmitLocked(b, message)
+	if err != nil {
 		return err
 	}
-	if !m.restartOrKillPending(b) {
-		switch State(b.Metadata["state"]) {
-		case StateAsleep, StateDrained, StateSuspended:
-			res, err := m.PersistedStore().WakeSession(b.ID, m.now(), WakeOpts{})
-			if err != nil {
-				log.Printf("session %s: recording wake after queued message: %v", b.ID, err)
-			} else if len(res.NudgeIDs) > 0 {
-				withdraw := m.withdrawWaitNudges
-				if withdraw == nil {
-					withdraw = func(ids []string) error { return nudgequeue.WithdrawWaitNudges(nil, m.cityPath, ids) }
-				}
-				if err := withdraw(res.NudgeIDs); err != nil {
-					log.Printf("session %s: withdrawing wait nudges after queued message: %v", b.ID, err)
-				}
-			}
+	if err := m.requestControllerWake(b); err != nil {
+		rollbackErr := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
+			matches := func(item nudgequeue.Item) bool { return item.ID == itemID }
+			state.Pending = slices.DeleteFunc(state.Pending, matches)
+			state.InFlight = slices.DeleteFunc(state.InFlight, matches)
+			return nil
+		})
+		if rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rolling back queued message %s: %w", itemID, rollbackErr))
+		}
+		return err
+	}
+	m.activateDeferredSubmitLocked(b, sessName)
+	m.pokeRestartCoordinator()
+	return nil
+}
+
+// requestControllerWake supplies demand before handing a session to the
+// controller. A reset alone only promises a fresh conversation at the next
+// wake; a restart request or committed reset already schedules that wake.
+func (m *Manager) requestControllerWake(b beads.Bead) error {
+	now := m.now()
+	input := LifecycleInputFromMetadata(b.Status, b.Metadata)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	if strings.TrimSpace(b.Metadata["restart_requested"]) == "true" ||
+		view.BaseState == BaseStateCreating || view.BaseState == BaseStateStartPending ||
+		KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], now) {
+		return nil
+	}
+	if len(view.Blockers) == 0 && b.Metadata["wait_hold"] != "true" {
+		if view.HasWakeCause(WakeCauseExplicit) ||
+			(view.BaseState != BaseStateDrained && strings.TrimSpace(b.Metadata["continuation_reset_pending"]) == "true" && strings.TrimSpace(b.Metadata[ResetCommittedAtKey]) != "") {
+			return nil
 		}
 	}
-	m.pokeRestartCoordinator()
+	res, err := m.PersistedStore().WakeSession(b.ID, now, WakeOpts{})
+	if err != nil {
+		var conflict *WakeConflictError
+		if errors.As(err, &conflict) {
+			log.Printf("session %s: recording controller wake: %v", b.ID, err)
+			return nil
+		}
+		return fmt.Errorf("recording controller wake for session %s: %w", b.ID, err)
+	}
+	if len(res.NudgeIDs) > 0 {
+		withdraw := m.withdrawWaitNudges
+		if withdraw == nil {
+			withdraw = func(ids []string) error { return nudgequeue.WithdrawWaitNudges(nil, m.cityPath, ids) }
+		}
+		if err := withdraw(res.NudgeIDs); err != nil {
+			// The wake is already durable; cleanup failure cannot strand the
+			// accepted message, but stale wait nudges still need reporting.
+			log.Printf("session %s: withdrawing wait nudges after controller wake: %v", b.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -96,6 +137,7 @@ func (m *Manager) pokeRestartCoordinator() {
 func (m *Manager) awaitControllerRestart(ctx context.Context, operation func() error) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	var nextPoke time.Time
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("waiting for pending restart owned by controller: %w", err)
@@ -104,7 +146,10 @@ func (m *Manager) awaitControllerRestart(ctx context.Context, operation func() e
 		if !errors.Is(err, ErrControllerRestartPending) {
 			return err
 		}
-		m.pokeRestartCoordinator()
+		if !time.Now().Before(nextPoke) {
+			m.pokeRestartCoordinator()
+			nextPoke = time.Now().Add(time.Second)
+		}
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {
 		case <-ctx.Done():

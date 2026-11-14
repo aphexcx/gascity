@@ -117,7 +117,7 @@ func TestMessagesQueueDuringControllerRestart(t *testing.T) {
 						t.Errorf("pending marker %s changed", key)
 					}
 				}
-				if pending == "dormant" || pending == "held" {
+				if pending == "dormant" || pending == "held" || pending == "config-drift" || pending == "crashed" {
 					if b.Metadata["wake_request"] != "explicit" || b.Metadata["held_until"] != "" {
 						t.Error("dormant message did not record an explicit wake and clear the hold")
 					}
