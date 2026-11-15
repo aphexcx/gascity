@@ -165,6 +165,9 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
+	if !cacheexec.HasScope(ctx) {
+		ctx = cacheexec.WithoutCity(ctx, "standalone order runner without loaded city configuration")
+	}
 	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	processgroup.StartCommandInNewGroup(cmd)
 
@@ -502,9 +505,11 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 			// every scope target (ga-237xpr).
 			return openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
 		},
-		storageRoutes:        routes,
-		ep:                   ep,
-		execRun:              shellExecRunner,
+		storageRoutes: routes,
+		ep:            ep,
+		execRun: func(ctx context.Context, command, dir string, env []string) ([]byte, error) {
+			return shellExecRunner(cacheexec.WithCity(ctx, cityPath), command, dir, env)
+		},
 		rec:                  rec,
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
@@ -745,7 +750,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Thread the dispatch tick's context into the condition check so a
 		// shutdown, reload, or canceled tick interrupts a slow check promptly
 		// instead of waiting out its (now operator-configurable) check_timeout.
-		cand.triggerOpts.ConditionCtx = ctx
+		cand.triggerOpts.ConditionCtx = cacheexec.WithCity(ctx, cityPath)
 		candidates = append(candidates, cand)
 	}
 

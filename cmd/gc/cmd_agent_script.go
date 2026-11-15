@@ -42,7 +42,18 @@ For k8s-backed agent-script agents, set lifecycle = "one_shot" in the agent
 config so the runtime treats a clean script exit as expected work completion
 instead of startup death.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			code := runAgentScript(scriptPath, stdout, stderr)
+			city, err := resolveCity()
+			if err != nil && !isCityDiscoveryNotFound(err) {
+				fmt.Fprintf(stderr, "gc agent-script: %v\n", err) //nolint:errcheck
+				return exitForCode(1)
+			}
+			if city != "" {
+				if _, err := loadCityConfigWithoutBuiltinPackRefresh(city, stderr); err != nil {
+					fmt.Fprintf(stderr, "gc agent-script: %v\n", err) //nolint:errcheck
+					return exitForCode(1)
+				}
+			}
+			code := runAgentScriptForCity(city, scriptPath, stdout, stderr)
 			return exitForCode(code)
 		},
 	}
@@ -101,6 +112,7 @@ type agentScriptContext struct {
 }
 
 type agentScriptExecutor struct {
+	cityPath   string
 	stdout     io.Writer
 	stderr     io.Writer
 	runCommand func(name string, args ...string) error
@@ -128,10 +140,11 @@ func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
 	return e.runCommand("bd", args...)
 }
 
-func runAgentScript(scriptPath string, stdout, stderr io.Writer) int {
+func runAgentScriptForCity(city, scriptPath string, stdout, stderr io.Writer) int {
 	executor := agentScriptExecutor{
-		stdout: stdout,
-		stderr: stderr,
+		cityPath: city,
+		stdout:   stdout,
+		stderr:   stderr,
 		runCommand: func(name string, args ...string) error {
 			return runAgentScriptCommand(stdout, stderr, name, args...)
 		},
@@ -723,7 +736,11 @@ func (e agentScriptExecutor) runShellCommand(command string, env []string) error
 	cmd.Env = workQueryEnvForDir(env, "")
 	cmd.Stdout = e.stdout
 	cmd.Stderr = e.stderr
-	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
+	if e.cityPath == "" {
+		cacheexec.GuardConfiguredExecCommandWithoutCity(ctx, cmd, "standalone YAML agent-script executor without loaded city configuration")
+	} else {
+		cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, e.cityPath)
+	}
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("shell action timed out after %s", agentScriptActionTimeout)

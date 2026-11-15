@@ -141,11 +141,16 @@ esac
 
 func run(t *testing.T, path string, wantError ...error) Report {
 	t.Helper()
+	return runForCity(t, path, "", wantError...)
+}
+
+func runForCity(t *testing.T, path, city string, wantError ...error) Report {
+	t.Helper()
 	var want error
 	if len(wantError) > 0 {
 		want = wantError[0]
 	}
-	rep, err := Run(context.Background(), path, Options{Command: "true"})
+	rep, err := Run(context.Background(), path, Options{Command: "true", CityPath: city})
 	if !errors.Is(err, want) {
 		t.Fatalf("Run error = %v, want %v", err, want)
 	}
@@ -202,7 +207,7 @@ func TestDirtyConfigurationCannotBecomeSkippedCapabilities(t *testing.T) {
 	cacheexec.PublishScope(city, []string{cached})
 	cfg := goldenConfig()
 	cfg.caps = nil
-	report := run(t, writeRef(t, cfg), dirty)
+	report := runForCity(t, writeRef(t, cfg), city, dirty)
 	if len(report.Results) != 0 {
 		t.Fatalf("integrity refusal produced a capability report: %+v", report.Summary)
 	}

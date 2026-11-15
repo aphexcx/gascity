@@ -256,7 +256,7 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	cmd.Stdin = bytes.NewReader(stdinData) // nil → empty reader → script reads EOF
 
-	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(ctx, p.cityPath, "standalone exec mail provider without loaded city configuration"), cmd)
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

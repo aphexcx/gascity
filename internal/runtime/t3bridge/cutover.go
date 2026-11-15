@@ -23,7 +23,13 @@ var (
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
 func NewSeamBacked() runtime.Provider {
+	return NewSeamBackedForCity("")
+}
+
+// NewSeamBackedForCity binds launch validation to the selected city.
+func NewSeamBackedForCity(city string) runtime.Provider {
 	raw := NewProvider()
+	raw.cacheCity = city
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }

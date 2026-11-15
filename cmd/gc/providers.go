@@ -1293,8 +1293,8 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	local := sessiontmux.NewSeamBackedWithConfigForCity(tmuxConfigFromSession(sc, cityName, cityPath), cityPath)
+	remote, err := sessionk8s.NewSeamBackedForCity(cityPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}

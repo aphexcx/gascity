@@ -75,6 +75,16 @@ func CheckTrigger(a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provi
 	return CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, TriggerOptions{})
 }
 
+// CheckTriggerForCity binds configured condition text to the caller's city.
+func CheckTriggerForCity(city string, a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provider, cursorFn CursorFunc, opts TriggerOptions) TriggerResult {
+	ctx := opts.ConditionCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opts.ConditionCtx = cacheexec.WithCity(ctx, city)
+	return CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts)
+}
+
 // CheckTriggerWithOptions evaluates an order trigger using explicit execution
 // context for condition checks.
 func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provider, cursorFn CursorFunc, opts TriggerOptions) TriggerResult {
@@ -306,6 +316,9 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	parent := opts.ConditionCtx
 	if parent == nil {
 		parent = context.Background()
+	}
+	if !cacheexec.HasScope(parent) {
+		parent = cacheexec.WithoutCity(parent, "standalone condition evaluator without loaded city configuration")
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()

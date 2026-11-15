@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
@@ -88,12 +89,23 @@ func (a *convergenceStoreAdapter) GetMetadata(id string) (map[string]string, err
 	if b.Metadata == nil {
 		return map[string]string{}, nil
 	}
+	if b.Type == "convergence" {
+		registerConvergenceConditionCaches(b.Metadata)
+	}
 	// Return a copy to prevent callers from mutating the store's internal state.
 	cp := make(map[string]string, len(b.Metadata))
 	for k, v := range b.Metadata {
 		cp[k] = v
 	}
 	return cp, nil
+}
+
+func registerConvergenceConditionCaches(meta map[string]string) {
+	// These paths are the immutable gate/trigger configuration persisted when
+	// the loop was created, including imports no longer in today's lock.
+	for _, key := range []string{convergence.FieldGateCondition, convergence.FieldTriggerCondition} {
+		config.RegisterHistoricalRemoteCacheForPath(meta[key])
+	}
 }
 
 func (a *convergenceStoreAdapter) SetMetadata(id, key, value string) error {

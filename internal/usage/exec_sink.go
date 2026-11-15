@@ -82,7 +82,7 @@ func (s *ExecSink) Record(ctx context.Context, f Fact) error {
 	cmd.Stdin = bytes.NewReader(append(line, '\n'))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, s.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(ctx, s.cityPath, "standalone exec usage sink without loaded city configuration"), cmd)
 	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("usage exec sink %q timed out after %s: %w", s.script, s.timeout, ctx.Err())

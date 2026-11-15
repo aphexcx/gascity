@@ -10,6 +10,24 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// ValidateLaunchForCity binds the provider's construction city to launch text.
+// Standalone providers may instead receive a binding from their operation caller.
+func ValidateLaunchForCity(ctx context.Context, cfg runtime.Config, city string) error {
+	if city != "" {
+		return ValidateLaunch(cacheexec.WithCity(ctx, city), cfg)
+	}
+	if cacheexec.HasScope(ctx) {
+		return ValidateLaunch(ctx, cfg)
+	}
+	return ValidateLaunchWithoutCity(ctx, cfg)
+}
+
+// ValidateLaunchWithoutCity validates a standalone provider constructed without
+// loaded configuration. Cached file ownership checks still apply.
+func ValidateLaunchWithoutCity(ctx context.Context, cfg runtime.Config) error {
+	return ValidateLaunch(cacheexec.WithoutCity(ctx, "standalone runtime provider constructed without a city"), cfg)
+}
+
 // ValidateLaunch checks code launched from a cached import before handing
 // the command to a session carrier. Controller loads already supply a FULL
 // verdict. Executable configuration and staged inputs conservatively retain

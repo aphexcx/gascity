@@ -871,7 +871,7 @@ func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
 	wantBareRoute := "fixture/control-dispatcher"
 	serveQuery := workflowServeControlReadyQuery(rigDispatcher)
 	queryCalls := 0
-	workflowServeList = func(workQuery, dir string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, workQuery, dir string, _ map[string]string) ([]hookBead, error) {
 		queryCalls++
 		if canonicalTestPath(dir) != canonicalTestPath(rigPath) {
 			t.Fatalf("serve query dir = %q, want rig store %q", dir, rigPath)

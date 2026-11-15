@@ -163,7 +163,7 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, c.path, args...)
-	cacheexec.GuardConfiguredExecCommandForCity(opCtx, cmd, c.opts.CityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(opCtx, c.opts.CityPath, "standalone runtime protocol check without loaded city configuration"), cmd)
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open; a conformance run should report a hang,
 	// not inherit it.

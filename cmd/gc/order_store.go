@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -289,6 +290,7 @@ func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target exec
 		return orders.TriggerOptions{}, err
 	}
 	return orders.TriggerOptions{
+		ConditionCtx:     cacheexec.WithCity(context.Background(), cityPath),
 		ConditionDir:     target.ScopeRoot,
 		ConditionEnv:     env,
 		ConditionTimeout: a.CheckTimeoutOrDefault(),

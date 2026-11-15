@@ -28,7 +28,7 @@ func ValidateConfiguredShellCommand(ctx context.Context, command, dir string, en
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}
-	if err := validateActiveRemoteCaches(ctx, dir, env); err != nil {
+	if err := validateActiveRemoteCaches(ctx); err != nil {
 		return err
 	}
 	return ValidateCachedShellCommand(ctx, command, dir, env)
@@ -39,11 +39,11 @@ func validateCachedShellCommand(ctx context.Context, command, dir string, env []
 		return err
 	}
 	if depth >= 32 {
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "launcher")
 	if err != nil {
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	}
 	if env == nil {
 		env = os.Environ()
@@ -106,7 +106,7 @@ func validateCachedShellCommand(ctx context.Context, command, dir string, env []
 		return validationErr
 	}
 	if unresolved {
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	}
 	return nil
 }
@@ -131,7 +131,7 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 				continue
 			}
 			if strings.HasPrefix(args[i], "-") {
-				return validateActiveRemoteCaches(ctx, dir, env)
+				return validateActiveRemoteCaches(ctx)
 			}
 			if operand {
 				operand = false // timeout's duration precedes its command
@@ -139,11 +139,11 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 			}
 			return validateCachedShellArgs(ctx, args[i:], dir, env, depth)
 		}
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	case "exec", "command", "env":
 		for i := 1; i < len(args); i++ {
 			if strings.HasPrefix(args[i], "-") {
-				return validateActiveRemoteCaches(ctx, dir, env)
+				return validateActiveRemoteCaches(ctx)
 			}
 			if key, _, ok := strings.Cut(args[i], "="); ok && name == "env" && key != "" {
 				env = append(env, args[i])
@@ -167,11 +167,11 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 				continue
 			}
 			if strings.HasPrefix(arg, "--") || arg == "-" {
-				return validateActiveRemoteCaches(ctx, dir, env)
+				return validateActiveRemoteCaches(ctx)
 			}
 			if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+") {
 				if strings.ContainsAny(arg[1:], "oOs") {
-					return validateActiveRemoteCaches(ctx, dir, env)
+					return validateActiveRemoteCaches(ctx)
 				}
 				if strings.HasPrefix(arg, "-") && strings.ContainsRune(arg[1:], 'c') {
 					if i+1 < len(args) {
@@ -183,27 +183,27 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 			}
 			return validateCachedScriptPath(ctx, arg, dir)
 		}
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	case "python", "python3", "node", "ruby", "perl", "lua":
 		for _, arg := range args[1:] {
 			if arg == "--" || arg == "-u" || arg == "-B" {
 				continue
 			}
 			if strings.HasPrefix(arg, "-") {
-				return validateActiveRemoteCaches(ctx, dir, env)
+				return validateActiveRemoteCaches(ctx)
 			}
 			return validateCachedScriptPath(ctx, arg, dir)
 		}
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	case ".", "source":
 		if len(args) > 1 {
 			if err := validateCachedShellPath(ctx, args[1], dir, env); err != nil {
 				return err
 			}
 		}
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	case "cd", "pushd", "popd", "read", "unset", "set", "shift", "getopts", "trap":
-		return validateActiveRemoteCaches(ctx, dir, env)
+		return validateActiveRemoteCaches(ctx)
 	case "cat", "cp", "echo", "printf", "true", "false", "test", "[", ":":
 		// These operations consume file contents without executing them.
 		return nil
@@ -213,7 +213,7 @@ func validateCachedShellArgs(ctx context.Context, args []string, dir string, env
 		// strings and paths outside the cache retain their existing behavior.
 		for _, arg := range args[1:] {
 			if arg == "-c" || arg == "--command" {
-				return validateActiveRemoteCaches(ctx, dir, env)
+				return validateActiveRemoteCaches(ctx)
 			}
 			path := arg
 			if !filepath.IsAbs(path) {

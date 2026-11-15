@@ -12,14 +12,10 @@ import (
 	"testing"
 	"time"
 
-	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	eventsexec "github.com/gastownhall/gascity/internal/events/exec"
-	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	runtimeexec "github.com/gastownhall/gascity/internal/runtime/exec"
-	"github.com/gastownhall/gascity/internal/runtime/rppcheck"
-	"github.com/gastownhall/gascity/internal/runtime/runtimecontract"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/spf13/cobra"
 )
@@ -310,7 +306,7 @@ func TestPackCacheInlineWorkQueryRefusedBeforeExecution(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := shellWorkQueryWithEnv(fmt.Sprintf("printf dirty > %q; printf '[]'", f.marker), f.city, nil)
+	_, err := shellWorkQueryForCity(f.city, fmt.Sprintf("printf dirty > %q; printf '[]'", f.marker), f.city, nil)
 	if err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
 		t.Errorf("inline configuration instructions were not refused: %v", err)
 	}
@@ -349,7 +345,7 @@ func TestPackCachePromptSynthesisValidatesConfigurationSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &config.ResolvedProvider{Command: "sh", Args: []string{"-c", fmt.Sprintf("printf dirty > %q", f.marker)}}
-	_, err := defaultPromptSynthRunner(t.Context(), provider, "prompt", f.city)
+	_, err := defaultPromptSynthRunner(cacheexec.WithCity(t.Context(), f.city), provider, "prompt", f.city)
 	if err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
 		t.Errorf("provider configuration was not refused: %v", err)
 	}
@@ -382,69 +378,6 @@ func TestPackCacheDirectBDRunnersRefuseDirtyExecutable(t *testing.T) {
 			}
 			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
 				t.Errorf("dirty beads executable ran: %v", err)
-			}
-		})
-	}
-}
-
-func TestPackCacheConfiguredProviderOperations(t *testing.T) {
-	operations := map[string]func(context.Context, string, string) string{
-		"runtime": func(_ context.Context, script, _ string) string {
-			_, err := runtimeexec.NewProvider(script).ListRunning("")
-			return fmt.Sprint(err)
-		},
-		"beads": func(_ context.Context, script, city string) string {
-			store := beadsexec.NewStore(script)
-			store.SetEnv(map[string]string{"GC_CITY_PATH": city})
-			_, err := store.ListOpen()
-			return fmt.Sprint(err)
-		},
-		"mail": func(_ context.Context, script, _ string) string {
-			_, err := mailexec.NewProvider(script).Send("sender", "recipient", "subject", "body")
-			return fmt.Sprint(err)
-		},
-		"events": func(_ context.Context, script, _ string) string {
-			_, err := eventsexec.NewProvider(script, io.Discard).List(events.Filter{})
-			return fmt.Sprint(err)
-		},
-		"event-watch": func(ctx context.Context, script, _ string) string {
-			watcher, err := eventsexec.NewProvider(script, io.Discard).Watch(ctx, 0)
-			if watcher != nil {
-				_ = watcher.Close()
-			}
-			return fmt.Sprint(err)
-		},
-		"usage": func(ctx context.Context, script, _ string) string {
-			return fmt.Sprint(usage.NewExecSink(script).Record(ctx, usage.Fact{}))
-		},
-		"runtime-check": func(ctx context.Context, script, _ string) string {
-			result, err := rppcheck.Run(ctx, script, rppcheck.Options{})
-			return fmt.Sprintf("%v %v", result, err)
-		},
-		"runtime-contract": func(ctx context.Context, script, city string) string {
-			result, err := runtimecontract.Run(ctx, script, runtimecontract.Options{WorkDir: city})
-			return fmt.Sprintf("%v %v", result, err)
-		},
-	}
-	for name, run := range operations {
-		t.Run(name, func(t *testing.T) {
-			f := newPackCacheFixture(t, 1)
-			t.Setenv("GC_CITY_PATH", f.city)
-			if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			script := filepath.Join(f.city, "local-provider.sh")
-			if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nprintf dirty > %q\n", f.marker)), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if result := run(t.Context(), script, f.city); !strings.Contains(result, "has local worktree changes") {
-				t.Error("provider did not report its dirty cached configuration source")
-			}
-			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
-				t.Errorf("configuration-selected local provider executed: %v", err)
 			}
 		})
 	}
@@ -617,22 +550,43 @@ func TestPackCacheFullLifecycleLoadsRejectDirtyImport(t *testing.T) {
 }
 
 func TestPackCacheImportReadCommandsValidateCaches(t *testing.T) {
-	for _, args := range [][]string{{"list"}, {"why", "sample0"}} {
+	for _, args := range [][]string{{"list"}, {"why", "sample0"}, {"status"}} {
 		t.Run(args[0], func(t *testing.T) {
 			f := newPackCacheFixture(t, 1)
 			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), []byte("changed"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			var stderr bytes.Buffer
-			cmd := newImportCmd(io.Discard, &stderr)
-			cmd.SetArgs(args)
-			if err := cmd.Execute(); err == nil {
+			var stdout, stderr bytes.Buffer
+			if code := run(append([]string{"import"}, args...), &stdout, &stderr); code == 0 {
 				t.Fatal("import inspection accepted dirty cache")
+			}
+			if !strings.Contains(stdout.String(), "sample0") {
+				t.Errorf("import inspection did not print its listing: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), `has local worktree changes; run "gc import install"`) {
+				t.Errorf("root command lost the cache diagnostic: %q", stderr.String())
 			}
 			if calls := f.gitCalls(t); !strings.Contains(calls, "status --porcelain") {
 				t.Fatalf("import did not scan: %s", calls)
 			}
 		})
+	}
+}
+
+func TestPackCacheImportPostHookPrintsValidationFailure(t *testing.T) {
+	f := newPackCacheFixture(t, 1)
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+	imports := findSubcommand(root, "import")
+	imports.AddCommand(&cobra.Command{Use: "fixture-mutation", RunE: func(*cobra.Command, []string) error {
+		return os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o644)
+	}})
+	root.SetArgs([]string{"import", "fixture-mutation"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("post hook accepted changed cache")
+	}
+	if !strings.Contains(stderr.String(), `gc import fixture-mutation: cached import`) || !strings.Contains(stderr.String(), `run "gc import install"`) {
+		t.Fatalf("post-hook diagnostic missing: %q", stderr.String())
 	}
 }
 

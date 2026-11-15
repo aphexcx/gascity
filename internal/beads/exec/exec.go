@@ -25,9 +25,10 @@ import (
 // Exit codes: 0 = success, 1 = error (stderr has message), 2 = unknown
 // operation (treated as success for forward compatibility).
 type Store struct {
-	script  string
-	timeout time.Duration
-	env     map[string]string
+	cityPath string
+	script   string
+	timeout  time.Duration
+	env      map[string]string
 
 	// localMu and localStrings back SetLocalString/GetLocalString. Clone-local
 	// data is kept in process only, never routed through the script: unlike
@@ -64,6 +65,13 @@ func NewStore(script string) *Store {
 		script:  script,
 		timeout: 30 * time.Second,
 	}
+}
+
+// NewStoreForCity binds configured provider execution to the loaded city.
+func NewStoreForCity(script, city string) *Store {
+	s := NewStore(script)
+	s.cityPath = city
+	return s
 }
 
 func execProcessEnv(overrides map[string]string) []string {
@@ -119,7 +127,11 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 		cmd.Stdin = bytes.NewReader(stdinData)
 	}
 
-	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
+	if s.cityPath == "" {
+		cacheexec.GuardConfiguredExecCommandWithoutCity(ctx, cmd, "standalone exec beads store without loaded city configuration")
+	} else {
+		cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, s.cityPath)
+	}
 	err := cmd.Run()
 	if err != nil {
 		var exitErr *exec.ExitError

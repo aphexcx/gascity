@@ -111,11 +111,12 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 			switch cmd.Name() {
 			case "list", "why", "status":
 				if cmd.Parent().Name() == "import" {
-					root, err := resolveImportRoot()
-					if err != nil {
-						return err
+					if _, err := resolveImportRoot(); err != nil {
+						fmt.Fprintf(stderr, "gc import %s: %v\n", cmd.Name(), err) //nolint:errcheck
+						return errExit
 					}
-					return config.ValidatePresentRemoteCaches(root)
+					// Inspection prints its listing before the post hook reports
+					// an integrity warning and unsuccessful exit status.
 				}
 			}
 			return nil
@@ -127,7 +128,10 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 			// Mutation commands keep their repair behavior: validate the resulting
 			// caches, rather than refusing the damaged state they are fixing.
 			if root, err := resolveImportRoot(); err == nil {
-				return config.ValidatePresentRemoteCaches(root)
+				if err := config.ValidatePresentRemoteCaches(root); err != nil {
+					fmt.Fprintf(stderr, "gc import %s: %v\n", cmd.Name(), err) //nolint:errcheck
+					return errExit
+				}
 			}
 			return nil // global credential/prune commands need no city
 		},
@@ -1025,10 +1029,9 @@ func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	graph, err := buildImportGraph(inspectImports, lock)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
-		return 1
+	graph, graphErr := buildImportGraph(inspectImports, lock)
+	if graphErr != nil {
+		fmt.Fprintf(stderr, "gc import why: %v; run \"gc import install\"\n", graphErr) //nolint:errcheck
 	}
 
 	matches, err := findImportWhyMatches(graph, target)
@@ -1038,6 +1041,9 @@ func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
 	}
 	if err := writeImportWhy(stdout, target, matches); err != nil {
 		fmt.Fprintf(stderr, "gc import why: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if graphErr != nil {
 		return 1
 	}
 	return 0
@@ -1126,14 +1132,15 @@ func buildImportGraph(imports map[string]config.Import, lock *packman.Lockfile) 
 	sort.Strings(names)
 
 	nodes := make([]*importGraphNode, 0, len(names))
+	var graphErr error
 	for _, name := range names {
 		node, err := buildImportGraphNode(name, imports[name], lock, map[string]bool{}, true)
 		if err != nil {
-			return nil, err
+			graphErr = errors.Join(graphErr, err)
 		}
 		nodes = append(nodes, node)
 	}
-	return nodes, nil
+	return nodes, graphErr
 }
 
 func buildImportGraphNode(name string, imp config.Import, lock *packman.Lockfile, stack map[string]bool, direct bool) (*importGraphNode, error) {
@@ -1157,7 +1164,7 @@ func buildImportGraphNode(name string, imp config.Import, lock *packman.Lockfile
 
 	children, err := packman.ReadCachedPackImports(imp.Source, pack.Commit)
 	if err != nil {
-		return nil, err
+		return node, fmt.Errorf("import %q: %w", name, err)
 	}
 	childNames := make([]string, 0, len(children))
 	for childName := range children {
@@ -1172,14 +1179,15 @@ func buildImportGraphNode(name string, imp config.Import, lock *packman.Lockfile
 	nextStack[imp.Source] = true
 
 	node.Children = make([]*importGraphNode, 0, len(childNames))
+	var graphErr error
 	for _, childName := range childNames {
 		child, err := buildImportGraphNode(childName, children[childName], lock, nextStack, false)
 		if err != nil {
-			return nil, err
+			graphErr = errors.Join(graphErr, err)
 		}
 		node.Children = append(node.Children, child)
 	}
-	return node, nil
+	return node, graphErr
 }
 
 func collectTransitiveImports(nodes []*importGraphNode, directSources map[string]bool) map[string]packman.LockedPack {

@@ -51,7 +51,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		// seams (runtime.NewProviderFromSeams), validated by the full Provider
 		// conformance suite in TestSubprocessSeamConformance.
 		if cityPath != "" {
-			return sessionsubprocess.NewSeamBackedWithDir(providerStateDir("subprocess", cityPath)), nil
+			return sessionsubprocess.NewSeamBackedForCity(providerStateDir("subprocess", cityPath), cityPath), nil
 		}
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
@@ -62,20 +62,20 @@ func buildRuntimeRegistry() *registry.Registry {
 			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
 		}
 		if cityPath != "" {
-			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
+			return sessionacp.NewSeamBackedForCity(providerStateDir("acp", cityPath), cfg, cityPath), nil
 		}
 		return sessionacp.NewSeamBacked(cfg), nil
 	}))
-	must(r.Register("t3bridge", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessiont3bridge.NewSeamBacked(), nil
+	must(r.Register("t3bridge", func(_ string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
+		return sessiont3bridge.NewSeamBackedForCity(cityPath), nil
 	}))
 	// "cloudflare" is no longer a builtin: it ships as the runtime-cloudflare
 	// pack ([runtimes.cloudflare] → gc-runtime-cloudflare, RPP v0) and
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
-	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewSeamBacked()
+	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
+		return sessionk8s.NewSeamBackedForCity(cityPath)
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
@@ -94,7 +94,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
-			return sessiont3bridge.NewSeamBacked(), nil
+			return sessiont3bridge.NewSeamBackedForCity(cityPath), nil
 		}
 		return sessionexec.NewSeamBackedForCity(script, cityPath), nil
 	}))
@@ -102,18 +102,18 @@ func buildRuntimeRegistry() *registry.Registry {
 	// endpoint (the anonymous form; the named, structured form with explicit
 	// key/known_hosts is a [runtimes.<name>] ssh declaration). Key + known_hosts
 	// resolve via ssh's own config (~/.ssh/config).
-	must(r.RegisterPrefix("ssh:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+	must(r.RegisterPrefix("ssh:", func(name string, _ config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		ep, err := sessionssh.ParseEndpoint(strings.TrimPrefix(name, "ssh:"))
 		if err != nil {
 			return nil, err
 		}
-		return sessionssh.NewSeamBacked(ep), nil
+		return sessionssh.NewSeamBackedForCity(ep, cityPath), nil
 	}))
 	// tmux registers both as an exact name and as the fallback: the exact
 	// registration makes a pack-declared runtime named "tmux" a collision
 	// error instead of a silent shadow of the default provider.
 	tmuxFactory := func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
+		return sessiontmux.NewSeamBackedWithConfigForCity(tmuxConfigFromSession(sc, cityName, cityPath), cityPath), nil
 	}
 	must(r.Register("tmux", tmuxFactory))
 	r.SetFallback(tmuxFactory)

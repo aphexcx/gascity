@@ -78,6 +78,10 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 // the command before it starts — it is how a caller opts into a cancellation
 // policy stronger than CommandContext's default.
 func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
+	return runShellCommandForCity("", command, dir, timeout, env, prepare)
+}
+
+func runShellCommandForCity(city, command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -89,7 +93,11 @@ func runShellCommand(command, dir string, timeout time.Duration, env map[string]
 	if prepare != nil {
 		prepare(cmd)
 	}
-	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
+	if city == "" {
+		cacheexec.GuardConfiguredExecCommandWithoutCity(ctx, cmd, "standalone shell runner without loaded city configuration")
+	} else {
+		cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, city)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)
@@ -144,6 +152,18 @@ func parseBDProbeTimeout(stderr io.Writer) time.Duration {
 // unless GC_BD_PROBE_TIMEOUT overrides it.
 func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
 	return shellCommand(command, dir, parseBDProbeTimeout(os.Stderr), env)
+}
+
+func scaleCheckRunnerForCity(city string) func(string, string, map[string]string) (string, error) {
+	return func(command, dir string, env map[string]string) (string, error) {
+		return runShellCommandForCity(city, command, dir, parseBDProbeTimeout(os.Stderr), env, nil)
+	}
+}
+
+func lifecycleHookRunnerForCity(city string) func(string, string, map[string]string) (string, error) {
+	return func(command, dir string, env map[string]string) (string, error) {
+		return runShellCommandForCity(city, command, dir, hookTimeout, env, hookProcessGroupCleanup)
+	}
 }
 
 // shellRunHook runs a lifecycle hook command (on_death, on_boot) via

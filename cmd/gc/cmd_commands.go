@@ -355,7 +355,7 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
 	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
-	cacheexec.GuardCachedExecCommand(context.Background(), cmd)
+	cacheexec.GuardCachedExecCommand(cacheexec.WithCity(context.Background(), cityPath), cmd)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError

@@ -547,7 +547,7 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 					t.Errorf("fake disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
 				fakeProof = claim.Proof
-			case entry.ID == "runtime.builtin.subprocess" && claim.Constructor == repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"):
+			case entry.ID == "runtime.builtin.subprocess" && claim.Constructor == repoSymbol("internal/runtime/subprocess", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionProved {
 					t.Errorf("subprocess WithDir disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
@@ -570,7 +570,7 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 		t.Errorf("runtime.NewFake proof = %s#%s, want fake conformance entrypoint", fakeProof.File, fakeProof.Test)
 	}
 	if subprocessProof == nil {
-		t.Fatal("subprocess.NewSeamBackedWithDir proof is missing")
+		t.Fatal("subprocess.NewSeamBackedForCity proof is missing")
 	}
 	if subprocessProof.File != "internal/runtime/subprocess/seam_conformance_test.go" || subprocessProof.Test != "TestSubprocessSeamConformance" {
 		t.Errorf("subprocess WithDir proof = %s#%s, want subprocess seam conformance entrypoint", subprocessProof.File, subprocessProof.Test)
@@ -599,7 +599,7 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 		}
 		for _, claim := range entry.Claims {
 			switch claim.Constructor {
-			case repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"):
+			case repoSymbol("internal/runtime/acp", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionProved {
 					t.Errorf("ACP WithDir disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
@@ -614,7 +614,7 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	}
 
 	if withDirProof == nil {
-		t.Fatal("acp.NewSeamBackedWithDir proof is missing")
+		t.Fatal("acp.NewSeamBackedForCity proof is missing")
 	}
 	if withDirProof.File != "internal/runtime/acp/conformance_test.go" || withDirProof.Test != "TestACPConformance" {
 		t.Errorf("ACP WithDir proof = %s#%s, want ACP conformance entrypoint", withDirProof.File, withDirProof.Test)
@@ -658,7 +658,7 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
 				proof = claim.Proof
-			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
+			case repoSymbol("internal/runtime/t3bridge", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionWaived {
 					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
 				}

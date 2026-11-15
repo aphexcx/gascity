@@ -99,6 +99,58 @@ func TestQuickCacheLoadRejectsWrongCommit(t *testing.T) {
 	}
 }
 
+func TestQuickCacheLoadRejectsGitFile(t *testing.T) {
+	city, cache := setupQuickCacheLoad(t)
+	gitDir := filepath.Join(t.TempDir(), "git-dir")
+	if err := os.Rename(filepath.Join(cache, ".git"), gitDir); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, cache, ".git", "gitdir: "+gitDir+"\n")
+	runRepoCacheGit = func(_ string, _ ...string) (string, error) {
+		return lockedPackRefCommit, nil
+	}
+	_, _, err := LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(city, "city.toml"), LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: CacheValidationQuick})
+	if err == nil || !strings.Contains(err.Error(), "locked but not cached") {
+		t.Fatalf("QUICK accepted linked worktree: %v", err)
+	}
+}
+
+func TestFullCacheVerdictChecksHEADAndRevalidatesAfterMismatch(t *testing.T) {
+	for _, boundary := range []string{"load", "execution"} {
+		t.Run(boundary, func(t *testing.T) {
+			city, cache := setupQuickCacheLoad(t)
+			head, status := lockedPackRefCommit, ""
+			runRepoCacheGit = func(_ string, args ...string) (string, error) {
+				if args[0] == "rev-parse" {
+					return head, nil
+				}
+				return status, nil
+			}
+			load := func() error {
+				_, _, err := LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(city, "city.toml"), LoadOptions{SkipRevisionSnapshot: true})
+				return err
+			}
+			if err := load(); err != nil {
+				t.Fatal(err)
+			}
+			check := load
+			if boundary == "execution" {
+				check = func() error { return cacheexec.ValidateCachedExecutable(t.Context(), filepath.Join(cache, "run.sh")) }
+			}
+			head = strings.Repeat("1", 40)
+			writeTestFile(t, cache, ".git/HEAD", head+"\n")
+			if err := check(); err == nil || !strings.Contains(err.Error(), "is checked out at") {
+				t.Errorf("memo accepted changed HEAD: %v", err)
+			}
+			head, status = lockedPackRefCommit, " M nested/file\n"
+			writeTestFile(t, cache, ".git/HEAD", head+"\n")
+			if err := check(); err == nil || !strings.Contains(err.Error(), "has local worktree changes") {
+				t.Errorf("mismatched HEAD retained the old FULL verdict: %v", err)
+			}
+		})
+	}
+}
+
 func TestQuickDirtyCacheIsRefusedByNextFullLoad(t *testing.T) {
 	city, _ := setupQuickCacheLoad(t)
 	statusCalls := 0
@@ -149,25 +201,6 @@ func TestQuickCacheUnknownHEADFallsBackOnceWithoutScan(t *testing.T) {
 		return lockedPackRefCommit, nil
 	}
 	if err := validateLockedRemoteCache("https://example.com/pack.git", cache, lockedPackRefCommit, CacheValidationQuick); err != nil {
-		t.Fatal(err)
-	}
-	if len(calls) != 1 || calls[0] != "rev-parse HEAD" {
-		t.Fatalf("fallback calls = %v", calls)
-	}
-}
-
-func TestQuickGitfileFallsBackWithoutScan(t *testing.T) {
-	_, cache := setupQuickCacheLoad(t)
-	if err := os.RemoveAll(filepath.Join(cache, ".git")); err != nil {
-		t.Fatal(err)
-	}
-	writeTestFile(t, cache, ".git", "gitdir: elsewhere\n")
-	var calls []string
-	runRepoCacheGit = func(_ string, args ...string) (string, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return lockedPackRefCommit, nil
-	}
-	if err := validateInstalledRemoteCache("https://example.com/pack.git", cache, lockedPackRefCommit, CacheValidationQuick); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 1 || calls[0] != "rev-parse HEAD" {
@@ -258,7 +291,7 @@ func TestCachedShellExecutionChecksCodeButNotReadArguments(t *testing.T) {
 				statusCalls++
 				return "", nil
 			}
-			if err := cacheexec.ValidateCachedShellCommand(context.Background(), tc.command, city, append(os.Environ(), "PACK_SCRIPT="+script, "LAUNCHER="+script)); err != nil {
+			if err := cacheexec.ValidateCachedShellCommand(cacheexec.WithCity(context.Background(), city), tc.command, city, append(os.Environ(), "PACK_SCRIPT="+script, "LAUNCHER="+script)); err != nil {
 				t.Fatal(err)
 			}
 			if statusCalls != tc.scans {
@@ -284,10 +317,10 @@ func TestShellFallbackIncludesRemoteFragments(t *testing.T) {
 		return " M run.sh", nil
 	}
 	env := []string{"PACK_SCRIPT=" + filepath.Join(cache, "run.sh")}
-	if err := cacheexec.ValidateCachedShellCommand(t.Context(), "cat \"$PACK_SCRIPT\"", city, env); err != nil || scans != 0 {
+	if err := cacheexec.ValidateCachedShellCommand(cacheexec.WithCity(t.Context(), city), "cat \"$PACK_SCRIPT\"", city, env); err != nil || scans != 0 {
 		t.Fatalf("fragment read must remain QUICK: err=%v scans=%d", err, scans)
 	}
-	if err := cacheexec.ValidateCachedShellCommand(t.Context(), "SCRIPT=\"$PACK_SCRIPT\"; \"$SCRIPT\"", city, env); err == nil || scans != 1 {
+	if err := cacheexec.ValidateCachedShellCommand(cacheexec.WithCity(t.Context(), city), "SCRIPT=\"$PACK_SCRIPT\"; \"$SCRIPT\"", city, env); err == nil || scans != 1 {
 		t.Fatalf("dynamic fragment execution escaped FULL: err=%v scans=%d", err, scans)
 	}
 }
@@ -332,7 +365,7 @@ func TestShellFallbackUsesSuccessfulActiveConfiguration(t *testing.T) {
 			if err := os.RemoveAll(cache); err != nil {
 				t.Fatal(err)
 			}
-			if err := cacheexec.ValidateCachedShellCommand(context.Background(), "FLAG=1 /bin/true", city, nil); err != nil {
+			if err := cacheexec.ValidateCachedShellCommand(cacheexec.WithCity(context.Background(), city), "FLAG=1 /bin/true", city, nil); err != nil {
 				t.Fatalf("historical import blocked active local execution: %v", err)
 			}
 		})

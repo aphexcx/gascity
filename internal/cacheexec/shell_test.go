@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 					return nil
 				})
 			}
-			if err := ValidateCachedShellCommand(context.Background(), tc.command, root, []string{"PATH=/usr/bin:/bin", "SCRIPT=" + filepath.Join(root, "first", "run.sh")}); err != nil {
+			if err := ValidateCachedShellCommand(WithoutCity(context.Background(), "standalone executable parser fixture"), tc.command, root, []string{"PATH=/usr/bin:/bin", "SCRIPT=" + filepath.Join(root, "first", "run.sh")}); err != nil {
 				t.Fatal(err)
 			}
 			if scans != tc.wantScans {
@@ -91,7 +92,7 @@ func TestShellGlobCannotHideCachedExecution(t *testing.T) {
 	Register(cached, func(context.Context) error { return dirty })
 	PublishScope(local, []string{cached})
 	for _, command := range []string{"./pack-*/run.sh", "sh ./pack-*/run.sh"} {
-		if err := ValidateCachedShellCommand(t.Context(), command, local, []string{}); !errors.Is(err, dirty) {
+		if err := ValidateCachedShellCommand(WithCity(t.Context(), local), command, local, []string{}); !errors.Is(err, dirty) {
 			t.Errorf("globbed execution %q bypassed validation: %v", command, err)
 		}
 	}
@@ -215,7 +216,7 @@ func TestConfiguredExecutionRetainsSymlinkSourceOwner(t *testing.T) {
 			if scans != 0 {
 				t.Fatal("publishing read-only configuration triggered validation")
 			}
-			if err := ValidateConfiguredShellCommand(t.Context(), "printf configured", city, []string{}); !errors.Is(err, dirty) {
+			if err := ValidateConfiguredShellCommand(WithCity(t.Context(), city), "printf configured", city, []string{}); !errors.Is(err, dirty) {
 				t.Fatalf("cached source owner was lost through its symlink: %v", err)
 			}
 			if scans != 1 {
@@ -266,9 +267,25 @@ func TestShellFallbackUsesExecutionCityOutsideItsDirectory(t *testing.T) {
 		city string
 		want error
 	}{{first, dirty}, {second, nil}} {
-		err := ValidateCachedShellCommand(t.Context(), "FLAG=1 /bin/true", t.TempDir(), []string{"GC_CITY_PATH=" + tc.city})
+		err := ValidateCachedShellCommand(WithCity(t.Context(), tc.city), "FLAG=1 /bin/true", t.TempDir(), []string{})
 		if !errors.Is(err, tc.want) {
 			t.Fatalf("execution city %s: %v; want %v", tc.city, err, tc.want)
+		}
+	}
+}
+
+func TestConfiguredCommandRequiresExplicitScope(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	city := t.TempDir()
+	PublishScope(city, nil)
+	for _, dir := range []string{city, t.TempDir()} {
+		cmd := &exec.Cmd{Path: "/bin/sh", Args: []string{"sh", "-c", "true"}}
+		cmd.Dir = dir
+		cmd.Env = []string{"GC_CITY_PATH=" + city, "GC_CITY=" + city}
+		GuardConfiguredExecCommand(t.Context(), cmd)
+		if cmd.Err == nil || !strings.Contains(cmd.Err.Error(), "no explicit city scope") {
+			t.Fatalf("guard inferred scope from child environment or directory: %v", cmd.Err)
 		}
 	}
 }
@@ -285,7 +302,7 @@ func TestShellFallbackDoesNotClaimUnrelatedExecution(t *testing.T) {
 				PublishScope(t.TempDir(), []string{cached})
 			}
 			dir := t.TempDir()
-			if err := ValidateCachedShellCommand(t.Context(), "FLAG=1 /bin/true", dir, []string{}); err != nil {
+			if err := ValidateCachedShellCommand(WithoutCity(t.Context(), "standalone local command"), "FLAG=1 /bin/true", dir, []string{}); err != nil {
 				t.Fatalf("unrelated city blocked local execution: %v", err)
 			}
 			if err := ValidateCachedShellCommand(t.Context(), filepath.Join(cached, "run.sh"), dir, []string{}); !errors.Is(err, dirty) {
@@ -319,7 +336,7 @@ func TestShellStateChangesCannotHideCachedExecution(t *testing.T) {
 			if tc.cachedInitial {
 				script = filepath.Join(cached, "run.sh")
 			}
-			err := ValidateCachedShellCommand(context.Background(), tc.command, city, []string{
+			err := ValidateCachedShellCommand(WithCity(context.Background(), city), tc.command, city, []string{
 				"PATH=/usr/bin:/bin", "SCRIPT=" + script, "CACHED=" + filepath.Join(cached, "run.sh"),
 			})
 			if !errors.Is(err, dirty) {

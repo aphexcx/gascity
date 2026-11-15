@@ -389,8 +389,7 @@ type remoteCacheValidationEntry struct{ fingerprint string }
 // mtime is stable across git status (the flags we pass, including
 // -c core.untrackedCache=false, prevent any index refresh writes).
 // A nested manual worktree edit touching neither root nor the index escapes
-// detection until the process restarts — acceptable for a pinned,
-// gc-managed cache.
+// detection until the next reload event or process restart.
 func remoteCacheFingerprint(cacheDir string) string {
 	var b strings.Builder
 	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git", "index")} {
@@ -413,7 +412,9 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 	fp := remoteCacheFingerprint(cacheDir)
 	if v, ok := remoteCacheValidationCache.Load(key); ok && !quickCacheValidation(mode) {
 		if v.(remoteCacheValidationEntry).fingerprint == fp {
-			return nil
+			// A memoized FULL verdict still has to match the lock's HEAD.
+			// Read ordinary Git metadata directly, without a worktree scan.
+			mode = []CacheValidationMode{CacheValidationQuick}
 		}
 	}
 	readLock := WithRepoCacheReadLock
@@ -428,6 +429,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		if errors.Is(err, ErrRepoCacheBusy) {
 			return err
 		}
+		remoteCacheValidationCache.Delete(key)
 		// A locked bundled source pinned at its canonical commit is served from
 		// the running binary's embedded content. A freshly installed/upgraded
 		// binary resolves a new content-hash cache dir (RepoCacheKey folds the
@@ -516,7 +518,7 @@ func validateInstalledRemoteCacheWithGit(source, cacheDir, commit string, runGit
 		// Synthetic cache is invalid but a real git checkout exists at this
 		// path, so validate it with the ordinary remote-cache contract below.
 	}
-	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) && (!quickCacheValidation(mode) || gitStatErr != nil || !gitInfo.Mode().IsRegular()) {
+	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
 		return fmt.Errorf("remote import %s is locked but not cached at %s; %s", source, cacheDir, notCachedRemediation(source, "sha:"+commit))
 	}
 	if gitStatErr != nil {

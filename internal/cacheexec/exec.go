@@ -122,14 +122,20 @@ func GuardConfiguredExecCommand(ctx context.Context, cmd *exec.Cmd) {
 }
 
 // GuardConfiguredExecCommandForCity binds executable configuration to its city
-// even when the caller runs elsewhere. An empty city uses the command's scope.
+// even when the caller runs elsewhere. An empty city requires a context binding.
 // The validation scope does not change the child's environment or directory.
 func GuardConfiguredExecCommandForCity(ctx context.Context, cmd *exec.Cmd, city string) {
 	ctx = WithCity(ctx, city)
 	if cmd.Err == nil {
-		cmd.Err = validateActiveRemoteCaches(ctx, cmd.Dir, cmd.Environ())
+		cmd.Err = validateActiveRemoteCaches(ctx)
 	}
 	GuardCachedExecCommand(ctx, cmd)
+}
+
+// GuardConfiguredExecCommandWithoutCity identifies a standalone caller that has
+// no loaded city. Cached executable paths still receive their ownership checks.
+func GuardConfiguredExecCommandWithoutCity(ctx context.Context, cmd *exec.Cmd, reason string) {
+	GuardConfiguredExecCommand(WithoutCity(ctx, reason), cmd)
 }
 
 // GuardCachedExecCommand prevents cmd from starting when its cached code fails

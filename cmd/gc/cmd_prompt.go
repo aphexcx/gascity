@@ -661,7 +661,7 @@ func defaultPromptSynthRunner(ctx context.Context, provider *config.ResolvedProv
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
-	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(ctx, "", "standalone prompt synthesis runner without loaded city configuration"), cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

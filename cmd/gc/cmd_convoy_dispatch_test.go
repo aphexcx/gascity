@@ -2632,7 +2632,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		{{ID: "gc-ctrl-2", Metadata: map[string]string{"gc.kind": "workflow-finalize"}}},
 	}
 
-	workflowServeList = func(workQuery, dir string, env map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, workQuery, dir string, env map[string]string) ([]hookBead, error) {
 		gotQueries = append(gotQueries, workQuery)
 		gotDirs = append(gotDirs, dir)
 		gotEnv = append(gotEnv, maps.Clone(env))
@@ -2706,7 +2706,7 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -2789,7 +2789,7 @@ func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
 	calls := 0
 	var controlled []string
 	retryableErr := errors.New("source store temporarily unavailable")
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls == 1 {
 			return []hookBead{
@@ -3510,7 +3510,7 @@ func TestRunWorkflowServeRoutesTraceOpenWarningsToCommandStderr(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, nil
 	}
 
@@ -3554,7 +3554,7 @@ func TestRunWorkflowServeWarnsOnLegacyTracePath(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, nil
 	}
 
@@ -3603,7 +3603,7 @@ func TestRunWorkflowServeWarnsWhenLegacyTraceFileStillExists(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, nil
 	}
 
@@ -3661,7 +3661,7 @@ func TestRunWorkflowServeWarnsWhenLegacyRigTraceFileStillExists(t *testing.T) {
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, nil
 	}
 
@@ -3713,7 +3713,7 @@ func TestRunWorkflowServeWarnsWhenLegacyEnvRigTraceFileStillExistsOutsideConfigu
 		workflowServeIdlePollAttempts = prevAttempts
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, nil
 	}
 
@@ -4037,7 +4037,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 		{{ID: checkOneID, Metadata: map[string]string{"gc.kind": "check"}}},
 		{{ID: checkTwoID, Metadata: map[string]string{"gc.kind": "check"}}},
 	}
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		if len(sequence) == 0 {
 			return nil, nil
 		}
@@ -4169,7 +4169,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 		{{ID: checkOneID, Metadata: map[string]string{"gc.kind": "check"}}},
 		{{ID: checkTwoID, Metadata: map[string]string{"gc.kind": "check"}}},
 	}
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		if len(sequence) == 0 {
 			return nil, nil
 		}
@@ -4928,7 +4928,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 	})
 
 	var capturedEnv map[string]string
-	workflowServeList = func(_, _ string, env map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, env map[string]string) ([]hookBead, error) {
 		capturedEnv = maps.Clone(env)
 		return nil, nil // no work: exits immediately
 	}
@@ -5002,7 +5002,7 @@ name = "myrig"
 
 	calls := 0
 	var queryDir string
-	workflowServeList = func(_, dir string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, dir string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		queryDir = dir
 		if calls == 1 {
@@ -5275,7 +5275,7 @@ name = "rigrepo"
 
 	var gotQuery string
 	var gotDir string
-	workflowServeList = func(workQuery, dir string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, workQuery, dir string, _ map[string]string) ([]hookBead, error) {
 		gotQuery = workQuery
 		gotDir = dir
 		return nil, nil
@@ -5324,7 +5324,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -5380,7 +5380,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -5531,7 +5531,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlBeadAndProcessesLaterRead
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -5585,7 +5585,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlOnly(t *testing.T) {
 
 	var controlled []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls > 1 {
 			return nil, nil
@@ -5649,7 +5649,7 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 	}
 
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls > 1 {
 			return nil, nil
@@ -5711,7 +5711,7 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 	})
 
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls == 1 {
 			return []hookBead{{ID: "gc-retry-control", Metadata: map[string]string{"gc.kind": "retry"}}}, nil
@@ -5759,7 +5759,7 @@ func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
 	var attempted []string
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls == 1 {
 			return []hookBead{
@@ -6254,7 +6254,7 @@ func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 
 	var attempted []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		return []hookBead{
 			{ID: "gc-legacy", Metadata: map[string]string{"gc.kind": "ralph"}},
@@ -6302,7 +6302,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 		controlDispatcherServe = prevControl
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
 	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
@@ -6359,7 +6359,7 @@ dir = "backend"
 		controlDispatcherServe = prevControl
 	})
 
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, errors.New("signal: killed")
 	}
 	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
@@ -6419,7 +6419,7 @@ name = "frontend"
 	t.Cleanup(func() { workflowServeList = prevList })
 
 	var gotQuery string
-	workflowServeList = func(workQuery, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, workQuery, _ string, _ map[string]string) ([]hookBead, error) {
 		gotQuery = workQuery
 		return nil, os.ErrDeadlineExceeded
 	}
@@ -6458,7 +6458,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 
 	var processed []string
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -6538,7 +6538,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1, 2, 4, 5, 7:
@@ -6623,7 +6623,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 	}
 
 	listCalls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		listCalls++
 		switch listCalls {
 		case 1:
@@ -6692,7 +6692,7 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	transientErr := fmt.Errorf("querying control work: running work query %q: timed out after 30s: %w", "bd ready", context.DeadlineExceeded)
 	fatalErr := errors.New("malformed work query: jq: command not found")
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		if calls == 1 {
 			return nil, transientErr
@@ -6732,7 +6732,7 @@ func TestRunWorkflowServeFollowSurvivesDoltCircuitBreakerOutage(t *testing.T) {
 	breakerOpenErr := fmt.Errorf(`querying control work: running work query %q: exit status 1: Error: failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)`, "bd ready")
 	fatalErr := errors.New("malformed work query: jq: command not found")
 	calls := 0
-	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+	workflowServeList = func(_ string, _, _ string, _ map[string]string) ([]hookBead, error) {
 		calls++
 		switch calls {
 		case 1:

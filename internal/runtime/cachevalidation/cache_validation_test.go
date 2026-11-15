@@ -39,7 +39,7 @@ func TestLaunchValidatesCachedStagingSourcesButCopyStaysQuick(t *testing.T) {
 			if scans != 0 {
 				t.Fatalf("copy-only materialization scanned %d imports", scans)
 			}
-			if err := ValidateLaunch(t.Context(), cfg); !errors.Is(err, dirty) {
+			if err := ValidateLaunchWithoutCity(t.Context(), cfg); !errors.Is(err, dirty) {
 				t.Fatalf("staged execution bypassed source validation: %v", err)
 			}
 		})

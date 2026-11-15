@@ -102,7 +102,7 @@ func (p *Provider) runStrictWithContext(parent context.Context, dur time.Duratio
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, p.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(ctx, p.cityPath, "standalone exec runtime provider without loaded city configuration"), cmd)
 	// Run the adapter in its own process group with interrupt-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
@@ -203,7 +203,7 @@ func isStartCollision(errMsg string) bool {
 // runWithTTY executes the script with the terminal inherited (for Attach).
 func (p *Provider) runWithTTY(args ...string) error {
 	cmd := exec.Command(p.script, args...)
-	cacheexec.GuardConfiguredExecCommandForCity(context.Background(), cmd, p.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(context.Background(), p.cityPath, "standalone exec runtime provider without loaded city configuration"), cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -220,7 +220,7 @@ func (p *Provider) runWithTTY(args ...string) error {
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cityPath); err != nil {
 		return err
 	}
 	// Was this name already occupied before we touched it? Asked structurally,
@@ -300,7 +300,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cityPath); err != nil {
 		return err
 	}
 	if !p.supportsSeparableLaunch() {
@@ -325,7 +325,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cityPath); err != nil {
 		return err
 	}
 	if !p.supportsSeparableLaunch() {
@@ -357,7 +357,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, p.startTimeout)
 	defer cancel()
-	if err := cachevalidation.ValidateLaunch(cacheexec.WithCity(ctx, p.cityPath), cfg); err != nil {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cityPath); err != nil {
 		return err
 	}
 	if p.supportsSeparableLaunch() {
@@ -417,7 +417,7 @@ func (p *Provider) startStartupWatch(
 ) (<-chan string, func() error, bool, error) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(watchCtx, p.script, "watch-startup", name)
-	cacheexec.GuardConfiguredExecCommandForCity(watchCtx, cmd, p.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(watchCtx, p.cityPath, "standalone exec runtime provider without loaded city configuration"), cmd)
 	// Startup watchers are short-lived probes; tear them down quickly once the
 	// dialog helper is finished so Start cannot stall behind a sleeping wrapper.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -919,12 +919,12 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	command := shellQuote(argv)
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	if err := cacheexec.ValidateConfiguredShellCommand(cacheexec.WithCity(cmdCtx, p.cityPath), command, "", nil); err != nil {
+	if err := cacheexec.ValidateConfiguredShellCommand(cacheexec.WithCityOrWithoutCity(cmdCtx, p.cityPath, "standalone exec runtime provider without loaded city configuration"), command, "", nil); err != nil {
 		return nil, -1, err
 	}
 
 	cmd := exec.CommandContext(cmdCtx, p.script, "exec", name)
-	cacheexec.GuardConfiguredExecCommandForCity(cmdCtx, cmd, p.cityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(cmdCtx, p.cityPath, "standalone exec runtime provider without loaded city configuration"), cmd)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

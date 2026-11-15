@@ -146,11 +146,6 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
 	registerRemoteCacheRoots()
-	if opts.RemoteCacheValidation != CacheValidationQuick {
-		// A new lifecycle load must inspect edits made since its previous load,
-		// including nested files that do not change the cache root or index.
-		InvalidateRemoteCacheValidations()
-	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)

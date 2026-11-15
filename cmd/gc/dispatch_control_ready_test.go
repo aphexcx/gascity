@@ -521,7 +521,7 @@ printf '[{"id":"ga-plain"}]'
 	}
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	got, err := nextWorkflowServeBeads("bd ready --json --limit=20", t.TempDir(), nil)
+	got, err := nextWorkflowServeBeads("", "bd ready --json --limit=20", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("nextWorkflowServeBeads: %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/cacheexec"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 var runRepoCacheGitContext = defaultRunRepoCacheGitContext
@@ -29,9 +30,10 @@ func validateRemoteCacheExecution(ctx context.Context, source, root, dir, commit
 		return err
 	}
 	key := dir + "\x00" + commit
+	mode := CacheValidationFull
 	if v, ok := remoteCacheValidationCache.Load(key); ok {
 		if v.(remoteCacheValidationEntry).fingerprint == remoteCacheFingerprint(dir) {
-			return nil
+			mode = CacheValidationQuick
 		}
 	}
 	return WithRepoCacheReadLockContext(ctx, root, func() error {
@@ -40,13 +42,16 @@ func validateRemoteCacheExecution(ctx context.Context, source, root, dir, commit
 		runGit := func(dir string, args ...string) (string, error) {
 			return runRepoCacheGitContext(ctx, dir, args...)
 		}
-		if err := validateInstalledRemoteCacheWithGit(source, dir, commit, runGit, CacheValidationFull); err != nil {
+		if err := validateInstalledRemoteCacheWithGit(source, dir, commit, runGit, mode); err != nil {
+			remoteCacheValidationCache.Delete(key)
 			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(dir)})
+		if mode == CacheValidationFull {
+			remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(dir)})
+		}
 		return nil
 	})
 }
@@ -90,6 +95,32 @@ func RegisterHistoricalRemoteCache(dir string) {
 		}
 		return validateRemoteCacheExecution(ctx, source, root, dir, commit)
 	})
+}
+
+// RegisterHistoricalRemoteCacheForPath retains the owner of a persisted,
+// previously authorized executable after its import leaves the current lock.
+// Only canonical cache entries qualify; execution still checks the source,
+// commit address, and worktree through RegisterHistoricalRemoteCache.
+func RegisterHistoricalRemoteCacheForPath(path string) {
+	if !filepath.IsAbs(path) {
+		return
+	}
+	path = pathutil.NormalizePathForCompare(path)
+	for _, candidate := range repoCacheRootCandidates() {
+		root := pathutil.NormalizePathForCompare(candidate)
+		rel, err := filepath.Rel(root, path)
+		if err != nil || pathutil.IsOutsideDir(rel) {
+			continue
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) < 2 || len(parts[0]) != 64 || !validCacheObjectID(parts[0]) {
+			continue
+		}
+		entry := filepath.Join(root, parts[0])
+		if pathutil.PathWithin(entry, path) {
+			RegisterHistoricalRemoteCache(entry)
+		}
+	}
 }
 
 func publishRemoteCacheScope(city string, resolvedPaths []string) {

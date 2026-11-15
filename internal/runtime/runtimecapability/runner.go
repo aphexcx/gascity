@@ -96,7 +96,7 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, opts.OpTimeout)
 	check := exec.CommandContext(checkCtx, path, "protocol")
 	check.Env = r.opEnv()
-	cacheexec.GuardConfiguredExecCommandForCity(checkCtx, check, opts.CityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(checkCtx, opts.CityPath, "standalone runtime capability check without loaded city configuration"), check)
 	cancel()
 	if check.Err != nil {
 		return Report{}, check.Err
@@ -271,7 +271,7 @@ func (r *runner) invoke(ctx context.Context, timeout time.Duration, stdin []byte
 	cmd := exec.CommandContext(opCtx, r.path, args...)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = r.opEnv()
-	cacheexec.GuardConfiguredExecCommandForCity(opCtx, cmd, r.opts.CityPath)
+	cacheexec.GuardConfiguredExecCommand(cacheexec.WithCityOrWithoutCity(opCtx, r.opts.CityPath, "standalone runtime capability check without loaded city configuration"), cmd)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

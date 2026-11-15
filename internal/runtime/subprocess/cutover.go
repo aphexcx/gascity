@@ -34,6 +34,16 @@ func NewSeamBacked() runtime.Provider { return seamBack(NewProvider()) }
 // NewSeamBackedWithDir returns NewProviderWithDir served through the seams.
 func NewSeamBackedWithDir(dir string) runtime.Provider { return seamBack(NewProviderWithDir(dir)) }
 
+// NewSeamBackedForCity binds launch validation independently of session work dirs.
+func NewSeamBackedForCity(dir, city string) runtime.Provider {
+	if dir == "" {
+		dir = defaultProviderDir()
+	}
+	raw := NewProviderWithDir(dir)
+	raw.cacheCity = city
+	return seamBack(raw)
+}
+
 func seamBack(raw *Provider) *seamBackedProvider {
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
