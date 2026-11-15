@@ -1787,6 +1787,35 @@ func TestDoImportListShowsDirectAndTransitive(t *testing.T) {
 	}
 }
 
+func TestDoImportListPreservesLockedDependenciesWithPartialGraph(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	t.Setenv("GC_HOME", filepath.Join(dir, "home"))
+	stubCmdCachedPackGit(t)
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n[imports.a]\nsource = \"https://example.com/a.git\"\n[imports.b]\nsource = \"https://example.com/b.git\"\n")
+	lock := &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{
+		"https://example.com/a.git":       {Commit: "aaaa"},
+		"https://example.com/a-child.git": {Commit: "cccc"},
+		"https://example.com/b.git":       {Commit: "bbbb"},
+		"https://example.com/b-child.git": {Commit: "dddd"},
+	}}
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, lock); err != nil {
+		t.Fatal(err)
+	}
+	stageCmdCachedPack(t, "https://example.com/a.git", "aaaa", "[pack]\nname = \"a\"\nschema = 1\n[imports.child]\nsource = \"https://example.com/a-child.git\"\n")
+	stageCmdCachedPack(t, "https://example.com/a-child.git", "cccc", "[pack]\nname = \"a-child\"\nschema = 1\n")
+	var stdout, stderr bytes.Buffer
+	if code := doImportList(dir, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("import list: %s", stderr.String())
+	}
+	for _, source := range []string{"https://example.com/a-child.git", "https://example.com/b-child.git"} {
+		if !strings.Contains(stdout.String(), "(transitive)\t"+source) {
+			t.Errorf("partial graph dropped locked dependency %s: %s", source, stdout.String())
+		}
+	}
+}
+
 func TestDoImportListShowsPathImportsInFlatOutput(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()

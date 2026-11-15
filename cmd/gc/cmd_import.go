@@ -994,7 +994,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 	}
 
 	transitive := collectTransitiveImports(graph, directSources)
-	if len(transitive) == 0 && allowLockOnlyFallback {
+	if (graphErr != nil || len(transitive) == 0) && allowLockOnlyFallback {
 		for source, pack := range lock.Packs {
 			if !directSources[source] {
 				transitive[source] = pack

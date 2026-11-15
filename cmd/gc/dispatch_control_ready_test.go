@@ -483,7 +483,8 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 
 // TestControlReadyFallbackReadyNoWarningBelowLimit is the negative case: a
 // batch below the limit is a complete result, not a truncation signal, and
-// must not log anything.
+// must not log a fallback warning. The standalone query still reports its
+// explicit cache-validation scope exemption.
 func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	tmp := t.TempDir()
@@ -506,8 +507,11 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
-	if logBuf.Len() != 0 {
-		t.Fatalf("expected no log output below the limit, got: %q", logBuf.String())
+	if strings.Contains(logBuf.String(), "control-ready fallback:") {
+		t.Fatalf("unexpected fallback warning below the limit: %q", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "cache validation without a city:") {
+		t.Fatalf("standalone query did not report its scope exemption: %q", logBuf.String())
 	}
 }
 

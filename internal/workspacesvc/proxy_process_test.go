@@ -792,13 +792,19 @@ func TestProxyProcessTickRetriesPublicationRefreshWithoutLosingCurrentURL(t *tes
 }
 
 func TestProxyProcessCacheValidationUsesStartupContext(t *testing.T) {
-	for _, phase := range []string{"construction", "tick", "canceled-tick"} {
+	for _, phase := range []string{"construction", "tick", "canceled-tick", "construction-inline", "tick-inline"} {
 		t.Run(phase, func(t *testing.T) {
 			cacheexec.Reset()
 			t.Cleanup(cacheexec.Reset)
 			city, cached := t.TempDir(), t.TempDir()
 			rt := &testRuntime{cityPath: city, cityName: "test-city", cfg: &config.City{}}
 			svc := config.Service{Name: "cached-service", Kind: "proxy_process", Process: config.ServiceProcessConfig{Command: []string{filepath.Join(cached, "run")}}}
+			if strings.HasSuffix(phase, "-inline") {
+				svc.SourceDir = t.TempDir()
+				svc.Process.Command = []string{"sh", "-c", "FLAG=1 true"}
+				t.Setenv("GC_CITY", "")
+				t.Setenv("GC_CITY_PATH", "")
+			}
 			root, err := ensureStateRoot(city, svc)
 			if err != nil {
 				t.Fatal(err)
@@ -812,8 +818,9 @@ func TestProxyProcessCacheValidationUsesStartupContext(t *testing.T) {
 				deadline, _ = ctx.Deadline()
 				return probe
 			})
+			cacheexec.PublishScope(city, []string{cached})
 			now := time.Now().UTC()
-			if phase == "construction" {
+			if strings.HasPrefix(phase, "construction") {
 				if _, err := newProxyProcessInstance(t.Context(), rt, svc, Status{}); !errors.Is(err, probe) {
 					t.Fatalf("unexpected construction error: %v", err)
 				}

@@ -154,15 +154,17 @@ func TestRunCredentialCommand_RealExec(t *testing.T) {
 	// The command echoes a token built from GC_EXEC_INFO to prove env delivery,
 	// and asserts GC_GRANT_INFO was stripped.
 	script := `test -z "$GC_GRANT_INFO" && printf '{"token":"t-%s","expiration_timestamp":"` + exp + `"}' "$(echo "$GC_EXEC_INFO" | grep -o mc)"`
-	res, err := runCredentialCommand(context.Background(), script, ExecInfo{Version: Version, Spec: ExecSpec{ServerURL: "https://box:9443", City: "mc"}})
-	if err != nil {
-		t.Fatalf("exec: %v", err)
-	}
-	if res.Token != "t-mc" {
-		t.Errorf("token = %q, want t-mc (GC_EXEC_INFO not delivered or GC_GRANT_INFO not stripped)", res.Token)
-	}
-	if res.ExpirationTimestamp != exp {
-		t.Errorf("expiration = %q", res.ExpirationTimestamp)
+	for _, prefix := range []string{"", "HELPER=1; "} {
+		res, err := runCredentialCommand(context.Background(), prefix+script, ExecInfo{Version: Version, Spec: ExecSpec{ServerURL: "https://box:9443", City: "mc"}})
+		if err != nil {
+			t.Fatalf("exec(%q): %v", prefix, err)
+		}
+		if res.Token != "t-mc" {
+			t.Errorf("token = %q, want t-mc (GC_EXEC_INFO not delivered or GC_GRANT_INFO not stripped)", res.Token)
+		}
+		if res.ExpirationTimestamp != exp {
+			t.Errorf("expiration = %q", res.ExpirationTimestamp)
+		}
 	}
 }
 

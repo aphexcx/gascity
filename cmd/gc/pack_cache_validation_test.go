@@ -549,6 +549,36 @@ func TestPackCacheFullLifecycleLoadsRejectDirtyImport(t *testing.T) {
 	}
 }
 
+func TestPackCacheManualExecOrdersRetainCity(t *testing.T) {
+	for _, trigger := range []string{"manual", "cooldown"} {
+		t.Run(trigger, func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_CITY_PATH", "")
+			orderDir := filepath.Join(f.caches[0], "orders")
+			if err := os.MkdirAll(orderDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := fmt.Sprintf("[order]\ntrigger = %q\nexec = %q\n", trigger, fmt.Sprintf("printf changed > %q", f.marker))
+			if trigger == "cooldown" {
+				body += "interval = \"1m\"\n"
+			}
+			writeFile(t, filepath.Join(orderDir, "probe.toml"), body)
+			writeFile(t, filepath.Join(f.caches[0], ".dirty"), "changed")
+			var stdout, stderr bytes.Buffer
+			if code := cmdOrderRun("probe", "", false, nil, &stdout, &stderr); code == 0 {
+				t.Error("manual exec order accepted a dirty imported definition")
+			}
+			if !strings.Contains(stderr.String(), "has local worktree changes") {
+				t.Errorf("manual exec order lost its city: %s", stderr.String())
+			}
+			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+				t.Errorf("dirty manual exec order ran: %v", err)
+			}
+		})
+	}
+}
+
 func TestPackCacheImportReadCommandsValidateCaches(t *testing.T) {
 	for _, args := range [][]string{{"list"}, {"why", "sample0"}, {"status"}} {
 		t.Run(args[0], func(t *testing.T) {

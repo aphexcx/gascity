@@ -241,7 +241,7 @@ func (p *proxyProcessInstance) start(ctx context.Context, now time.Time) error {
 	)
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
-	cacheexec.GuardCachedExecCommand(ctx, cmd)
+	cacheexec.GuardCachedExecCommand(cacheexec.WithCity(ctx, p.rt.CityPath()), cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = proxyProcessSysProcAttr()
