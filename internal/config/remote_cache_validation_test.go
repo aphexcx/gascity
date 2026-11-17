@@ -36,6 +36,49 @@ func validateFixture(dir, commit string) error {
 	return validateInstalledRemoteCacheLocked(validationTestSource, filepath.Dir(dir), dir, commit, true)
 }
 
+func TestRemoteCacheFullRefusalRevokesReceipt(t *testing.T) {
+	for _, site := range []string{"load", "execution"} {
+		t.Run(site, func(t *testing.T) {
+			dir, _, status := validationFixture(t)
+			writeTestFile(t, dir, "nested/run.sh", "original")
+			if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+				t.Fatal(err)
+			}
+			before := remoteCacheFingerprint(dir)
+			writeTestFile(t, dir, "nested/run.sh", "edited")
+			if remoteCacheFingerprint(dir) != before {
+				t.Fatal("nested edit changed fingerprint")
+			}
+			*status = " M nested/run.sh"
+			old := runRepoCacheGitContext
+			runRepoCacheGitContext = func(_ context.Context, dir string, args ...string) (string, error) {
+				return runRepoCacheGit(dir, args...)
+			}
+			t.Cleanup(func() { runRepoCacheGitContext = old })
+			check := func() error { return validateFixture(dir, lockedPackRefCommit) }
+			if site == "execution" {
+				check = func() error {
+					return validateRemoteCacheExecution(t.Context(), validationTestSource, filepath.Dir(dir), dir, lockedPackRefCommit)
+				}
+			}
+			InvalidateRemoteCacheValidations()
+			if err := check(); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+				t.Fatalf("first FULL check did not refuse: %v", err)
+			}
+			if _, err := os.Stat(remoteCacheValidationPath(dir)); !os.IsNotExist(err) {
+				t.Errorf("FULL refusal left success receipt: %v", err)
+			}
+			ResetRemoteCacheValidationCache()
+			if err := validateFixture(dir, lockedPackRefCommit); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+				t.Errorf("fresh process load accepted refused content: %v", err)
+			}
+			if err := validateRemoteCacheExecution(t.Context(), validationTestSource, filepath.Dir(dir), dir, lockedPackRefCommit); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+				t.Errorf("fresh process execution accepted refused content: %v", err)
+			}
+		})
+	}
+}
+
 func TestRemoteCacheReceiptAnswersFullDemandOnlyUnderItsConditions(t *testing.T) {
 	t.Run("quick_never_writes_full_receipt", func(t *testing.T) {
 		dir, calls, status := validationFixture(t)

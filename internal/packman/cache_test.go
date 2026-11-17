@@ -8,7 +8,66 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
+
+func TestEnsureRepoInCacheRefreshFailurePreservesCleanCheckout(t *testing.T) {
+	for _, bundled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bundled_%t", bundled), func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			source, commit := "https://example.invalid/unreachable.git", "abcdef1234567890abcdef1234567890abcdef12"
+			if bundled {
+				source = builtinpacks.MustSource("core")
+				commit = canonicalBundledCommit(source)
+			}
+			dir, err := RepoCachePath(source, commit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"fixture\"\nschema = 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			lock := filepath.Join(dir, ".git", "index.lock")
+			if err := os.WriteFile(lock, []byte("stale lock"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			old, oldNetwork := runGit, runNetworkGit
+			runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				return "", fmt.Errorf("source unreachable")
+			}
+			runGit = func(_ string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				switch args[0] {
+				case "rev-parse":
+					return commit, nil
+				case "status":
+					return "", nil
+				case "update-index":
+					return "", fmt.Errorf("index.lock already exists")
+				default:
+					return "", fmt.Errorf("source unreachable")
+				}
+			}
+			t.Cleanup(func() { runGit, runNetworkGit = old, oldNetwork })
+			_, err = EnsureRepoInCache("", source, commit)
+			if err == nil || !strings.Contains(err.Error(), "refreshing cached repo index") {
+				t.Errorf("refresh failure must be reported independently: %v", err)
+			}
+			if data, err := os.ReadFile(lock); err != nil || string(data) != "stale lock" {
+				t.Errorf("clean checkout was replaced or deleted: lock=%q err=%v", data, err)
+			}
+			if want := []string{"rev-parse HEAD", "status --porcelain", "update-index --refresh"}; !reflect.DeepEqual(calls, want) {
+				t.Errorf("refresh failure entered recovery: calls=%q", calls)
+			}
+		})
+	}
+}
 
 func TestRepoCacheKeyDeterministic(t *testing.T) {
 	a := RepoCacheKey("https://github.com/example/repo", "abc123")
