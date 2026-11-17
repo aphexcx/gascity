@@ -239,7 +239,8 @@ func TestPackCacheRuntimePathBoundary(t *testing.T) {
 		{"symlink_modified", "symlink", true, true},
 		{"dot_dot_inside_clean", "dot_dot_inside", true, false},
 		{"dot_dot_inside_modified", "dot_dot_inside", true, true},
-		{"dot_dot_out", "dot_dot_out", false, false},
+		// Ruling C: a visited cache root counts even if the path then leaves it.
+		{"dot_dot_out", "dot_dot_out", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])

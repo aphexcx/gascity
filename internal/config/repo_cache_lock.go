@@ -109,6 +109,9 @@ func withRepoCacheReadLockForPath(path string, nonBlocking bool, fn func() error
 }
 
 // IsRepoCachePath reports whether path visits a known repository cache root.
+// Relative paths are prefixed with the working directory without cleaning;
+// the walk applies .. to physical directories as the kernel does. A path that
+// passes through a root and leaves it again counts as cached.
 // It compares directory file identity at every step of symlink resolution;
 // lexical containment also counts, so spelling alone cannot rule a path out.
 // An empty path denotes the working directory, like other relative paths.
@@ -116,7 +119,12 @@ func withRepoCacheReadLockForPath(path string, nonBlocking bool, fn func() error
 // is included. Other unfinished resolutions count as cached, so callers load
 // configuration conservatively.
 func IsRepoCachePath(path string) bool {
-	abs, err := filepath.Abs(path)
+	abs := path
+	var err error
+	if !filepath.IsAbs(path) {
+		abs, err = os.Getwd()
+		abs += string(os.PathSeparator) + path
+	}
 	if err != nil {
 		return true
 	}
