@@ -293,6 +293,167 @@ func TestPackCacheRuntimePathBoundary(t *testing.T) {
 	}
 }
 
+func packCacheRuntimeSpelling(t *testing.T, f packCacheFixture, spelling string) string {
+	t.Helper()
+	script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+	link := func(target string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	switch spelling {
+	case "case_home", "case_cache", "case_repos":
+		component := map[string]string{"case_home": "gchome", "case_cache": "cache", "case_repos": "repos"}[spelling]
+		variant := map[string]string{"case_home": "GCHOME", "case_cache": "Cache", "case_repos": "Repos"}[spelling]
+		changed := strings.Replace(script, string(os.PathSeparator)+component+string(os.PathSeparator), string(os.PathSeparator)+variant+string(os.PathSeparator), 1)
+		original, err := os.Stat(script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := os.Stat(changed)
+		if os.IsNotExist(err) || (err == nil && !os.SameFile(original, other)) {
+			t.Skip("filesystem does not fold this component's letter case")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log("case-folding probe: same file")
+		return changed
+	case "outer_file_link":
+		outside := filepath.Join(t.TempDir(), "run.sh")
+		writePackCacheLocalScript(t, outside, f.marker)
+		if err := os.Remove(script); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, script); err != nil {
+			t.Fatal(err)
+		}
+		return link(script)
+	case "outer_directory_link", "cached_directory_link":
+		outside := t.TempDir()
+		writePackCacheLocalScript(t, filepath.Join(outside, "run.sh"), f.marker)
+		if err := os.RemoveAll(filepath.Dir(script)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Dir(script)); err != nil {
+			t.Fatal(err)
+		}
+		if spelling == "outer_directory_link" {
+			return link(script)
+		}
+		return script
+	case "linked_home", "linked_home_outer":
+		t.Setenv("GC_HOME", link(os.Getenv("GC_HOME")))
+		canonical, err := filepath.EvalSymlinks(script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spelling == "linked_home_outer" {
+			return link(canonical)
+		}
+		return canonical
+	case "outer_link":
+		return link(script)
+	default:
+		t.Fatalf("unknown cache spelling %q", spelling)
+		return ""
+	}
+}
+
+func TestPackCacheRuntimeModifiedPathIdentity(t *testing.T) {
+	for _, spelling := range []string{"case_home", "case_cache", "case_repos", "outer_file_link", "outer_directory_link", "linked_home", "outer_link", "cached_directory_link"} {
+		for _, command := range []string{"check", "conformance", "conformance --env"} {
+			for _, city := range []string{"env", "flags"} {
+				t.Run(strings.Join([]string{spelling, command, city}, "/"), func(t *testing.T) {
+					f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])
+					script := packCacheRuntimeSpelling(t, f, spelling)
+					if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var args []string
+					if city == "flags" {
+						t.Setenv("GC_CITY", "")
+						t.Setenv("GC_RIG", "")
+						args = []string{"--city", f.city, "--rig", "fixture"}
+					}
+					args = append(args, "runtime")
+					args = append(args, strings.Fields(command)...)
+					args = append(args, script)
+					var stdout, stderr bytes.Buffer
+					code := run(args, &stdout, &stderr)
+					output := stdout.String() + stderr.String()
+					if code == 0 {
+						t.Errorf("modified executable accepted: %s", output)
+					}
+					if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+						t.Errorf("modified executable ran: marker stat=%v; %s", err, output)
+					}
+					if !strings.Contains(output, "local worktree changes") && !strings.Contains(output, "cached executable") && !strings.Contains(output, "historical cache") {
+						t.Errorf("missing cache refusal: %s", output)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPackCacheRuntimeCleanPathIdentity(t *testing.T) {
+	for _, spelling := range []string{"linked_home", "linked_home_outer", "shadowed_name"} {
+		for _, pin := range []struct{ name, commit string }{
+			{"abbreviated_8", packCacheTestCommit[:8]},
+			{"uppercase_full", strings.ToUpper(packCacheTestCommit)},
+			{"mixed_case_full", strings.ReplaceAll(packCacheTestCommit, "abcdef", "aBcDeF")},
+		} {
+			if spelling == "shadowed_name" && pin.name == "mixed_case_full" {
+				continue
+			}
+			for _, command := range []string{"check", "conformance", "conformance --env"} {
+				for _, city := range []string{"env", "flags"} {
+					t.Run(strings.Join([]string{spelling, pin.name, command, city}, "/"), func(t *testing.T) {
+						f := newPinnedPackCacheExecutionFixture(t, pin.commit)
+						var script, localMarker string
+						if spelling == "shadowed_name" {
+							cwd := t.TempDir()
+							localMarker = filepath.Join(cwd, "local-executed")
+							writePackCacheLocalScript(t, filepath.Join(cwd, "run.sh"), localMarker)
+							t.Chdir(cwd)
+							t.Setenv("PATH", filepath.Join(f.caches[0], "commands", "report")+string(os.PathListSeparator)+os.Getenv("PATH"))
+							script = "run.sh"
+						} else {
+							script = packCacheRuntimeSpelling(t, f, spelling)
+						}
+						var args []string
+						if city == "flags" {
+							t.Setenv("GC_CITY", "")
+							t.Setenv("GC_RIG", "")
+							args = []string{"--city", f.city, "--rig", "fixture"}
+						}
+						args = append(args, "runtime")
+						args = append(args, strings.Fields(command)...)
+						args = append(args, script)
+						var stdout, stderr bytes.Buffer
+						_ = run(args, &stdout, &stderr)
+						if _, err := os.Stat(f.marker); err != nil {
+							t.Errorf("clean pinned executable did not run: %v; %s%s", err, &stdout, &stderr)
+						}
+						if !strings.Contains(f.gitCalls(t), "status --porcelain") {
+							t.Error("clean executable ran without full validation")
+						}
+						if localMarker != "" {
+							if _, err := os.Stat(localMarker); !os.IsNotExist(err) {
+								t.Errorf("working-directory shadow ran: %v", err)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestPackCacheRuntimePinInvocation(t *testing.T) {
 	for _, state := range []string{"clean", "modified"} {
 		for _, pin := range []struct{ name, commit string }{
