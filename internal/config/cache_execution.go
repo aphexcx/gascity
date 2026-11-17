@@ -46,7 +46,7 @@ func validateRemoteCacheExecution(ctx context.Context, source, root, dir, commit
 		}
 		if err := validateInstalledRemoteCacheWithGit(source, dir, commit, runGit, mode); err != nil {
 			remoteCacheValidationCache.Delete(key)
-			return err
+			return revokeRefusedRemoteCache(dir, err, mode)
 		}
 		if err := ctx.Err(); err != nil {
 			return err

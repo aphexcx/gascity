@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,66 @@ func validationFixture(t *testing.T) (string, *int, *string) {
 
 func validateFixture(dir, commit string) error {
 	return validateInstalledRemoteCacheLocked(validationTestSource, filepath.Dir(dir), dir, commit, true)
+}
+
+func TestRemoteCacheRefusalRevocationRequiresFullVerdict(t *testing.T) {
+	for _, site := range []string{"load", "execution"} {
+		for _, failure := range []string{"wrong_head", "git_unavailable", "status_unreadable", "quick_wrong_head"} {
+			if site == "execution" && failure == "quick_wrong_head" {
+				continue // A matching HEAD is required to select QUICK execution.
+			}
+			t.Run(site+"/"+failure, func(t *testing.T) {
+				dir, _, _ := validationFixture(t)
+				if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(remoteCacheValidationPath(dir))
+				if err != nil {
+					t.Fatal(err)
+				}
+				InvalidateRemoteCacheValidations()
+				wrong := strings.Repeat("f", 40)
+				runRepoCacheGit = func(_ string, args ...string) (string, error) {
+					if failure == "git_unavailable" || failure == "status_unreadable" && args[0] == "status" {
+						return "", errors.New("unreadable validation input")
+					}
+					if args[0] == "rev-parse" {
+						if failure == "wrong_head" {
+							return wrong, nil
+						}
+						return lockedPackRefCommit, nil
+					}
+					return "", nil
+				}
+				old := runRepoCacheGitContext
+				runRepoCacheGitContext = func(_ context.Context, dir string, args ...string) (string, error) {
+					return runRepoCacheGit(dir, args...)
+				}
+				t.Cleanup(func() { runRepoCacheGitContext = old })
+				mode := CacheValidationFull
+				if failure == "quick_wrong_head" {
+					mode = CacheValidationQuick
+					writeTestFile(t, dir, ".git/HEAD", wrong)
+				}
+				if site == "execution" {
+					err = validateRemoteCacheExecution(t.Context(), validationTestSource, filepath.Dir(dir), dir, lockedPackRefCommit)
+				} else {
+					err = validateInstalledRemoteCacheLocked(validationTestSource, filepath.Dir(dir), dir, lockedPackRefCommit, true, mode)
+				}
+				if err == nil {
+					t.Fatal("validation unexpectedly passed")
+				}
+				after, readErr := os.ReadFile(remoteCacheValidationPath(dir))
+				if failure == "wrong_head" {
+					if !os.IsNotExist(readErr) {
+						t.Fatalf("FULL wrong-commit verdict did not revoke receipt: %v", readErr)
+					}
+				} else if readErr != nil || string(before) != string(after) {
+					t.Fatalf("non-FULL verdict changed receipt: err=%v", readErr)
+				}
+			})
+		}
+	}
 }
 
 func TestRemoteCacheFullRefusalRevokesReceipt(t *testing.T) {

@@ -433,7 +433,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		checkedAt := time.Now()
 		if err := validateInstalledRemoteCache(source, cacheDir, commit, mode...); err != nil {
 			remoteCacheValidationCache.Delete(key)
-			return err
+			return revokeRefusedRemoteCache(cacheDir, err, mode...)
 		}
 		if !quickCacheValidation(mode) {
 			rememberRemoteCacheValidation(key, cacheDir, commit, before, checkedAt)
@@ -566,7 +566,7 @@ func validateLockedRemoteCacheWithGit(source, cacheDir, commit string, runGit fu
 		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
 	}
 	if !gitutil.SameCommit(head, commit) {
-		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
+		return remoteCacheRefusal{fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)}
 	}
 	if quickCacheValidation(mode) {
 		return nil
@@ -581,9 +581,23 @@ func validateLockedRemoteCacheWithGit(source, cacheDir, commit string, runGit fu
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
+		return remoteCacheRefusal{fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)}
 	}
 	return nil
+}
+
+type remoteCacheRefusal struct{ error }
+
+// The caller holds the read lock. Only a definitive FULL refusal revokes a
+// shared success; QUICK and operational failures are not shared verdicts.
+func revokeRefusedRemoteCache(cacheDir string, err error, mode ...CacheValidationMode) error {
+	var refusal remoteCacheRefusal
+	if !quickCacheValidation(mode) && errors.As(err, &refusal) {
+		if removeErr := os.Remove(remoteCacheValidationPath(cacheDir)); removeErr != nil && !os.IsNotExist(removeErr) {
+			return errors.Join(err, fmt.Errorf("invalidating refused remote cache validation: %w", removeErr))
+		}
+	}
+	return err
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
