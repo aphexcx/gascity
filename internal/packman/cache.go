@@ -22,6 +22,7 @@ var (
 	runGit                   = defaultRunGit
 	runNetworkGit            = defaultRunNetworkGit
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
+	errCacheIndexRefresh     = errors.New("refreshing cached repo index")
 )
 
 // networkGitTimeout bounds every network git invocation.
@@ -149,6 +150,8 @@ func ensureBundledRepoInCacheLocked(source, commit, cachePath string) (string, e
 			} else {
 				return cachePath, nil
 			}
+		} else if errors.Is(err, errCacheIndexRefresh) {
+			return "", err
 		} else {
 			recoveryCause = err
 			if removeErr := os.RemoveAll(cachePath); removeErr != nil {
@@ -177,6 +180,8 @@ func ensureRepoInCacheLocked(cityRoot, source, commit string, parsed remoteSourc
 			} else {
 				return cachePath, nil
 			}
+		} else if errors.Is(err, errCacheIndexRefresh) {
+			return "", err
 		} else if err := os.RemoveAll(cachePath); err != nil {
 			return "", fmt.Errorf("removing stale repo cache %q: %w", cachePath, err)
 		}
@@ -265,7 +270,7 @@ func checkoutExistingCache(cachePath, commit string) error {
 // index.lock or prevent a later reader from reusing the refreshed index.
 func refreshCachedRepoIndex(cachePath string) error {
 	if _, err := runGit(cachePath, "update-index", "--refresh"); err != nil {
-		return fmt.Errorf("refreshing cached repo index: %w", err)
+		return fmt.Errorf("%w: %w", errCacheIndexRefresh, err)
 	}
 	return nil
 }
