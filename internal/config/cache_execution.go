@@ -15,12 +15,14 @@ import (
 
 var runRepoCacheGitContext = defaultRunRepoCacheGitContext
 
-func registerRemoteCacheRoots() {
+// RegisterRemoteCacheRoots guards cached executables even without a config load.
+// Registration performs no cache validation, Git invocation, or locking.
+func RegisterRemoteCacheRoots() {
 	cacheexec.RegisterRoots(repoCacheRootCandidates())
 }
 
 func rememberRemoteCache(source, root, dir, commit string) {
-	registerRemoteCacheRoots()
+	RegisterRemoteCacheRoots()
 	cacheexec.Register(dir, func(ctx context.Context) error {
 		return validateRemoteCacheExecution(ctx, source, root, dir, commit)
 	})

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func newPackCacheExecutionFixture(t *testing.T) packCacheFixture {
+	t.Helper()
+	f := newPackCacheFixture(t, 1)
+	t.Setenv("GC_RIG", "fixture")
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Historical ownership reads the origin in addition to the validation calls.
+	wrapper := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *'config --get remote.origin.url') printf 'https://example.com/cache0.git\\n'; exit 0 ;;\nesac\nexec %q \"$@\"\n", git)
+	if err := os.WriteFile(filepath.Join(f.city, "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", f.city+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return f
+}
+
 func TestPackCacheBuiltinsRefuseUnresolvedCachedExecutables(t *testing.T) {
 	for _, name := range []string{
 		"runtime_check", "runtime_conformance", "runtime_conformance_env", "registry_credentials", "remote_grant", "agent_script",
@@ -22,8 +40,7 @@ func TestPackCacheBuiltinsRefuseUnresolvedCachedExecutables(t *testing.T) {
 		"remote:mail inbox fixture", "remote:mail send fixture -m test", "remote:sling fixture fixture-1",
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newPackCacheFixture(t, 1)
-			t.Setenv("GC_RIG", "fixture")
+			f := newPackCacheExecutionFixture(t)
 			script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
 			if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -71,8 +88,31 @@ func TestPackCacheBuiltinsRefuseUnresolvedCachedExecutables(t *testing.T) {
 			if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
 				t.Errorf("unchecked cached executable ran: marker stat=%v; %s%s", err, &stdout, &stderr)
 			}
-			if output := stdout.String() + stderr.String(); !strings.Contains(output, "cached executable") && !strings.Contains(output, "local worktree changes") {
+			// The credential protocol intentionally sanitizes subprocess errors;
+			// absence of the execution marker proves refusal for that boundary.
+			if output := stdout.String() + stderr.String(); name != "registry_credentials" && !strings.Contains(output, "cached executable") && !strings.Contains(output, "local worktree changes") {
 				t.Errorf("missing cache refusal: %s", output)
+			}
+		})
+	}
+}
+
+func TestPackCacheRuntimePathRetainsCleanExecution(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("relative_%t", relative), func(t *testing.T) {
+			f := newPackCacheExecutionFixture(t)
+			script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+			if relative {
+				t.Chdir(f.caches[0])
+				script = "./commands/report/run.sh"
+			}
+			var stdout, stderr bytes.Buffer
+			_ = run([]string{"runtime", "check", script}, &stdout, &stderr)
+			if _, err := os.Stat(f.marker); err != nil {
+				t.Fatalf("clean cached executable did not run: %v; %s%s", err, &stdout, &stderr)
+			}
+			if !strings.Contains(f.gitCalls(t), "status --porcelain") {
+				t.Fatal("clean executable ran without a full validation")
 			}
 		})
 	}

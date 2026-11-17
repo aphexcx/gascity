@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -109,6 +111,13 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 // declared, the argument passes through unchanged (the checker
 // PATH-resolves bare names like the exec provider does).
 func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, promptDelivery string) {
+	defer func() {
+		if path, err := exec.LookPath(target); err == nil {
+			if absolute, err := filepath.Abs(path); err == nil {
+				config.RegisterHistoricalRemoteCacheForPath(absolute)
+			}
+		}
+	}()
 	if strings.Contains(arg, "/") {
 		return arg, "", ""
 	}
