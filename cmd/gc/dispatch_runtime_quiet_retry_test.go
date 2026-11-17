@@ -59,7 +59,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 				controlDispatcherServe = prevControl
 			})
 
-			workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+			workflowServeList = func(_, _, _ string, _ map[string]string) ([]hookBead, error) {
 				return []hookBead{{ID: "pl-mmneh", Metadata: hookBeadMetadata{"gc.kind": "workflow-finalize"}}}, nil
 			}
 			serveCalls := 0

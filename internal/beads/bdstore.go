@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -154,6 +155,7 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 			}
 		}
 		cmd.Env = execEnvFor(name, baseEnv, overrides)
+		cacheexec.GuardCachedExecCommand(ctx, cmd)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -722,6 +724,7 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	cacheexec.GuardCachedExecCommand(ctx, cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

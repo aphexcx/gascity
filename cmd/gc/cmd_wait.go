@@ -1553,6 +1553,6 @@ func waitLifecycleEnabled() error {
 	// Validate config loads successfully. The bead reconciler is always
 	// enabled now (legacy reconciler removed), so this just confirms
 	// the city is usable.
-	_, _, err = config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	_, _, err = config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	return err
 }

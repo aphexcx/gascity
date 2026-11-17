@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1040,7 +1041,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		}()
 	}
 
-	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
+	output, err := shellExecRunner(cacheexec.WithCity(ctx, cityPath), a.Exec, target.ScopeRoot, env)
 	// The exec env now projects the controller's GH_TOKEN/GITHUB_TOKEN into the
 	// child, so any order that echoes one would leak it. Redact the exec error
 	// and combined output against the projected env on both the failure and

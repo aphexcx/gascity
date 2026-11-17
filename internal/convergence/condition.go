@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/gchome"
@@ -79,6 +80,9 @@ type ConditionEnv struct {
 	AgentVerdict         string // normalized verdict, may be empty
 	AgentProvider        string // may be empty
 	AgentModel           string // may be empty
+	// ScriptSource retains the authored path before symlink resolution for
+	// cache validation. It is not exported to the child environment.
+	ScriptSource string
 }
 
 // conditionBeadsCredentialsFile resolves the beads credentials file gate
@@ -389,6 +393,10 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 		cmd.Dir = env.WorkDir
 	}
 	cmd.Env = env.Environ()
+	if env.ScriptSource != "" {
+		cmd.Err = cacheexec.ValidateCachedExecutable(execCtx, env.ScriptSource)
+	}
+	cacheexec.GuardCachedExecCommand(execCtx, cmd)
 	// WaitDelay ensures cmd.Wait returns promptly after the context
 	// cancels and SIGKILL is sent, even if child I/O pipes are still open.
 	cmd.WaitDelay = time.Second

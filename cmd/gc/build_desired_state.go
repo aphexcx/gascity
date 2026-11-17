@@ -287,6 +287,7 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 }
 
 func evaluatePendingPools(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
@@ -320,9 +321,9 @@ func evaluatePendingPools(
 			var d int
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, scaleCheckRunnerForCity(cityPath))
 			} else {
-				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePool(agentName, sp, dir, probeEnv, scaleCheckRunnerForCity(cityPath))
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
@@ -366,12 +367,13 @@ func evaluatePendingPools(
 // count is additive new demand; legacy no-store callers still use desired
 // counts.
 func evaluatePendingPoolsMap(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (map[string]int, map[string]bool) {
-	counts, partials := evaluatePendingPools(cfg, pendingPools, stderr, trace)
+	counts, partials := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
 	m := make(map[string]int, len(counts))
 	var partialTemplates map[string]bool
 	for j, pw := range pendingPools {
@@ -913,7 +915,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			"beads": len(unassignedRoutedBeads),
 		})
 		subPhaseStart = time.Now()
-		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
@@ -1020,7 +1022,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		}
 	} else {
 		// No store — use scale_check counts directly.
-		scaleCheckCounts, _ = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		scaleCheckCounts, _ = evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		for _, pw := range pendingPools {
 			cfgAgent := &cfg.Agents[pw.agentIdx]

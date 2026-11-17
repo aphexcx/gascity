@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -197,6 +198,10 @@ type SlingRunner = sling.SlingRunner
 // that directory (needed for rig-scoped beads whose .beads/ lives there).
 // Extra env vars are appended to the process environment.
 func shellSlingRunner(dir, command string, env map[string]string) (string, error) {
+	return shellSlingRunnerForCity("", dir, command, env)
+}
+
+func shellSlingRunnerForCity(city, dir, command string, env map[string]string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -204,6 +209,11 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	if city == "" {
+		cacheexec.GuardConfiguredExecCommandWithoutCity(ctx, cmd, "standalone sling runner without loaded city configuration")
+	} else {
+		cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, city)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("running %q: %w", command, err)
@@ -511,7 +521,9 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 		ScopeKind:     scopeKind,
 		ScopeRef:      scopeRef,
 	}
-	runner := SlingRunner(shellSlingRunner)
+	runner := SlingRunner(func(dir, command string, env map[string]string) (string, error) {
+		return shellSlingRunnerForCity(cityPath, dir, command, env)
+	})
 	if len(storeEnv) > 0 {
 		pinnedEnv := maps.Clone(storeEnv)
 		runner = func(dir, command string, env map[string]string) (string, error) {
@@ -519,7 +531,7 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 			for k, v := range env {
 				merged[k] = v
 			}
-			return shellSlingRunner(dir, command, merged)
+			return shellSlingRunnerForCity(cityPath, dir, command, merged)
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
@@ -578,7 +590,7 @@ func cmdSlingWithImplicitPolicy(args []string, isFormula, doNudge, force bool, t
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, skipRevisionSnapshot, extraConfigFiles...)
 }
 
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {

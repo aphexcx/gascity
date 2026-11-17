@@ -145,7 +145,7 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1031,7 +1031,7 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 // used by routed callers that already resolved the city before dispatching
 // to the fallback path.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -1197,7 +1197,7 @@ func openConvoyStoreByIDForMutation(convoyID string, stderr io.Writer, cmdName s
 // answer from the readable stores and warn; mutations (convoyMutationStrict)
 // refuse.
 func openConvoyStoreByIDAt(convoyID, cityPath string, visibility convoyStoreVisibility, stderr io.Writer, cmdName string) (beads.Store, int) {
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
@@ -2286,7 +2286,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	storeRoot := convoyAutocloseStoreRoot(cwd)
 	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 	rec := openCityRecorderAt(cityPath, stderr)
-	cfg, _, configErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, configErr := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if configErr != nil {
 		// An unknown identity may still close an unlabeled standalone convoy.
 		if !errors.Is(configErr, os.ErrNotExist) {
@@ -2377,7 +2377,7 @@ func resolveAutocloseOwner(beadID string, cfg *config.City, cityPath, storeRoot 
 // molecule autoclose derive the matching store-ref label. Skipped candidates
 // and a veto are reported on stderr rather than swallowed.
 func autocloseOwningStore(beadID, cityPath, storeRoot string, stderr io.Writer) (beads.Store, string, autocloseOutcome) {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		return nil, "", autocloseFallback
 	}

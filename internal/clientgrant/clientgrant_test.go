@@ -153,12 +153,14 @@ func TestRunGrantCommand_RealExec(t *testing.T) {
 	// carries the city) and asserts the sibling GC_EXEC_INFO was stripped.
 	script := `test -z "$GC_EXEC_INFO" && echo "$GC_GRANT_INFO" | grep -q '"city":"mc"' && printf '%s\n' '` + valid + `'`
 	// runGrantCommand returns raw stdout (Mint owns the trim), so compare trimmed.
-	tok, err := runGrantCommand(context.Background(), script, GrantInfo{Version: Version, City: "mc"})
-	if err != nil {
-		t.Fatalf("exec: %v", err)
-	}
-	if strings.TrimSpace(tok) != valid {
-		t.Errorf("token = %q, want %q (GC_GRANT_INFO not delivered or GC_EXEC_INFO not stripped)", tok, valid)
+	for _, prefix := range []string{"", "HELPER=1; "} {
+		tok, err := runGrantCommand(context.Background(), prefix+script, GrantInfo{Version: Version, City: "mc"})
+		if err != nil {
+			t.Fatalf("exec(%q): %v", prefix, err)
+		}
+		if strings.TrimSpace(tok) != valid {
+			t.Errorf("token = %q, want %q (GC_GRANT_INFO not delivered or GC_EXEC_INFO not stripped)", tok, valid)
+		}
 	}
 }
 

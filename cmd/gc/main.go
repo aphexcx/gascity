@@ -1744,7 +1744,7 @@ func openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath strin
 			copyExecProjectedBackendEnv(env, projected)
 		}
 	}
-	store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
+	store := beadsexec.NewStoreForCity(strings.TrimPrefix(provider, "exec:"), runtimeCityPath)
 	store.SetEnv(env)
 	return store, nil
 }

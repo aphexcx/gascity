@@ -71,7 +71,7 @@ func nudgeMailSweepMailTTLForConfig(cfg *config.City, stderr io.Writer) time.Dur
 // than failing: this runs as a 5-minute order, and failing it closed would stop
 // the sweep entirely for a condition the loader only warns about.
 func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stderr io.Writer) time.Duration {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		if stderr != nil && !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; using default %s\n", err, fallback) //nolint:errcheck // best-effort stderr

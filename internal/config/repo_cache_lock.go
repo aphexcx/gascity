@@ -1,10 +1,12 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const repoCacheLockName = ".packman-cache.lock"
@@ -39,6 +41,32 @@ func WithRepoCacheReadLock(root string, fn func() error) error {
 // WithRepoCacheReadLock and wait.
 func TryWithRepoCacheReadLock(root string, fn func() error) error {
 	return withRepoCacheLock(root, repoCacheLockOptions{mode: repoCacheLockShared, nonBlocking: true}, fn)
+}
+
+// WithRepoCacheReadLockContext waits for a shared cache lock within the caller's
+// deadline. The callback must also honor ctx while it holds the lock.
+func WithRepoCacheReadLockContext(ctx context.Context, root string, fn func() error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := TryWithRepoCacheReadLock(root, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fn()
+		})
+		if !errors.Is(err, ErrRepoCacheBusy) {
+			return err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // WithRepoCacheWriteLock runs fn while holding the exclusive repo-cache lock,

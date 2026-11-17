@@ -1606,7 +1606,7 @@ func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
 // proceed against the pre-overlay state. Pre-fix behavior is the failure
 // mode, so degrading to it is acceptable.
 func materializeCityRootPackOverlays(fs fsys.FS, cityPath string, stderr io.Writer) {
-	cfg, _, err := config.LoadWithIncludes(fs, filepath.Join(cityPath, citylayout.CityConfigFile))
+	cfg, _, err := config.LoadWithIncludesOptions(fs, filepath.Join(cityPath, citylayout.CityConfigFile), skipRevisionSnapshot)
 	if err != nil || cfg == nil {
 		return
 	}
@@ -1740,7 +1740,7 @@ func sourceTemplateLegacyScriptOriginsFS(srcFS fsys.FS, srcDir string) []string 
 
 	add(legacyLocalScriptOriginsFS(srcFS, srcDir))
 
-	cfg, _, err := config.LoadWithIncludes(srcFS, filepath.Join(srcDir, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(srcFS, filepath.Join(srcDir, "city.toml"), skipRevisionSnapshot)
 	if err == nil {
 		add(legacyScriptSourceDirsFS(srcFS, cfg.PackDirs))
 	}
@@ -1940,7 +1940,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 
 	// Resolve formulas and scripts from pack layers.
-	expandedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, copiedToml)
+	expandedCfg, _, loadErr := config.LoadWithIncludesOptions(fsys.OSFS{}, copiedToml, skipRevisionSnapshot)
 	if loadErr == nil && len(expandedCfg.FormulaLayers.City) > 0 {
 		if rfErr := ResolveFormulas(cityPath, expandedCfg.FormulaLayers.City); rfErr != nil {
 			fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr

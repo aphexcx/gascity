@@ -431,7 +431,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	idlePolls := 0
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
-		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		queue, err := workflowServeList(cityPath, serveQuery, storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -923,14 +923,14 @@ func controlDispatcherBareRoute(target string) string {
 	return config.ControlDispatcherAgentName
 }
 
-func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
+func nextWorkflowServeBeads(cityPath, workQuery, dir string, env map[string]string) ([]hookBead, error) {
 	if workQuery == "" {
 		return nil, nil
 	}
 	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
 		return queue, err
 	}
-	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
+	output, err := shellWorkQueryForCity(cityPath, workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
 		return nil, err
 	}

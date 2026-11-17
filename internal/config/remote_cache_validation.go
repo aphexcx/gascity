@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -16,6 +17,8 @@ const (
 	remoteCacheValidationFile = "gc-validation-v1.json"
 	remoteCacheValidationTTL  = time.Minute
 )
+
+var remoteCacheReloadAt atomic.Int64
 
 type remoteCacheValidationRecord struct {
 	Version     int       `json:"version"`
@@ -45,6 +48,9 @@ func remoteCacheValidationFresh(checkedAt, now time.Time) bool {
 // validation. Synthetic bundled caches have no .git directory and keep their
 // existing in-process memo.
 func loadRemoteCacheValidation(cacheDir, commit, fingerprint string, now time.Time) (remoteCacheValidationEntry, bool) {
+	if head, ok := readCacheHEAD(cacheDir); !ok || !gitutil.SameCommit(head, commit) {
+		return remoteCacheValidationEntry{}, false
+	}
 	signature := remoteCacheValidationFileFingerprint(cacheDir)
 	if signature == "" {
 		return remoteCacheValidationEntry{}, false
@@ -55,6 +61,7 @@ func loadRemoteCacheValidation(cacheDir, commit, fingerprint string, now time.Ti
 	}
 	var record remoteCacheValidationRecord
 	if json.Unmarshal(data, &record) != nil || record.Version != 1 || record.Commit != commit ||
+		record.CheckedAt.UnixNano() <= remoteCacheReloadAt.Load() ||
 		record.Fingerprint != fingerprint || !remoteCacheValidationFresh(record.CheckedAt, now) ||
 		signature != remoteCacheValidationFileFingerprint(cacheDir) || remoteCacheFingerprint(cacheDir) != fingerprint {
 		return remoteCacheValidationEntry{}, false

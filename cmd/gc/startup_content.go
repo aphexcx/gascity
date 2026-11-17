@@ -262,7 +262,7 @@ func finishStartupContent(prepared *preparedStart, metadata sessionpkg.MetadataP
 	if content.Skipped {
 		// A fresh PreStart process rejected what a warm validator may have
 		// accepted. Forget that success once, when consuming the skip receipt.
-		config.ResetRemoteCacheValidationCache()
+		config.InvalidateRemoteCacheValidations()
 	}
 	if len(content.Sources) > 0 || content.Skipped {
 		if content.Baseline.Core == "" {
@@ -286,7 +286,7 @@ func recoverStartupContent(info sessionpkg.Info, store *sessionpkg.Store, stderr
 		return info, err
 	}
 	if content.Skipped {
-		config.ResetRemoteCacheValidationCache()
+		config.InvalidateRemoteCacheValidations()
 	}
 	updated, err := store.CommitStartupContent(info, content)
 	if err != nil {
