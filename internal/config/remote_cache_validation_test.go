@@ -173,6 +173,27 @@ func TestRemoteCacheReceiptAnswersFullDemandOnlyUnderItsConditions(t *testing.T)
 	})
 }
 
+func TestRemoteCacheValidationMissingHEADNeverReusesSuccess(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		name := map[bool]string{false: "memory", true: "receipt"}[reset]
+		t.Run(name, func(t *testing.T) {
+			dir, calls, _ := validationFixture(t)
+			if err := os.Remove(filepath.Join(dir, ".git", "HEAD")); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+				t.Fatal(err)
+			}
+			if reset {
+				ResetRemoteCacheValidationCache()
+			}
+			if err := validateFixture(dir, lockedPackRefCommit); err != nil || *calls != 4 {
+				t.Fatalf("missing HEAD must force a full check: calls=%d err=%v", *calls, err)
+			}
+		})
+	}
+}
+
 func TestRemoteCacheValidationFreshness(t *testing.T) {
 	now := time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

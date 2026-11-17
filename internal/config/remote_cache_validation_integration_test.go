@@ -17,6 +17,7 @@ import (
 
 func TestRemoteCacheValidationAcrossProcesses(t *testing.T) {
 	city, dir := setupLockedPackRefTest(t, validationTestSource)
+	writeTestFile(t, dir, ".git/HEAD", lockedPackRefCommit)
 	writeTestFile(t, city, "city.toml", fmt.Sprintf("[workspace]\nname = \"fixture\"\n[imports.fixture]\nsource = %q\n", validationTestSource))
 	writeTestFile(t, dir, "pack.toml", "[pack]\nname = \"fixture\"\nschema = 2\n")
 	for i, want := range []string{"calls=2", "calls=0"} {
