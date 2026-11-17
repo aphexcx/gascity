@@ -136,11 +136,138 @@ func newPinnedPackCacheExecutionFixture(t *testing.T, pin string) packCacheFixtu
 	if err := os.WriteFile(lockPath, []byte(strings.ReplaceAll(string(lock), packCacheTestCommit, pin)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Register the lock's owner through QUICK loading before runtime resolution.
-	if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
-		t.Fatal(err)
-	}
 	return f
+}
+
+func TestPackCacheRuntimePinInvocation(t *testing.T) {
+	for _, state := range []string{"clean", "modified"} {
+		for _, pin := range []struct{ name, commit string }{
+			{"full_lowercase", packCacheTestCommit},
+			{"abbreviated_7", packCacheTestCommit[:7]},
+			{"abbreviated_8", packCacheTestCommit[:8]},
+			{"abbreviated_12", packCacheTestCommit[:12]},
+			{"uppercase_full", strings.ToUpper(packCacheTestCommit)},
+			{"mixed_case_full", strings.ReplaceAll(packCacheTestCommit, "abcdef", "aBcDeF")},
+		} {
+			for _, command := range []struct {
+				name string
+				args []string
+			}{
+				{"check", []string{"runtime", "check"}},
+				{"conformance", []string{"runtime", "conformance"}},
+				{"conformance_env", []string{"runtime", "conformance", "--env"}},
+			} {
+				for _, target := range []string{"name", "path"} {
+					for _, city := range []string{"env", "flags", "none"} {
+						if target == "name" && city == "none" {
+							continue // Runtime names need a city configuration.
+						}
+						t.Run(strings.Join([]string{state, pin.name, command.name, target, city}, "/"), func(t *testing.T) {
+							f := newPinnedPackCacheExecutionFixture(t, pin.commit)
+							packPath := filepath.Join(f.caches[0], "pack.toml")
+							pack, err := os.ReadFile(packPath)
+							if err != nil {
+								t.Fatal(err)
+							}
+							pack = append(pack, []byte("\n[runtimes.sample]\ncommand = \"commands/report/run.sh\"\n")...)
+							if err := os.WriteFile(packPath, pack, 0o644); err != nil {
+								t.Fatal(err)
+							}
+							if state == "modified" {
+								if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+									t.Fatal(err)
+								}
+							}
+							var args []string
+							if city != "env" {
+								t.Setenv("GC_CITY", "")
+								t.Setenv("GC_RIG", "")
+								if city == "flags" {
+									args = []string{"--city", f.city, "--rig", "fixture"}
+								} else {
+									t.Chdir(t.TempDir())
+								}
+							}
+							args = append(args, command.args...)
+							executable := "sample"
+							if target == "path" {
+								executable = filepath.Join(f.caches[0], "commands", "report", "run.sh")
+							}
+							args = append(args, executable)
+							var stdout, stderr bytes.Buffer
+							code := run(args, &stdout, &stderr)
+							output := stdout.String() + stderr.String()
+							_, markerErr := os.Stat(f.marker)
+							citylessNoncanonical := city == "none" && pin.commit != packCacheTestCommit
+							if state == "modified" || citylessNoncanonical {
+								if code == 0 {
+									t.Errorf("unchecked cached executable accepted: %s", output)
+								}
+								if !os.IsNotExist(markerErr) {
+									t.Errorf("refused executable ran: marker stat=%v; %s", markerErr, output)
+								}
+								if !strings.Contains(output, "cached executable") && !strings.Contains(output, "local worktree changes") && !strings.Contains(output, "historical cache") {
+									t.Errorf("missing cache refusal: %s", output)
+								}
+								if state == "clean" && citylessNoncanonical && !strings.Contains(output, "does not match its source and commit address") {
+									t.Errorf("cityless refusal changed: %s", output)
+								}
+								return
+							}
+							// This fixture proves execution, not a complete RPP handshake.
+							if markerErr != nil {
+								t.Fatalf("clean pinned executable did not run: %v; %s", markerErr, output)
+							}
+							if !strings.Contains(f.gitCalls(t), "status --porcelain") {
+								t.Fatal("clean pinned executable ran without a full validation")
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestPackCacheRuntimeExistingFilenameLoadsLock(t *testing.T) {
+	f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])
+	dir := filepath.Join(f.caches[0], "commands", "report")
+	t.Chdir(dir)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr bytes.Buffer
+	_ = run([]string{"runtime", "check", "run.sh"}, &stdout, &stderr)
+	if _, err := os.Stat(f.marker); err != nil {
+		t.Fatalf("clean pinned executable did not run: %v; %s%s", err, &stdout, &stderr)
+	}
+	if !strings.Contains(f.gitCalls(t), "status --porcelain") {
+		t.Fatal("clean pinned executable ran without a full validation")
+	}
+}
+
+func TestPackCacheRuntimePathInvalidCityPreservesHistoricalRecovery(t *testing.T) {
+	for _, pin := range []string{packCacheTestCommit, packCacheTestCommit[:8]} {
+		t.Run(pin, func(t *testing.T) {
+			f := newPinnedPackCacheExecutionFixture(t, pin)
+			if err := os.WriteFile(filepath.Join(f.city, "city.toml"), []byte("[invalid"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+			code := run([]string{"runtime", "check", script}, &stdout, &stderr)
+			output := stdout.String() + stderr.String()
+			if strings.Contains(output, "city config not loaded") || strings.Contains(output, "warning") {
+				t.Errorf("path target gained a config warning: %s", output)
+			}
+			_, err := os.Stat(f.marker)
+			if pin == packCacheTestCommit {
+				if err != nil || !strings.Contains(f.gitCalls(t), "status --porcelain") {
+					t.Errorf("clean canonical cache lost validated execution: marker stat=%v; %s", err, output)
+				}
+			} else if code == 0 || !os.IsNotExist(err) || !strings.Contains(output, "does not match its source and commit address") {
+				t.Errorf("non-canonical cache lost historical refusal: code=%d marker stat=%v; %s", code, err, output)
+			}
+		})
+	}
 }
 
 func TestPackCacheRuntimePathRetainsPinnedExecution(t *testing.T) {
