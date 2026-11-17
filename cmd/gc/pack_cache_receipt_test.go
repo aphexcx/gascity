@@ -118,6 +118,75 @@ func TestPackCacheRuntimePathRetainsCleanExecution(t *testing.T) {
 	}
 }
 
+func newPinnedPackCacheExecutionFixture(t *testing.T, pin string) packCacheFixture {
+	t.Helper()
+	f := newPackCacheExecutionFixture(t)
+	cache := filepath.Join(filepath.Dir(f.caches[0]), config.RepoCacheKey("https://example.com/cache0.git", pin))
+	if cache != f.caches[0] {
+		if err := os.Rename(f.caches[0], cache); err != nil {
+			t.Fatal(err)
+		}
+		f.caches[0] = cache
+	}
+	lockPath := filepath.Join(f.city, "packs.lock")
+	lock, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte(strings.ReplaceAll(string(lock), packCacheTestCommit, pin)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestPackCacheRuntimePathRetainsPinnedExecution(t *testing.T) {
+	for _, pin := range []struct{ name, commit string }{
+		{"full_lowercase", packCacheTestCommit},
+		{"abbreviated", packCacheTestCommit[:8]},
+		{"uppercase", strings.ToUpper(packCacheTestCommit)},
+	} {
+		for _, command := range []struct {
+			name string
+			args []string
+		}{
+			{"check", []string{"runtime", "check"}},
+			{"conformance", []string{"runtime", "conformance"}},
+			{"conformance_env", []string{"runtime", "conformance", "--env"}},
+		} {
+			t.Run(pin.name+"/"+command.name, func(t *testing.T) {
+				f := newPinnedPackCacheExecutionFixture(t, pin.commit)
+				script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+				var stdout, stderr bytes.Buffer
+				_ = run(append(command.args, script), &stdout, &stderr)
+				if _, err := os.Stat(f.marker); err != nil {
+					t.Fatalf("clean pinned executable did not run: %v; %s%s", err, &stdout, &stderr)
+				}
+				if !strings.Contains(f.gitCalls(t), "status --porcelain") {
+					t.Fatal("clean pinned executable ran without a full validation")
+				}
+			})
+		}
+	}
+}
+
+func TestPackCacheRuntimePathRefusesModifiedAbbreviatedPin(t *testing.T) {
+	f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])
+	if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"runtime", "check", script}, &stdout, &stderr); code == 0 {
+		t.Errorf("modified abbreviated-pin executable accepted: %s%s", &stdout, &stderr)
+	}
+	if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+		t.Errorf("modified abbreviated-pin executable ran: marker stat=%v; %s%s", err, &stdout, &stderr)
+	}
+	if output := stdout.String() + stderr.String(); !strings.Contains(output, "historical cache") && !strings.Contains(output, "local worktree changes") {
+		t.Errorf("missing cache refusal: %s", output)
+	}
+}
+
 func TestPackCacheInspectionDoesNotReuseSuccess(t *testing.T) {
 	for _, args := range [][]string{{"import", "list"}, {"import", "why", "sample0"}, {"import", "status"}, {"doctor", "--check", "expanded-config-load"}} {
 		for _, freshProcess := range []bool{false, true} {
