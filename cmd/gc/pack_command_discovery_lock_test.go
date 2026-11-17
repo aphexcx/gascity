@@ -153,6 +153,28 @@ func TestRegisterPackCommandsDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	}
 }
 
+func TestBuiltinRootConstructionDoesNotReadImports(t *testing.T) {
+	for _, args := range [][]string{
+		{"version"},
+		{"--help"},
+		{"cities"},
+		{"context", "list"},
+		{"shell", "status"},
+		{"gen-doc"},
+		{"login", "--help"},
+		{"session", "list"},
+		{"session", "--help"},
+	} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			_, root := setupDiscoveryLockCity(t)
+			newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptionsForArgs(args))
+			if _, err := os.Stat(filepath.Join(root, ".packman-cache.lock")); !os.IsNotExist(err) {
+				t.Fatalf("constructing builtin %q touched the import cache: %v", args, err)
+			}
+		})
+	}
+}
+
 // Completion runs on a <TAB> keystroke, so a blocking load there stalls the
 // user's shell rather than a command they submitted.
 func TestCompletionCandidatesDoNotWaitOnHeldRepoCacheLock(t *testing.T) {

@@ -68,6 +68,17 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 		args []string
 		skip bool
 	}{
+		{name: "version", args: []string{"version"}, skip: true},
+		{name: "scoped version", args: []string{"--city", "/tmp/city", "version", "--json"}, skip: true},
+		{name: "root help", args: []string{"--help"}, skip: true},
+		{name: "root short help", args: []string{"-h"}, skip: true},
+		{name: "root help command", args: []string{"help"}, skip: true},
+		{name: "bare root", args: nil, skip: true},
+		{name: "login", args: []string{"login", "--help"}, skip: true},
+		{name: "whoami", args: []string{"whoami"}, skip: true},
+		{name: "logout", args: []string{"logout"}, skip: true},
+		{name: "pack help still discovers", args: []string{"help", "example-pack"}},
+		{name: "pack flag help still discovers", args: []string{"example-pack", "--help"}},
 		{name: "metrics", args: []string{"metrics"}, skip: true},
 		{name: "scoped metrics", args: []string{"--city", "/tmp/city", "--rig=tower", "metrics", "status"}, skip: true},
 		{name: "remote context metrics", args: []string{"--context=prod", "metrics", "status"}, skip: true},
@@ -191,16 +202,22 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 		wantPack    bool
 	}{
 		{
-			name:        "ordinary injected args discover packs",
+			name:        "injected pack command discovers packs",
 			ambientArgs: []string{"version"},
-			injected:    []string{"version"},
+			injected:    []string{"backstage"},
 			wantPack:    true,
 		},
 		{
-			name:        "ambient metrics cannot suppress ordinary discovery",
+			name:        "ambient metrics cannot suppress pack discovery",
 			ambientArgs: []string{"metrics", "status"},
-			injected:    []string{"version"},
+			injected:    []string{"backstage"},
 			wantPack:    true,
+		},
+		{
+			name:        "injected version suppresses ambient pack discovery",
+			ambientArgs: []string{"backstage"},
+			injected:    []string{"version"},
+			wantPack:    false,
 		},
 		{
 			name:        "injected metrics suppresses ordinary ambient discovery",
@@ -215,9 +232,9 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 			wantPack:    false,
 		},
 		{
-			name:        "ambient credential helper cannot suppress ordinary discovery",
+			name:        "ambient credential helper cannot suppress pack discovery",
 			ambientArgs: []string{"git-credential", "get"},
-			injected:    []string{"version"},
+			injected:    []string{"backstage"},
 			wantPack:    true,
 		},
 		{

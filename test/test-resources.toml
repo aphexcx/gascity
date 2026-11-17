@@ -10,13 +10,13 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 718
-baseline_files = 211
+baseline_calls = 719
+baseline_files = 212
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-cp3hwi owns this point-in-time source census; gf-jzn owns the tagged private tmux client ownership proof"
+resource_owner = "ga-cp3hwi owns this point-in-time source census; gf-jzn owns the tagged private tmux client ownership proof; gf-6fw9 owns the tagged cross-process import-cache validation proof"
 migration_target = "P0.4a"
 expires = "2026-12-31"
 

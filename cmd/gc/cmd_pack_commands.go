@@ -66,8 +66,13 @@ func registerPackCommands(root *cobra.Command, args []string, stdout, stderr io.
 	if isCredentialHelperInvocation(args) {
 		return
 	}
-	// Eager discovery runs on every gc invocation, whatever the user typed, so
-	// it resolves advisorily: it must not wait on another process's repo-cache
+	// Packs cannot shadow built-ins. Their handlers resolve configuration when
+	// needed; constructing the command tree must not load imports for them.
+	// Help and completion still discover named pack commands.
+	if command, ok := firstRootCommand(args); ok && command != "help" && command != "completion" && coreCommandNames(root)[command] {
+		return
+	}
+	// Discovery resolves advisorily: it must not wait on another process's repo-cache
 	// clone. When it degrades, the command the user actually typed still
 	// resolves through the blocking lazy paths below.
 	cityPath, err := resolveCityForDiscovery()

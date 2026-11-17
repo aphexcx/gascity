@@ -65,6 +65,21 @@ func TestResolvePackRefNonBlockingRefusesBusyCache(t *testing.T) {
 	}
 }
 
+func TestRemoteCacheValidationPersistedSuccessSkipsLock(t *testing.T) {
+	dir, calls, _ := validationFixture(t)
+	if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+		t.Fatal(err)
+	}
+	ResetRemoteCacheValidationCache()
+	lockRepoCacheRoot(t, filepath.Dir(dir), syscall.LOCK_EX)
+	if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+		t.Fatalf("warm validation took the held cache lock: %v", err)
+	}
+	if *calls != 2 {
+		t.Fatalf("warm validation ran git: %d calls, want 2 cold calls only", *calls)
+	}
+}
+
 // The control: blocking stays blocking. Without this, dropping the flag and
 // making every caller non-blocking would pass the test above while breaking
 // installers, prune and bootstrap, which must see the cache's real contents.

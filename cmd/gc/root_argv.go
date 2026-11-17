@@ -13,7 +13,7 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !ok || !rootCommandSkipsPackDiscovery(command)
+	discoverPackCommands := !rootHelpInvocation(args) && (!ok || !rootCommandSkipsPackDiscovery(command))
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,
@@ -27,11 +27,36 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 // resolution when it runs.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
+	case "version", "login", "whoami", "logout":
+		return true
 	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
 		return true
 	default:
 		return false
 	}
+}
+
+// rootHelpInvocation recognizes help for the built-in root, which needs no
+// city. Named pack help still goes through discovery. Consume scope values so
+// a city named "help" or "version" is never mistaken for a command.
+func rootHelpInvocation(args []string) bool {
+	seenHelp := false
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case isRootPersistentValueFlag(arg):
+			if i+1 == len(args) {
+				return false
+			}
+			i++
+		case isRootPersistentValueAssignment(arg), arg == "--help", arg == "-h", arg == "--help=true":
+			continue
+		case arg == "help" && !seenHelp:
+			seenHelp = true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // firstRootCommand returns the first command word under the root's narrow

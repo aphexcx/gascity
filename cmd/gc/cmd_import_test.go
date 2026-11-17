@@ -3525,6 +3525,9 @@ while [ "$#" -gt 0 ]; do
 		-c)
 			shift 2
 			;;
+		--no-optional-locks)
+			shift
+			;;
 		*)
 			break
 			;;

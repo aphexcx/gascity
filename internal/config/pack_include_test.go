@@ -301,11 +301,9 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 		t.Fatalf("second validation re-ran git (%d→%d); want cached (no new git)", first, calls)
 	}
 
-	// A bare .git-dir mtime bump must NOT invalidate the memo: git status
-	// --porcelain creates/removes a lock file under .git/ on every run, so
-	// including .git dir in the fingerprint would defeat the memo. Writing a
-	// file under .git/ bumps the dir mtime but leaves cacheDir root and
-	// .git/index untouched, so validation must stay cached.
+	// Unrelated .git files must not invalidate the memo. The validation
+	// receipt itself is atomically replaced there, and a lock left by an
+	// older Git invocation must not force another check on every command.
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index.lock"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -322,9 +320,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	// Touching the checkout invalidates the fingerprint → revalidate.
 	// Simulate a gc import install / git checkout by updating .git/index (a
 	// checkout rewrites the index to reflect the new tree). The .git directory
-	// itself is excluded from the fingerprint because git status --porcelain
-	// creates/removes a lock file inside .git/, updating .git dir mtime on every
-	// run and defeating the memo; .git/index mtime is stable across status runs.
+	// is excluded; validation's --no-optional-locks also keeps the index stable.
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
 		t.Fatal(err)
 	}

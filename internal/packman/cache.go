@@ -114,6 +114,9 @@ func EnsureRepoInCache(cityRoot, source, commit string) (string, error) {
 		return "", fmt.Errorf("creating repo cache root: %w", err)
 	}
 	return config.WithRepoCacheWriteLock(root, func() (string, error) {
+		if err := config.InvalidateRemoteCacheValidation(cachePath); err != nil {
+			return "", err
+		}
 		if config.IsBundledSourceAtCanonicalPin(source, commit) {
 			return ensureBundledRepoInCacheLocked(source, commit, cachePath)
 		}
@@ -195,6 +198,9 @@ func ensureRepoInCacheLocked(cityRoot, source, commit string, parsed remoteSourc
 	if _, err := runGit(cachePath, "checkout", "--quiet", commit); err != nil {
 		return "", fmt.Errorf("checking out %q: %w", commit, err)
 	}
+	if err := refreshCachedRepoIndex(cachePath); err != nil {
+		return "", err
+	}
 	if err := validateCachedPackRoot(source, cachePath); err != nil {
 		if removeErr := os.RemoveAll(cachePath); removeErr != nil {
 			return "", fmt.Errorf("removing invalid repo cache %q after %w: %w", cachePath, err, removeErr)
@@ -235,9 +241,12 @@ func checkoutExistingCache(cachePath, commit string) error {
 			return err
 		}
 		if !dirty {
-			return nil
+			return refreshCachedRepoIndex(cachePath)
 		}
-		return resetCachedRepo(cachePath, commit)
+		if err := resetCachedRepo(cachePath, commit); err != nil {
+			return err
+		}
+		return refreshCachedRepoIndex(cachePath)
 	}
 	if _, err := runGit(cachePath, "checkout", "--quiet", commit); err != nil {
 		if headErr != nil {
@@ -245,7 +254,20 @@ func checkoutExistingCache(cachePath, commit string) error {
 		}
 		return fmt.Errorf("checking out %q in cached repo: %w", commit, err)
 	}
-	return resetCachedRepo(cachePath, commit)
+	if err := resetCachedRepo(cachePath, commit); err != nil {
+		return err
+	}
+	return refreshCachedRepoIndex(cachePath)
+}
+
+// refreshCachedRepoIndex pays the index-refresh cost once, under the install
+// write lock. Validation uses read-only status so killing it cannot strand an
+// index.lock or prevent a later reader from reusing the refreshed index.
+func refreshCachedRepoIndex(cachePath string) error {
+	if _, err := runGit(cachePath, "update-index", "--refresh"); err != nil {
+		return fmt.Errorf("refreshing cached repo index: %w", err)
+	}
+	return nil
 }
 
 func cachedRepoDirty(cachePath string) (bool, error) {
@@ -327,6 +349,9 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	// also flow through here. The remaining DNS-rebinding residual is documented
 	// at the pack SSRF fence (internal/api/pack_source_policy.go).
 	cmdArgs := append(baseHardeningGitArgs(), args...)
+	if len(args) > 0 && args[0] == "status" {
+		cmdArgs = append([]string{"--no-optional-locks"}, cmdArgs...)
+	}
 	cmd := exec.Command(git.Path, cmdArgs...)
 	if dir != "" {
 		cmd.Dir = dir
