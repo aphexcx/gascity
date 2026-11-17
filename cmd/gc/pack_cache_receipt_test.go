@@ -454,6 +454,122 @@ func TestPackCacheRuntimeCleanPathIdentity(t *testing.T) {
 	}
 }
 
+func TestPackCacheRuntimeModifiedPhysicalParent(t *testing.T) {
+	for _, spelling := range []string{"absolute_link", "absolute_link_decoy", "relative_link", "linked_cwd"} {
+		for _, command := range []string{"check", "conformance", "conformance --env"} {
+			for _, city := range []string{"env", "flags"} {
+				t.Run(strings.Join([]string{spelling, command, city}, "/"), func(t *testing.T) {
+					f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])
+					script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+					outside := t.TempDir()
+					link := filepath.Join(outside, "link")
+					if err := os.Symlink(filepath.Dir(script), link); err != nil {
+						t.Fatal(err)
+					}
+					target := link + "/../report/run.sh"
+					decoyMarker := filepath.Join(outside, "decoy-executed")
+					switch spelling {
+					case "absolute_link_decoy":
+						writePackCacheLocalScript(t, filepath.Join(outside, "report", "run.sh"), decoyMarker)
+					case "relative_link":
+						t.Chdir(f.city)
+						rel, err := filepath.Rel(f.city, outside)
+						if err != nil {
+							t.Fatal(err)
+						}
+						target = rel + "/link/../report/run.sh"
+					case "linked_cwd":
+						t.Chdir(link)
+						target = "../report/run.sh"
+					}
+					original, err := os.Stat(script)
+					if err != nil {
+						t.Fatal(err)
+					}
+					other, err := os.Stat(target)
+					if err != nil || !os.SameFile(original, other) {
+						t.Fatalf("target %q does not reach cached script %q: %v", target, script, err)
+					}
+					if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var args []string
+					if city == "flags" {
+						t.Setenv("GC_CITY", "")
+						t.Setenv("GC_RIG", "")
+						args = []string{"--city", f.city, "--rig", "fixture"}
+					}
+					args = append(args, "runtime")
+					args = append(args, strings.Fields(command)...)
+					args = append(args, target)
+					var stdout, stderr bytes.Buffer
+					code := run(args, &stdout, &stderr)
+					output := stdout.String() + stderr.String()
+					if code == 0 {
+						t.Errorf("modified executable accepted: %s", output)
+					}
+					if _, err := os.Stat(f.marker); !os.IsNotExist(err) {
+						t.Errorf("modified executable ran: marker stat=%v; %s", err, output)
+					}
+					if _, err := os.Stat(decoyMarker); !os.IsNotExist(err) {
+						t.Errorf("lexically cleaned decoy ran: marker stat=%v; %s", err, output)
+					}
+					if !strings.Contains(output, "local worktree changes") && !strings.Contains(output, "cached executable") && !strings.Contains(output, "historical cache") {
+						t.Errorf("missing cache refusal: %s", output)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPackCacheRuntimeLocalPhysicalParent(t *testing.T) {
+	for _, spelling := range []string{"local_directory", "local_link"} {
+		for _, command := range []string{"check", "conformance", "conformance --env"} {
+			for _, city := range []string{"env", "flags"} {
+				t.Run(strings.Join([]string{spelling, command, city}, "/"), func(t *testing.T) {
+					f := newPackCacheExecutionFixture(t)
+					outside := t.TempDir()
+					script, marker := filepath.Join(outside, "script.sh"), filepath.Join(outside, "executed")
+					writePackCacheLocalScript(t, script, marker)
+					dir := filepath.Join(outside, "sub")
+					if err := os.Mkdir(dir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if spelling == "local_link" {
+						link := filepath.Join(t.TempDir(), "link")
+						if err := os.Symlink(dir, link); err != nil {
+							t.Fatal(err)
+						}
+						dir = link
+					}
+					target := dir + "/../script.sh"
+					var args []string
+					if city == "flags" {
+						t.Setenv("GC_CITY", "")
+						t.Setenv("GC_RIG", "")
+						args = []string{"--city", f.city, "--rig", "fixture"}
+					}
+					args = append(args, "runtime")
+					args = append(args, strings.Fields(command)...)
+					args = append(args, target)
+					var stdout, stderr bytes.Buffer
+					_ = run(args, &stdout, &stderr)
+					if _, err := os.Stat(marker); err != nil {
+						t.Errorf("local executable did not run: %v; %s%s", err, &stdout, &stderr)
+					}
+					if calls := f.gitCalls(t); calls != "" {
+						t.Errorf("local executable check invoked Git:\n%s", calls)
+					}
+					if _, err := os.Stat(filepath.Join(f.caches[0], ".git", "gc-validation-v1.json")); !os.IsNotExist(err) {
+						t.Errorf("local executable check wrote a cache receipt: stat=%v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestPackCacheRuntimePinInvocation(t *testing.T) {
 	for _, state := range []string{"clean", "modified"} {
 		for _, pin := range []struct{ name, commit string }{
