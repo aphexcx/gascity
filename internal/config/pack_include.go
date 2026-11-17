@@ -409,10 +409,11 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 	// Execution needs the lock identity even when a prior FULL check is cached.
 	rememberRemoteCache(source, cacheRoot, cacheDir, commit)
 	key := cacheDir + "\x00" + commit
+	inspect := len(mode) == 1 && mode[0] == CacheValidationInspect
 	fp := remoteCacheFingerprint(cacheDir)
 	now := time.Now()
 	head, resolved := readCacheHEAD(cacheDir)
-	if v, ok := remoteCacheValidationCache.Load(key); ok {
+	if v, ok := remoteCacheValidationCache.Load(key); ok && !inspect {
 		entry := v.(remoteCacheValidationEntry)
 		if resolved && gitutil.SameCommit(head, commit) && entry.fingerprint == fp &&
 			entry.checkedAt.UnixNano() > remoteCacheReloadAt.Load() && remoteCacheValidationFresh(entry.checkedAt, now) &&
@@ -420,7 +421,7 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 			return nil
 		}
 	}
-	if entry, ok := loadRemoteCacheValidation(cacheDir, commit, fp, now); ok {
+	if entry, ok := loadRemoteCacheValidation(cacheDir, commit, fp, now); ok && !inspect {
 		remoteCacheValidationCache.Store(key, entry)
 		return nil
 	}

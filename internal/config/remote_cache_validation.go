@@ -18,7 +18,10 @@ const (
 	remoteCacheValidationTTL  = time.Minute
 )
 
-var remoteCacheReloadAt atomic.Int64
+var (
+	remoteCacheReloadAt           atomic.Int64
+	readRemoteCacheValidationFile = os.ReadFile
+)
 
 type remoteCacheValidationRecord struct {
 	Version     int       `json:"version"`
@@ -55,7 +58,7 @@ func loadRemoteCacheValidation(cacheDir, commit, fingerprint string, now time.Ti
 	if signature == "" {
 		return remoteCacheValidationEntry{}, false
 	}
-	data, err := os.ReadFile(remoteCacheValidationPath(cacheDir))
+	data, err := readRemoteCacheValidationFile(remoteCacheValidationPath(cacheDir))
 	if err != nil {
 		return remoteCacheValidationEntry{}, false
 	}

@@ -24,7 +24,7 @@ func newPackCacheExecutionFixture(t *testing.T) packCacheFixture {
 		t.Fatal(err)
 	}
 	// Historical ownership reads the origin in addition to the validation calls.
-	wrapper := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *'config --get remote.origin.url') printf 'https://example.com/cache0.git\\n'; exit 0 ;;\nesac\nexec %q \"$@\"\n", git)
+	wrapper := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *'config --get remote.origin.url') printf 'https://example.com/cache0.git\\n'; exit 0 ;;\n  *'status --porcelain') if test -f commands/report/dirty; then printf ' M commands/report/run.sh\\n'; exit 0; fi ;;\nesac\nexec %q \"$@\"\n", git)
 	if err := os.WriteFile(filepath.Join(f.city, "git"), []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +115,40 @@ func TestPackCacheRuntimePathRetainsCleanExecution(t *testing.T) {
 				t.Fatal("clean executable ran without a full validation")
 			}
 		})
+	}
+}
+
+func TestPackCacheInspectionDoesNotReuseSuccess(t *testing.T) {
+	for _, args := range [][]string{{"import", "list"}, {"import", "why", "sample0"}, {"import", "status"}, {"doctor", "--check", "expanded-config-load"}} {
+		for _, freshProcess := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fresh_%t", strings.Join(args, "_"), freshProcess), func(t *testing.T) {
+				f := newPackCacheExecutionFixture(t)
+				t.Setenv("GC_DOLT", "skip")
+				if _, _, err := loadStartCityConfig(f.city); err != nil {
+					t.Fatal(err)
+				}
+				if scans := strings.Count(f.gitCalls(t), "status --porcelain"); scans != 1 {
+					t.Fatalf("initial FULL scans=%d, want 1", scans)
+				}
+				nested := filepath.Join(f.caches[0], "commands", "report")
+				if err := os.WriteFile(filepath.Join(nested, "run.sh"), []byte("#!/bin/sh\nprintf changed\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(nested, "dirty"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if freshProcess {
+					config.ResetRemoteCacheValidationCache()
+				}
+				var stdout, stderr bytes.Buffer
+				if code := run(args, &stdout, &stderr); code == 0 {
+					t.Error("inspection reused success after a nested edit")
+				}
+				if !strings.Contains(stdout.String()+stderr.String(), `has local worktree changes; run "gc import install"`) {
+					t.Errorf("inspection lost the cache diagnostic: %s%s", &stdout, &stderr)
+				}
+			})
+		}
 	}
 }
 

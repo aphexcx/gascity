@@ -20,6 +20,8 @@ const (
 	CacheValidationFull CacheValidationMode = iota
 	// CacheValidationQuick checks the locked commit without scanning the worktree.
 	CacheValidationQuick
+	// CacheValidationInspect requires a fresh FULL check, bypassing reused success.
+	CacheValidationInspect
 )
 
 func quickCacheValidation(modes []CacheValidationMode) bool {
@@ -59,7 +61,7 @@ func ValidatePresentRemoteCaches(root string) error {
 		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
 			continue
 		}
-		if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
+		if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false, CacheValidationInspect); err != nil {
 			return err
 		}
 	}

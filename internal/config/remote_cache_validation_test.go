@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,169 @@ func validationFixture(t *testing.T) (string, *int, *string) {
 
 func validateFixture(dir, commit string) error {
 	return validateInstalledRemoteCacheLocked(validationTestSource, filepath.Dir(dir), dir, commit, true)
+}
+
+func TestRemoteCacheValidationMemoryExpiry(t *testing.T) {
+	dir, _, status := validationFixture(t)
+	if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+		t.Fatal(err)
+	}
+	key := dir + "\x00" + lockedPackRefCommit
+	value, ok := remoteCacheValidationCache.Load(key)
+	if !ok {
+		t.Fatal("FULL check did not memoize success")
+	}
+	entry := value.(remoteCacheValidationEntry)
+	entry.checkedAt = time.Now().Add(-2 * remoteCacheValidationTTL)
+	data, err := json.Marshal(remoteCacheValidationRecord{Version: 1, Commit: lockedPackRefCommit, Fingerprint: entry.fingerprint, CheckedAt: entry.checkedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, ".git/"+remoteCacheValidationFile, string(data))
+	entry.receipt = remoteCacheValidationFileFingerprint(dir)
+	remoteCacheValidationCache.Store(key, entry)
+	*status = " M nested/file"
+	if err := validateFixture(dir, lockedPackRefCommit); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+		t.Fatalf("expired memory entry reused success: %v", err)
+	}
+}
+
+func TestRemoteCacheValidationMemoryReloadDuringCheck(t *testing.T) {
+	dir, _, status := validationFixture(t)
+	baseGit := runRepoCacheGit
+	reloaded := false
+	runRepoCacheGit = func(dir string, args ...string) (string, error) {
+		if !reloaded {
+			InvalidateRemoteCacheValidations()
+			reloaded = true
+		}
+		return baseGit(dir, args...)
+	}
+	if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+		t.Fatal(err)
+	}
+	*status = " M nested/file"
+	if err := validateFixture(dir, lockedPackRefCommit); err == nil || !strings.Contains(err.Error(), "local worktree changes") {
+		t.Fatalf("memory entry from before the reload reused success: %v", err)
+	}
+}
+
+func TestRemoteCacheValidationLoadPublicationTime(t *testing.T) {
+	dir, _, _ := validationFixture(t)
+	var firstGitAt time.Time
+	baseGit := runRepoCacheGit
+	runRepoCacheGit = func(dir string, args ...string) (string, error) {
+		if firstGitAt.IsZero() {
+			firstGitAt = time.Now().Round(0)
+			for !time.Now().After(firstGitAt) {
+				runtime.Gosched()
+			}
+		}
+		return baseGit(dir, args...)
+	}
+	if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(remoteCacheValidationPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record remoteCacheValidationRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if firstGitAt.IsZero() || record.CheckedAt.After(firstGitAt) {
+		t.Fatalf("load receipt time=%s, first Git call=%s", record.CheckedAt, firstGitAt)
+	}
+}
+
+func TestRemoteCacheValidationExecutionPublication(t *testing.T) {
+	for _, condition := range []string{"hit_does_not_renew", "fingerprint_before_check", "time_before_check"} {
+		t.Run(condition, func(t *testing.T) {
+			dir, _, _ := validationFixture(t)
+			var original []byte
+			if condition == "hit_does_not_renew" {
+				if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				original, err = os.ReadFile(remoteCacheValidationPath(dir))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var firstGitAt time.Time
+			old := runRepoCacheGitContext
+			runRepoCacheGitContext = func(_ context.Context, dir string, args ...string) (string, error) {
+				if firstGitAt.IsZero() {
+					firstGitAt = time.Now().Round(0)
+					for !time.Now().After(firstGitAt) {
+						runtime.Gosched()
+					}
+					if condition == "fingerprint_before_check" {
+						writeTestFile(t, dir, "concurrent-edit", "changed during validation")
+					}
+				}
+				return runRepoCacheGit(dir, args...)
+			}
+			t.Cleanup(func() { runRepoCacheGitContext = old })
+			if err := validateRemoteCacheExecution(t.Context(), validationTestSource, filepath.Dir(dir), dir, lockedPackRefCommit); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(remoteCacheValidationPath(dir))
+			if condition == "fingerprint_before_check" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("execution published a concurrent edit: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if condition == "hit_does_not_renew" {
+				if string(data) != string(original) || !firstGitAt.IsZero() {
+					t.Fatal("execution hit renewed its receipt or ran Git")
+				}
+				return
+			}
+			var record remoteCacheValidationRecord
+			if err := json.Unmarshal(data, &record); err != nil {
+				t.Fatal(err)
+			}
+			if firstGitAt.IsZero() || record.CheckedAt.After(firstGitAt) {
+				t.Fatalf("execution receipt time=%s, first Git call=%s", record.CheckedAt, firstGitAt)
+			}
+		})
+	}
+}
+
+func TestRemoteCacheValidationReceiptReadRace(t *testing.T) {
+	for _, changed := range []string{"receipt", "fingerprint"} {
+		t.Run(changed, func(t *testing.T) {
+			dir, _, _ := validationFixture(t)
+			if err := validateFixture(dir, lockedPackRefCommit); err != nil {
+				t.Fatal(err)
+			}
+			before := remoteCacheFingerprint(dir)
+			old := readRemoteCacheValidationFile
+			readRemoteCacheValidationFile = func(path string) ([]byte, error) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return nil, err
+				}
+				if changed == "receipt" {
+					writeTestFile(t, dir, ".git/"+remoteCacheValidationFile, string(data)+" ")
+				} else {
+					writeTestFile(t, dir, "concurrent-edit", "changed during receipt read")
+				}
+				return data, nil
+			}
+			t.Cleanup(func() { readRemoteCacheValidationFile = old })
+			if _, ok := loadRemoteCacheValidation(dir, lockedPackRefCommit, before, time.Now()); ok {
+				t.Fatalf("reused success after %s changed during the read", changed)
+			}
+		})
+	}
 }
 
 func TestRemoteCacheRefusalRevocationRequiresFullVerdict(t *testing.T) {
