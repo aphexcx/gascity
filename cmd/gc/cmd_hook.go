@@ -12,14 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/spf13/cobra"
 )
 
 func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -442,7 +442,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], workQueryRunnerForCity(cityPath))
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -675,7 +675,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	// read to the primary: the query runs on stores, but the cross-city adoption
 	// re-check must be able to reach every leg that can hold a bead.
 	ops.WorkLegs = legs
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, workQueryRunnerForCity(cityPath), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -965,6 +965,16 @@ var hookWorkQueryTimeout = 150 * time.Second
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryForCity("", command, dir, env)
+}
+
+func workQueryRunnerForCity(city string) func(string, string, []string) (string, error) {
+	return func(command, dir string, env []string) (string, error) {
+		return shellWorkQueryForCity(city, command, dir, env)
+	}
+}
+
+func shellWorkQueryForCity(city, command, dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -974,6 +984,11 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
+	if city == "" {
+		cacheexec.GuardConfiguredExecCommandWithoutCity(ctx, cmd, "standalone work-query runner without loaded city configuration")
+	} else {
+		cacheexec.GuardConfiguredExecCommandForCity(ctx, cmd, city)
+	}
 	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

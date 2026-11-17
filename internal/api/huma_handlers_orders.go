@@ -89,7 +89,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			storeInfos = nil
 		}
 		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
-		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
+		result := checkOrderTriggerForAPICity(s.state.CityPath(), a, now, history, storeInfos, ep, input.Fresh)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),
@@ -132,7 +132,7 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
-func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+func checkOrderTriggerForAPICity(city string, a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -152,7 +152,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 			cursorFn = func(string) uint64 { return cursor }
 		}
 	}
-	return orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
+	return orders.CheckTriggerForCity(city, a, now, lastRunFn, ep, cursorFn, orders.TriggerOptions{})
 }
 
 // orderCheckResponse is the response item for GET /v0/orders/check.

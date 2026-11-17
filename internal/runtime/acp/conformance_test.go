@@ -29,7 +29,7 @@ func TestACPConformance(t *testing.T) {
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
-		return NewSeamBackedWithDir(acpConformanceDir(caseT, t, &fixture), Config{}), runtime.Config{
+		return NewSeamBackedForCity(acpConformanceDir(caseT, t, &fixture), Config{}, caseT.TempDir()), runtime.Config{
 			Command: acpConformanceCommand(caseT, t, &fixture),
 			WorkDir: caseT.TempDir(),
 		}, fmt.Sprintf("gc-acp-conform-%d", atomic.AddInt64(&counter, 1))

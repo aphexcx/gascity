@@ -21,6 +21,7 @@ import (
 	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 )
 
 // Compile-time interface checks.
@@ -33,6 +34,7 @@ var (
 // Eliminates subprocess overhead by making direct API calls over reused
 // HTTP/2 connections. Pod manifests are compatible with gc-session-k8s.
 type Provider struct {
+	cacheCity          string
 	ops                k8sOps
 	namespace          string
 	image              string
@@ -166,6 +168,9 @@ func newProviderWithOps(ops k8sOps) *Provider {
 
 // Start creates a new K8s pod running a tmux session with the agent command.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}
@@ -365,6 +370,9 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 // server itself died (not just the agent), respawn-pane fails and Relaunch
 // returns ErrSessionNotFound so the reconciler reprovisions.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

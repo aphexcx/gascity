@@ -37,7 +37,7 @@ func TestTmuxConformance(t *testing.T) {
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		return NewSeamBackedWithConfig(tmuxConformanceConfig()), runtime.Config{
+		return NewSeamBackedWithConfigForCity(tmuxConformanceConfig(), t.TempDir()), runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
 		}, fmt.Sprintf("gc-test-conform-%d", atomic.AddInt64(&counter, 1))

@@ -1619,7 +1619,7 @@ func runController(
 		}
 	}
 
-	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
+	runPoolOnBoot(cfg, cityPath, lifecycleHookRunnerForCity(cityPath), stderr)
 	cr.run(ctx)
 	cr.shutdown()
 

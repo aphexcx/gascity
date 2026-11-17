@@ -172,7 +172,7 @@ func provenRelicRefsForCity(cityPath string) map[storeref.StoreRef]bool {
 // reasons it was refused in the first place; reporting them again would put a
 // second copy of the same sentence on every by-id read of an unconverged city.
 func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil || cfg == nil || cfg.Storage == nil {
 		return nil
 	}

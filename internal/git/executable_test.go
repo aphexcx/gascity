@@ -7,7 +7,40 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestExecutableResolutionCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	resolve := cachedExecutableResolution("linux", "/path/git", "/clt/git", func(ctx context.Context, _ string) (string, int, error) {
+		close(entered)
+		<-ctx.Done()
+		return "", -1, ctx.Err()
+	}, func(string) {})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := resolve(ctx)
+		done <- err
+	}()
+	<-entered
+	// A second caller must cancel while another caller still owns the probe.
+	waitCtx, stopWaiting := context.WithCancel(t.Context())
+	stopWaiting()
+	if _, err := resolve(waitCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting resolution = %v; want cancellation", err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("probing resolution = %v; want cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolution ignored probe cancellation")
+	}
+}
 
 // A failed probe must not prevent an import reload from seeing a repaired Git.
 func TestExecutableResolutionRetriesFailures(t *testing.T) {
@@ -23,7 +56,7 @@ func TestExecutableResolutionRetriesFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repaired := false
 			probes, warnings := 0, 0
-			resolve := cachedExecutableResolution("darwin", "/path/git", "/clt/git", func(path string) (string, int, error) {
+			resolve := cachedExecutableResolution("darwin", "/path/git", "/clt/git", func(_ context.Context, path string) (string, int, error) {
 				probes++
 				if repaired && path == tc.repairedPath {
 					return "git version 2.49", 0, nil
@@ -33,16 +66,16 @@ func TestExecutableResolutionRetriesFailures(t *testing.T) {
 				}
 				return "", -1, errors.New("no such file or directory")
 			}, func(string) { warnings++ })
-			if _, err := resolve(); err == nil {
+			if _, err := resolve(context.Background()); err == nil {
 				t.Fatal("first resolution succeeded with both executables unusable")
 			}
 			repaired = true
-			got, err := resolve()
+			got, err := resolve(context.Background())
 			if err != nil || got.Path != tc.repairedPath {
 				t.Fatalf("resolution after repair = %+v, %v; want %s", got, err, tc.repairedPath)
 			}
 			probesAfterRepair := probes
-			if cached, err := resolve(); err != nil || cached != got || probes != probesAfterRepair {
+			if cached, err := resolve(context.Background()); err != nil || cached != got || probes != probesAfterRepair {
 				t.Fatalf("successful resolution not cached: %+v, %v, probes %d -> %d", cached, err, probesAfterRepair, probes)
 			}
 			wantWarnings := 0
@@ -59,7 +92,7 @@ func TestExecutableResolutionRetriesFailures(t *testing.T) {
 // Concurrent import reads must share both the version probes and the warning.
 func TestExecutableResolutionCached(t *testing.T) {
 	var probes, warnings atomic.Int32
-	resolve := cachedExecutableResolution("darwin", "/path/git", "/clt/git", func(path string) (string, int, error) {
+	resolve := cachedExecutableResolution("darwin", "/path/git", "/clt/git", func(_ context.Context, path string) (string, int, error) {
 		probes.Add(1)
 		if path == "/path/git" {
 			return "Xcode license", 69, errors.New("exit status 69")
@@ -69,7 +102,7 @@ func TestExecutableResolutionCached(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			got, err := resolve()
+			got, err := resolve(context.Background())
 			if err != nil || got.Path != "/clt/git" {
 				t.Errorf("cached result = %+v, %v", got, err)
 			}

@@ -41,17 +41,19 @@ func TestRunCommandDoesNotInterpretArgvAsShell(t *testing.T) {
 
 func TestRunCommandDeliversExactStdin(t *testing.T) {
 	payload := []byte(`{"version":"gascity.dev/credential-provider/v1","audience":"manifold","required_scopes":["manifold:proxy"],"org":"org-acme","force_refresh":false,"interactive":false}`)
-	output, err := runCommand(
-		context.Background(),
-		[]string{"cat"},
-		payload,
-		minimalEnvironment(os.Environ()),
-	)
-	if err != nil {
-		t.Fatalf("runCommand: %v", err)
-	}
-	if got := string(output.stdout); got != string(payload) {
-		t.Fatalf("stdout = %q, want exact stdin %q", got, payload)
+	for _, argv := range [][]string{{"cat"}, {"sh", "-c", "HELPER=1; cat"}} {
+		output, err := runCommand(
+			context.Background(),
+			argv,
+			payload,
+			minimalEnvironment(os.Environ()),
+		)
+		if err != nil {
+			t.Fatalf("runCommand(%q): %v", argv, err)
+		}
+		if got := string(output.stdout); got != string(payload) {
+			t.Fatalf("stdout = %q, want exact stdin %q", got, payload)
+		}
 	}
 }
 

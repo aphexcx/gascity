@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -62,6 +63,7 @@ const (
 // operations into native Go WebSocket calls while leaving a small helper
 // surface on the internal exec shim.
 type Provider struct {
+	cacheCity    string
 	mu           sync.Mutex
 	reqSeq       int
 	watchers     map[string]context.CancelFunc
@@ -2359,7 +2361,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 // Start creates or reuses a T3 thread for the named session and dispatches the
 // startup prompt and any nudge.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) called, wsURL=%s\n", name, resolveWsURL())
 
 	var envelope StartupEnvelope

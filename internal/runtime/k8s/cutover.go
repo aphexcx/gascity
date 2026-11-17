@@ -25,10 +25,16 @@ var (
 
 // NewSeamBacked constructs a k8s provider served through the seams.
 func NewSeamBacked() (runtime.Provider, error) {
+	return NewSeamBackedForCity("")
+}
+
+// NewSeamBackedForCity binds launch validation to the selected city.
+func NewSeamBackedForCity(city string) (runtime.Provider, error) {
 	raw, err := NewProvider()
 	if err != nil {
 		return nil, err
 	}
+	raw.cacheCity = city
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
 }

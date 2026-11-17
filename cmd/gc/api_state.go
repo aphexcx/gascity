@@ -428,7 +428,7 @@ func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) 
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	openExecStore := func() (beads.Store, error) {
-		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
+		s := beadsexec.NewStoreForCity(strings.TrimPrefix(provider, "exec:"), cs.cityPath)
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",

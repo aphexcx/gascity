@@ -19,7 +19,7 @@ func TestSubprocessSeamConformance(t *testing.T) {
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		return NewSeamBackedWithDir(testutil.ShortTempDir(t, "gc-subproc-seam-")), runtime.Config{
+		return NewSeamBackedForCity(testutil.ShortTempDir(t, "gc-subproc-seam-"), t.TempDir()), runtime.Config{
 			Command: "exec sleep 300",
 			WorkDir: t.TempDir(),
 		}, fmt.Sprintf("gc-subproc-seam-%d", atomic.AddInt64(&counter, 1))

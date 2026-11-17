@@ -490,6 +490,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			cityPath := rctx.CityPath
+			registerConvergenceConditionCaches(meta)
 			iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
 			maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
 			env := convergence.ConditionEnv{
@@ -608,6 +609,7 @@ func newConvergeTestTriggerCmd(stdout, stderr io.Writer) *cobra.Command {
 			if cityPath == "" {
 				cityPath = rctx.CityPath
 			}
+			registerConvergenceConditionCaches(meta)
 			env := convergence.TriggerConditionEnv(meta, beadID, cityPath, storePath, nextIteration)
 
 			if !jsonOutput {
