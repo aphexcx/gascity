@@ -135,6 +135,7 @@ func TestNudgeComposer(t *testing.T) {
 		{"placeholder cursor", "────\n❯ \x1b[7mT\x1b[0;2mry a different task\x1b[0m\n────", "❯ ", "", true},
 		{"letter before completion cursor", "────\n❯ x\x1b[2;7m \x1b[27mcompletion\x1b[0m\n────", "❯ ", "x", true},
 		{"cursor moved to draft start", "────\n❯ \x1b[7mt\x1b[27myped\n────", "❯ ", "typed", true},
+		{"cursor moved to single letter", "────\n❯\u00a0\x1b[7mT\x1b[0m\n────", "❯ ", "T", true},
 		{"typed beside suggestion", "────\n❯ typed\x1b[2m suggestion\x1b[22m\n────", "❯ ", "typed", true},
 		{"unframed ambiguous footer", "› \n\n  ? for shortcuts", "› ", "", false},
 		{"unframed blank continuation", "› first\n  \n  last", "› ", "", false},

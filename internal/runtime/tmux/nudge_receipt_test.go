@@ -55,8 +55,12 @@ func TestNudgeDeliveryBusyComposerHint(t *testing.T) {
 					return out, err
 				}}
 				receipts := collectReceipts(tm)
+				pastes := 0
 				for _, message := range []string{"first synthetic input", "second synthetic input"} {
-					delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), message, pane.paste(""))
+					delivery, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "attempt-"+runtime.NudgePayloadDigest(message), func(target, text string, timeout time.Duration) (int, error) {
+						pastes++
+						return pane.paste("")(target, text, timeout)
+					})
 					// An already-busy turn provides no new busy transition. Delivery
 					// is terminal/unverified; it must not license a replay.
 					if err != nil || !delivery.Delivered || delivery.Submit != runtime.NudgeSubmitUnverified {
@@ -65,9 +69,15 @@ func TestNudgeDeliveryBusyComposerHint(t *testing.T) {
 					if stored := pane.options[nudgeDraftPayloadOption]; stored != "" {
 						t.Fatalf("submitted input retained provenance %q", stored)
 					}
+					if stored := pane.options[nudgeDraftIdentityOption]; stored != runtime.NudgePayloadDigest(message)+":" {
+						t.Fatalf("terminal delivery retained retry identity %q", stored)
+					}
+					if err := delivery.UnconfirmedSubmitError(t.Name()); err != nil {
+						t.Fatalf("terminal delivery invited a retry: %v", err)
+					}
 				}
-				if pane.enters != 2 || !slices.Equal(pane.submitted, []string{"first synthetic input", "second synthetic input"}) || len(receipts()) != 2 {
-					t.Fatalf("enters=%d submitted=%q receipts=%d; want each delivery once", pane.enters, pane.submitted, len(receipts()))
+				if pastes != 2 || pane.enters != 2 || !slices.Equal(pane.submitted, []string{"first synthetic input", "second synthetic input"}) || len(receipts()) != 2 {
+					t.Fatalf("pastes=%d enters=%d submitted=%q receipts=%d; want each delivery once", pastes, pane.enters, pane.submitted, len(receipts()))
 				}
 			})
 		})
@@ -125,6 +135,31 @@ func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 }
 
 func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
+	t.Run("refusal command trace", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, pane := newRecoveryPane(t)
+			pane.draft, pane.busy = "manual draft", true
+			pane.options[nudgeDraftPayloadOption] = runtime.NudgePayloadDigest("earlier input")
+			var calls []string
+			started := time.Now()
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				calls = append(calls, fmt.Sprintf("%s %s", time.Since(started), strings.Join(args, " ")))
+				return pane.exec(args)
+			}}
+			pastes := 0
+			delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "new synthetic input", func(_, text string, _ time.Duration) (int, error) {
+				pastes++
+				return len(text), nil
+			})
+			if !errors.Is(err, ErrNudgeDraftDeferred) || delivery.Delivered || pastes != 0 || pane.enters != 0 || pane.draft != "manual draft" {
+				t.Fatalf("delivery=%+v err=%v pastes=%d enters=%d draft=%q", delivery, err, pastes, pane.enters, pane.draft)
+			}
+			t.Logf("refusal: %d tmux commands, %s virtual elapsed (zero executor latency)", len(calls), time.Since(started))
+			for i, call := range calls {
+				t.Logf("command %02d: %s", i+1, call)
+			}
+		})
+	})
 	for _, tt := range []struct {
 		name, draft, message, stored, attached, submitCheck string
 		sentFirst                                           bool
