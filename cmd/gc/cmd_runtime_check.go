@@ -121,7 +121,7 @@ func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, prom
 	}()
 	if strings.Contains(arg, "/") {
 		// Best-effort lock loading leaves historical recovery available on errors.
-		if cityPath, err := resolveCity(); err == nil && runtimeCheckPathIsCached(arg) {
+		if cityPath, err := resolveCity(); err == nil && config.IsRepoCachePath(arg) {
 			_, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		}
 		return arg, "", ""
@@ -149,13 +149,8 @@ func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, prom
 }
 
 func runtimeCheckPathIsCached(path string) bool {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return false
+	if executable, err := exec.LookPath(path); err == nil {
+		path = executable
 	}
-	if config.IsRepoCachePath(absolute) {
-		return true
-	}
-	canonical, err := filepath.EvalSymlinks(absolute)
-	return err == nil && config.IsRepoCachePath(canonical)
+	return config.IsRepoCachePath(path)
 }
