@@ -15,6 +15,8 @@ func TestRenderPeek(t *testing.T) {
 		name, input, suggestion, kept string
 	}{
 		{"suggestion", box("\x1b[2mTry the next step\x1b[0m"), "Try the next step", "❯\u00a0"},
+		{"cursor placeholder", box("\x1b[7mT\x1b[0;2mry the next step\x1b[0m"), "Try the next step", "❯\u00a0"},
+		{"cursor on draft", box("\x1b[7mR\x1b[27mun the checks"), "", "Run the checks"},
 		{"live capture", frame + "\x1b[39m❯\u00a0\x1b[2mkeep going\x1b[0m\n" + frame, "keep going", "❯\u00a0"},
 		{"typed", box("Run the checks"), "", "Run the checks"},
 		{"status", "\x1b[2mWorking\x1b[0m\n" + box("typed"), "", "Working"},

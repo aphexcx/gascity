@@ -36,6 +36,44 @@ func collectReceipts(tm *Tmux) func() []runtime.NudgeReceipt {
 	}
 }
 
+func TestNudgeDeliveryBusyComposerHint(t *testing.T) {
+	for _, hint := range []string{
+		"\x1b[38;5;246m❯\u00a0\x1b[7m\x1b[39mP\x1b[0;2mress up to edit queued messages\x1b[0m",
+		"❯ \x1b[7mT\x1b[0;2mry a different task\x1b[0m",
+	} {
+		t.Run(runtime.NudgePayloadDigest(hint)[:8], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				pane.busy = true
+				// Stale provenance must not turn an empty hint into a draft.
+				pane.options[nudgeDraftPayloadOption] = runtime.NudgePayloadDigest("earlier input")
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					out, err := pane.exec(args)
+					if pane.draft == "" {
+						out = strings.Replace(out, "────\n❯ \n────", "\x1b[38;5;244m────────────────\n"+hint+"\n\x1b[38;5;244m────────────────", 1)
+					}
+					return out, err
+				}}
+				receipts := collectReceipts(tm)
+				for _, message := range []string{"first synthetic input", "second synthetic input"} {
+					delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), message, pane.paste(""))
+					// An already-busy turn provides no new busy transition. Delivery
+					// is terminal/unverified; it must not license a replay.
+					if err != nil || !delivery.Delivered || delivery.Submit != runtime.NudgeSubmitUnverified {
+						t.Fatalf("delivery = %+v, %v; want delivered/unverified", delivery, err)
+					}
+					if stored := pane.options[nudgeDraftPayloadOption]; stored != "" {
+						t.Fatalf("submitted input retained provenance %q", stored)
+					}
+				}
+				if pane.enters != 2 || !slices.Equal(pane.submitted, []string{"first synthetic input", "second synthetic input"}) || len(receipts()) != 2 {
+					t.Fatalf("enters=%d submitted=%q receipts=%d; want each delivery once", pane.enters, pane.submitted, len(receipts()))
+				}
+			})
+		})
+	}
+}
+
 func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 	for _, toolBoundary := range []bool{false, true} {
 		t.Run(strconv.FormatBool(toolBoundary), func(t *testing.T) {
