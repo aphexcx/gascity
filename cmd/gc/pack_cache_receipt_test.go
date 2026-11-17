@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/config"
@@ -137,6 +138,159 @@ func newPinnedPackCacheExecutionFixture(t *testing.T, pin string) packCacheFixtu
 		t.Fatal(err)
 	}
 	return f
+}
+
+func writePackCacheLocalScript(t *testing.T, path, marker string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPackCacheRuntimeLocalPathSkipsCityLoad(t *testing.T) {
+	for _, scenario := range []string{"lock_held", "dirty_import", "no_validation"} {
+		for _, location := range []string{"outside_city", "inside_city"} {
+			for _, command := range []struct {
+				name string
+				args []string
+			}{
+				{"check", []string{"runtime", "check"}},
+				{"conformance", []string{"runtime", "conformance"}},
+				{"conformance_env", []string{"runtime", "conformance", "--env"}},
+			} {
+				for _, city := range []string{"env", "flags"} {
+					t.Run(strings.Join([]string{scenario, location, command.name, city}, "/"), func(t *testing.T) {
+						f := newPackCacheExecutionFixture(t)
+						dir := t.TempDir()
+						if location == "inside_city" {
+							dir = filepath.Join(f.city, "local")
+						}
+						script, marker := filepath.Join(dir, "rt.sh"), filepath.Join(dir, "executed")
+						writePackCacheLocalScript(t, script, marker)
+						var args []string
+						if city == "flags" {
+							t.Setenv("GC_CITY", "")
+							t.Setenv("GC_RIG", "")
+							args = []string{"--city", f.city, "--rig", "fixture"}
+						}
+						args = append(append(args, command.args...), script)
+						if scenario == "dirty_import" {
+							if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+								t.Fatal(err)
+							}
+						}
+						var stdout, stderr bytes.Buffer
+						if scenario == "lock_held" {
+							release := holdExclusiveRepoCacheLock(t, filepath.Dir(f.caches[0]))
+							done := make(chan struct{})
+							go func() {
+								defer close(done)
+								_ = run(args, &stdout, &stderr)
+							}()
+							select {
+							case <-done:
+								// The lock is still held when execution is observed below.
+							case <-time.After(5 * time.Second):
+								// Release and join before fixture cleanup, even on failure.
+								release()
+								<-done
+								t.Fatal("local executable check waited on the repository-cache lock")
+							}
+						} else {
+							_ = run(args, &stdout, &stderr)
+						}
+						// The script proves execution, not RPP conformance or exit status.
+						if _, err := os.Stat(marker); err != nil {
+							t.Errorf("local executable did not run: %v; %s%s", err, &stdout, &stderr)
+						}
+						if scenario == "dirty_import" {
+							for _, refusal := range []string{"cached executable", "local worktree changes", "historical cache"} {
+								if strings.Contains(stdout.String()+stderr.String(), refusal) {
+									t.Errorf("unrelated import refused local execution: %s%s", &stdout, &stderr)
+								}
+							}
+						}
+						if scenario == "no_validation" {
+							if calls := f.gitCalls(t); calls != "" {
+								t.Errorf("local executable check invoked Git:\n%s", calls)
+							}
+							if _, err := os.Stat(filepath.Join(f.caches[0], ".git", "gc-validation-v1.json")); !os.IsNotExist(err) {
+								t.Errorf("local executable check wrote a cache receipt: stat=%v", err)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestPackCacheRuntimePathBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		cached     bool
+		modified   bool
+	}{
+		{"mimic", "mimic", false, false},
+		{"symlink_clean", "symlink", true, false},
+		{"symlink_modified", "symlink", true, true},
+		{"dot_dot_inside_clean", "dot_dot_inside", true, false},
+		{"dot_dot_inside_modified", "dot_dot_inside", true, true},
+		{"dot_dot_out", "dot_dot_out", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPinnedPackCacheExecutionFixture(t, packCacheTestCommit[:8])
+			script := filepath.Join(f.caches[0], "commands", "report", "run.sh")
+			switch tc.path {
+			case "mimic":
+				script = filepath.Join(t.TempDir(), filepath.Base(f.caches[0]), "commands", "report", "run.sh")
+				writePackCacheLocalScript(t, script, f.marker)
+			case "symlink":
+				// Cache root candidates preserve spelling; use the canonical root
+				// so this link tests the same boundary on macOS and Linux.
+				gcHome, err := filepath.EvalSymlinks(os.Getenv("GC_HOME"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GC_HOME", gcHome)
+				link := filepath.Join(t.TempDir(), "rt.sh")
+				if err := os.Symlink(script, link); err != nil {
+					t.Fatal(err)
+				}
+				script = link
+			case "dot_dot_inside":
+				script = f.caches[0] + "/commands/../commands/report/run.sh"
+			case "dot_dot_out":
+				script = filepath.Dir(f.caches[0]) + "/../local.sh"
+				writePackCacheLocalScript(t, script, f.marker)
+			}
+			if tc.modified {
+				if err := os.WriteFile(filepath.Join(f.caches[0], ".dirty"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			_ = run([]string{"runtime", "check", script}, &stdout, &stderr)
+			_, markerErr := os.Stat(f.marker)
+			if tc.modified {
+				if !os.IsNotExist(markerErr) || !strings.Contains(stdout.String()+stderr.String(), "local worktree changes") {
+					t.Errorf("modified cached executable not refused: marker stat=%v; %s%s", markerErr, &stdout, &stderr)
+				}
+			} else if markerErr != nil {
+				t.Errorf("clean executable did not run: %v; %s%s", markerErr, &stdout, &stderr)
+			}
+			if calls := f.gitCalls(t); tc.cached {
+				if !strings.Contains(calls, "status --porcelain") {
+					t.Errorf("cached executable checked without full validation: %s", calls)
+				}
+			} else if calls != "" {
+				t.Errorf("local executable check invoked Git:\n%s", calls)
+			}
+		})
+	}
 }
 
 func TestPackCacheRuntimePinInvocation(t *testing.T) {
