@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -153,10 +155,27 @@ func TestRegisterPackCommandsDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	}
 }
 
+func TestRootHelpListsCachedPackCommandsWithoutGit(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}, nil} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "sample0") {
+				t.Fatal("root help omitted discovered pack")
+			}
+			if calls := f.gitCalls(t); calls != "" {
+				t.Fatalf("root help spawned Git: %s", calls)
+			}
+		})
+	}
+}
+
 func TestBuiltinRootConstructionDoesNotReadImports(t *testing.T) {
 	for _, args := range [][]string{
 		{"version"},
-		{"--help"},
 		{"cities"},
 		{"context", "list"},
 		{"shell", "status"},

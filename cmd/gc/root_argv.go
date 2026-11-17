@@ -13,7 +13,7 @@ type rootCommandOptions struct {
 
 func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	command, ok := firstRootCommand(args)
-	discoverPackCommands := !rootHelpInvocation(args) && (!ok || !rootCommandSkipsPackDiscovery(command))
+	discoverPackCommands := rootHelpInvocation(args) || !ok || !rootCommandSkipsPackDiscovery(command)
 	return rootCommandOptions{
 		invocationArgs:            append([]string(nil), args...),
 		discoverPackCommands:      discoverPackCommands,
@@ -36,9 +36,9 @@ func rootCommandSkipsPackDiscovery(command string) bool {
 	}
 }
 
-// rootHelpInvocation recognizes help for the built-in root, which needs no
-// city. Named pack help still goes through discovery. Consume scope values so
-// a city named "help" or "version" is never mistaken for a command.
+// rootHelpInvocation recognizes root help, which includes discovered pack
+// commands. Consume scope values so a city named "help" or "version" is never
+// mistaken for a command.
 func rootHelpInvocation(args []string) bool {
 	seenHelp := false
 	for i := 0; i < len(args); i++ {
