@@ -36,6 +36,26 @@ func Register(dir string, validate func(context.Context) error) {
 	resolvedRemoteCaches.Store(filepath.Clean(dir), owner)
 }
 
+// HasOwner reports whether path is within a registered checkout, without
+// running its validator. It checks both the original and canonical paths.
+func HasOwner(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	canonical := abs
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		canonical = resolved
+	}
+	found := false
+	resolvedRemoteCaches.Range(func(key, _ any) bool {
+		dir := key.(string)
+		found = pathWithinDir(abs, dir) || pathWithinDir(canonical, dir)
+		return !found
+	})
+	return found
+}
+
 // RegisterRoots identifies cache roots so unresolved cached code fails closed.
 func RegisterRoots(roots []string) {
 	for _, root := range roots {

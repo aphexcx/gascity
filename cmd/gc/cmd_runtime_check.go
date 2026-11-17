@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime/rppcheck"
 	"github.com/spf13/cobra"
@@ -113,7 +114,7 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, promptDelivery string) {
 	defer func() {
 		if path, err := exec.LookPath(target); err == nil {
-			if absolute, err := filepath.Abs(path); err == nil {
+			if absolute, err := filepath.Abs(path); err == nil && !cacheexec.HasOwner(absolute) {
 				config.RegisterHistoricalRemoteCacheForPath(absolute)
 			}
 		}
