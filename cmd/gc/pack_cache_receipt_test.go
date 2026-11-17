@@ -136,6 +136,10 @@ func newPinnedPackCacheExecutionFixture(t *testing.T, pin string) packCacheFixtu
 	if err := os.WriteFile(lockPath, []byte(strings.ReplaceAll(string(lock), packCacheTestCommit, pin)), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Register the lock's owner through QUICK loading before runtime resolution.
+	if _, err := loadCityConfigWithoutBuiltinPackRefresh(f.city, io.Discard); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
