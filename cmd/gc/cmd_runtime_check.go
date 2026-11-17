@@ -120,9 +120,16 @@ func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, prom
 		}
 	}()
 	if strings.Contains(arg, "/") {
+		// Best-effort lock loading leaves historical recovery available on errors.
+		if cityPath, err := resolveCity(); err == nil {
+			_, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		}
 		return arg, "", ""
 	}
 	if _, err := os.Stat(arg); err == nil {
+		if cityPath, err := resolveCity(); err == nil {
+			_, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		}
 		return arg, "", ""
 	}
 	cityPath, err := resolveCity()
