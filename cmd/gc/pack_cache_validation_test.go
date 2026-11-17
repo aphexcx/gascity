@@ -241,7 +241,7 @@ func TestPackCacheExecutionScansOnlyOwningImport(t *testing.T) {
 		t.Fatalf("script did not execute: %v", err)
 	}
 	calls := f.gitCalls(t)
-	if strings.Count(calls, "status --porcelain") != 1 || !strings.Contains(calls, f.caches[1]+" -c core.fsmonitor=false") {
+	if strings.Count(calls, "status --porcelain") != 1 || !strings.Contains(calls, f.caches[1]+" --no-optional-locks -c core.fsmonitor=false") {
 		t.Fatalf("expected one scan of owning cache, got:\n%s", calls)
 	}
 	for _, other := range []string{f.caches[0], f.caches[2]} {
