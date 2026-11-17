@@ -106,6 +106,12 @@ func withRepoCacheReadLockForPath(path string, nonBlocking bool, fn func() error
 	return WithRepoCacheReadLock(root, fn)
 }
 
+// IsRepoCachePath reports whether path is within a known repository cache root.
+func IsRepoCachePath(path string) bool {
+	_, ok := repoCacheRootForPath(path)
+	return ok
+}
+
 func repoCacheRootForPath(path string) (string, bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
