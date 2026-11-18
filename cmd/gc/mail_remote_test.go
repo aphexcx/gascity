@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -190,6 +191,32 @@ func TestMailReplyToLocalSender(t *testing.T) {
 		inbox, err := provider.Inbox(sender)
 		if err != nil || len(inbox) != 1 || inbox[0].ReplyTo != original.ID {
 			t.Errorf("local inbox for %s: %+v, err=%v", sender, inbox, err)
+		}
+	}
+}
+
+func TestMailReplyRefusesUnresolvedOrigin(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	seedLocalCity(t)
+	registry := clientcontext.File{Contexts: []clientcontext.Context{
+		{Name: "peer-one", City: "ridge", URL: "https://one.invalid"},
+		{Name: "peer-two", City: "ridge", URL: "https://two.invalid"},
+		{Name: "hollow", City: "elsewhere", URL: "https://three.invalid"},
+	}}
+	if err := registry.Save(DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ from, hint string }{
+		{"", "gc --context CITY mail send AGENT"},
+		{"/worker", "gc --context CITY mail send AGENT"},
+		{"ridge/", "gc --context CITY mail send AGENT"},
+		{"ridge/forge/worker", "gc --context CITY mail send forge/worker"},
+		{"hollow/worker", "gc --context CITY mail send worker"},
+	} {
+		target, _, err := mailReplyTarget(mail.Message{From: tc.from})
+		if target != nil || err == nil || !strings.Contains(err.Error(), tc.hint) {
+			t.Errorf("sender %q: target=%v err=%v, want %q", tc.from, target, err, tc.hint)
 		}
 	}
 }

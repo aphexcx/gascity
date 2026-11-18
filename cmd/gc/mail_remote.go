@@ -5,10 +5,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // Remote mail: `gc --context <peer> mail send|reply|inbox` operate a REMOTE
@@ -152,24 +154,35 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 // registry. A context may have an alias distinct from its destination city.
 func mailReplyTarget(original mail.Message) (*remoteTarget, string, error) {
 	city, recipient, qualified := strings.Cut(original.From, "/")
+	if strings.TrimSpace(original.From) == "" || strings.IndexFunc(original.From, unicode.IsControl) >= 0 ||
+		qualified && (city == "" || recipient == "" || strings.Contains(original.From, "//") || strings.HasSuffix(recipient, "/") || strings.HasPrefix(recipient, "-")) {
+		return nil, "", fmt.Errorf("cannot resolve sender %q; use gc --context CITY mail send AGENT", original.From)
+	}
 	if !qualified {
 		return nil, "", nil
 	}
+	hint := func(name string) string {
+		return shellquote.Join([]string{"gc", "--context", name, "mail", "send", recipient})
+	}
 	contexts, err := clientcontext.Load(DefaultPath())
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("%w; use %s after configuring the origin", err, hint("CITY"))
 	}
 	var name string
 	for _, candidate := range contexts.Contexts {
 		if candidate.EffectiveCity() == city {
 			if name != "" {
-				return nil, "", fmt.Errorf("multiple contexts for city %q; use gc --context CITY mail send %s", city, recipient)
+				return nil, "", fmt.Errorf("multiple contexts for city %q; select one with %s", city, hint("CITY"))
 			}
 			name = candidate.Name
 		}
 	}
 	if name == "" {
-		return nil, "", fmt.Errorf("no context for city %q; use gc --context %s mail send %s", city, city, recipient)
+		contextName := city
+		if _, taken := contexts.Lookup(city); taken {
+			contextName = "CITY" // The same-named alias targets a different city.
+		}
+		return nil, "", fmt.Errorf("no context for city %q; configure one and use %s", city, hint(contextName))
 	}
 	if err := guardNoAPI(readRemoteSelection()); err != nil {
 		return nil, "", err
