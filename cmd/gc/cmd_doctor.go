@@ -118,11 +118,17 @@ func splitDoctorCheckNames(values []string) []string {
 	return names
 }
 
+func loadDoctorCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
+	return loadCityConfigFSWithOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), config.LoadOptions{
+		SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationInspect,
+	}, warningWriter...)
+}
+
 func doctorSkipsDoltChecks(cityPath string) bool {
 	if gcDoltSkip() {
 		return true
 	}
-	cfg, err := loadCityConfigFull(cityPath, io.Discard)
+	cfg, err := loadDoctorCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return !cityUsesBdStoreContract(cityPath)
 	}
@@ -666,7 +672,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout, UseCheckTimeouts: opts.UseCheckTimeouts}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
-	cfg, cfgErr := loadCityConfigFull(cityPath, stderr)
+	cfg, cfgErr := loadDoctorCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 	}
@@ -909,7 +915,7 @@ func (expandedConfigLoadCheck) WarmupEligible() bool { return false }
 func (expandedConfigLoadCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	if _, err := loadCityConfigFull(ctx.CityPath, io.Discard); err != nil {
+	if _, err := loadDoctorCityConfig(ctx.CityPath, io.Discard); err != nil {
 		return errorCheck("expanded-config-load",
 			fmt.Sprintf("expanded config load error: %v", err),
 			expandedConfigLoadFixHint(err),

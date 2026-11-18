@@ -11,6 +11,66 @@ import (
 	"testing"
 )
 
+func TestHasOwner(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	root := t.TempDir()
+	cache := filepath.Join(root, "cache")
+	if err := os.Mkdir(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(cache, "run.sh")
+	if err := os.WriteFile(script, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(cache, alias); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	RegisterRoots([]string{root})
+	if HasOwner(script) {
+		t.Fatal("cache root registration supplied an owner")
+	}
+	checks := 0
+	Register(alias, func(context.Context) error {
+		checks++
+		return fmt.Errorf("fixture refuses execution")
+	})
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"registered", alias, true},
+		{"canonical", canonical, true},
+		{"script", script, true},
+		{"symlink", filepath.Join(alias, "run.sh"), true},
+		{"missing_child", filepath.Join(alias, "missing.sh"), true},
+		{"parent", root, false},
+		{"prefix_sibling", alias + "-other/run.sh", false},
+		{"unregistered", filepath.Join(root, "other", "run.sh"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasOwner(tc.path); got != tc.want {
+				t.Errorf("HasOwner(%q) = %t, want %t", tc.path, got, tc.want)
+			}
+		})
+	}
+	if checks != 0 {
+		t.Fatalf("ownership query ran validation %d times", checks)
+	}
+	if err := ValidateCachedExecutable(t.Context(), filepath.Join(canonical, "run.sh")); err == nil || checks != 1 {
+		t.Fatalf("ownership query changed the validator: err=%v, checks=%d", err, checks)
+	}
+	Reset()
+	if HasOwner(script) {
+		t.Fatal("reset retained ownership")
+	}
+}
+
 func TestShellLaunchChecksOnlyReferencedCode(t *testing.T) {
 	for _, tc := range []struct {
 		name, command string

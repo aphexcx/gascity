@@ -148,6 +148,22 @@ func (f *cachedImportFixture) tick(trigger string) {
 	f.cr.tick(context.Background(), f.dirty, &f.lastProviderName, f.cityPath, &f.prevPoolRunning, trigger)
 }
 
+func (f *cachedImportFixture) invalidateValidation() {
+	f.t.Helper()
+	// Force a full check independently of the validation receipt's reuse interval.
+	_, err := config.WithRepoCacheWriteLock(filepath.Dir(f.cacheDirs[0]), func() (string, error) {
+		for _, dir := range f.cacheDirs {
+			if err := config.InvalidateRemoteCacheValidation(dir); err != nil {
+				return "", err
+			}
+		}
+		return "", nil
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func (f *cachedImportFixture) storedHash() string {
 	f.t.Helper()
 	b, err := f.store.Get(f.beadID)
@@ -196,7 +212,7 @@ func TestCityRuntimeIncidentReplayWarmValidationMemo(t *testing.T) {
 			check("stray present")
 			check("stray still present")
 			// A cold validator rejects the same dirty cache, after the tested ticks.
-			config.ResetRemoteCacheValidationCache()
+			f.invalidateValidation()
 			_, err := tryReloadConfig(f.tomlPath, "test-city", f.cityPath)
 			if err == nil || !strings.Contains(err.Error(), "local worktree changes") {
 				t.Fatalf("cold validator accepted dirty cache: %v", err)
@@ -275,7 +291,7 @@ func TestCityRuntimeRejectedReloadRetainsSkillMembership(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			config.ResetRemoteCacheValidationCache()
+			f.invalidateValidation()
 			f.dirty.Store(true)
 			f.tick("watch")
 			if failure := f.cr.configLoadHealth.snapshot(); failure == nil || !strings.Contains(failure.Error, "local worktree changes") {
@@ -299,7 +315,7 @@ func TestCityRuntimeRejectedReloadRetainsOrderDispatcher(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(orderDir, "unexpected.toml"), []byte("[order]\nexec = \"true\"\ntrigger = \"manual\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	config.ResetRemoteCacheValidationCache()
+	f.invalidateValidation()
 	f.dirty.Store(true)
 	f.tick("watch")
 	if f.cr.configLoadHealth.snapshot() == nil {

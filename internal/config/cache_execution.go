@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/cacheexec"
@@ -14,12 +15,14 @@ import (
 
 var runRepoCacheGitContext = defaultRunRepoCacheGitContext
 
-func registerRemoteCacheRoots() {
+// RegisterRemoteCacheRoots guards cached executables even without a config load.
+// Registration performs no cache validation, Git invocation, or locking.
+func RegisterRemoteCacheRoots() {
 	cacheexec.RegisterRoots(repoCacheRootCandidates())
 }
 
 func rememberRemoteCache(source, root, dir, commit string) {
-	registerRemoteCacheRoots()
+	RegisterRemoteCacheRoots()
 	cacheexec.Register(dir, func(ctx context.Context) error {
 		return validateRemoteCacheExecution(ctx, source, root, dir, commit)
 	})
@@ -31,12 +34,11 @@ func validateRemoteCacheExecution(ctx context.Context, source, root, dir, commit
 	}
 	key := dir + "\x00" + commit
 	mode := CacheValidationFull
-	if v, ok := remoteCacheValidationCache.Load(key); ok {
-		if v.(remoteCacheValidationEntry).fingerprint == remoteCacheFingerprint(dir) {
-			mode = CacheValidationQuick
-		}
+	if _, ok := loadRemoteCacheValidation(dir, commit, remoteCacheFingerprint(dir), time.Now()); ok {
+		mode = CacheValidationQuick
 	}
 	return WithRepoCacheReadLockContext(ctx, root, func() error {
+		before, checkedAt := remoteCacheFingerprint(dir), time.Now()
 		// Execution never repairs a missing checkout: discovery must have
 		// resolved it first. Keep cancellation through both Git subprocesses.
 		runGit := func(dir string, args ...string) (string, error) {
@@ -44,13 +46,13 @@ func validateRemoteCacheExecution(ctx context.Context, source, root, dir, commit
 		}
 		if err := validateInstalledRemoteCacheWithGit(source, dir, commit, runGit, mode); err != nil {
 			remoteCacheValidationCache.Delete(key)
-			return err
+			return revokeRefusedRemoteCache(dir, err, mode)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if mode == CacheValidationFull {
-			remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(dir)})
+			rememberRemoteCacheValidation(key, dir, commit, before, checkedAt)
 		}
 		return nil
 	})

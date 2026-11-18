@@ -279,6 +279,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 // newRootCmdWithOptions constructs the built-in command tree and optionally
 // performs city/pack discovery selected from injected invocation arguments.
 func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions) *cobra.Command {
+	config.RegisterRemoteCacheRoots()
 	root := &cobra.Command{
 		Use:           "gc",
 		Short:         "Gas City CLI — orchestration-builder for multi-agent workflows",

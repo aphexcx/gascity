@@ -1232,6 +1232,7 @@ go_test(
         "order_retention_paging_test.go",
         "order_scan_contract_test.go",
         "order_store_concurrency_test.go",
+        "pack_cache_receipt_test.go",
         "pack_cache_reload_event_test.go",
         "pack_cache_validation_test.go",
         "pack_command_discovery_lock_test.go",
