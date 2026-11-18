@@ -235,7 +235,7 @@ func TestMailReplyToLocalSender(t *testing.T) {
 	// Exec mail and older unbound messages only supply the display address.
 	alias := mail.Message{From: "crew/night"}
 	cfg, sessions := city.cs.Config(), city.cs.SessionsBeadStore().Store
-	if target, _, err := mailReplyTarget(alias, cfg, sessions); target != nil || err != nil {
+	if target, _, err := mailReplyTarget(alias, cfg, sessions, false); target != nil || err != nil {
 		t.Errorf("local session alias without stored sender binding: target=%v err=%v", target, err)
 	}
 	registry := clientcontext.File{Contexts: []clientcontext.Context{
@@ -245,12 +245,12 @@ func TestMailReplyToLocalSender(t *testing.T) {
 	if err := registry.Save(DefaultPath()); err != nil {
 		t.Fatal(err)
 	}
-	target, _, err := mailReplyTarget(mail.Message{From: "forge/worker"}, cfg, sessions)
+	target, _, err := mailReplyTarget(mail.Message{From: "forge/worker"}, cfg, sessions, false)
 	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send worker") {
 		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
 	}
 	for _, address := range []string{alias.From, "crew/former", "crew/retired"} {
-		if target, _, err := mailReplyTarget(mail.Message{From: address}, cfg, sessions); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
+		if target, _, err := mailReplyTarget(mail.Message{From: address}, cfg, sessions, false); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
 			t.Errorf("ambiguous session address %q and peer city: target=%v err=%v", address, target, err)
 		}
 	}
@@ -275,7 +275,7 @@ func TestMailReplyRefusesUnresolvedOrigin(t *testing.T) {
 		{"ridge/forge/worker", "gc --context CITY mail send forge/worker"},
 		{"hollow/worker", "gc --context CITY mail send worker"},
 	} {
-		target, _, err := mailReplyTarget(mail.Message{From: tc.from}, &config.City{}, nil)
+		target, _, err := mailReplyTarget(mail.Message{From: tc.from}, &config.City{}, nil, false)
 		if target != nil || err == nil || !strings.Contains(err.Error(), tc.hint) {
 			t.Errorf("sender %q: target=%v err=%v, want %q", tc.from, target, err, tc.hint)
 		}

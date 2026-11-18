@@ -2323,13 +2323,15 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	}
 	sender := defaultMailIdentity()
 	providerName := mailProviderName()
+	execProvider := strings.HasPrefix(providerName, "exec:")
+	providerLocal := execProvider && !strings.Contains(original.From, "/")
 	var store beads.Store
 	var cityPath string
 	var cfg *config.City
 	var notifySetupErr error
-	if sender != "human" || notify || original.From != "human" {
+	if sender != "human" || notify || (!providerLocal && original.From != "human") {
 		switch {
-		case strings.HasPrefix(providerName, "exec:"):
+		case execProvider:
 			var err error
 			cityPath, err = resolveCity()
 			if err == nil {
@@ -2341,7 +2343,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			}
 			if err != nil {
 				standalone := cityPath == "" && isCityDiscoveryNotFound(err)
-				if !standalone && !knownLocalMailSender(original, cfg) {
+				if !standalone && !providerLocal && !knownLocalMailSender(original, cfg) {
 					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 				}
 				notifySetupErr = err
@@ -2363,7 +2365,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	if store != nil {
 		sessions = cliSessionStore(store, cfg, cityPath)
 	}
-	target, recipient, err := mailReplyTarget(original, cfg, sessions)
+	target, recipient, err := mailReplyTarget(original, cfg, sessions, providerLocal)
 	if err != nil {
 		return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 	}

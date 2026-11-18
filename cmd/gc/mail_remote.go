@@ -145,13 +145,18 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 
 // mailReplyTarget resolves a city-qualified return address against the local
 // registry. A context may have an alias distinct from its destination city.
-func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Store) (*remoteTarget, string, error) {
+func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Store, providerLocal bool) (*remoteTarget, string, error) {
 	city, recipient, qualified := strings.Cut(original.From, "/")
 	if strings.TrimSpace(original.From) == "" || strings.IndexFunc(original.From, unicode.IsControl) >= 0 ||
 		qualified && (city == "" || recipient == "" || strings.Contains(original.From, "//") || strings.HasSuffix(recipient, "/") || strings.HasPrefix(recipient, "-")) {
 		return nil, "", fmt.Errorf("cannot resolve sender %q; use gc --context CITY mail send AGENT", original.From)
 	}
 	if !qualified {
+		// Exec providers own their local recipient namespace. Only the provider
+		// can resolve or refuse an unqualified return address.
+		if providerLocal {
+			return nil, "", nil
+		}
 		recipient = original.From
 	}
 	hint := func(name string) string {
@@ -166,8 +171,7 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 		}
 	}
 	if !qualified {
-		// A standalone exec provider owns its own recipient directory.
-		if localSender || cfg == nil && sessions == nil {
+		if localSender {
 			return nil, "", nil
 		}
 		return nil, "", fmt.Errorf("no local recipient %q; to answer another city use %s", original.From, hint("CITY"))

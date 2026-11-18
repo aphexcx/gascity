@@ -2237,20 +2237,27 @@ func TestCmdMailReplyExecProviderNotifyWithoutCityWarnsAndSendsReply(t *testing.
 	}
 }
 
-func TestCmdMailReplyExecProviderConfiguredSenderWithoutBeads(t *testing.T) {
-	cityPath, _, script := setupExecMailReplyNudgeTest(t)
-	t.Setenv("GC_MAIL", "exec:"+script)
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = 'alpha'\n[[agent]]\nname = 'alice'\n"), 0o644); err != nil {
+func TestCmdMailReplyExecProviderOwnsBareAddresses(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	seedLocalCity(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "exec:"+writeExecReplyScript(t))
+	dir := filepath.Join(os.Getenv("GC_CITY"), ".gc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "beads.json"), []byte("{invalid"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, notify := range []bool{false, true} {
-		var out, errOut bytes.Buffer
-		rc := cmdMailReply([]string{"gc-1", "answer"}, "", "", notify, &out, &errOut)
-		if rc != 0 || !strings.Contains(out.String(), "to alice") || (notify && !strings.Contains(errOut.String(), "nudge skipped")) {
-			t.Errorf("notify=%t: rc=%d out=%q stderr=%q", notify, rc, &out, &errOut)
+	for _, unavailable := range []bool{false, true} {
+		if unavailable {
+			if err := os.WriteFile(filepath.Join(dir, "beads.json"), []byte("{invalid"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, notify := range []bool{false, true} {
+			var out, errOut bytes.Buffer
+			rc := cmdMailReply([]string{"gc-1", "answer"}, "", "", notify, &out, &errOut)
+			if rc != 0 || !strings.Contains(out.String(), "to alice") || (unavailable && notify && !strings.Contains(errOut.String(), "nudge skipped")) {
+				t.Errorf("unavailable=%t notify=%t: rc=%d out=%q stderr=%q", unavailable, notify, rc, &out, &errOut)
+			}
 		}
 	}
 }
