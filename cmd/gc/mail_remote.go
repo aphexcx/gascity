@@ -14,22 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
-// Remote mail: `gc --context <peer> mail send|reply|inbox` operate a REMOTE
-// city over the control plane. The remote server resolves the recipient and
-// stores the message; the sender identity is asserted by this client (the
-// city-write grant proves which city sent it, the from string says who inside
-// that city). Local-only modes are refused with a clear message rather than
-// silently degraded: --all needs the local live-session enumeration and
-// --notify needs local nudge delivery, neither of which the mail API models.
-//
-// Sender identity: a remote city cannot resolve this session's alias, so the
-// default sender is city-qualified — "<local city>/<identity>" (e.g.
-// citadel/mayor) — which is what the far side sees in `gc mail inbox` and
-// what tells its operator to answer with `gc --context <city> mail send …`.
-// --from overrides it verbatim. gc has no cross-city addressing, so a plain
-// `gc mail reply` on the far side lands in THAT city's store, addressed to
-// the qualified sender; `gc --context <peer> mail inbox` (no argument) reads
-// exactly that mailbox back.
+// Remote mail uses a city-scoped client. The server resolves the recipient
+// and stores the sender address asserted by the client. A city-write grant
+// authorizes the request to its destination. The default return address
+// is "<local city>/<identity>", and --from overrides it verbatim.
 
 // remoteMailIdentity returns the identity part of the default remote sender:
 // the first non-empty of GC_ALIAS, GC_AGENT, GC_SESSION_ID, else "human". The
@@ -300,7 +288,7 @@ func (r remoteInboxReader) Inbox(recipient string) ([]mail.Message, error) {
 
 // cmdMailInboxRemote is the remote arm of `gc mail inbox [recipient]`. With no
 // recipient it reads the mailbox of this client's own remote sender identity
-// ("<local city>/<identity>") — where a far-side `gc mail reply` lands.
+// ("<local city>/<identity>") stored in the selected city.
 func cmdMailInboxRemote(c *api.Client, target *remoteTarget, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	recipient := ""
 	if len(args) > 0 {

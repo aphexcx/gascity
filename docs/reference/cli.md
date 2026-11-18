@@ -2677,15 +2677,20 @@ gc mail read <id> [flags]
 
 Reply to a message. The reply is addressed to the original sender.
 
-Inherits the thread ID from the original message for conversation tracking.
+Local replies inherit the original thread ID. A reply to a sender in another
+city (CITY/AGENT) starts a message in that city's inbox through its configured
+context. If the destination is missing or ambiguous, the command exits with
+an error before sending. To choose the destination yourself, use
+gc --context CITY mail send AGENT. Unqualified senders are local.
+
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
-With --context/--city-url the reply is sent inside a REMOTE city (the reply
-is addressed by that city to the original sender); the sender is
-"&lt;local city&gt;/&lt;identity&gt;" and --notify is refused.
+With --context/--city-url, the message ID and its thread belong to the
+selected city. Both remote delivery modes use the sender
+"&lt;local city&gt;/&lt;identity&gt;" and require replying without --notify.
 
 ```
 gc mail reply <id> [-s subject] [-m body] [flags]
