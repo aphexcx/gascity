@@ -144,9 +144,15 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 	return 0
 }
 
-// mailReplyTarget resolves a city-qualified return address against the local
+type mailReplyResolver struct {
+	cfg       *config.City
+	configErr error
+	sessions  beads.Store
+}
+
+// target resolves a city-qualified return address against the local
 // registry. A context may have an alias distinct from its destination city.
-func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Store, providerLocal bool) (*remoteTarget, string, error) {
+func (r mailReplyResolver) target(original mail.Message, providerLocal bool, stderr io.Writer) (*remoteTarget, string, error) {
 	city, recipient, qualified := strings.Cut(original.From, "/")
 	if strings.TrimSpace(original.From) == "" || strings.IndexFunc(original.From, unicode.IsControl) >= 0 ||
 		qualified && (city == "" || recipient == "" || strings.Contains(original.From, "//") || strings.HasSuffix(recipient, "/") || strings.HasPrefix(recipient, "-")) {
@@ -155,7 +161,7 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 	if !qualified {
 		// Exec providers own their local recipient namespace. Only the provider
 		// can resolve or refuse an unqualified return address.
-		if providerLocal {
+		if providerLocal && r.configErr == nil {
 			return nil, "", nil
 		}
 		recipient = original.From
@@ -163,13 +169,13 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 	hint := func(name string) string {
 		return shellquote.Join([]string{"gc", "--context", name, "mail", "send", recipient})
 	}
-	if knownLocalMailSender(original, cfg) {
+	if original.FromSessionID != "" || (r.configErr == nil && knownLocalMailSender(original, r.cfg)) {
 		return nil, "", nil
 	}
 	var localSender bool
-	if sessions != nil {
+	if r.sessions != nil {
 		var err error
-		localSender, err = sessionOwnsMailAddress(sessions, original.From)
+		localSender, err = sessionOwnsMailAddress(r.sessions, original.From)
 		if err != nil {
 			return nil, "", fmt.Errorf("resolving sender %q: %w; use %s", original.From, err, hint("CITY"))
 		}
@@ -178,13 +184,24 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 		if localSender {
 			return nil, "", nil
 		}
+		if r.configErr != nil {
+			fmt.Fprintf(stderr, "gc mail reply: warning: %v; recipient %q not checked\n", r.configErr, original.From) //nolint:errcheck // best-effort stderr
+			return nil, "", nil
+		}
 		return nil, "", fmt.Errorf("no local recipient %q; to answer another city use %s", original.From, hint("CITY"))
 	}
-	if cfg == nil {
+	if r.configErr != nil && !localSender {
+		return nil, "", fmt.Errorf("%w; cannot tell whether %q is local; use %s", r.configErr, original.From, hint("CITY"))
+	}
+	if r.cfg == nil && r.configErr == nil {
 		return nil, "", fmt.Errorf("no local city to resolve sender %q; use %s", original.From, hint("CITY"))
 	}
 	contexts, err := clientcontext.Load(DefaultPath())
 	if err != nil {
+		if localSender {
+			fmt.Fprintf(stderr, "gc mail reply: warning: %v; replied locally without checking contexts\n", err) //nolint:errcheck // best-effort stderr
+			return nil, "", nil
+		}
 		return nil, "", fmt.Errorf("%w; use %s after configuring the origin", err, hint("CITY"))
 	}
 	var name string
@@ -196,7 +213,7 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 			name = candidate.Name
 		}
 	}
-	if name != "" && (localSender || rigConfigHasRigNamed(cfg, city)) {
+	if name != "" && (localSender || rigConfigHasRigNamed(r.cfg, city)) {
 		return nil, "", fmt.Errorf("sender %q matches both a local address namespace and city %q; to reply there use %s", original.From, city, hint(name))
 	}
 	if localSender {

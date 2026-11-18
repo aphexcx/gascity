@@ -268,8 +268,8 @@ func TestMailReplyToLocalSender(t *testing.T) {
 	}
 	// Exec mail and older unbound messages only supply the display address.
 	alias := mail.Message{From: "crew/night"}
-	cfg, sessions := city.cs.Config(), city.cs.SessionsBeadStore().Store
-	if target, _, err := mailReplyTarget(alias, cfg, sessions, false); target != nil || err != nil {
+	resolver := mailReplyResolver{cfg: city.cs.Config(), sessions: city.cs.SessionsBeadStore().Store}
+	if target, _, err := resolver.target(alias, false, io.Discard); target != nil || err != nil {
 		t.Errorf("local session alias without stored sender binding: target=%v err=%v", target, err)
 	}
 	registry := clientcontext.File{Contexts: []clientcontext.Context{
@@ -279,16 +279,16 @@ func TestMailReplyToLocalSender(t *testing.T) {
 	if err := registry.Save(DefaultPath()); err != nil {
 		t.Fatal(err)
 	}
-	target, _, err := mailReplyTarget(mail.Message{From: "forge/worker"}, cfg, sessions, false)
+	target, _, err := resolver.target(mail.Message{From: "forge/worker"}, false, io.Discard)
 	if target != nil || err != nil {
 		t.Errorf("configured local agent: target=%v err=%v", target, err)
 	}
-	target, _, err = mailReplyTarget(mail.Message{From: "forge/ghost"}, cfg, sessions, false)
+	target, _, err = resolver.target(mail.Message{From: "forge/ghost"}, false, io.Discard)
 	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send ghost") {
 		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
 	}
 	for _, address := range []string{alias.From, "crew/former", "crew/retired"} {
-		if target, _, err := mailReplyTarget(mail.Message{From: address}, cfg, sessions, false); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
+		if target, _, err := resolver.target(mail.Message{From: address}, false, io.Discard); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
 			t.Errorf("ambiguous session address %q and peer city: target=%v err=%v", address, target, err)
 		}
 	}
@@ -372,10 +372,84 @@ func TestMailReplyRefusesUnresolvedOrigin(t *testing.T) {
 		{"ridge/forge/worker", "gc --context CITY mail send forge/worker"},
 		{"hollow/worker", "gc --context CITY mail send worker"},
 	} {
-		target, _, err := mailReplyTarget(mail.Message{From: tc.from}, &config.City{}, nil, false)
+		resolver := mailReplyResolver{cfg: &config.City{}}
+		target, _, err := resolver.target(mail.Message{From: tc.from}, false, io.Discard)
 		if target != nil || err == nil || !strings.Contains(err.Error(), tc.hint) {
 			t.Errorf("sender %q: target=%v err=%v, want %q", tc.from, target, err, tc.hint)
 		}
+	}
+}
+
+func TestMailReplyWithUnreadableConfig(t *testing.T) {
+	for _, file := range []string{"city.toml", "contexts.toml"} {
+		t.Run(file, func(t *testing.T) {
+			clearRemoteMailIdentityEnv(t)
+			t.Setenv("GC_MAIL", "")
+			const cfg = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n[[agent]]\nname = 'worker'\nscope = 'rig'\n[[agent]]\nname = 'alice'\n"
+			city := newCharCity(t, charCityBasic+cfg, nil)
+			t.Setenv("GC_CITY", city.cityPath)
+			sessions := city.cs.SessionsBeadStore().Store
+			addAlias := func(alias string) {
+				t.Helper()
+				_, err := sessions.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"alias": alias}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			addAlias("forge/lane")
+			provider := city.cs.MailProvider("")
+			senders := []string{"alice", "forge/lane", "forge/worker", "forge/late", "ridge/worker"}
+			originals := map[string]string{}
+			for _, from := range senders {
+				m, err := provider.Send(from, "human", "Question", "Any news?")
+				if err != nil {
+					t.Fatal(err)
+				}
+				originals[from] = m.ID
+			}
+			addAlias("forge/late")
+			path := DefaultPath()
+			broken := "[broken"
+			if file == "city.toml" {
+				broken = "[[agent]]\nname = 42\n"
+				path = filepath.Join(city.cityPath, file)
+			}
+			if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, from := range senders {
+				t.Run(from, func(t *testing.T) {
+					var out, stderr bytes.Buffer
+					id := originals[from]
+					rc := cmdMailReply([]string{id, "Answer"}, "", "", false, &out, &stderr)
+					inbox, err := provider.Inbox(from)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantRC, diagnostic := 0, ""
+					switch {
+					case file == "city.toml" && from == "alice":
+						diagnostic = `recipient "alice" not checked`
+					case file == "city.toml" && (from == "forge/worker" || from == "ridge/worker"):
+						wantRC, diagnostic = 1, "cannot tell whether \""+from+"\" is local; use gc --context CITY mail send worker"
+					case file == "contexts.toml" && from == "forge/late":
+						diagnostic = "replied locally without checking contexts"
+					case file == "contexts.toml" && from == "ridge/worker":
+						wantRC, diagnostic = 1, "use gc --context CITY mail send worker after configuring the origin"
+					}
+					if rc != wantRC || (wantRC == 1 && len(inbox) != 0) || (wantRC == 0 && (len(inbox) != 1 || inbox[0].ReplyTo != id)) {
+						t.Errorf("rc=%d want=%d inbox=%v stderr=%q", rc, wantRC, inbox, &stderr)
+					}
+					warnings := 0
+					if wantRC == 0 && diagnostic != "" {
+						warnings = 1
+					}
+					if !strings.Contains(stderr.String(), diagnostic) || strings.Count(stderr.String(), "gc mail reply: warning:") != warnings {
+						t.Errorf("stderr=%q want %d warnings and %q", &stderr, warnings, diagnostic)
+					}
+				})
+			}
+		})
 	}
 }
 

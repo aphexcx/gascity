@@ -2272,6 +2272,20 @@ func testExecProviderBareReplies(t *testing.T, script string) {
 	}
 }
 
+func TestCmdMailReplyExecProviderNotifyWithUnreadableConfig(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	city := newCharCity(t, charCityBasic, nil)
+	t.Setenv("GC_CITY", city.cityPath)
+	t.Setenv("GC_MAIL", "exec:"+writeExecReplyScriptWithGet(t))
+	if err := os.WriteFile(filepath.Join(city.cityPath, "city.toml"), []byte("[[agent]]\nname = 42"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	if rc := cmdMailReply([]string{"gc-1", "Answer"}, "", "", true, &out, &stderr); rc != 0 || !strings.Contains(out.String(), "to alice") {
+		t.Errorf("rc=%d stdout=%q stderr=%q", rc, &out, &stderr)
+	}
+}
+
 func TestCmdMailReplyExecProviderNotifyResolvesNonHumanSender(t *testing.T) {
 	cityPath, sessionID, script := setupExecMailReplyNudgeTest(t)
 	t.Setenv("GC_MAIL", "exec:"+script)

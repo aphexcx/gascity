@@ -2330,6 +2330,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	var store beads.Store
 	var cityPath string
 	var cfg *config.City
+	var configErr error
 	var notifySetupErr error
 	if sender != "human" || notify || (!providerLocal && original.From != "human") {
 		switch {
@@ -2337,10 +2338,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			var err error
 			cityPath, err = resolveCity()
 			if err == nil {
-				cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-				if err != nil && !getUnsupported {
-					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
-				}
+				cfg, configErr = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 				store, err = openStoreAtForCity(cityPath, cityPath)
 			}
 			if err != nil {
@@ -2357,10 +2355,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			if store == nil {
 				return storeCode
 			}
-			cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-			if err != nil {
-				return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
-			}
+			cfg, configErr = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		}
 	}
 	var sessions beads.Store
@@ -2370,7 +2365,8 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	var target *remoteTarget
 	var recipient string
 	if !getUnsupported {
-		target, recipient, err = mailReplyTarget(original, cfg, sessions, providerLocal)
+		resolver := mailReplyResolver{cfg: cfg, configErr: configErr, sessions: sessions}
+		target, recipient, err = resolver.target(original, providerLocal, stderr)
 		if err != nil {
 			return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 		}
