@@ -27,7 +27,7 @@ var reviewHeadings = []string{
 	"## Pruning",
 }
 
-var htmlBlockStart = regexp.MustCompile(`^ {0,3}</?[A-Za-z][A-Za-z0-9-]*([ \t/>]|$)`)
+var htmlBlockStart = regexp.MustCompile(`^ {0,3}<(/?[A-Za-z][A-Za-z0-9-]*)([ \t/>]|$)`)
 
 func checkReviewMD(root fs.FS) error {
 	entries, err := fs.ReadDir(root, ".")
@@ -51,17 +51,28 @@ func checkReviewMD(root fs.FS) error {
 	}
 
 	lines := make(map[string]bool)
-	var fence string
+	var fence, endTag string
 	var comment, rawHTML, dated bool
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimRight(line, " \t\r")
 		left := strings.TrimLeft(line, " ")
-		if fence == "" && !comment {
+		if fence == "" && !comment && endTag == "" {
 			if left == "" {
 				rawHTML = false
-			} else if htmlBlockStart.MatchString(line) {
+			} else if tag := htmlBlockStart.FindStringSubmatch(line); !rawHTML && tag != nil {
 				rawHTML = true
+				switch name := strings.ToLower(tag[1]); name {
+				case "pre", "script", "style", "textarea":
+					endTag = "</" + name + ">"
+				}
 			}
+		}
+		if endTag != "" {
+			if strings.Contains(strings.ToLower(line), endTag) {
+				endTag = ""
+				rawHTML = false
+			}
+			continue
 		}
 		if !comment && !rawHTML && len(line)-len(left) <= 3 && len(left) >= 3 && (left[0] == '`' || left[0] == '~') {
 			mark := left[:1]
@@ -155,6 +166,8 @@ func TestReviewMD(t *testing.T) {
 		{"HTML comment", file(name, strings.Replace(full, securityRule, "<!--\n"+securityRule+"\n-->", 1), 0), securityRule},
 		{"unclosed comment", file(name, strings.Replace(full, "## Pruning", "<!--\n## Pruning", 1), 0), "## Pruning"},
 		{"comment in raw HTML", file(name, "<div>\n```\n<!--\n```\n</div>\n\n"+full, 0), "## What MAJOR means here"},
+		{"preformatted example", file(name, "<PRE>\n\n"+full+"\n</PRE>", 0), "## What MAJOR means here"},
+		{"after script block", file(name, "<script>\nconst marker = '<!--';\n</script>\n"+full, 0), ""},
 		{"real file", os.DirFS(root), ""},
 	}
 	for _, required := range slices.Concat(reviewHeadings, []string{securityRule, manualRule, date}) {
