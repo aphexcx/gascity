@@ -2334,12 +2334,14 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			cityPath, err = resolveCity()
 			if err == nil {
 				cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-				if err == nil {
-					store, err = openStoreAtForCity(cityPath, cityPath)
+				if err != nil {
+					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 				}
+				store, err = openStoreAtForCity(cityPath, cityPath)
 			}
 			if err != nil {
-				if cityPath != "" || !isCityDiscoveryNotFound(err) {
+				standalone := cityPath == "" && isCityDiscoveryNotFound(err)
+				if !standalone && !knownLocalMailSender(original, cfg) {
 					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 				}
 				notifySetupErr = err

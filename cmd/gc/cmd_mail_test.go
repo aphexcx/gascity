@@ -2237,6 +2237,24 @@ func TestCmdMailReplyExecProviderNotifyWithoutCityWarnsAndSendsReply(t *testing.
 	}
 }
 
+func TestCmdMailReplyExecProviderConfiguredSenderWithoutBeads(t *testing.T) {
+	cityPath, _, script := setupExecMailReplyNudgeTest(t)
+	t.Setenv("GC_MAIL", "exec:"+script)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = 'alpha'\n[[agent]]\nname = 'alice'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "beads.json"), []byte("{invalid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, notify := range []bool{false, true} {
+		var out, errOut bytes.Buffer
+		rc := cmdMailReply([]string{"gc-1", "answer"}, "", "", notify, &out, &errOut)
+		if rc != 0 || !strings.Contains(out.String(), "to alice") || (notify && !strings.Contains(errOut.String(), "nudge skipped")) {
+			t.Errorf("notify=%t: rc=%d out=%q stderr=%q", notify, rc, &out, &errOut)
+		}
+	}
+}
+
 func TestCmdMailReplyExecProviderNotifyResolvesNonHumanSender(t *testing.T) {
 	cityPath, sessionID, script := setupExecMailReplyNudgeTest(t)
 	t.Setenv("GC_MAIL", "exec:"+script)

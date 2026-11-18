@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -156,14 +157,13 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 	hint := func(name string) string {
 		return shellquote.Join([]string{"gc", "--context", name, "mail", "send", recipient})
 	}
-	localSender := original.From == "human" || original.FromSessionID != "" ||
-		config.FindAgent(cfg, original.From) != nil || config.FindNamedSession(cfg, original.From) != nil
+	localSender := knownLocalMailSender(original, cfg)
 	if !localSender && sessions != nil {
-		_, err := session.NewStore(beads.SessionStore{Store: sessions}).ResolveAddress(original.From, false)
-		if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+		var err error
+		localSender, err = sessionOwnsMailAddress(sessions, original.From)
+		if err != nil {
 			return nil, "", fmt.Errorf("resolving sender %q: %w; use %s", original.From, err, hint("CITY"))
 		}
-		localSender = err == nil
 	}
 	if !qualified {
 		// A standalone exec provider owns its own recipient directory.
@@ -206,6 +206,31 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 	}
 	target, err := targetFromContext(contexts, name, "mail sender")
 	return target, recipient, err
+}
+
+func knownLocalMailSender(original mail.Message, cfg *config.City) bool {
+	return original.From == "human" || original.FromSessionID != "" ||
+		config.FindAgent(cfg, original.From) != nil || config.FindNamedSession(cfg, original.From) != nil
+}
+
+func sessionOwnsMailAddress(sessions beads.Store, address string) (bool, error) {
+	directory := session.NewStore(beads.SessionStore{Store: sessions})
+	_, err := directory.ResolveAddress(address, true)
+	if !errors.Is(err, session.ErrSessionNotFound) {
+		return err == nil, err
+	}
+	// Older and exec-provider messages may predate a rename and carry only
+	// the old display address. Beadmail includes alias history in its inboxes.
+	all, err := directory.ListAddresses(true)
+	if err != nil {
+		return false, err
+	}
+	for _, info := range all {
+		if slices.Contains(info.AliasHistory, address) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func mailReplyError(code string, err error, jsonOut bool, stdout, stderr io.Writer) int {

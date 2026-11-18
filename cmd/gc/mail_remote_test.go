@@ -195,6 +195,16 @@ func TestMailReplyToLocalSender(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		retired, err := store.Create(beads.Bead{
+			Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"alias": "crew/retired", "alias_history": "crew/former"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(retired.ID); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Setenv("GC_CITY", city.cityPath)
 	provider := city.cs.MailProvider("")
@@ -239,8 +249,10 @@ func TestMailReplyToLocalSender(t *testing.T) {
 	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send worker") {
 		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
 	}
-	if target, _, err := mailReplyTarget(alias, cfg, sessions); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send night") {
-		t.Errorf("ambiguous session alias and peer city: target=%v err=%v", target, err)
+	for _, address := range []string{alias.From, "crew/former", "crew/retired"} {
+		if target, _, err := mailReplyTarget(mail.Message{From: address}, cfg, sessions); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
+			t.Errorf("ambiguous session address %q and peer city: target=%v err=%v", address, target, err)
+		}
 	}
 }
 
