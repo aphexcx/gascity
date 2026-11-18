@@ -2371,9 +2371,10 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	}
 	var target *remoteTarget
 	var recipient string
+	var routeWarnings strings.Builder
 	if !getUnsupported {
 		resolver := mailReplyResolver{cfg: cfg, configErr: configErr, sessions: sessions}
-		target, recipient, err = resolver.target(original, providerLocal, stderr)
+		target, recipient, err = resolver.target(original, providerLocal, &routeWarnings)
 		if err != nil {
 			return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 		}
@@ -2388,7 +2389,8 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
 		}
 		from := loadedCityName(cfg, cityPath) + "/" + remoteMailIdentity()
-		return sendRemoteReply(c, target, args[0], recipient, from, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
+		rec := cliFactoryEventsRecorder(cityPath, cfg)
+		return sendRemoteReply(c, target, rec, args[0], recipient, from, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
 	}
 	if sender != "human" && sessions != nil {
 		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessions, stderr, "gc mail reply")
@@ -2405,7 +2407,11 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
 	}
 
-	return doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
+	code = doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
+	if code == 0 && routeWarnings.Len() != 0 {
+		fmt.Fprint(stderr, routeWarnings.String()) //nolint:errcheck // best-effort stderr
+	}
+	return code
 }
 
 // doMailReply creates a reply to an existing message.

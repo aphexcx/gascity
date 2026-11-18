@@ -80,6 +80,13 @@ func TestRemoteMailSender(t *testing.T) {
 }
 
 func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
+	for _, provider := range []string{"file", "exec"} {
+		t.Run(provider, func(t *testing.T) { testRemoteMailRoundTrip(t, provider) })
+	}
+}
+
+func testRemoteMailRoundTrip(t *testing.T, eventProvider string) {
+	t.Helper()
 	clearRemoteMailIdentityEnv(t)
 	t.Setenv("GC_NO_API", "")
 	t.Setenv("GC_MAIL", "")
@@ -129,9 +136,39 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	prevCity := cityFlag
 	t.Cleanup(func() { cityFlag = prevCity })
 	cityFlag = cityPath
+	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	supervisor, err := events.NewFileRecorder(eventPath, io.Discard, events.WithMaxSize(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	supervisor.Record(events.Event{Type: events.MailSent, Subject: "before"})
+	activeFile, err := os.Stat(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_EVENTS_ROTATION_ENABLED", "true")
+	t.Setenv("GC_EVENTS_ROTATION_MAX_SIZE_BYTES", "1")
+	replyEventPath := eventPath
+	if eventProvider == "exec" {
+		dir := t.TempDir()
+		script := filepath.Join(dir, "events-provider")
+		replyEventPath = filepath.Join(dir, "records.jsonl")
+		if err := os.WriteFile(script, []byte(`#!/bin/sh
+if [ "$1" = record ]; then
+  cat >> "${0%/*}/records.jsonl"
+  printf '\n' >> "${0%/*}/records.jsonl"
+fi
+`), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_EVENTS", "exec:"+script)
+	} else {
+		t.Setenv("GC_EVENTS", "file")
+	}
 	replyEvents := func() []events.Event {
 		t.Helper()
-		all, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+		all, err := events.ReadAll(replyEventPath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,6 +245,21 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	}
 	if got := replyEvents(); len(got) != 2 {
 		t.Errorf("after explicit context reply, got %d mail.replied events, want 2", len(got))
+	}
+	after, err := os.Stat(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(activeFile, after) {
+		t.Error("a one-shot reply rotated the active supervisor log")
+	}
+	supervisor.Record(events.Event{Type: events.MailSent, Subject: "after"})
+	all, err := events.ReadAll(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 || all[len(all)-1].Subject != "after" {
+		t.Error("supervisor event after the reply is missing from the log")
 	}
 	want := []string{"POST /v0/city/alpha/mail", "GET /v0/city/alpha/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/alpha/mail/" + original.ID + "/reply"}
 	if strings.Join(hits, ",") != strings.Join(want, ",") {
@@ -448,6 +500,15 @@ func TestMailReplyWithUnreadableConfig(t *testing.T) {
 						t.Errorf("stderr=%q want %d warnings and %q", &stderr, warnings, diagnostic)
 					}
 				})
+			}
+			if file == "contexts.toml" {
+				t.Setenv("GC_ALIAS", "absent")
+				var out, stderr bytes.Buffer
+				rc := cmdMailReply([]string{originals["forge/late"], "Answer"}, "", "", false, &out, &stderr)
+				inbox, err := provider.Inbox("forge/late")
+				if rc != 1 || err != nil || len(inbox) != 1 || strings.Contains(stderr.String(), "replied locally") {
+					t.Errorf("unresolved reply sender: rc=%d inbox=%v err=%v stderr=%q", rc, inbox, err, &stderr)
+				}
 			}
 		})
 	}

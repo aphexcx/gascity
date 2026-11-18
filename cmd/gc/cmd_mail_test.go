@@ -2275,6 +2275,19 @@ func testExecProviderBareReplies(t *testing.T, script string) {
 func TestCmdMailReplyExecProviderNotifyWithUnreadableConfig(t *testing.T) {
 	clearRemoteMailIdentityEnv(t)
 	city := newCharCity(t, charCityBasic, nil)
+	store := city.cs.SessionsBeadStore().Store
+	for _, name := range []string{"one", "two"} {
+		b, err := store.Create(beads.Bead{
+			Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"alias": "alice", "session_name": name},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("GC_CITY", city.cityPath)
 	t.Setenv("GC_MAIL", "exec:"+writeExecReplyScriptWithGet(t))
 	if err := os.WriteFile(filepath.Join(city.cityPath, "city.toml"), []byte("[[agent]]\nname = 42"), 0o600); err != nil {

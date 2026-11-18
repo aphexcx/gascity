@@ -177,7 +177,12 @@ func (r mailReplyResolver) target(original mail.Message, providerLocal bool, std
 		var err error
 		localSender, err = sessionOwnsMailAddress(r.sessions, original.From)
 		if err != nil {
-			return nil, "", fmt.Errorf("resolving sender %q: %w; use %s", original.From, err, hint("CITY"))
+			if !providerLocal {
+				return nil, "", fmt.Errorf("resolving sender %q: %w; use %s", original.From, err, hint("CITY"))
+			}
+			// An exec provider owns bare recipients even if the city's
+			// optional session lookup cannot confirm the address.
+			r.configErr = fmt.Errorf("%w; resolving sender: %w", r.configErr, err)
 		}
 	}
 	if !qualified {
@@ -276,10 +281,10 @@ func cmdMailReplyRemote(c *api.Client, target *remoteTarget, args []string, subj
 	if body == "" && len(args) > 1 {
 		body = strings.Join(args[1:], " ")
 	}
-	return sendRemoteReply(c, target, args[0], "", remoteMailSender(""), subject, body, notify, jsonOut, stdout, stderr)
+	return sendRemoteReply(c, target, events.Discard, args[0], "", remoteMailSender(""), subject, body, notify, jsonOut, stdout, stderr)
 }
 
-func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, sender, subject, body string, notify, jsonOut bool, stdout, stderr io.Writer) int {
+func sendRemoteReply(c *api.Client, target *remoteTarget, rec events.Recorder, id, recipient, sender, subject, body string, notify, jsonOut bool, stdout, stderr io.Writer) int {
 	if notify {
 		return mailReplyError("unsupported_remote", fmt.Errorf("--notify delivery for a remote city lands separately; reply without --notify"), jsonOut, stdout, stderr)
 	}
@@ -303,7 +308,7 @@ func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, sender,
 	to := reply.To
 	if destination != "" {
 		to = destination + "/" + to
-		openCityRecorder(stderr).Record(events.Event{
+		rec.Record(events.Event{
 			Type: events.MailReplied, Actor: sender, Subject: reply.ID,
 			Message: to, Payload: mailEventPayload(&reply),
 		})
