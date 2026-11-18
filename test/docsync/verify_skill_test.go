@@ -23,16 +23,32 @@ const verifySmoke = `(
   env -i -C "$scratch" HOME="$scratch" ./bin/gc --help
 )`
 
-var verifyCommands = strings.Fields("build check-hooks fmt-check lint vet test-pkg check-docs spec-ci dashboard-ci test-fast-parallel")
+// These blocks have a different purpose from an unconditional Make command.
+// Match the complete block so dropping a guard or masking its status fails.
+const verifyLinter = `(
+  set -eu
+  . scripts/lib/go-toolchain.sh
+  gc_go_toolchain "$PWD"
+  version=$(awk '$1 == "GOLANGCI_LINT_VERSION" {print $3}' Makefile)
+  compiler=$(go env GOVERSION)
+  linter="$(go env GOPATH)/bin/gascity-tools/golangci-lint-v$version-$compiler/golangci-lint"
+  test -x "$linter"
+  go version -m "$linter" | awk -v compiler="$compiler" -v version="v$version" '
+    NR == 1 && $NF == compiler { toolchain = 1 }
+    $1 == "mod" && $2 == "github.com/golangci/golangci-lint/v2" && $3 == version { module = 1 }
+    END { exit !(toolchain && module) }'
+)`
+
+const verifyIsolated = `make test-pkg PKG=./test/docsync RUN='^TestVerifySkill$' COUNT=5`
+
+var verifyCommands = strings.Fields("build check-hooks fmt-check lint vet test-pkg check-docs spec-ci dashboard-ci check-bd-parent-grammar test-fast-parallel")
 
 var failureRules = []string{
-	"When a test fails in a package you did not change, run that one test alone five times.",
-	"If it passes five of five, record the load-only failure in the handoff and continue.",
-	"If it fails even once alone, stop and report the base failure.",
-	"If a package exceeds its time limit, apply the same rule to its slowest test.",
+	"Five isolated passes leave the full command's failed exit status in the READY.",
+	"Use “load-only” only if the whole package passes on head and independent evidence ties the failure to load.",
+	"Treat a failure reproduced in the package on head as the change's own unless the same package command fails the same way on the unchanged base.",
+	"Include both outputs in the READY. If the base passes, differs, or cannot be tested, stop and report the head failure.",
 	"Never rerun the suite until it passes.",
-	"Report the original suite exit status and any unexecuted tests as unverified, even when all five isolated runs pass.",
-	"Confirm attribution on the unchanged base before calling a failure pre-existing.",
 }
 
 var (
@@ -74,6 +90,7 @@ func TestVerifySkill(t *testing.T) {
 
 	classified := make(map[string]string)
 	seenCommands := make(map[string]bool)
+	var sawLinterCheck, sawIsolated bool
 	classify := func(target, class string) {
 		if !rules[target] {
 			t.Errorf("missing Makefile target %q", target)
@@ -117,18 +134,29 @@ func TestVerifySkill(t *testing.T) {
 			continue
 		}
 		if verifyShell(language) {
-			target, err := verifyCommand(root, strings.Join(lines, "\n"))
-			if err != nil {
-				t.Error(err)
-			} else {
-				classify(target, "Command of record")
-				seenCommands[target] = true
+			script := strings.Join(lines, "\n")
+			switch script {
+			case verifyLinter:
+				sawLinterCheck = true
+			case verifyIsolated:
+				sawIsolated = true
+			default:
+				target, err := verifyCommand(root, script)
+				if err != nil {
+					t.Error(err)
+				} else {
+					classify(target, "Command of record")
+					seenCommands[target] = true
+				}
 			}
 		}
 		lines, marker = nil, ""
 	}
 	if marker != "" {
 		t.Error("unclosed verification fence")
+	}
+	if !sawLinterCheck || !sawIsolated {
+		t.Error("missing pinned linter check or five-run diagnostic")
 	}
 	for _, target := range verifyCommands {
 		if !seenCommands[target] {
@@ -142,10 +170,16 @@ func TestVerifySkill(t *testing.T) {
 			}
 		}
 	}
+	for target := range rules {
+		if classified[target] == "" {
+			t.Errorf("unclassified Makefile target: %s", target)
+		}
+	}
 }
 
 func verifyShell(language string) bool {
-	return slices.Contains([]string{"", "sh", "bash", "shell", "zsh", "console"}, language)
+	words := strings.Fields(language)
+	return len(words) == 0 || slices.Contains([]string{"sh", "bash", "shell", "zsh", "console"}, words[0])
 }
 
 func checkVerifyProse(t *testing.T, root, skill, line string, rules map[string]bool) {
@@ -198,6 +232,9 @@ func verifyCommand(root, script string) (string, error) {
 	if script == verifySmoke {
 		return "build", nil
 	}
+	if script == "command -v oapi-codegen && make spec-ci" {
+		return "spec-ci", nil
+	}
 	// Validate the whole statement. Inspecting nested calls alone loses
 	// control flow, status masking, redirects and background execution.
 	tree, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(script), "verify skill")
@@ -225,7 +262,7 @@ func verifyCommand(root, script string) (string, error) {
 		return "", fmt.Errorf("unexpected command: %s", script)
 	}
 	target := args[1]
-	if target == "build" || !slices.Contains(verifyCommands, target) {
+	if target == "build" || target == "spec-ci" || !slices.Contains(verifyCommands, target) {
 		return "", fmt.Errorf("unmeasured or unguarded verification command: %s", script)
 	}
 	if target != "test-pkg" {
@@ -234,8 +271,8 @@ func verifyCommand(root, script string) (string, error) {
 		}
 		return target, nil
 	}
-	if len(call.Args) != 3 {
-		return "", fmt.Errorf("test-pkg needs exactly one PKG=./package argument: %s", script)
+	if len(args) != 5 || args[3] != "RUN=." || args[4] != "COUNT=1" {
+		return "", fmt.Errorf("whole-package check needs PKG=./package RUN=. COUNT=1: %s", script)
 	}
 	path, ok := strings.CutPrefix(args[2], "PKG=./")
 	if !ok || !filepath.IsLocal(path) {

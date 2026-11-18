@@ -15,7 +15,25 @@ Check hook ownership first. This reads the configuration and takes less than a m
 make check-hooks
 ```
 
-Check formatting (3 minutes), then lint (9 minutes). Both can install the pinned linter in the Go tool cache directory under GOPATH if absent. Formatting prints the diff. Lint populates analysis caches.
+Before either formatting or lint, check the cached linter for the toolchain Make selects (less than a minute). Both targets install a replacement if the executable, compiler or module version fails this check. On a nonzero exit, stop and report the missing or mismatched tool.
+
+```sh
+(
+  set -eu
+  . scripts/lib/go-toolchain.sh
+  gc_go_toolchain "$PWD"
+  version=$(awk '$1 == "GOLANGCI_LINT_VERSION" {print $3}' Makefile)
+  compiler=$(go env GOVERSION)
+  linter="$(go env GOPATH)/bin/gascity-tools/golangci-lint-v$version-$compiler/golangci-lint"
+  test -x "$linter"
+  go version -m "$linter" | awk -v compiler="$compiler" -v version="v$version" '
+    NR == 1 && $NF == compiler { toolchain = 1 }
+    $1 == "mod" && $2 == "github.com/golangci/golangci-lint/v2" && $3 == version { module = 1 }
+    END { exit !(toolchain && module) }'
+)
+```
+
+Check formatting (3 minutes), then lint (9 minutes). Formatting prints the diff. Lint populates analysis caches.
 
 ```sh
 make fmt-check
@@ -31,13 +49,9 @@ Vet uses the Go build cache (less than a minute).
 make vet
 ```
 
-Run the package target once per changed Go package (1 minute for this example). Skip this step for changes outside Go packages. The fast test targets set read-only module resolution and `GC_FAST_UNIT=1`. Their `env -i` allowlist preserves HOME and selected provider variables. Keep session variables such as `GC_CITY`, `GC_HOME`, `GC_SESSION_ID`, `BEADS_DIR`, `GC_DOLT_PORT` and `BEADS_DOLT_SERVER_PORT` out of `EXTRA_TEST_ENV`. The package target writes a test log and an isolated Git configuration in temporary storage.
+Run the [whole-package command](#diagnose-a-failed-run) once per changed Go package (1 minute for the example). Skip this step for changes outside Go packages. The fast test targets set read-only module resolution and `GC_FAST_UNIT=1`. Their `env -i` allowlist preserves HOME and selected provider variables. Keep session variables such as `GC_CITY`, `GC_HOME`, `GC_SESSION_ID`, `BEADS_DIR`, `GC_DOLT_PORT` and `BEADS_DOLT_SERVER_PORT` out of `EXTRA_TEST_ENV`. The package target writes a test log and an isolated Git configuration in temporary storage.
 
-```sh
-make test-pkg PKG=./test/docsync
-```
-
-For documentation and verification skill changes, run the sync tests (1 minute, Go cache only). Hosted preflight runs this command on the prospective merge commit, including skill-only PRs. The [docs verification guide](../gascity-docs/references/verification.md) covers authoring tasks separately. Leave preview servers and diagram rendering out of unattended verification. The [testing policy](../../../TESTING.md) describes the separate hosted Bazel suite.
+For documentation and verification skill changes, run the sync tests (1 minute, Go cache only). Hosted preflight runs this command on the prospective merge commit, including skill-only PRs. The [docs verification guide](../gascity-docs/references/verification.md) covers authoring tasks separately. Use a provisioned environment for the required dashboard preview. Leave preview servers and diagram rendering off machines running a city. The [testing policy](../../../TESTING.md) describes the separate hosted Bazel suite.
 
 ```sh
 make check-docs
@@ -46,7 +60,7 @@ make check-docs
 For API, OpenAPI or dashboard changes, use an already provisioned oapi-codegen, Node 22.13.0 or later, and npm. Run the schema check first (less than a minute). It regenerates tracked OpenAPI and event schemas, their text mirrors and the Go client, then checks for drift. The Makefile installs oapi-codegen onto PATH if missing. Stop and report the missing tool before running the target in that case.
 
 ```sh
-make spec-ci
+command -v oapi-codegen && make spec-ci
 ```
 
 Then run the dashboard check (2 minutes). It installs workspace dependencies, rewrites the embedded dashboard and TypeScript client, typechecks, runs Go tests and checks for drift. Before the next inventory check or commit, move the dashboard's newly installed node_modules directory outside the checkout and restore the original dependency state. Otherwise Gazelle discovers Go packages inside the installed modules.
@@ -72,19 +86,50 @@ The build and two CLI reads together took 1 minute. The build uses the caller's 
 
 ## Before handoff
 
-Run the sharded fast suite once. The measured push including this suite took 13 minutes. The runner writes per-shard logs and uses Go caches. A normal push that runs the suite supplies this result.
+Check the parent-dependency grammar alongside the sharded fast suite. This compares gc with the pinned beads parser and may download the module if absent. With the module cached it compared 189 spellings in less than a minute.
+
+```sh
+make check-bd-parent-grammar
+```
+
+Run the sharded fast suite once (13 minutes in a measured push). A normal push runs it for a new branch or changed Go files and supplies this result. Otherwise run it directly. The runner writes per-shard logs and uses Go caches. Before starting tests it sweeps the invoking user's stale processes across the machine. Once they reach the package timeout age, it kills orphaned Go test binaries and holders of abandoned test tmux sockets, and removes those sockets' parent directories. With slot locking available it waits up to 600 seconds by default for a slot under the enclosing city, or under the Git common directory outside a city. A runner exit of 75 before tests start means slot contention (Make can report this as Error 75 and exit 2). Wait for a free slot, retry once and report both attempts in the READY.
 
 ```sh
 make test-fast-parallel
 ```
 
-When a test fails in a package you did not change, run that one test alone five times. Use the package target's `RUN` and `COUNT` arguments and record the test, package, machine load and all five results. If it passes five of five, record the load-only failure in the handoff and continue. If it fails even once alone, stop and report the base failure. If a package exceeds its time limit, apply the same rule to its slowest test. Never rerun the suite until it passes. Investigate failures in a changed package before handoff.
+### Diagnose a failed run
 
-Report the original suite exit status and any unexecuted tests as unverified, even when all five isolated runs pass. Isolated runs can miss failures that depend on test order or shared state. Confirm attribution on the unchanged base before calling a failure pre-existing.
+Record the full command's exit status, output and any tests it did not reach. Five isolated passes leave the full command's failed exit status in the READY. Use “load-only” only if the whole package passes on head and independent evidence ties the failure to load. Running the entire package preserves its test order and shared state. Treat a failure reproduced in the package on head as the change's own unless the same package command fails the same way on the unchanged base. Include both outputs in the READY. If the base passes, differs, or cannot be tested, stop and report the head failure. Never rerun the suite until it passes.
+
+For a named failure, substitute the affected package and exact test name in this five-run diagnostic (less than a minute for this example). Record the load and all five results. For a timeout without a named test, go straight to the whole package.
+
+```sh
+make test-pkg PKG=./test/docsync RUN='^TestVerifySkill$' COUNT=5
+```
+
+Run the whole package once on head (1 minute for this example). If it fails, use this identical command on the unchanged base.
+
+```sh
+make test-pkg PKG=./test/docsync RUN=. COUNT=1
+```
+
+### Hosted coverage
+
+Local fast tests omit process-backed CLI scenarios, tagged integration and acceptance tests, and the product-metrics testhook. For a change in one of these families, name the owning hosted job and its result at the pushed head in the READY. A skipped job or a result from another commit leaves the change unverified.
+
+| Family | Hosted job |
+| --- | --- |
+| CLI processes and tagged telemetry | cmd/gc process / shard N of 12 and cmd/gc product metrics testhook, respectively |
+| Integration | Integration / packages-core-1-of-4 and its sibling shards, plus Integration / rest-full-N-of-16 on eligible pushes |
+| Acceptance A and beads contracts | Preflight / acceptance A, Contract / bd CLI (minimum supported), Contract / acceptance A (bd current), Beads / topology acceptance |
+| Acceptance B and C | Tier B acceptance tests and Tier C acceptance tests (Ollama) in the nightly workflow. These supply no result for a PR head unless that commit actually runs there. |
+| Tagged Dolt chaos | No hosted job runs this family. Record it as unverified. |
+| Dashboard browser rendering | Dashboard SPA runs the Playwright render smoke. |
 
 ## Other Make targets
 
-The fenced Make targets above are the commands of record. **NEVER** run the following targets marked NEVER as verification. The harmless targets are unnecessary for this checklist.
+The fenced Make targets above are the commands of record. An agent on a machine running a city must **NEVER** run a target marked NEVER. For the test families above, the named hosted job is the gate. The harmless targets are unnecessary for this checklist.
 
 | Class | Targets | Effect |
 | --- | --- | --- |
@@ -112,7 +157,7 @@ The fenced Make targets above are the commands of record. **NEVER** run the foll
 | Harmless | `check-release-dist-ignore`, `check-routed-test-rows`, `check-split-topology-rows`, `check-inventories`, `check-residency-boundary` | Check repository inventories and boundaries. |
 | Harmless | `test-ci-policy`, `check-gomod-replace`, `check-native-dependency-surface`, `check-eventexport-isolation`, `check-core-boundary`, `test-native-doltlite-beads` | Additional CI policy, dependency and native-store checks. |
 | Harmless | `check-bd`, `check-docker`, `check-dolt`, `check-version-tag`, `print-cgo-env`, `check-icu`, `help` | Inspect local tool availability, environment or metadata. |
-| Harmless | `complexity`, `complexity-diff`, `complexity-check`, `check-bd-parent-grammar` | Inspect complexity or check a pinned dependency's grammar. |
+| Harmless | `complexity`, `complexity-diff`, `complexity-check` | Inspect complexity. |
 | Harmless | `test-worker-core`, `test-worker-core-phase2` | Run deterministic transcript and continuation tests. |
 | NEVER | `test-cover`, `cover` | Delete previous CLI coverage shards and replace the merged report. |
 | Harmless | `test-cover-mac`, `test-cover-noncmdgc`, `test-cover-cmdgc-shard` | Run additional suites and write local coverage profiles. |
