@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const (
@@ -94,6 +97,19 @@ func checkReviewMD(root fs.FS) error {
 
 func TestReviewMD(t *testing.T) {
 	const date = "Prune by: 2027-02-17"
+	root := repoRoot()
+	if bazeltest.IsBazel() {
+		// Bazel projects even regular source files as symlinks. Require the
+		// declared input, then inspect its source directory for case and type.
+		if _, err := os.Stat(filepath.Join(root, "REVIEW.md")); err != nil {
+			t.Fatal(err)
+		}
+		anchor, err := filepath.EvalSymlinks(filepath.Join(root, "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		root = filepath.Dir(anchor)
+	}
 	full := strings.Join(reviewHeadings, "\n") + "\n" + securityRule + "\n" + manualRule + "\n" + date
 	file := func(name, body string, mode fs.FileMode) fs.FS {
 		return fstest.MapFS{name: &fstest.MapFile{Data: []byte(body), Mode: mode}}
@@ -115,7 +131,7 @@ func TestReviewMD(t *testing.T) {
 		{"tilde fence", file(name, strings.Replace(full, manualRule, "   ~~~\n"+manualRule+"\n   ~~~", 1), 0), manualRule},
 		{"HTML comment", file(name, strings.Replace(full, securityRule, "<!--\n"+securityRule+"\n-->", 1), 0), securityRule},
 		{"unclosed comment", file(name, strings.Replace(full, "## Pruning", "<!--\n## Pruning", 1), 0), "## Pruning"},
-		{"real file", os.DirFS(repoRoot()), ""},
+		{"real file", os.DirFS(root), ""},
 	}
 	for _, required := range slices.Concat(reviewHeadings, []string{securityRule, manualRule, date}) {
 		body := strings.Replace(full, required, "", 1)
