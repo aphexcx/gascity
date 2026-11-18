@@ -80,6 +80,7 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
+	City          string               `json:"city,omitempty"`
 	DryRun        bool                 `json:"dry_run,omitempty"`
 }
 
@@ -2309,6 +2310,25 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	mp, code := openCityMailProvider(stderr, "gc mail reply")
 	if mp == nil {
 		return code
+	}
+	original, err := mp.Get(args[0])
+	if err != nil {
+		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
+	}
+	target, recipient, err := mailReplyTarget(original)
+	if err != nil {
+		return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+	}
+	if target != nil {
+		c, err := buildRemoteWriteClient(target)
+		if err != nil {
+			return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
+		}
+		body := message
+		if body == "" {
+			body = strings.Join(args[1:], " ")
+		}
+		return sendRemoteReply(c, target, args[0], recipient, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
 	}
 	rec := openCityRecorder(stderr)
 

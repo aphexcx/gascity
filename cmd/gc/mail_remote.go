@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
@@ -147,39 +148,88 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 	return 0
 }
 
-// cmdMailReplyRemote is the remote arm of `gc mail reply <id> [body...]`.
-func cmdMailReplyRemote(c *api.Client, target *remoteTarget, args []string, subject, message string, notify, jsonOut bool, stdout, stderr io.Writer) int {
-	fail := func(code, msg string) int {
-		if jsonOut {
-			return writeJSONError(stdout, stderr, code, msg, 1)
+// mailReplyTarget resolves a city-qualified return address against the local
+// registry. A context may have an alias distinct from its destination city.
+func mailReplyTarget(original mail.Message) (*remoteTarget, string, error) {
+	city, recipient, qualified := strings.Cut(original.From, "/")
+	if !qualified {
+		return nil, "", nil
+	}
+	contexts, err := clientcontext.Load(DefaultPath())
+	if err != nil {
+		return nil, "", err
+	}
+	var name string
+	for _, candidate := range contexts.Contexts {
+		if candidate.EffectiveCity() == city {
+			if name != "" {
+				return nil, "", fmt.Errorf("multiple contexts for city %q; use gc --context CITY mail send %s", city, recipient)
+			}
+			name = candidate.Name
 		}
-		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
-		return 1
 	}
+	if name == "" {
+		return nil, "", fmt.Errorf("no context for city %q; use gc --context %s mail send %s", city, city, recipient)
+	}
+	if err := guardNoAPI(readRemoteSelection()); err != nil {
+		return nil, "", err
+	}
+	target, err := targetFromContext(contexts, name, "mail sender")
+	return target, recipient, err
+}
+
+func mailReplyError(code string, err error, jsonOut bool, stdout, stderr io.Writer) int {
+	msg := "gc mail reply: " + err.Error()
+	if jsonOut {
+		return writeJSONError(stdout, stderr, code, msg, 1)
+	}
+	fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
+// cmdMailReplyRemote replies to an original stored in the explicitly selected city.
+func cmdMailReplyRemote(c *api.Client, target *remoteTarget, args []string, subject, message string, notify, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		return fail("invalid_arguments", "gc mail reply: missing message ID")
+		return mailReplyError("invalid_arguments", fmt.Errorf("missing message ID"), jsonOut, stdout, stderr)
 	}
-	if notify {
-		return fail("unsupported_remote", "gc mail reply: --notify delivery for a remote city lands separately; reply without --notify")
-	}
-	id := args[0]
 	body := message
 	if body == "" && len(args) > 1 {
 		body = strings.Join(args[1:], " ")
+	}
+	return sendRemoteReply(c, target, args[0], "", subject, body, notify, jsonOut, stdout, stderr)
+}
+
+func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, subject, body string, notify, jsonOut bool, stdout, stderr io.Writer) int {
+	if notify {
+		return mailReplyError("unsupported_remote", fmt.Errorf("--notify delivery for a remote city lands separately; reply without --notify"), jsonOut, stdout, stderr)
 	}
 	sender := remoteMailSender("")
 	if !jsonOut {
 		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
 	}
-	reply, err := c.ReplyMail(id, api.MailReplyRequest{From: sender, Subject: subject, Body: body})
+	var reply mail.Message
+	var err error
+	var destination string
+	if recipient == "" {
+		reply, err = c.ReplyMail(id, api.MailReplyRequest{From: sender, Subject: subject, Body: body})
+	} else {
+		// The original ID belongs to the local store, so it cannot identify
+		// a parent message in the other city.
+		destination = target.CityName
+		reply, err = c.SendMail(api.MailSendRequest{From: sender, To: recipient, Subject: subject, Body: body})
+	}
 	if err != nil {
-		return fail("mail_reply_failed", "gc mail reply: "+err.Error())
+		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, City: destination, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)})
 	}
-	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s (as %s)\n", id, reply.ID, reply.To, reply.From) //nolint:errcheck // best-effort stdout
+	to := reply.To
+	if destination != "" {
+		to = destination + "/" + to
+	}
+	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s (as %s)\n", id, reply.ID, to, reply.From) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
