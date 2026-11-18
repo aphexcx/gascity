@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -282,13 +283,17 @@ func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, sender,
 	if err != nil {
 		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
 	}
-	if jsonOut {
-		summary := summarizeMailMessage(reply)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, City: destination, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)})
-	}
 	to := reply.To
 	if destination != "" {
 		to = destination + "/" + to
+		openCityRecorder(stderr).Record(events.Event{
+			Type: events.MailReplied, Actor: sender, Subject: reply.ID,
+			Message: to, Payload: mailEventPayload(&reply),
+		})
+	}
+	if jsonOut {
+		summary := summarizeMailMessage(reply)
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, City: destination, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)})
 	}
 	fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s (as %s)\n", id, reply.ID, to, reply.From) //nolint:errcheck // best-effort stdout
 	return 0

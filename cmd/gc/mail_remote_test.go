@@ -129,6 +129,20 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	prevCity := cityFlag
 	t.Cleanup(func() { cityFlag = prevCity })
 	cityFlag = cityPath
+	replyEvents := func() []events.Event {
+		t.Helper()
+		all, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var replies []events.Event
+		for _, event := range all {
+			if event.Type == events.MailReplied {
+				replies = append(replies, event)
+			}
+		}
+		return replies
+	}
 	for _, jsonOut := range []bool{false, true} {
 		out.Reset()
 		errOut.Reset()
@@ -144,6 +158,10 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	if rc := doContextAdd(clientcontext.Context{Name: "return-route", City: charCityName, URL: server.URL}, &out, &errOut); rc != 0 {
 		t.Fatal(errOut.String())
 	}
+	if got := replyEvents(); len(got) != 0 {
+		t.Errorf("refused replies recorded events: %+v", got)
+	}
+	var previousID string
 	for i, jsonOut := range []bool{false, true} {
 		out.Reset()
 		errOut.Reset()
@@ -162,8 +180,21 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 		inbox, err := origin.cs.MailProvider("").Inbox("human")
 		if err != nil || len(inbox) != i+1 {
 			t.Errorf("origin inbox: got %d deliveries, want %d (err=%v)", len(inbox), i+1, err)
-		} else if m := inbox[0]; m.From != "alpha/human" || m.Subject != "Re: Question" || m.Body != "An answer" {
-			t.Errorf("delivered reply: %+v", m)
+		} else {
+			m := inbox[0]
+			if i == 1 && m.ID == previousID {
+				m = inbox[1]
+			}
+			previousID = m.ID
+			if m.From != "alpha/human" || m.Subject != "Re: Question" || m.Body != "An answer" {
+				t.Errorf("delivered reply: %+v", m)
+			}
+			replies := replyEvents()
+			if len(replies) != i+1 {
+				t.Errorf("after reply %d, got %d mail.replied events", i+1, len(replies))
+			} else if e := replies[i]; e.Actor != "alpha/human" || e.Subject != m.ID || e.Message != charCityName+"/human" || !bytes.Equal(e.Payload, mailEventPayload(&m)) {
+				t.Errorf("mail.replied event=%+v payload=%s, delivered=%+v", e, e.Payload, m)
+			}
 		}
 	}
 	if duds, err := local.Inbox(from); err != nil || len(duds) != 0 {
@@ -174,6 +205,9 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 	contextFlag = "peer"
 	if rc := cmdMailReplyJSON([]string{original.ID, "Within alpha"}, "", "", false, false, &out, &errOut); rc != 0 {
 		t.Fatal(errOut.String())
+	}
+	if got := replyEvents(); len(got) != 2 {
+		t.Errorf("after explicit context reply, got %d mail.replied events, want 2", len(got))
 	}
 	want := []string{"POST /v0/city/alpha/mail", "GET /v0/city/alpha/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/alpha/mail/" + original.ID + "/reply"}
 	if strings.Join(hits, ",") != strings.Join(want, ",") {
