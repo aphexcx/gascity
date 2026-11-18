@@ -31,6 +31,8 @@ var failureRules = []string{
 	"If it fails even once alone, stop and report the base failure.",
 	"If a package exceeds its time limit, apply the same rule to its slowest test.",
 	"Never rerun the suite until it passes.",
+	"Report the original suite exit status and any unexecuted tests as unverified, even when all five isolated runs pass.",
+	"Confirm attribution on the unchanged base before calling a failure pre-existing.",
 }
 
 var (

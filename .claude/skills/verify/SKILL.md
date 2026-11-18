@@ -80,6 +80,8 @@ make test-fast-parallel
 
 When a test fails in a package you did not change, run that one test alone five times. Use the package target's `RUN` and `COUNT` arguments and record the test, package, machine load and all five results. If it passes five of five, record the load-only failure in the handoff and continue. If it fails even once alone, stop and report the base failure. If a package exceeds its time limit, apply the same rule to its slowest test. Never rerun the suite until it passes. Investigate failures in a changed package before handoff.
 
+Report the original suite exit status and any unexecuted tests as unverified, even when all five isolated runs pass. Isolated runs can miss failures that depend on test order or shared state. Confirm attribution on the unchanged base before calling a failure pre-existing.
+
 ## Other Make targets
 
 The fenced Make targets above are the commands of record. **NEVER** run the following targets marked NEVER as verification. The harmless targets are unnecessary for this checklist.
