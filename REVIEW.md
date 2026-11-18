@@ -1,9 +1,11 @@
 # Review rules
 
 Read this file from the base branch, `integration`, for every pull request.
-Use `git show origin/integration:REVIEW.md`. If the base has no copy, say so
-in the review record. The first PR adding this file is reviewed under the
-rules already on its base.
+Fetch it first with `git fetch origin integration`, then pin the fetched
+commit with `base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')`.
+Stop if the fetch or lookup fails. Read `git show "$base:REVIEW.md"`.
+Record a missing policy only when `git ls-tree "$base" -- REVIEW.md`
+succeeds with no entry. Stop on any other read error.
 
 ## What MAJOR means here
 
@@ -22,11 +24,12 @@ the review brief when it requires a different standard of reproduction.
 | MINOR | Causes a visible, retryable refusal, a bounded delay during an operator race, or a misleading result from which the caller can recover without losing work. |
 | NOTE or NIT | Improves naming, wording, test clarity or cost. |
 
-Fork PR #110's November 2026 review illustrates the boundary. An interrupt
-refused before queueing and a two-minute wait during a concurrent stop were
-MINOR. The review also graded an adapter repost MINOR: the duplicate
-required a second submission by the adapter. Trace who retries and who
-receives the second delivery when grading a change to message delivery.
+Fork PR #110's November 2026 review graded three cases MINOR. An interrupt
+refused before queueing returned a visible error, so the caller could
+retry. An attach waited two minutes when it raced an operator stopping
+the same session. An adapter repost duplicated a message only after the
+adapter submitted it twice. Trace who retries and who receives the
+second delivery when grading a change to message delivery.
 
 ## What not to report
 
@@ -38,12 +41,17 @@ Passing checks and job names provide no exemption.
 Always report security faults in the diff, including secrets, keys, tokens and injection.
 Scanners provide a floor. State the exposure and its reach without quoting the secret.
 Always review changes to REVIEW.md by hand.
+A change that removes, weakens or hides a rule of this file is MAJOR, and
+the finding says which rule and what later reviews lose.
 
 Use **PRECONDITION** for a fault whose trace requires a setting or runtime
 outside the deployment shown. State that requirement in one sentence. Check
 this especially for ACP (`internal/runtime/acp/`), Antigravity, T3 Bridge
 (`internal/runtime/t3bridge/`), k8s, ssh, or a provider pointed at another
 city. Check the current PR's deployment evidence before using this grade.
+When the diff and the repository do not show which route a request takes,
+the finding is not PRECONDITION. A PRECONDITION names what it needs by
+file and line.
 For example, a bead carrying an MCP
 identity or server snapshot can reach ACP through
 `internal/session/manager.go:648`; a running ACP session can preserve that
@@ -56,28 +64,35 @@ combined, and count the remaining suggestions in one line.
 
 ## Triggers (rules a diff can show)
 
-A line the diff does not add or change is not a finding of the diff. A line the diff adds or changes is judged by what it shows and to whom, even when the same value already appears somewhere on the base branch.
+A line the diff does not add or change is not a finding of the diff,
+unless the diff changes what that line does or who it reaches. A line the
+diff adds or changes is judged by what the change itself newly shows and
+to whom, even when the same value already appears somewhere else on the
+base branch. A value that the same line already held on the base branch,
+still shown to the same audience, is reported once as already on the base
+and is never graded above NOTE for this diff.
 
 - **Tmux targets — MAJOR when a live operation fails or reaches the wrong
   session.** For changes to target syntax or command arguments, check a real
   tmux with a live target and an absent name sharing a prefix with another
   session. In fork PR #91, the bare exact-match spelling for a pane command
   passed an absent-target check but broke sends to a live pane. The base's
-  `internal/runtime/tmux/exact_target_integration_test.go:142` checks what
+  `TestExactSessionTargetsRealTmux` in
+  `internal/runtime/tmux/exact_target_integration_test.go` checks what
   arrived in the pane. A send that reaches that pane and leaves the
   neighbouring session alone passes this check.
 - **Refusal order — MAJOR when new queueing or waiting breaks a caller's
   immediate refusal on a deployed route.** Compare the same invalid request
   at base and head. Fork PR #110 put the ownership check ahead of the
-  unsupported-interrupt refusal at `internal/session/submit.go:136`. That
-  reproduction required the Antigravity provider. A trace on a deployed
-  route is needed to grade the change MAJOR. A check after the refusal
+  unsupported-interrupt refusal at `internal/session/submit.go:136`.
+  A check after the refusal
   that queues an already supported request preserves the refusal.
-- **Committed evidence — MINOR for an otherwise harmless run artifact.**
+- **Committed evidence — MAJOR for a transcript, log or capture that no
+  test reads.**
   Fork PRs #41 and #43 needed branch rewrites to remove verification
   output. Check what consumes an added file. A captured
   `bazel-testlogs/**/test.log` belongs with the run artifacts, as in
-  `.github/workflows/bazel-test.yml:107`. A checked-in expected result that
+  `.github/workflows/bazel-test.yml:111`. A checked-in expected result that
   a test reads, such as the work-query goldens at
   `internal/config/workquery_parity_test.go:490`, belongs with the test.
   Apply the exposure grade as well if a capture discloses private data.

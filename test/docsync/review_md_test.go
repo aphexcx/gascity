@@ -20,6 +20,17 @@ const (
 	manualRule   = "Always review changes to REVIEW.md by hand."
 )
 
+var reviewSentences = []string{
+	securityRule,
+	manualRule,
+	"A line the diff does not add or change is not a finding of the diff, unless the diff changes what that line does or who it reaches.",
+	"A line the diff adds or changes is judged by what the change itself newly shows and to whom, even when the same value already appears somewhere else on the base branch.",
+	"A value that the same line already held on the base branch, still shown to the same audience, is reported once as already on the base and is never graded above NOTE for this diff.",
+	"A change that removes, weakens or hides a rule of this file is MAJOR, and the finding says which rule and what later reviews lose.",
+	"When the diff and the repository do not show which route a request takes, the finding is not PRECONDITION.",
+	"A PRECONDITION names what it needs by file and line.",
+}
+
 var reviewHeadings = []string{
 	"## What MAJOR means here",
 	"## What not to report",
@@ -27,7 +38,10 @@ var reviewHeadings = []string{
 	"## Pruning",
 }
 
-var htmlBlockStart = regexp.MustCompile(`^ {0,3}<(/?[A-Za-z][A-Za-z0-9-]*)([ \t/>]|$)`)
+var (
+	reviewFence     = regexp.MustCompile("^ {0,3}(`{3}|~{3})")
+	reviewReference = regexp.MustCompile(`^ {0,3}\[(?:\\.|[^\[\]\\])+\]:`)
+)
 
 func checkReviewMD(root fs.FS) error {
 	entries, err := fs.ReadDir(root, ".")
@@ -50,77 +64,41 @@ func checkReviewMD(root fs.FS) error {
 		return err
 	}
 
-	lines := make(map[string]bool)
-	var fence, endTag string
-	var comment, rawHTML, dated bool
+	seen := make(map[string]bool)
+	dated := false
 	for line := range strings.SplitSeq(string(data), "\n") {
-		line = strings.TrimRight(line, " \t\r")
-		left := strings.TrimLeft(line, " ")
-		if fence == "" && !comment && endTag == "" {
-			if left == "" {
-				rawHTML = false
-			} else if tag := htmlBlockStart.FindStringSubmatch(line); !rawHTML && tag != nil {
-				rawHTML = true
-				switch name := strings.ToLower(tag[1]); name {
-				case "pre", "script", "style", "textarea":
-					endTag = "</" + name + ">"
-				}
-			}
+		switch {
+		case strings.Contains(line, "<"):
+			return fmt.Errorf("REVIEW.md contains an angle bracket (<)")
+		case reviewFence.MatchString(line):
+			return fmt.Errorf("REVIEW.md contains a code fence")
+		case reviewReference.MatchString(line):
+			return fmt.Errorf("REVIEW.md contains a link reference definition")
+		case strings.Contains(line, "!["):
+			return fmt.Errorf("REVIEW.md contains image syntax (![)")
 		}
-		if endTag != "" {
-			if strings.Contains(strings.ToLower(line), endTag) {
-				endTag = ""
-				rawHTML = false
-			}
-			continue
+
+		if strings.HasPrefix(line, "## ") {
+			seen[strings.Join(strings.Fields(line), " ")] = true
 		}
-		if !comment && !rawHTML && len(line)-len(left) <= 3 && len(left) >= 3 && (left[0] == '`' || left[0] == '~') {
-			mark := left[:1]
-			run := len(left) - len(strings.TrimLeft(left, mark))
-			if fence != "" && strings.HasPrefix(left, fence) && run == len(left) {
-				fence = ""
-				continue
-			}
-			if fence == "" && run >= 3 && (mark == "~" || !strings.Contains(left[run:], mark)) {
-				fence = left[:run]
-				continue
-			}
-		}
-		if fence != "" {
-			continue
-		}
-		// Comments can cross blank lines, including inside a raw HTML block.
-		if comment || strings.Contains(line, "<!--") {
-			for rest := line; ; {
-				delimiter := "<!--"
-				if comment {
-					delimiter = "-->"
-				}
-				var found bool
-				_, rest, found = strings.Cut(rest, delimiter)
-				if !found {
-					break
-				}
-				comment = !comment
-			}
-			continue
-		}
-		if rawHTML {
-			continue
-		}
-		lines[line] = true
-		if date, ok := strings.CutPrefix(line, "Prune by: "); ok {
+		if date, ok := strings.CutPrefix(strings.TrimRight(line, " \t\r"), "Prune by: "); ok {
 			_, err := time.Parse("2006-01-02", date)
 			dated = dated || err == nil
 		}
 	}
-	for _, want := range slices.Concat(reviewHeadings, []string{securityRule, manualRule}) {
-		if !lines[want] {
-			return fmt.Errorf("REVIEW.md missing %q", want)
+	for _, heading := range reviewHeadings {
+		if !seen[heading] {
+			return fmt.Errorf("REVIEW.md missing heading %q on its own line without closing hashes", heading)
+		}
+	}
+	prose := strings.Join(strings.Fields(string(data)), " ")
+	for _, sentence := range reviewSentences {
+		if !strings.Contains(prose, sentence) {
+			return fmt.Errorf("REVIEW.md missing %q", sentence)
 		}
 	}
 	if !dated {
-		return fmt.Errorf("REVIEW.md missing a valid Prune by: YYYY-MM-DD line")
+		return fmt.Errorf("REVIEW.md missing a valid Prune by: YYYY-MM-DD line without emphasis or trailing remarks")
 	}
 	return nil
 }
@@ -140,7 +118,7 @@ func TestReviewMD(t *testing.T) {
 		}
 		root = filepath.Dir(anchor)
 	}
-	full := strings.Join(reviewHeadings, "\n") + "\n" + securityRule + "\n" + manualRule + "\n" + date
+	full := strings.Join(slices.Concat(reviewHeadings, reviewSentences, []string{date}), "\n")
 	file := func(name, body string, mode fs.FileMode) fs.FS {
 		return fstest.MapFS{name: &fstest.MapFile{Data: []byte(body), Mode: mode}}
 	}
@@ -161,16 +139,36 @@ func TestReviewMD(t *testing.T) {
 		{"symlink", file(name, full, fs.ModeSymlink), "regular file"},
 		{"invalid date", file(name, strings.Replace(full, date, "Prune by: 2027-02-31", 1), 0), "valid Prune by"},
 		{"past date", file(name, strings.Replace(full, date, "Prune by: 2001-01-01", 1), 0), ""},
-		{"short fence closer", file(name, strings.Replace(full, "## Pruning", "````md\n```\n## Pruning\n````", 1), 0), "## Pruning"},
-		{"tilde fence", file(name, strings.Replace(full, manualRule, "   ~~~\n"+manualRule+"\n   ~~~", 1), 0), manualRule},
-		{"HTML comment", file(name, strings.Replace(full, securityRule, "<!--\n"+securityRule+"\n-->", 1), 0), securityRule},
-		{"unclosed comment", file(name, strings.Replace(full, "## Pruning", "<!--\n## Pruning", 1), 0), "## Pruning"},
-		{"comment in raw HTML", file(name, "<div>\n```\n<!--\n```\n</div>\n\n"+full, 0), "## What MAJOR means here"},
-		{"preformatted example", file(name, "<PRE>\n\n"+full+"\n</PRE>", 0), "## What MAJOR means here"},
-		{"after script block", file(name, "<script>\nconst marker = '<!--';\n</script>\n"+full, 0), ""},
 		{"real file", os.DirFS(root), ""},
 	}
-	for _, required := range slices.Concat(reviewHeadings, []string{securityRule, manualRule, date}) {
+	for _, edit := range []struct{ label, old, new, want string }{
+		{"processing instruction", "", "<?x?>\n", "angle bracket"},
+		{"CDATA", "", "<![CDATA[]]>\n", "angle bracket"},
+		{"declaration", "", "<!X>\n", "angle bracket"},
+		{"link reference", "", "   [reference]: elsewhere\n", "link reference"},
+		{"preformatted", "", "<pre>\n", "angle bracket"},
+		{"caption", "", "<em>Example</em>\n", "angle bracket"},
+		{"embedded frame", "", "<iframe>\n", "angle bracket"},
+		{"folded text", "", "Notes <details>\n", "angle bracket"},
+		{"backtick fence", "", "  ```md\n", "fence"},
+		{"tilde fence", "", "   ~~~~\n", "fence"},
+		{"image", "", "See ![figure](figure.png)\n", "image"},
+		{"reflow", "and injection.", "and\r\n  injection.", ""},
+		{"list", manualRule, "- " + manualRule, ""},
+		{"bold", manualRule, "**" + manualRule + "**", ""},
+		{"second sentence", manualRule, manualRule + " Use the base.", ""},
+		{"blockquote", manualRule, "> " + manualRule, ""},
+		{"placeholder", "", "<file>:<line>\n", "angle bracket"},
+		{"inline example", "", "The marker is `<!--`.\n", "angle bracket"},
+		{"empty comment", "", "<!-->\n", "angle bracket"},
+		{"annotated date", date, date + " (extended)", "Prune by:"},
+		{"bold date label", date, "**Prune by:** 2027-02-17", "Prune by:"},
+		{"closing hashes", "## Pruning", "## Pruning ##", "## Pruning"},
+	} {
+		body := strings.Replace(full, edit.old, edit.new, 1)
+		cases = append(cases, example{edit.label, file(name, body, 0), edit.want})
+	}
+	for _, required := range slices.Concat(reviewHeadings, reviewSentences, []string{date}) {
 		body := strings.Replace(full, required, "", 1)
 		cases = append(cases, example{"missing " + required, file(name, body, 0), strings.Split(required, ":")[0]})
 	}
