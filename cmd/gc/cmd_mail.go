@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -2318,7 +2319,8 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		return code
 	}
 	original, err := mp.Get(args[0])
-	if err != nil {
+	getUnsupported := errors.Is(err, mailexec.ErrGetUnsupported)
+	if err != nil && !getUnsupported {
 		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
 	}
 	sender := defaultMailIdentity()
@@ -2336,7 +2338,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			cityPath, err = resolveCity()
 			if err == nil {
 				cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-				if err != nil {
+				if err != nil && !getUnsupported {
 					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 				}
 				store, err = openStoreAtForCity(cityPath, cityPath)
@@ -2365,9 +2367,13 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	if store != nil {
 		sessions = cliSessionStore(store, cfg, cityPath)
 	}
-	target, recipient, err := mailReplyTarget(original, cfg, sessions, providerLocal)
-	if err != nil {
-		return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+	var target *remoteTarget
+	var recipient string
+	if !getUnsupported {
+		target, recipient, err = mailReplyTarget(original, cfg, sessions, providerLocal)
+		if err != nil {
+			return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+		}
 	}
 	body := message
 	if body == "" && len(args) > 1 {

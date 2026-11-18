@@ -20,6 +20,9 @@ import (
 
 const messageNotFoundMarker = "gc-mail-error:not-found"
 
+// ErrGetUnsupported indicates that the script returned no message for the optional get operation.
+var ErrGetUnsupported = errors.New("exec mail provider does not support get")
+
 // Provider implements [mail.Provider] by delegating to a user-supplied script.
 type Provider struct {
 	script   string
@@ -76,6 +79,9 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	out, err := p.run(nil, "get", id)
 	if err != nil {
 		return mail.Message{}, normalizeMessageError("get", err)
+	}
+	if out == "" {
+		return mail.Message{}, ErrGetUnsupported
 	}
 	return unmarshalMessage(out)
 }

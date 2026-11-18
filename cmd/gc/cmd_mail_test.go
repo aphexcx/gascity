@@ -2238,10 +2238,20 @@ func TestCmdMailReplyExecProviderNotifyWithoutCityWarnsAndSendsReply(t *testing.
 }
 
 func TestCmdMailReplyExecProviderOwnsBareAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script func(*testing.T) string
+	}{{"without-get", writeExecReplyScript}, {"with-get", writeExecReplyScriptWithGet}} {
+		t.Run(tc.name, func(t *testing.T) { testExecProviderBareReplies(t, tc.script(t)) })
+	}
+}
+
+func testExecProviderBareReplies(t *testing.T, script string) {
+	t.Helper()
 	clearRemoteMailIdentityEnv(t)
 	seedLocalCity(t)
 	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_MAIL", "exec:"+writeExecReplyScript(t))
+	t.Setenv("GC_MAIL", "exec:"+script)
 	dir := filepath.Join(os.Getenv("GC_CITY"), ".gc")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2335,10 +2345,6 @@ case "$1" in
   ensure-running)
     exit 0
     ;;
-  get)
-    printf '{"id":"%s","from":"alice","to":"human","subject":"Hello"}\n' "$2"
-    exit 0
-    ;;
   reply)
     cat >/dev/null
     printf '{"id":"exec-reply-1","from":"human","to":"alice","subject":"RE: Hello","body":"reply body","created_at":"2026-04-28T00:00:00Z","read":false,"thread_id":"thread-1","reply_to":"%s"}\n' "$2"
@@ -2353,6 +2359,46 @@ esac
 		t.Fatalf("WriteFile(exec script): %v", err)
 	}
 	return script
+}
+
+func writeExecReplyScriptWithGet(t *testing.T) string {
+	t.Helper()
+	base := writeExecReplyScript(t)
+	script := filepath.Join(filepath.Dir(base), "with-get")
+	data := `#!/bin/sh
+if [ "$1" = get ]; then
+  printf '{"id":"%s","from":"alice","to":"human","subject":"Hello"}\n' "$2"
+  exit 0
+fi
+exec "${0%/*}/mail-exec" "$@"
+`
+	if err := os.WriteFile(script, []byte(data), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestCmdMailReplyExecProviderGetFailure(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "mail-exec")
+	data := `#!/bin/sh
+case "$1" in
+  get) echo "get failed" >&2; exit 1 ;;
+  reply) touch "${0%/*}/called" ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(data), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_MAIL", "exec:"+script)
+	var out, stderr bytes.Buffer
+	if rc := cmdMailReply([]string{"gc-1", "answer"}, "", "", false, &out, &stderr); rc != 1 || !strings.Contains(stderr.String(), "get failed") {
+		t.Errorf("get failure: rc=%d stdout=%q stderr=%q", rc, &out, &stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "called")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected reply marker: stat returned %v", err)
+	}
 }
 
 func assertQueuedMailNudge(t *testing.T, cityPath, sessionID, stderr string) {
