@@ -162,8 +162,11 @@ func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Sto
 	hint := func(name string) string {
 		return shellquote.Join([]string{"gc", "--context", name, "mail", "send", recipient})
 	}
-	localSender := knownLocalMailSender(original, cfg)
-	if !localSender && sessions != nil {
+	if knownLocalMailSender(original, cfg) {
+		return nil, "", nil
+	}
+	var localSender bool
+	if sessions != nil {
 		var err error
 		localSender, err = sessionOwnsMailAddress(sessions, original.From)
 		if err != nil {

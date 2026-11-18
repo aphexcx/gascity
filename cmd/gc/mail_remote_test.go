@@ -246,13 +246,76 @@ func TestMailReplyToLocalSender(t *testing.T) {
 		t.Fatal(err)
 	}
 	target, _, err := mailReplyTarget(mail.Message{From: "forge/worker"}, cfg, sessions, false)
-	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send worker") {
+	if target != nil || err != nil {
+		t.Errorf("configured local agent: target=%v err=%v", target, err)
+	}
+	target, _, err = mailReplyTarget(mail.Message{From: "forge/ghost"}, cfg, sessions, false)
+	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send ghost") {
 		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
 	}
 	for _, address := range []string{alias.From, "crew/former", "crew/retired"} {
 		if target, _, err := mailReplyTarget(mail.Message{From: address}, cfg, sessions, false); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
 			t.Errorf("ambiguous session address %q and peer city: target=%v err=%v", address, target, err)
 		}
+	}
+}
+
+func TestMailReplyToLocalSenderWithMatchingContext(t *testing.T) {
+	for _, name := range []string{"forge", "peer"} {
+		t.Run(name, func(t *testing.T) {
+			clearRemoteMailIdentityEnv(t)
+			t.Setenv("GC_MAIL", "")
+			const rig = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n[[agent]]\nname = 'worker'\nscope = 'rig'\n"
+			city := newCharCity(t, charCityBasic+rig, func(t *testing.T, store beads.Store) {
+				_, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"alias": "forge/lane"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			t.Setenv("GC_CITY", city.cityPath)
+			server := unexpectedMailServer(t)
+			var errOut bytes.Buffer
+			if rc := doContextAdd(clientcontext.Context{Name: name, City: "forge", URL: server.URL}, io.Discard, &errOut); rc != 0 {
+				t.Fatal(errOut.String())
+			}
+			provider := city.cs.MailProvider("")
+			for _, from := range []string{"forge/lane", "forge/worker", "forge/ghost"} {
+				original, err := provider.Send(from, "human", "Question", "Any news?")
+				if err != nil {
+					t.Fatal(err)
+				}
+				stored, err := provider.Get(original.ID)
+				if err != nil || (stored.FromSessionID != "") != (from == "forge/lane") {
+					t.Fatalf("sender %q binding=%q err=%v", from, stored.FromSessionID, err)
+				}
+				for i, jsonOut := range []bool{false, true} {
+					var out, stderr bytes.Buffer
+					rc := cmdMailReplyJSON([]string{original.ID, "Answer"}, "", "", false, jsonOut, &out, &stderr)
+					inbox, err := provider.Inbox(from)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if from == "forge/ghost" {
+						msg := out.String() + stderr.String()
+						if rc != 1 || len(inbox) != 0 || !strings.Contains(msg, "matches both a local address namespace") || !strings.Contains(msg, "gc --context "+name+" mail send ghost") {
+							t.Errorf("collision: rc=%d deliveries=%d diagnostic=%q", rc, len(inbox), msg)
+						}
+						continue
+					}
+					if rc != 0 || len(inbox) != i+1 || inbox[0].ReplyTo != original.ID {
+						t.Errorf("%s json=%t: rc=%d inbox=%v stderr=%q", from, jsonOut, rc, inbox, &stderr)
+					}
+					if jsonOut {
+						var result mailActionResult
+						if err := json.Unmarshal(out.Bytes(), &result); err != nil || !result.OK || result.City != "" {
+							t.Errorf("local JSON %q err=%v", &out, err)
+						}
+					} else if strings.Contains(out.String(), "(as ") {
+						t.Errorf("unexpected remote confirmation %q", &out)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -304,13 +367,19 @@ func TestRemoteMailSubject(t *testing.T) {
 	}
 }
 
+func unexpectedMailServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected remote mail request %s", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // Local-only modes are refused before the wire is touched.
 func TestCmdMailSendRemote_RefusesLocalOnlyModes(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("server must not be contacted for a refused mode")
-		w.WriteHeader(500)
-	}))
-	defer srv.Close()
+	srv := unexpectedMailServer(t)
 	cases := []struct {
 		name        string
 		notify, all bool
