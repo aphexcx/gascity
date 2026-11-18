@@ -18,15 +18,15 @@ the review brief when it requires a different standard of reproduction.
 | Grade | What the changed line does |
 | --- | --- |
 | CRITICAL | Exposes city data or credentials, crosses a permission boundary, causes city-wide data loss or duplication, or stops every agent in a city. |
-| MAJOR | In a reachable deployment, loses or duplicates a bead, message or wake, starts the wrong command, or breaks work, an operator command or behaviour a city relies on. Code called only by our agents or hosted boxes is covered. |
+| MAJOR | In a shape we run, loses or duplicates a bead, message or wake, starts the wrong command, or breaks work, an operator command or behaviour a city relies on. Code called only by our agents or hosted boxes is covered. |
 | MINOR | Causes a visible, retryable refusal, a bounded delay during an operator race, or a misleading result from which the caller can recover without losing work. |
 | NOTE or NIT | Improves naming, wording, test clarity or cost. |
 
 Fork PR #110's November 2026 review illustrates the boundary. An interrupt
 refused before queueing and a two-minute wait during a concurrent stop were
-MINOR. An adapter repost duplicated a message only after an external retry
-in the reproduction. Trace the retry and who receives the second delivery
-before assigning the ordinary-delivery grade.
+MINOR. The review also graded an adapter repost MINOR: the duplicate
+required a second submission by the adapter. Trace who retries and who
+receives the second delivery when grading a change to message delivery.
 
 ## What not to report
 
@@ -43,8 +43,8 @@ Use **PRECONDITION** for a fault whose trace requires a setting or runtime
 outside the deployment shown. State that requirement in one sentence. Check
 this especially for ACP (`internal/runtime/acp/`), Antigravity, T3 Bridge
 (`internal/runtime/t3bridge/`), k8s, ssh, or a provider pointed at another
-city. Neither of the two configurations sampled selected k8s or ssh. A path
-name alone establishes no precondition. For example, a bead carrying an MCP
+city. Check the current PR's deployment evidence before using this grade.
+For example, a bead carrying an MCP
 identity or server snapshot can reach ACP through
 `internal/session/manager.go:648`; a running ACP session can preserve that
 route at line 654. Fork PR #67 addressed stale routing after a provider
@@ -63,16 +63,16 @@ A line the diff does not add or change is not a finding of the diff. A line the 
   tmux with a live target and an absent name sharing a prefix with another
   session. In fork PR #91, the bare exact-match spelling for a pane command
   passed an absent-target check but broke sends to a live pane. The base's
-  `internal/runtime/tmux/exact_target_integration_test.go:82` checks what
+  `internal/runtime/tmux/exact_target_integration_test.go:142` checks what
   arrived in the pane. A send that reaches that pane and leaves the
   neighbouring session alone passes this check.
 - **Refusal order — MAJOR when new queueing or waiting breaks a caller's
   immediate refusal on a deployed route.** Compare the same invalid request
-  at base and head. In the review of fork PR #110 an ownership check queued
-  requests the base rejected, including an unsupported interrupt
-  (`internal/session/submit.go:136`). A check after that refusal that queues
-  an already supported request preserves the refusal. Grade a visible,
-  retryable refusal or an undeployed route by its actual consequence.
+  at base and head. Fork PR #110 put the ownership check ahead of the
+  unsupported-interrupt refusal at `internal/session/submit.go:136`. That
+  reproduction required the Antigravity provider. A trace on a deployed
+  route is needed to grade the change MAJOR. A check after the refusal
+  that queues an already supported request preserves the refusal.
 - **Committed evidence — MINOR for an otherwise harmless run artifact.**
   Fork PRs #41 and #43 needed branch rewrites to remove verification
   output. Check what consumes an added file. A captured

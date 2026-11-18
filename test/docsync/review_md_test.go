@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -26,14 +27,22 @@ var reviewHeadings = []string{
 	"## Pruning",
 }
 
+var htmlBlockStart = regexp.MustCompile(`^ {0,3}</?[A-Za-z][A-Za-z0-9-]*([ \t/>]|$)`)
+
 func checkReviewMD(root fs.FS) error {
 	entries, err := fs.ReadDir(root, ".")
 	if err != nil {
 		return err
 	}
-	if !slices.ContainsFunc(entries, func(e fs.DirEntry) bool {
-		return e.Name() == "REVIEW.md" && e.Type().IsRegular()
-	}) {
+	regular := false
+	for _, e := range entries {
+		if e.Name() == "REVIEW.md" {
+			regular = e.Type().IsRegular()
+		} else if strings.EqualFold(e.Name(), "REVIEW.md") {
+			return fmt.Errorf("expected a regular file named exactly REVIEW.md: case collision with %q", e.Name())
+		}
+	}
+	if !regular {
 		return fmt.Errorf("expected a regular file named exactly REVIEW.md")
 	}
 	data, err := fs.ReadFile(root, "REVIEW.md")
@@ -43,11 +52,18 @@ func checkReviewMD(root fs.FS) error {
 
 	lines := make(map[string]bool)
 	var fence string
-	var comment, dated bool
+	var comment, rawHTML, dated bool
 	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimRight(line, " \t\r")
 		left := strings.TrimLeft(line, " ")
-		if !comment && len(line)-len(left) <= 3 && len(left) >= 3 && (left[0] == '`' || left[0] == '~') {
+		if fence == "" && !comment {
+			if left == "" {
+				rawHTML = false
+			} else if htmlBlockStart.MatchString(line) {
+				rawHTML = true
+			}
+		}
+		if !comment && !rawHTML && len(line)-len(left) <= 3 && len(left) >= 3 && (left[0] == '`' || left[0] == '~') {
 			mark := left[:1]
 			run := len(left) - len(strings.TrimLeft(left, mark))
 			if fence != "" && strings.HasPrefix(left, fence) && run == len(left) {
@@ -62,7 +78,7 @@ func checkReviewMD(root fs.FS) error {
 		if fence != "" {
 			continue
 		}
-		// Only a complete, visible line can supply a section, marker or date.
+		// Comments can cross blank lines, including inside a raw HTML block.
 		if comment || strings.Contains(line, "<!--") {
 			for rest := line; ; {
 				delimiter := "<!--"
@@ -76,6 +92,9 @@ func checkReviewMD(root fs.FS) error {
 				}
 				comment = !comment
 			}
+			continue
+		}
+		if rawHTML {
 			continue
 		}
 		lines[line] = true
@@ -124,6 +143,10 @@ func TestReviewMD(t *testing.T) {
 		{"complete", file(name, full, 0), ""},
 		{"absent", fstest.MapFS{}, "regular file"},
 		{"wrong case", file("review.md", full, 0), "regular file"},
+		{"case collision", fstest.MapFS{
+			name:        &fstest.MapFile{Data: []byte(full)},
+			"Review.md": &fstest.MapFile{},
+		}, "case collision"},
 		{"symlink", file(name, full, fs.ModeSymlink), "regular file"},
 		{"invalid date", file(name, strings.Replace(full, date, "Prune by: 2027-02-31", 1), 0), "valid Prune by"},
 		{"past date", file(name, strings.Replace(full, date, "Prune by: 2001-01-01", 1), 0), ""},
@@ -131,6 +154,7 @@ func TestReviewMD(t *testing.T) {
 		{"tilde fence", file(name, strings.Replace(full, manualRule, "   ~~~\n"+manualRule+"\n   ~~~", 1), 0), manualRule},
 		{"HTML comment", file(name, strings.Replace(full, securityRule, "<!--\n"+securityRule+"\n-->", 1), 0), securityRule},
 		{"unclosed comment", file(name, strings.Replace(full, "## Pruning", "<!--\n## Pruning", 1), 0), "## Pruning"},
+		{"comment in raw HTML", file(name, "<div>\n```\n<!--\n```\n</div>\n\n"+full, 0), "## What MAJOR means here"},
 		{"real file", os.DirFS(root), ""},
 	}
 	for _, required := range slices.Concat(reviewHeadings, []string{securityRule, manualRule, date}) {
