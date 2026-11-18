@@ -1,9 +1,12 @@
 # Review rules
 
 Read this file from the base branch, `integration`, for every pull request.
-Fetch it first with `git fetch origin integration`, then pin the fetched
-commit with `base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')`.
-Stop if the fetch or lookup fails. Read `git show "$base:REVIEW.md"`.
+Before review, the launcher or person preparing it runs
+`git fetch origin integration` and records the fetched commit with
+`git rev-parse --verify 'FETCH_HEAD^{commit}'`. Stop if either step fails.
+Give that commit to the reviewer as `base`. A read-only reviewer starts
+with the supplied commit. Stop if it cannot be resolved locally.
+Read `git show "$base:REVIEW.md"`.
 Record a missing policy only when `git ls-tree "$base" -- REVIEW.md`
 succeeds with no entry. Stop on any other read error.
 
