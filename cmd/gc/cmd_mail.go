@@ -1629,7 +1629,8 @@ Local replies inherit the original thread ID. A reply to a sender in another
 city (CITY/AGENT) starts a message in that city's inbox through its configured
 context. If the destination is missing or ambiguous, the command exits with
 an error before sending. To choose the destination yourself, use
-gc --context CITY mail send AGENT. Unqualified senders are local.
+gc --context CITY mail send AGENT. An unqualified From override is
+indistinguishable from local mail. A qualified override is trusted as written.
 
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
@@ -2320,73 +2321,70 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	if err != nil {
 		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
 	}
-	target, recipient, err := mailReplyTarget(original)
-	if err != nil {
-		return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
-	}
-	if target != nil {
-		c, err := buildRemoteWriteClient(target)
-		if err != nil {
-			return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
-		}
-		body := message
-		if body == "" {
-			body = strings.Join(args[1:], " ")
-		}
-		return sendRemoteReply(c, target, args[0], recipient, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
-	}
-	rec := openCityRecorder(stderr)
-
 	sender := defaultMailIdentity()
 	providerName := mailProviderName()
 	var store beads.Store
 	var cityPath string
 	var cfg *config.City
 	var notifySetupErr error
-	if sender != "human" || notify {
+	if sender != "human" || notify || original.From != "human" {
 		switch {
 		case strings.HasPrefix(providerName, "exec:"):
 			var err error
 			cityPath, err = resolveCity()
 			if err == nil {
-				cfg, _ = loadCityConfig(cityPath, stderr)
-				store, err = openStoreAtForCity(cityPath, cityPath)
+				cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+				if err == nil {
+					store, err = openStoreAtForCity(cityPath, cityPath)
+				}
 			}
 			if err != nil {
+				if cityPath != "" || !isCityDiscoveryNotFound(err) {
+					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+				}
 				notifySetupErr = err
 				store = nil
 			}
-		case !isStorelessMailProvider():
+		case !isStorelessMailProviderName(providerName):
 			var storeCode int
-			store, storeCode = openCityStore(stderr, "gc mail reply")
+			store, cityPath, storeCode = openCityStoreWithPath(stderr, "gc mail reply")
 			if store == nil {
 				return storeCode
 			}
-			var err error
-			cityPath, err = resolveCity()
+			cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			cfg, _ = loadCityConfig(cityPath, stderr)
-		}
-		if sender != "human" {
-			if store != nil {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr, "gc mail reply")
-				if !ok {
-					return 1
-				}
-				sender = resolved
+				return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
 			}
 		}
 	}
-
-	// Determine body from remaining args if -m not set.
+	var sessions beads.Store
+	if store != nil {
+		sessions = cliSessionStore(store, cfg, cityPath)
+	}
+	target, recipient, err := mailReplyTarget(original, cfg, sessions)
+	if err != nil {
+		return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+	}
 	body := message
 	if body == "" && len(args) > 1 {
 		body = strings.Join(args[1:], " ")
 	}
-
+	if target != nil {
+		c, err := buildRemoteWriteClient(target)
+		if err != nil {
+			return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
+		}
+		from := loadedCityName(cfg, cityPath) + "/" + remoteMailIdentity()
+		return sendRemoteReply(c, target, args[0], recipient, from, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
+	}
+	if sender != "human" && sessions != nil {
+		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessions, stderr, "gc mail reply")
+		if !ok {
+			return 1
+		}
+		sender = resolved
+	}
+	rec := openCityRecorder(stderr)
 	var nf nudgeFunc
 	if notify && store != nil {
 		nf = newMailNudgeFunc(sender)

@@ -2681,7 +2681,8 @@ Local replies inherit the original thread ID. A reply to a sender in another
 city (CITY/AGENT) starts a message in that city's inbox through its configured
 context. If the destination is missing or ambiguous, the command exits with
 an error before sending. To choose the destination yourself, use
-gc --context CITY mail send AGENT. Unqualified senders are local.
+gc --context CITY mail send AGENT. An unqualified From override is
+indistinguishable from local mail. A qualified override is trusted as written.
 
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.

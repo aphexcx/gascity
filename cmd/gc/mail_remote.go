@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,11 @@ import (
 	"unicode"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -141,17 +144,36 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 
 // mailReplyTarget resolves a city-qualified return address against the local
 // registry. A context may have an alias distinct from its destination city.
-func mailReplyTarget(original mail.Message) (*remoteTarget, string, error) {
+func mailReplyTarget(original mail.Message, cfg *config.City, sessions beads.Store) (*remoteTarget, string, error) {
 	city, recipient, qualified := strings.Cut(original.From, "/")
 	if strings.TrimSpace(original.From) == "" || strings.IndexFunc(original.From, unicode.IsControl) >= 0 ||
 		qualified && (city == "" || recipient == "" || strings.Contains(original.From, "//") || strings.HasSuffix(recipient, "/") || strings.HasPrefix(recipient, "-")) {
 		return nil, "", fmt.Errorf("cannot resolve sender %q; use gc --context CITY mail send AGENT", original.From)
 	}
 	if !qualified {
-		return nil, "", nil
+		recipient = original.From
 	}
 	hint := func(name string) string {
 		return shellquote.Join([]string{"gc", "--context", name, "mail", "send", recipient})
+	}
+	localSender := original.From == "human" || original.FromSessionID != "" ||
+		config.FindAgent(cfg, original.From) != nil || config.FindNamedSession(cfg, original.From) != nil
+	if !localSender && sessions != nil {
+		_, err := session.NewStore(beads.SessionStore{Store: sessions}).ResolveAddress(original.From, false)
+		if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			return nil, "", fmt.Errorf("resolving sender %q: %w; use %s", original.From, err, hint("CITY"))
+		}
+		localSender = err == nil
+	}
+	if !qualified {
+		// A standalone exec provider owns its own recipient directory.
+		if localSender || cfg == nil && sessions == nil {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("no local recipient %q; to answer another city use %s", original.From, hint("CITY"))
+	}
+	if cfg == nil {
+		return nil, "", fmt.Errorf("no local city to resolve sender %q; use %s", original.From, hint("CITY"))
 	}
 	contexts, err := clientcontext.Load(DefaultPath())
 	if err != nil {
@@ -166,17 +188,6 @@ func mailReplyTarget(original mail.Message) (*remoteTarget, string, error) {
 			name = candidate.Name
 		}
 	}
-	// The same qualified spelling is also used for local rig agents.
-	// Beadmail retains its session binding even after an agent is renamed.
-	cityPath, err := resolveCity()
-	if err != nil {
-		return nil, "", fmt.Errorf("checking local sender %q: %w; use %s", original.From, err, hint("CITY"))
-	}
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
-		return nil, "", fmt.Errorf("checking local sender %q: %w; use %s", original.From, err, hint("CITY"))
-	}
-	localSender := original.FromSessionID != "" || config.FindAgent(cfg, original.From) != nil || config.FindNamedSession(cfg, original.From) != nil
 	if name != "" && (localSender || rigConfigHasRigNamed(cfg, city)) {
 		return nil, "", fmt.Errorf("sender %q matches both a local address namespace and city %q; to reply there use %s", original.From, city, hint(name))
 	}
@@ -215,14 +226,13 @@ func cmdMailReplyRemote(c *api.Client, target *remoteTarget, args []string, subj
 	if body == "" && len(args) > 1 {
 		body = strings.Join(args[1:], " ")
 	}
-	return sendRemoteReply(c, target, args[0], "", subject, body, notify, jsonOut, stdout, stderr)
+	return sendRemoteReply(c, target, args[0], "", remoteMailSender(""), subject, body, notify, jsonOut, stdout, stderr)
 }
 
-func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, subject, body string, notify, jsonOut bool, stdout, stderr io.Writer) int {
+func sendRemoteReply(c *api.Client, target *remoteTarget, id, recipient, sender, subject, body string, notify, jsonOut bool, stdout, stderr io.Writer) int {
 	if notify {
 		return mailReplyError("unsupported_remote", fmt.Errorf("--notify delivery for a remote city lands separately; reply without --notify"), jsonOut, stdout, stderr)
 	}
-	sender := remoteMailSender("")
 	if !jsonOut {
 		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
 	}

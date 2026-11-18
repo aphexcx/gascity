@@ -2090,6 +2090,13 @@ func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
 	if _, err := mp.Send("alice", sessionBead.ID, "Hello", "first"); err != nil {
 		t.Fatalf("mp.Send(): %v", err)
 	}
+	// A local sender can become addressable after the original was stored.
+	if _, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"alias": "alice"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
 	t.Setenv("GC_SESSION_ID", "codeprobe-worker-gc-1941")
