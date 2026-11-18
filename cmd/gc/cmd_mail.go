@@ -1561,7 +1561,9 @@ to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to vie
 
 With --context/--city-url the inbox is read from a REMOTE city; with no
 argument it lists mail addressed to this client's remote identity
-("<local city>/<identity>") — where a far-side 'gc mail reply' lands.`,
+("<local city>/<identity>") stored in that city. A bare 'gc mail reply' there
+answers you in your own city's inbox instead, when that city has a context
+for yours.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailInboxWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -1626,12 +1628,17 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Reply to a message",
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
-Local replies inherit the original thread ID. A reply to a sender in another
-city (CITY/AGENT) starts a message in that city's inbox through its configured
-context. If the destination is missing or ambiguous, the command exits with
-an error before sending. To choose the destination yourself, use
-gc --context CITY mail send AGENT. An unqualified From override is
-indistinguishable from local mail. A qualified override is trusted as written.
+Local replies inherit the original thread ID. A From of the form CITY/AGENT
+that is not a sender of this city is answered in CITY: the reply starts a new
+message in that city's inbox through the context whose city is CITY. The From
+alone chooses the city, so the answer goes to the city the From names, which
+may not be the city the mail came from. A sender name that contains a slash is
+read as CITY/AGENT. A From that a session or a configured agent of this city
+sent is answered here. If no context matches, two match, or the From also
+matches a local rig or session, the command exits with an error before sending.
+To choose the destination yourself, use gc --context CITY mail send AGENT.
+An unqualified From override is indistinguishable from local mail.
+A qualified override is trusted as written.
 
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
