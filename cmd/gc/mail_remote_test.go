@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const remoteMailMessageJSON = `{"id":"mc-wisp-1","from":"alpha/mayor","to":"mayor","subject":"hello","body":"round trip","created_at":"2026-08-18T17:00:00Z","read":false}`
@@ -176,10 +178,19 @@ func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
 func TestMailReplyToLocalSender(t *testing.T) {
 	clearRemoteMailIdentityEnv(t)
 	t.Setenv("GC_MAIL", "")
-	city := newCharCity(t, charCityBasic+"\n[[rigs]]\nname = 'forge'\npath = 'forge'\n", nil)
+	const rigConfig = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n\n[[agent]]\nname = 'worker'\nscope = 'rig'\n"
+	city := newCharCity(t, charCityBasic+rigConfig, func(t *testing.T, store beads.Store) {
+		_, err := store.Create(beads.Bead{
+			Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"alias": "crew/night", "session_name": "night-session"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Setenv("GC_CITY", city.cityPath)
 	provider := city.cs.MailProvider("")
-	for _, sender := range []string{"operator", "forge/worker"} {
+	for _, sender := range []string{"operator", "forge/worker", "crew/night"} {
 		original, err := provider.Send(sender, "human", "Question", "Any news?")
 		if err != nil {
 			t.Fatal(err)
@@ -192,6 +203,14 @@ func TestMailReplyToLocalSender(t *testing.T) {
 		if err != nil || len(inbox) != 1 || inbox[0].ReplyTo != original.ID {
 			t.Errorf("local inbox for %s: %+v, err=%v", sender, inbox, err)
 		}
+	}
+	registry := clientcontext.File{Contexts: []clientcontext.Context{{Name: "forge", URL: "https://peer.invalid"}}}
+	if err := registry.Save(DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := mailReplyTarget(mail.Message{From: "forge/worker"})
+	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send worker") {
+		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
 	}
 }
 

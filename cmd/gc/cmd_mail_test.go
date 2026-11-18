@@ -2303,6 +2303,10 @@ case "$1" in
   ensure-running)
     exit 0
     ;;
+  get)
+    printf '{"id":"%s","from":"alice","to":"human","subject":"Hello"}\n' "$2"
+    exit 0
+    ;;
   reply)
     cat >/dev/null
     printf '{"id":"exec-reply-1","from":"human","to":"alice","subject":"RE: Hello","body":"reply body","created_at":"2026-04-28T00:00:00Z","read":false,"thread_id":"thread-1","reply_to":"%s"}\n' "$2"

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/clientcontext"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -176,6 +177,23 @@ func mailReplyTarget(original mail.Message) (*remoteTarget, string, error) {
 			}
 			name = candidate.Name
 		}
+	}
+	// The same qualified spelling is also used for local rig agents.
+	// Beadmail retains its session binding even after an agent is renamed.
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nil, "", fmt.Errorf("checking local sender %q: %w; use %s", original.From, err, hint("CITY"))
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		return nil, "", fmt.Errorf("checking local sender %q: %w; use %s", original.From, err, hint("CITY"))
+	}
+	localSender := original.FromSessionID != "" || config.FindAgent(cfg, original.From) != nil || config.FindNamedSession(cfg, original.From) != nil
+	if name != "" && (localSender || rigConfigHasRigNamed(cfg, city)) {
+		return nil, "", fmt.Errorf("sender %q matches both a local address namespace and city %q; to reply there use %s", original.From, city, hint(name))
+	}
+	if localSender {
+		return nil, "", nil
 	}
 	if name == "" {
 		contextName := city

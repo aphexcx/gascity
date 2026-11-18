@@ -1274,17 +1274,18 @@ func beadToMessage(b beads.Bead) mail.Message {
 		read = false
 	}
 	return mail.Message{
-		ID:        b.ID,
-		From:      from,
-		To:        to,
-		Subject:   b.Title,
-		Body:      b.Description,
-		CreatedAt: b.CreatedAt,
-		Read:      read,
-		ThreadID:  extractLabel(b.Labels, "thread:"),
-		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
-		Priority:  extractPriority(b.Labels),
-		CC:        extractCC(b.Labels),
+		ID:            b.ID,
+		From:          from,
+		FromSessionID: b.Metadata[fromSessionIDMetadataKey],
+		To:            to,
+		Subject:       b.Title,
+		Body:          b.Description,
+		CreatedAt:     b.CreatedAt,
+		Read:          read,
+		ThreadID:      extractLabel(b.Labels, "thread:"),
+		ReplyTo:       extractLabel(b.Labels, "reply-to:"),
+		Priority:      extractPriority(b.Labels),
+		CC:            extractCC(b.Labels),
 	}
 }
 
