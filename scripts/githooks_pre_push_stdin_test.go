@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // prePushFixture is a throwaway git repo wired to run the real .githooks/pre-push
@@ -74,7 +76,7 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 assert_bead_still_claimed() { return 0; }
 `)
 	for _, name := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
-		writeExecutable(t, filepath.Join(repo, "scripts", name), "#!/bin/sh\nexit 0\n")
+		writeExecutable(t, filepath.Join(repo, "scripts", name), "#!/bin/sh\nexit 93\n")
 	}
 
 	f.git(t, "init", "-q", "-b", "main")
@@ -404,34 +406,36 @@ func TestPrePushPackagesOnBothSides(t *testing.T) {
 }
 
 func TestPrePushHarnessSelfTests(t *testing.T) {
-	for _, change := range []string{"go", "script only"} {
-		for _, script := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
-			t.Run(change+"/"+script, func(t *testing.T) {
-				f := newPrePushFixture(t)
-				f.write(t, "scripts/"+script, "#!/bin/sh\nexit 1\n")
-				base := f.commit(t, "configure failing self-test")
-				if change == "script only" {
-					f.write(t, "scripts/push-gate-lock-lib.sh", "# changed\n")
-				} else {
-					f.write(t, "touched.go", "package fixture\n// change\n")
-				}
-				head := f.commit(t, "change input")
-				code, out := f.run(t, "HEAD "+head+" refs/heads/main "+base+"\n")
-				if code != 1 || !strings.Contains(out, script+" took ") {
-					t.Fatalf("expected timed failure of %s, got exit %d: %s", script, code, out)
-				}
-			})
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	const jobID = "local-harness-self-tests"
+	job := wf.Jobs[jobID]
+	if !slices.Contains(wf.Jobs["ci-required"].Needs, jobID) || job.ContinueOnError {
+		t.Fatal("CI / required must depend on the harness self-tests")
+	}
+	for _, script := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
+		if !slices.ContainsFunc(job.Steps, func(s ciCriticalPathStep) bool {
+			return s.Run == "bash scripts/"+script && s.If == "" && !s.ContinueOnError
+		}) {
+			t.Errorf("missing required CI step for %s", script)
 		}
+	}
+	f := newPrePushFixture(t)
+	f.write(t, "scripts/push-gate-lock-lib.sh", "# harness change\n")
+	head := f.commit(t, "change harness")
+	if code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n"); code != 0 {
+		t.Fatalf("script-only push ran a CI fixture: exit %d: %s", code, out)
 	}
 }
 
 func TestPrePushSelfTestEnvironment(t *testing.T) {
 	f := newPrePushFixture(t)
-	// The caller's Git vars describe this temporary pushing repo. Check the
-	// child's boundary before allowing it to create a commit in its own repo.
-	f.write(t, "scripts/test-push-gate-lock.sh", `#!/bin/sh
+	// Ownership checks need the same Git context as the push. The actual
+	// test-pkg Make recipe must give its test process an independent scope.
+	f.write(t, "scripts/push-ownership-guard.sh", `assert_bead_still_claimed() { test "$(git config probe.owner)" = caller; }`)
+	f.write(t, "scripts/test-gitconfig-path", "#!/bin/sh\nprintf '/dev/null\\n'\n")
+	f.write(t, "scripts/go-test-observable", `#!/bin/sh
 set -eu
-test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GC_PUSH_GATE_NO_CAP-}${GC_TEST_INNER_P-}" || exit 31
+test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GIT_CONFIG_COUNT-}" || exit 31
 test "$GIT_CONFIG_NOSYSTEM" = 1 && test "$GIT_CONFIG_GLOBAL" = /dev/null || exit 32
 test ! -e "$HOME/caller-marker" || exit 33
 scratch=$(mktemp -d "$HOME/fixture.XXXXXX")
@@ -439,14 +443,28 @@ git -C "$scratch" init -q
 git -C "$scratch" config user.name fixture
 git -C "$scratch" config user.email fixture@example.invalid
 git -C "$scratch" commit -q --allow-empty -m fixture
+echo isolated-test-ran
 `)
+	for _, script := range []string{"test-gitconfig-path", "go-test-observable"} {
+		if err := os.Chmod(filepath.Join(f.repo, "scripts", script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	f.write(t, "caller-home/caller-marker", "caller\n")
+	f.write(t, "go.mod", "module example.org/fixture\n\ngo 1.23\n")
+	f.write(t, "touched.go", "package fixture\n// run tests\n")
 	head := f.commit(t, "exercise isolated self-test")
 	f.env = append(f.env, "GIT_DIR="+filepath.Join(f.repo, ".git"), "GIT_WORK_TREE="+f.repo,
 		"GIT_INDEX_FILE="+filepath.Join(f.repo, ".git", "index"), "HOME="+filepath.Join(f.repo, "caller-home"),
-		"GC_PUSH_GATE_NO_CAP=1", "GC_TEST_INNER_P=7")
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=probe.owner", "GIT_CONFIG_VALUE_0=caller",
+		"TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
+	writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+if [ "$2" = test-pkg ]; then
+    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" CHECK_ICU=true "$@"
+fi
+`)
 	code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
-	if code != 0 || f.gitOut(t, "config", "user.name") != "test" || f.gitOut(t, "rev-parse", "HEAD") != head {
+	if code != 0 || !strings.Contains(out, "isolated-test-ran") || f.gitOut(t, "config", "user.name") != "test" || f.gitOut(t, "rev-parse", "HEAD") != head {
 		t.Fatalf("self-test environment: exit %d, %s", code, out)
 	}
 }
@@ -507,6 +525,76 @@ case " ${EXTRA_TEST_ENV-} " in *" GC_TEST_NO_ORPHAN_SWEEP=1 "*) ;; *) exit 1 ;; 
 	cmd.Env = append(os.Environ(), "GC_TEST_NO_ORPHAN_SWEEP=", "EXTRA_TEST_ENV=")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("direct and Make runner environments must disable the host sweep: %v, %s", err, out)
+	}
+}
+
+func TestPrePushLockFixtureCancellation(t *testing.T) {
+	root := repoRoot(t)
+	script := filepath.Join(root, "scripts", "test-push-gate-lock.sh")
+	body, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup, _, ok := strings.Cut(string(body), "\nSLOTS=")
+	if !ok {
+		t.Fatal("missing lock fixture setup")
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(root, "scripts", "push-gate-lock-lib.sh"), filepath.Join(dir, "push-gate-lock-lib.sh")); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(dir, "probe")
+	writeExecutable(t, probe, setup+`
+mkfifo "$WORK/fifo"
+exec 8<>"$WORK/fifo"
+for n in 1 2; do
+    bash -c 'echo $$ > "$1"; read -r -t 30 line <&8' _ "$RECORD/$n" &
+done
+wait
+`)
+	cmd := testCommand("bash", probe)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "TMPDIR="+dir, "RECORD="+dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	first := waitForPIDFile(t, filepath.Join(dir, "1"), 10*time.Second)
+	second := waitForPIDFile(t, filepath.Join(dir, "2"), 10*time.Second)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitWithin(t, cmd, 10*time.Second)
+	live := 0
+	for _, pid := range []int{first, second} {
+		if !processGone(pid, time.Second) {
+			live++
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+	}
+	if live != 0 {
+		t.Fatalf("%d fixture FIFO readers survived cancellation", live)
+	}
+}
+
+func TestPrePushConcurrencyReportsDeniedTrace(t *testing.T) {
+	root := repoRoot(t)
+	body, err := os.ReadFile(filepath.Join(root, "scripts", "test-local-concurrency.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const start = "if command -v strace"
+	_, after, ok := strings.Cut(string(body), start)
+	block, _, end := strings.Cut(after, "\nfi\n")
+	if !ok || !end {
+		t.Fatal("missing trace probe")
+	}
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "strace"), "#!/bin/sh\necho 'strace: ptrace: Operation not permitted' >&2\nexit 1\n")
+	cmd := testCommand("bash", "-c", "record_pass() { exit 2; }; record_fail() { exit 3; }; "+start+block+"\nfi")
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "JOB_COUNT=/bin/true")
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "skip loadavg.default_path_opens_proc_loadavg") || !strings.Contains(string(out), "Operation not permitted") {
+		t.Fatalf("denied trace should be a named skip with reason: %v, %s", err, out)
 	}
 }
 
