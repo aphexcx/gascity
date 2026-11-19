@@ -75,6 +75,10 @@ if ! git diff --quiet HEAD --; then
 fi
 
 cd "$repo_root"
+# Git may have been launched by Make in dry-run or fix mode. Run fresh
+# checks with read-only lint and full coverage of each selected package.
+unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES MAKEFILES
+export LINT_FLAGS='' RUN=.
 exec python3 - "${bases[@]}" <<'PY'
 import os
 from pathlib import Path

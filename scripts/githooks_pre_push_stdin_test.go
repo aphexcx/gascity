@@ -331,6 +331,36 @@ func TestPrePushChangedCommandTests(t *testing.T) {
 	}
 }
 
+func TestPrePushPinsMakeChecks(t *testing.T) {
+	for _, flags := range []string{"", "n"} {
+		t.Run("MAKEFLAGS="+flags, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			makePath, err := exec.LookPath("make")
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := filepath.Join(t.TempDir(), "selectors")
+			f.env = append(f.env, "REAL_MAKE="+makePath, "SELECTORS="+record,
+				"RUN=^$", "LINT_FLAGS=--fix", "MAKEFLAGS="+flags)
+			// Probe the values GNU Make will actually use in its recipes.
+			makefile := "RUN ?= .\n" +
+				"lint-changed:\n\t@printf 'lint=%s\\n' '$(LINT_FLAGS)' >> \"$$SELECTORS\"\n" +
+				"test-pkg:\n\t@printf 'run=%s\\n' '$(value RUN)' >> \"$$SELECTORS\"\n"
+			if err := os.WriteFile(filepath.Join(f.repo, "Makefile"), []byte(makefile), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+case "$2" in lint-changed|test-pkg) exec "$REAL_MAKE" "$@";; esac
+`)
+			line := "HEAD " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
+			code, out := f.run(t, line)
+			if got := f.read(t, record); code != 0 || got != "lint=\nrun=.\n" {
+				t.Fatalf("exit %d, selectors %q, output %s", code, got, out)
+			}
+		})
+	}
+}
+
 // TestPrePushSkipsSuiteForBranchDeletion keeps the pre-existing carve-out
 // intact through the stdin rework: a deletion has nothing to test, but beads
 // must still see the ref line.
