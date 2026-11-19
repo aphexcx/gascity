@@ -42,6 +42,7 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 		"GIT_CONFIG_SYSTEM="+filepath.Join(recordDir, "gitconfig-system"),
 		"BD_STDIN_RECORD="+f.bdStdin,
 		"MAKE_RECORD="+f.makeRuns,
+		"GC_PREPUSH_BASE_REF=",
 	)
 
 	// `bd` records exactly what the chain handed it on stdin.
