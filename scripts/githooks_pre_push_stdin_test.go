@@ -567,6 +567,65 @@ case " ${EXTRA_TEST_ENV-} " in *" GC_TEST_NO_ORPHAN_SWEEP=1 "*) ;; *) exit 1 ;; 
 	}
 }
 
+func TestPrePushLockFixtureInitFailure(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(repoRoot(t), "scripts", "test-push-gate-lock.sh")
+	for _, name := range []string{"no-city-repo", "linked-repo"} {
+		t.Run(name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			f.write(t, "README.md", "caller staged content\n")
+			f.git(t, "add", "README.md")
+			scratch := filepath.Join(f.repo, "scratch")
+			if err := os.Mkdir(scratch, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			state := func() []string {
+				return []string{
+					f.gitOut(t, "rev-parse", "HEAD"), f.gitOut(t, "config", "--local", "--list"),
+					f.gitOut(t, "ls-files", "--stage"), f.gitOut(t, "status", "--porcelain"),
+					f.gitOut(t, "worktree", "list", "--porcelain"),
+				}
+			}
+			before := state()
+			probe := filepath.Join(t.TempDir(), "init-probe")
+			writeExecutable(t, filepath.Join(f.binDir, "git"), `#!/bin/sh
+dir=$PWD
+if [ "$1" = -C ]; then dir=$2; shift 2; fi
+if [ -f "$INIT_PROBE" ]; then
+    echo continued >> "$INIT_PROBE"
+    exit 87
+fi
+if [ "$1" = init ] && [ "${dir##*/}" = "$FAIL_INIT" ]; then
+    if "$REAL_GIT" -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+        echo escaped > "$INIT_PROBE"
+    else
+        echo fenced > "$INIT_PROBE"
+    fi
+    exit 81
+fi
+exec "$REAL_GIT" -C "$dir" "$@"
+`)
+			cmd := testCommand("bash", script)
+			cmd.Dir = f.repo
+			cmd.Env = append(slices.Clone(f.env), "PATH="+f.binDir+":"+os.Getenv("PATH"),
+				"TMPDIR="+scratch, "REAL_GIT="+realGit, "FAIL_INIT="+name, "INIT_PROBE="+probe)
+			out, err := cmd.CombinedOutput()
+			if after := state(); !slices.Equal(before, after) {
+				t.Errorf("enclosing repository changed: before %q, after %q", before, after)
+			}
+			if got := f.read(t, probe); got != "fenced\n" {
+				t.Errorf("failed initialization must be fenced and the last Git call: %q", got)
+			}
+			if err == nil || !strings.Contains(string(out), "git init failed for "+name) {
+				t.Fatalf("missing named initialization failure for %s: %v\n%s", name, err, out)
+			}
+		})
+	}
+}
+
 func TestPrePushLockFixtureCancellation(t *testing.T) {
 	root := repoRoot(t)
 	script := filepath.Join(root, "scripts", "test-push-gate-lock.sh")
