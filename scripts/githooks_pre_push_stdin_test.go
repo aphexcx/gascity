@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -47,7 +48,7 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env sh
 cat > "$BD_STDIN_RECORD"
 `)
-	// `make` records that the push-time suite was reached.
+	// Record each target and its Make variables in invocation order.
 	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env sh
 printf '%s\n' "$*" >> "$MAKE_RECORD"
 `)
@@ -142,11 +143,7 @@ func (f *prePushFixture) read(t *testing.T, path string) string {
 	return string(body)
 }
 
-// TestPrePushReplaysRefListToBeadsAndSuiteScan pins the composition introduced
-// with the beads chain: git delivers the ref list on stdin exactly once, and
-// both consumers — the beads pre-push hook and the Go-change scan that gates
-// the push-time suite — must see it. Reading it in only one place silently
-// disables the other.
+// Git delivers the ref list once. Both beads and the checks must see it.
 func TestPrePushReplaysRefListToBeadsAndSuiteScan(t *testing.T) {
 	f := newPrePushFixture(t)
 	refLine := "refs/heads/main " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
@@ -159,8 +156,107 @@ func TestPrePushReplaysRefListToBeadsAndSuiteScan(t *testing.T) {
 	if got := f.read(t, f.bdStdin); got != refLine {
 		t.Fatalf("beads received stdin %q, want %q", got, refLine)
 	}
-	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
-		t.Fatalf("push-time suite not reached (make invocations = %q); the Go-change scan lost its stdin", got)
+	f.checkGoPush(t, f.commitOld, out)
+}
+
+func (f *prePushFixture) checkGoPush(t *testing.T, base, output string) {
+	t.Helper()
+	scope := " LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF=" + base
+	targets := []string{
+		"check-inventories GC_CHECK_INVENTORIES_TIMEOUT=300",
+		"fmt-check-changed" + scope,
+		"lint-changed" + scope,
+		"vet",
+		"test-fsys-darwin-compile",
+		"test-pkg PKG=. COUNT=1",
+	}
+	var want strings.Builder
+	for _, target := range targets {
+		want.WriteString("--no-print-directory " + target + "\n")
+		name := strings.Fields(target)[0]
+		timing := regexp.MustCompile("(?m)^pre-push: " + name + ` took [0-9]+ s at load [0-9]+(\.[0-9]+)?$`)
+		if !timing.MatchString(output) {
+			t.Errorf("missing timing for %s in %q", name, output)
+		}
+	}
+	if got := f.read(t, f.makeRuns); got != want.String() {
+		t.Errorf("make invocations:\n%s\nwant:\n%s", got, want.String())
+	}
+}
+
+func TestPrePushNewBranchBase(t *testing.T) {
+	for _, ref := range []string{"refs/remotes/origin/integration", "refs/heads/alternate", "refs/heads/missing"} {
+		t.Run(ref, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			if ref != "refs/remotes/origin/integration" {
+				f.env = append(f.env, "GC_PREPUSH_BASE_REF="+ref)
+			}
+			if ref != "refs/heads/missing" {
+				// The target advanced independently after the branch point.
+				tree := f.gitOut(t, "rev-parse", f.commitOld+"^{tree}")
+				tip := f.gitOut(t, "commit-tree", tree, "-p", f.commitOld, "-m", "target")
+				f.git(t, "update-ref", ref, tip)
+			}
+			code, out := f.run(t, "HEAD "+f.commitNew+" refs/heads/new "+strings.Repeat("0", 40)+"\n")
+			if ref == "refs/heads/missing" {
+				if code != 1 || !strings.Contains(out, "git fetch origin integration") ||
+					strings.Contains(f.read(t, f.makeRuns), "test-") {
+					t.Fatalf("missing base: exit %d, output %q, make %q", code, out, f.read(t, f.makeRuns))
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, out)
+			}
+			f.checkGoPush(t, f.commitOld, out)
+		})
+	}
+}
+
+func TestPrePushValidatesTreeBeingChecked(t *testing.T) {
+	for _, which := range []string{"non-HEAD", "tracked"} {
+		t.Run(which, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			line := "HEAD " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
+			if which == "non-HEAD" {
+				// A second ref must be validated even when the first matches HEAD.
+				line += "refs/heads/old " + f.commitOld + " refs/heads/old " + f.commitOld + "\n"
+			} else if err := os.WriteFile(filepath.Join(f.repo, "README.md"), []byte("dirty"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			code, out := f.run(t, line)
+			if code != 1 || !strings.Contains(out, strings.TrimPrefix(which, "non-")) || f.read(t, f.makeRuns) != "" {
+				t.Fatalf("exit %d, output %q, make %q", code, out, f.read(t, f.makeRuns))
+			}
+		})
+	}
+}
+
+func TestPrePushChangedCommandTests(t *testing.T) {
+	f := newPrePushFixture(t)
+	dir := filepath.Join(f.repo, "cmd", "gc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "package main\nimport \"testing\"\nfunc TestAlpha(t *testing.T) {}\nfunc helper() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "alpha_test.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.git(t, "add", "cmd")
+	f.git(t, "commit", "-qm", "add command test")
+	head := f.gitOut(t, "rev-parse", "HEAD")
+	code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
+	calls := f.read(t, f.makeRuns)
+	var packages []string
+	for _, call := range strings.Split(calls, "\n") {
+		if strings.Contains(call, "test-pkg") {
+			packages = append(packages, call)
+		}
+	}
+	want := "--no-print-directory test-pkg PKG=./cmd/gc RUN=^$ COUNT=1\n" +
+		"--no-print-directory test-pkg PKG=./cmd/gc RUN=^(TestAlpha)$ COUNT=1"
+	if code != 0 || strings.Join(packages, "\n") != want {
+		t.Fatalf("exit %d: %s\nmake calls:\n%s", code, out, calls)
 	}
 }
 
