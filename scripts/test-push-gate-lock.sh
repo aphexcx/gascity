@@ -56,7 +56,21 @@ assert_contains() {
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")" || exit 1
 [[ -n "$WORK" ]] || exit 1
 WORK="$(cd "$WORK" && pwd -P)" || exit 1
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+    local pid
+    local children
+    children=$(jobs -p)
+    for pid in $children; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    # Let each supervised wrapper drain its own group before removing FIFOs.
+    wait
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # The linked-repository fixture writes local Git configuration and a commit.
 # Scope Git to its own repositories even when invoked directly from a hook.
 repo_vars=$(git rev-parse --local-env-vars) || exit 1

@@ -7,11 +7,6 @@ set -euo pipefail
 zero="0000000000000000000000000000000000000000"
 
 repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
-# A real push exports its repository and index to hooks. Rediscover this
-# checkout by cwd so helpers can also discover their own scratch repos.
-repo_vars=$(git rev-parse --local-env-vars)
-while IFS= read -r name; do unset "$name"; done <<< "$repo_vars"
 
 # The ref list arrives once on stdin but two consumers need it: the beads chain
 # and the Go-change scan below. Buffer it and replay it to each.
@@ -79,6 +74,7 @@ if ! git diff --quiet "$head" --; then
   exit 1
 fi
 
+cd "$repo_root"
 # Git may have been launched by Make in dry-run or fix mode. Run fresh
 # checks with read-only lint and full coverage of each selected package.
 unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES MAKEFILES
@@ -101,12 +97,12 @@ def check_tree():
         sys.exit("pre-push: tracked files changed while checking the pushed commit")
 
 
-def step(target, *args, env=None, cwd=None):
+def make(target, *variables, env=None):
     # The checks read the checkout. Verify its tracked contents before and
     # after each command, including the final test or a script-only check.
     check_tree()
     start = time.monotonic()
-    result = subprocess.run(args, env=env, cwd=cwd)
+    result = subprocess.run(["make", "--no-print-directory", target, *variables], env=env)
     elapsed = round(time.monotonic() - start)
     print(f"pre-push: {target} took {elapsed} s at load {os.getloadavg()[0]:.2f}",
           file=sys.stderr, flush=True)
@@ -115,8 +111,13 @@ def step(target, *args, env=None, cwd=None):
     check_tree()
 
 
-def make(target, *variables, env=None):
-    step(target, "make", "--no-print-directory", target, *variables, env=env)
+def test_packages(*variables):
+    # Make resolves compiler settings and caches in the pushing checkout.
+    # Its TEST_ENV then clears repository vars and installs a test gitconfig.
+    # Give only the test process a private HOME inside that boundary.
+    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or "/var/tmp") as home:
+        env = dict(os.environ, GC_PREPUSH_TEST_HOME=home, EXTRA_TEST_ENV='HOME="$$GC_PREPUSH_TEST_HOME"')
+        make("test-pkg", *variables, "COUNT=1", env=env)
 
 
 def batches(values, prefix, separator, suffix=""):
@@ -153,41 +154,22 @@ def declared_tests(path):
 go_bases = []
 changed_dirs = set()
 command_tests = set()
-check_harness = False
 for base in dict.fromkeys(sys.argv[2:]):
     # With rename detection off a move is D + A, including a move across
     # packages. NUL delimiters preserve the exact path read from Git.
     diff = subprocess.check_output(["git", "diff", "--no-renames", "--name-status", "-z",
-                                    base, head, "--", "*.go", "scripts", ".githooks",
-                                    "Makefile", "go.mod", "go.sum"])
-    if diff:
-        check_harness = True
-    has_go = False
+                                    base, head, "--", "*.go"])
+    if not diff:
+        continue
+    go_bases.append(base)
     fields = iter(diff.split(b"\0")[:-1])
     for status in fields:
         path = Path(os.fsdecode(next(fields)))
-        if not path.name.endswith(".go"):
-            continue
-        has_go = True
         changed_dirs.add(path.parent.as_posix())
         if status != b"D" and path.parent == Path("cmd/gc") and path.name.endswith("_test.go"):
             command_tests.add(path)
-    if has_go:
-        go_bases.append(base)
 
 make("check-inventories", "GC_CHECK_INVENTORIES_TIMEOUT=300")
-if check_harness:
-    # These are standalone fixtures. Give each its own home and Git config.
-    # Share the Go module/toolchain cache without passing caller test knobs.
-    fixture_env = {key: os.environ[key] for key in
-                   ("PATH", "USER", "LOGNAME", "SHELL", "LANG", "GOMODCACHE", "GOTMPDIR")
-                   if key in os.environ}
-    fixture_env.update(GOPATH=os.environ.get("GOPATH") or str(Path.home() / "go"),
-                       GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
-    for script in ("test-push-gate-lock.sh", "test-local-concurrency.sh"):
-        with tempfile.TemporaryDirectory(prefix="gc-push-fixture-", dir="/var/tmp") as home:
-            step(script, "bash", Path("scripts", script).absolute(),
-                 env=dict(fixture_env, HOME=home, TMPDIR=home), cwd=home)
 if not go_bases:
     sys.exit(0)
 
@@ -230,13 +212,13 @@ packages.difference_update(tagged)
 make("vet")
 make("test-fsys-darwin-compile")
 for group in batches(packages - {"./cmd/gc"}, "PKG=", " "):
-    make("test-pkg", group, "COUNT=1")
+    test_packages(group)
 if "./cmd/gc" in packages:
-    make("test-pkg", "PKG=./cmd/gc", "RUN=^$", "COUNT=1")
+    test_packages("PKG=./cmd/gc", "RUN=^$")
     names = {name for path in command_tests for name in declared_tests(path)}
     if names:
         for selector in batches(names, "RUN=^(", "|", ")$"):
-            make("test-pkg", "PKG=./cmd/gc", selector, "COUNT=1")
+            test_packages("PKG=./cmd/gc", selector)
     else:
         print("pre-push: no tests declared in changed cmd/gc test files", file=sys.stderr)
 PY

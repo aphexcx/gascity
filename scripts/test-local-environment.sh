@@ -10,10 +10,15 @@ scratch="$(cd "$scratch" && pwd -P)"
 default_log_root="$(cd /var/tmp && pwd -P)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin" "$scratch/user-tmp" "$scratch/caller tmp"
+ln -s "$(command -v xargs)" "$scratch/bin/real-xargs"
 
 cat >"$scratch/bin/xargs" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+# Leave compiler and system probes using the real xargs.
+if [[ "${1-} ${2-} ${3-} ${5-} ${6-}" != "-0 -n1 -P bash -c" ]]; then
+  exec "$(dirname "$0")/real-xargs" "$@"
+fi
 # Consume the original jobs, then exercise their unchanged worker with one
 # command that exposes only the environment values this test owns.
 while IFS= read -r -d '' spec; do

@@ -26,7 +26,7 @@ const (
 	// shared filter path so its changes exercise every consumer. This execution
 	// digest covers the full workflow; no trigger or permission changes accompany
 	// the source-resolution change.
-	expectedCIExecutionHash     = "8c638ac78b46ec301b9b8dfe79b1af6b48a31644cb974008ab39bd864e54e2cf"
+	expectedCIExecutionHash     = "f0041054ec5c3efc57489d4eb3c76322b295487d9cb71988c434bcca8cd52771"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained

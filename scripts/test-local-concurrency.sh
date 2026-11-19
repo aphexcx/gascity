@@ -129,11 +129,16 @@ if command -v strace >/dev/null 2>&1; then
     # under pipefail that early close can race strace's own exit — SIGPIPEing
     # strace mid-write turns into a spurious pipeline failure even though the
     # match was genuinely found. Capturing first removes the race entirely.
-    STRACE_OUT="$(GC_TEST_LOCAL_CPUS=16 strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null || true)"
-    if [[ "$STRACE_OUT" == *"/proc/loadavg"* ]]; then
-        record_pass "loadavg.default_path_opens_proc_loadavg"
+    if STRACE_OUT="$(LC_ALL=C GC_TEST_LOCAL_CPUS=16 strace -f -e trace=%file -- "$JOB_COUNT" 2>&1 >/dev/null)"; then
+        if [[ "$STRACE_OUT" == *"/proc/loadavg"* ]]; then
+            record_pass "loadavg.default_path_opens_proc_loadavg"
+        else
+            record_fail "loadavg.default_path_opens_proc_loadavg" "/proc/loadavg not opened by the default (no-override) path"
+        fi
+    elif reason=$(grep -m1 -E '^strace:.*(Operation not permitted|Permission denied)' <<<"$STRACE_OUT"); then
+        printf '  skip loadavg.default_path_opens_proc_loadavg — %s\n' "$reason"
     else
-        record_fail "loadavg.default_path_opens_proc_loadavg" "/proc/loadavg not opened by the default (no-override) path"
+        record_fail "loadavg.default_path_opens_proc_loadavg" "trace command failed: $STRACE_OUT"
     fi
 else
     echo "  skip loadavg.default_path_opens_proc_loadavg — strace not installed"
