@@ -1,9 +1,9 @@
 # Review rules
 
 Read this file from the base branch, `integration`, for every pull request.
-Before review, the launcher or person preparing it runs
-`git fetch origin +refs/heads/integration:refs/review/base` and records the fetched commit with
-`base=$(git rev-parse --verify 'refs/review/base^{commit}')`. Stop if either step fails.
+Before review, the launcher or person preparing it records the integration commit with
+`git fetch origin +refs/heads/integration:refs/review/base && base=$(git rev-parse --verify 'refs/review/base^{commit}')`.
+Stop if the command fails.
 Give that commit to the reviewer as `base`. A read-only reviewer starts
 with the supplied commit. Stop if it cannot be resolved locally.
 Read `git show "$base:REVIEW.md"`.

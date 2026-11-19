@@ -42,12 +42,18 @@ var reviewHeadings = []string{
 var (
 	reviewBackticks = regexp.MustCompile("`+")
 	reviewBlankLine = regexp.MustCompile(`\n[ \t\r]*\n`)
+	// Check indentation at the line start and after Markdown quote or list markers.
+	reviewCodeIndent = regexp.MustCompile(`^(?: {0,3}(?:[>+*-]|[0-9]{1,9}[.)]))*(?: {4}| *\t)`)
 )
 
 // Count prose around unambiguous inline examples. If delimiters could belong
 // to different blocks or table cells, this paragraph cannot prove a rule.
 func stripReviewCodeSpans(paragraph string) string {
 	const omitted = "\x00"
+	if strings.Contains(paragraph, "|") {
+		// Markdown tables can drop cells beyond the header width.
+		return omitted
+	}
 	runs := reviewBackticks.FindAllStringIndex(paragraph, -1)
 	if len(runs)%2 != 0 {
 		return omitted
@@ -57,7 +63,7 @@ func stripReviewCodeSpans(paragraph string) string {
 	for i := 0; i < len(runs); i += 2 {
 		opener, closer := runs[i], runs[i+1]
 		if opener[1]-opener[0] != closer[1]-closer[0] || strings.HasSuffix(paragraph[:opener[0]], "\\") ||
-			strings.ContainsAny(paragraph[opener[1]:closer[0]], "\n|") {
+			strings.Contains(paragraph[opener[1]:closer[0]], "\n") {
 			return omitted
 		}
 		prose.WriteString(paragraph[start:opener[0]])
@@ -100,7 +106,7 @@ func checkReviewMD(root fs.FS) error {
 			return fmt.Errorf("REVIEW.md contains a tilde (strikethrough or fence)")
 		case strings.Contains(line, "["):
 			return fmt.Errorf("REVIEW.md contains a bracket (link, link reference, footnote or image)")
-		case strings.HasPrefix(line, "    ") || strings.HasPrefix(strings.TrimLeft(line, " "), "\t"):
+		case reviewCodeIndent.MatchString(line):
 			return fmt.Errorf("REVIEW.md contains an indented code block")
 		}
 
@@ -149,7 +155,7 @@ func TestReviewMD(t *testing.T) {
 		}
 		root = filepath.Dir(anchor)
 	}
-	full := strings.Join(slices.Concat(reviewHeadings, reviewSentences, []string{date}), "\n")
+	full := strings.Join(slices.Concat(reviewHeadings, reviewSentences, []string{date}), "\n\n")
 	file := func(name, body string, mode fs.FileMode) fs.FS {
 		return fstest.MapFS{name: &fstest.MapFile{Data: []byte(body), Mode: mode}}
 	}
@@ -161,6 +167,17 @@ func TestReviewMD(t *testing.T) {
 			}
 		}
 	})
+	for _, tc := range []struct{ name, row string }{
+		{"one excess table cell", "| A | Sample |"},
+		{"nine excess table cells", "| A |" + strings.Repeat(" Sample |", 9)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prose := stripReviewCodeSpans("| Heading |\n| --- |\n" + tc.row)
+			if strings.Contains(prose, "Sample") {
+				t.Error("excess table cells counted as prose")
+			}
+		})
+	}
 	type example struct {
 		label string
 		root  fs.FS
@@ -203,11 +220,16 @@ func TestReviewMD(t *testing.T) {
 		{"two-line reference label", "", "[two\nlines]: #section\n", "reference"},
 		{"strikethrough", "", "~~example~~\n", "strikethrough"},
 		{"code span", citation, "`" + citation + "`", citation},
-		{"multiline double-backtick span", citation, "``example `\n" + citation + "\n` example``", "code span"},
+		{"multiline double-backtick span", citation, "``example `\n" + citation + "\n` example``", fmt.Sprintf("missing %q", citation)},
 		{"indented code block", "", "    example\n", "indent"},
 		{"tab-indented code block", "", "  \texample\n", "indent"},
+		{"indented code in list", "", "-     example\n", "indented code block"},
+		{"indented code in quote", "", ">     example\n", "indented code block"},
+		{"indented code in ordered list", "", "1.      example\n", "indented code block"},
+		{"tabs after list marker", "", "-\t\texample\n", "indented code block"},
+		{"indented code in nested quote", "", "> >     example\n", "indented code block"},
 		{"quoted fence", "", "> ```\n> example\n> ```\n", "fence"},
-		{"table cell", citation, "| Rule |\n| --- |\n| " + citation + " |", ""},
+		{"table cell", citation, "| Rule |\n| --- |\n| " + citation + " |", fmt.Sprintf("missing %q", citation)},
 		{"heading", citation, "### " + citation + " ###", ""},
 		{"trailing entity", citation, citation + "&#8203;", ""},
 		{"reflow", "and injection.", "and\r\n  injection.", ""},
