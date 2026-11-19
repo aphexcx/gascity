@@ -7,11 +7,14 @@ go_test(
         "docsync_test.go",
         "review_md_test.go",
         "testenv_import_test.go",
+        "verify_skill_test.go",
     ],
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "//:.claude/skills/gascity-docs/references/verification.md",
+        "//:.claude/skills/verify/SKILL.md",
         "//:go.mod",
         "//:repo_source_tree",
         "//contrib:all_files",
@@ -21,6 +24,8 @@ go_test(
         "//internal/bazeltest",
         "//internal/docgen",
         "//internal/testenv",
+        "@cc_mvdan_sh_v3//expand",
+        "@cc_mvdan_sh_v3//syntax",
     ],
 )
 
