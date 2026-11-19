@@ -56,7 +56,7 @@ head=$(git rev-parse HEAD)
 bases=()
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   [ "$local_sha" != "$zero" ] || continue
-  if [ "$local_sha" != "$head" ]; then
+  if ! commit=$(git rev-parse --verify "$local_sha^{commit}" 2>/dev/null) || [ "$commit" != "$head" ]; then
     echo "pre-push: check out the commit being pushed; it must match HEAD" >&2
     exit 1
   fi
@@ -81,12 +81,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 
-def step(target, *variables):
+def step(target, *variables, env=None):
     start = time.monotonic()
-    result = subprocess.run(["make", "--no-print-directory", target, *variables])
+    result = subprocess.run(["make", "--no-print-directory", target, *variables], env=env)
     elapsed = round(time.monotonic() - start)
     print(f"pre-push: {target} took {elapsed} s at load {os.getloadavg()[0]:.2f}",
           file=sys.stderr, flush=True)
@@ -134,14 +135,23 @@ for base in dict.fromkeys(sys.argv[1:]):
 step("check-inventories", "GC_CHECK_INVENTORIES_TIMEOUT=300")
 if not go_bases:
     sys.exit(0)
-for target in ("fmt-check-changed", "lint-changed"):
+for base in go_bases:
+    step("fmt-check-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base)
+# lint-changed already loads each changed package with Go. Reuse its list
+# of build-tag exclusions so the test selection uses the same build profile.
+with tempfile.NamedTemporaryFile(mode="r", encoding="utf-8") as exclusions:
+    lint_env = dict(os.environ, GC_PREPUSH_TAGGED_PACKAGES=exclusions.name)
     for base in go_bases:
-        step(target, "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base)
+        step("lint-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base, env=lint_env)
+    tagged = set(exclusions.read().splitlines())
+for package in sorted(tagged):
+    print(f"pre-push: {package} left to CI (build-tagged)", file=sys.stderr, flush=True)
+packages.difference_update(tagged)
 step("vet")
 step("test-fsys-darwin-compile")
 if packages:
     step("test-pkg", "PKG=" + " ".join(sorted(packages)), "COUNT=1")
-if command_changed:
+if command_changed and "./cmd/gc" not in tagged:
     step("test-pkg", "PKG=./cmd/gc", "RUN=^$", "COUNT=1")
     names = sorted({name for path in command_tests for name in declared_tests(path)})
     if names:

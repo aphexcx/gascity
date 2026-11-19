@@ -446,9 +446,19 @@ lint-changed: $(GOLANGCI_LINT)
 	dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
 	pkgs="$$(for dir in $$dirs; do \
 		if [ "$$dir" = "." ]; then pkg="."; else pkg="./$$dir"; fi; \
-		if ! go list "$$pkg" >/dev/null; then \
-			echo "lint-changed: unable to load $$pkg" >&2; \
-			exit 1; \
+		if message=$$(go list "$$pkg" 2>&1 >/dev/null); then \
+			[ -z "$$message" ] || printf '%s\n' "$$message" >&2; \
+		else \
+			rc=$$?; \
+			if [ -n "$$GC_PREPUSH_TAGGED_PACKAGES" ]; then \
+				tagged=$$(go list -e -f 'package {{.ImportPath}}: build constraints exclude all Go files in {{.Dir}}' "$$pkg") || exit $$?; \
+				if [ "$$message" = "$$tagged" ]; then \
+					printf '%s\n' "$$pkg" >> "$$GC_PREPUSH_TAGGED_PACKAGES" || exit $$?; \
+					continue; \
+				fi; \
+			fi; \
+			printf '%s\n' "$$message" "lint-changed: unable to load $$pkg" >&2; \
+			exit "$$rc"; \
 		fi; \
 		printf '%s\n' "$$pkg"; \
 	done)" || exit $$?; \

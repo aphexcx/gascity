@@ -233,6 +233,76 @@ func TestPrePushValidatesTreeBeingChecked(t *testing.T) {
 	}
 }
 
+func TestPrePushAnnotatedTagTarget(t *testing.T) {
+	for _, target := range []string{"HEAD", "HEAD^"} {
+		t.Run(target, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			f.git(t, "tag", "-a", "release", "-m", "release", target)
+			tag := f.gitOut(t, "rev-parse", "refs/tags/release")
+			code, out := f.run(t, "refs/tags/release "+tag+" refs/tags/release "+f.commitOld+"\n")
+			if target == "HEAD" {
+				if code != 0 {
+					t.Fatalf("annotated tag at HEAD: exit %d, %s", code, out)
+				}
+				f.checkGoPush(t, f.commitOld, out)
+			} else if code != 1 || !strings.Contains(out, "HEAD") || f.read(t, f.makeRuns) != "" {
+				t.Fatalf("annotated tag at older commit: exit %d, %s", code, out)
+			}
+		})
+	}
+}
+
+func TestPrePushBuildTaggedPackages(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		name := "tagged alongside buildable package"
+		if broken {
+			name = "conflicting package declarations"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			// Exercise real Go package loading in lint-changed. Record the
+			// remaining Make targets as usual, including the final test list.
+			f.env = append(f.env, "TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
+			writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+printf '%s\n' "$*" >> "$MAKE_RECORD"
+if [ "$2" = lint-changed ]; then
+    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" GOLANGCI_LINT=/usr/bin/true "$@"
+fi
+`)
+			files := map[string]string{
+				"go.mod":        "module example.org/fixture\n\ngo 1.23\n",
+				"tagged/one.go": "//go:build integration\n\npackage tagged\n",
+			}
+			if broken {
+				files["tagged/one.go"] = "package one\n"
+				files["tagged/two.go"] = "package two\n"
+			}
+			for path, body := range files {
+				dest := filepath.Join(f.repo, path)
+				if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dest, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.git(t, "add", "-A")
+			f.git(t, "commit", "-qm", "add packages")
+			head := f.gitOut(t, "rev-parse", "HEAD")
+			code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitOld+"\n")
+			calls := f.read(t, f.makeRuns)
+			if broken {
+				if code == 0 || !strings.Contains(out, "found packages") || strings.Contains(calls, "test-pkg") {
+					t.Fatalf("package error: exit %d, %s\n%s", code, out, calls)
+				}
+			} else if code != 0 || !strings.Contains(out, "./tagged left to CI (build-tagged)") ||
+				!strings.HasSuffix(calls, "--no-print-directory test-pkg PKG=. COUNT=1\n") {
+				t.Fatalf("build-tagged package: exit %d, %s\n%s", code, out, calls)
+			}
+		})
+	}
+}
+
 func TestPrePushChangedCommandTests(t *testing.T) {
 	f := newPrePushFixture(t)
 	dir := filepath.Join(f.repo, "cmd", "gc")
