@@ -27,6 +27,7 @@ var reviewSentences = []string{
 	"A line the diff adds or changes is judged by what the change itself newly shows and to whom, even when the same value already appears somewhere else on the base branch.",
 	"A value that the same line already held on the base branch, still shown to the same audience, is reported once as already on the base and is never graded above NOTE for this diff.",
 	"A change that removes, weakens or hides a rule of this file is MAJOR, and the finding says which rule and what later reviews lose.",
+	"A PR that removes a rule under Pruning, and shows that no review cited it and no diff triggered it since the last pruning date, is not a finding.",
 	"When the diff and the repository do not show which route a request takes, the finding is not PRECONDITION.",
 	"A PRECONDITION names what it needs by file and line.",
 }
@@ -39,9 +40,32 @@ var reviewHeadings = []string{
 }
 
 var (
-	reviewFence     = regexp.MustCompile("^ {0,3}(`{3}|~{3})")
-	reviewReference = regexp.MustCompile(`^ {0,3}\[(?:\\.|[^\[\]\\])+\]:`)
+	reviewBackticks = regexp.MustCompile("`+")
+	reviewBlankLine = regexp.MustCompile(`\n[ \t\r]*\n`)
 )
+
+// Count prose around unambiguous inline examples. If delimiters could belong
+// to different blocks or table cells, this paragraph cannot prove a rule.
+func stripReviewCodeSpans(paragraph string) string {
+	const omitted = "\x00"
+	runs := reviewBackticks.FindAllStringIndex(paragraph, -1)
+	if len(runs)%2 != 0 {
+		return omitted
+	}
+	var prose strings.Builder
+	start := 0
+	for i := 0; i < len(runs); i += 2 {
+		opener, closer := runs[i], runs[i+1]
+		if opener[1]-opener[0] != closer[1]-closer[0] || strings.HasSuffix(paragraph[:opener[0]], "\\") ||
+			strings.ContainsAny(paragraph[opener[1]:closer[0]], "\n|") {
+			return omitted
+		}
+		prose.WriteString(paragraph[start:opener[0]])
+		prose.WriteString(omitted)
+		start = closer[1]
+	}
+	return prose.String() + paragraph[start:]
+}
 
 func checkReviewMD(root fs.FS) error {
 	entries, err := fs.ReadDir(root, ".")
@@ -70,12 +94,14 @@ func checkReviewMD(root fs.FS) error {
 		switch {
 		case strings.Contains(line, "<"):
 			return fmt.Errorf("REVIEW.md contains an angle bracket (<)")
-		case reviewFence.MatchString(line):
-			return fmt.Errorf("REVIEW.md contains a code fence")
-		case reviewReference.MatchString(line):
-			return fmt.Errorf("REVIEW.md contains a link reference definition")
-		case strings.Contains(line, "!["):
-			return fmt.Errorf("REVIEW.md contains image syntax (![)")
+		case strings.Contains(line, "```"):
+			return fmt.Errorf("REVIEW.md contains a backtick fence")
+		case strings.Contains(line, "~"):
+			return fmt.Errorf("REVIEW.md contains a tilde (strikethrough or fence)")
+		case strings.Contains(line, "["):
+			return fmt.Errorf("REVIEW.md contains a bracket (link, link reference, footnote or image)")
+		case strings.HasPrefix(line, "    ") || strings.HasPrefix(strings.TrimLeft(line, " "), "\t"):
+			return fmt.Errorf("REVIEW.md contains an indented code block")
 		}
 
 		if strings.HasPrefix(line, "## ") {
@@ -91,10 +117,14 @@ func checkReviewMD(root fs.FS) error {
 			return fmt.Errorf("REVIEW.md missing heading %q on its own line without closing hashes", heading)
 		}
 	}
-	prose := strings.Join(strings.Fields(string(data)), " ")
+	paragraphs := reviewBlankLine.Split(string(data), -1)
+	for i, paragraph := range paragraphs {
+		paragraphs[i] = stripReviewCodeSpans(paragraph)
+	}
+	prose := strings.Join(strings.Fields(strings.Join(paragraphs, "\n\n")), " ")
 	for _, sentence := range reviewSentences {
 		if !strings.Contains(prose, sentence) {
-			return fmt.Errorf("REVIEW.md missing %q", sentence)
+			return fmt.Errorf("REVIEW.md missing %q in prose outside a code span", sentence)
 		}
 	}
 	if !dated {
@@ -105,6 +135,7 @@ func checkReviewMD(root fs.FS) error {
 
 func TestReviewMD(t *testing.T) {
 	const date = "Prune by: 2027-02-17"
+	const citation = "A PRECONDITION names what it needs by file and line."
 	root := repoRoot()
 	if bazeltest.IsBazel() {
 		// Bazel projects even regular source files as symlinks. Require the
@@ -123,6 +154,13 @@ func TestReviewMD(t *testing.T) {
 		return fstest.MapFS{name: &fstest.MapFile{Data: []byte(body), Mode: mode}}
 	}
 	const name = "REVIEW.md"
+	t.Run("ambiguous code span boundaries", func(t *testing.T) {
+		for _, paragraph := range []string{"| sample `one | two` |", "### sample `one\ntwo`"} {
+			if prose := stripReviewCodeSpans(paragraph); strings.Contains(prose, "sample") {
+				t.Errorf("ambiguous paragraph counted as prose: %q", paragraph)
+			}
+		}
+	})
 	type example struct {
 		label string
 		root  fs.FS
@@ -153,6 +191,25 @@ func TestReviewMD(t *testing.T) {
 		{"backtick fence", "", "  ```md\n", "fence"},
 		{"tilde fence", "", "   ~~~~\n", "fence"},
 		{"image", "", "See ![figure](figure.png)\n", "image"},
+		{"double-quoted link title", "", "[label](#section \"caption\")\n", "link"},
+		{"single-quoted link title", "", "[label](#section 'caption')\n", "link"},
+		{"parenthesized link title", "", "[label](#section (caption))\n", "link"},
+		{"empty-text link title", "", "[](#section \"caption\")\n", "link"},
+		{"two-line link title", "", "[label](#section\n  \"caption\")\n", "link"},
+		{"multiple empty-text titles", "", "[](#a \"first\")\n[](#b \"second\")\n", "link"},
+		{"quoted footnote", "", "> [^1]: note\n", "footnote"},
+		{"quoted comment-like reference", "", "> [//]: # (comment)\n", "reference"},
+		{"list comment-like reference", "", "- [//]: # (comment)\n", "reference"},
+		{"two-line reference label", "", "[two\nlines]: #section\n", "reference"},
+		{"strikethrough", "", "~~example~~\n", "strikethrough"},
+		{"code span", citation, "`" + citation + "`", citation},
+		{"multiline double-backtick span", citation, "``example `\n" + citation + "\n` example``", "code span"},
+		{"indented code block", "", "    example\n", "indent"},
+		{"tab-indented code block", "", "  \texample\n", "indent"},
+		{"quoted fence", "", "> ```\n> example\n> ```\n", "fence"},
+		{"table cell", citation, "| Rule |\n| --- |\n| " + citation + " |", ""},
+		{"heading", citation, "### " + citation + " ###", ""},
+		{"trailing entity", citation, citation + "&#8203;", ""},
 		{"reflow", "and injection.", "and\r\n  injection.", ""},
 		{"list", manualRule, "- " + manualRule, ""},
 		{"bold", manualRule, "**" + manualRule + "**", ""},

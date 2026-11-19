@@ -2,12 +2,12 @@
 
 Read this file from the base branch, `integration`, for every pull request.
 Before review, the launcher or person preparing it runs
-`git fetch origin integration` and records the fetched commit with
-`git rev-parse --verify 'FETCH_HEAD^{commit}'`. Stop if either step fails.
+`git fetch origin +refs/heads/integration:refs/review/base` and records the fetched commit with
+`base=$(git rev-parse --verify 'refs/review/base^{commit}')`. Stop if either step fails.
 Give that commit to the reviewer as `base`. A read-only reviewer starts
 with the supplied commit. Stop if it cannot be resolved locally.
 Read `git show "$base:REVIEW.md"`.
-Record a missing policy only when `git ls-tree "$base" -- REVIEW.md`
+Record a missing policy only when `git ls-tree --full-tree "$base" -- REVIEW.md`
 succeeds with no entry. Stop on any other read error.
 
 ## What MAJOR means here
@@ -46,6 +46,8 @@ Scanners provide a floor. State the exposure and its reach without quoting the s
 Always review changes to REVIEW.md by hand.
 A change that removes, weakens or hides a rule of this file is MAJOR, and
 the finding says which rule and what later reviews lose.
+A PR that removes a rule under Pruning, and shows that no review cited it
+and no diff triggered it since the last pruning date, is not a finding.
 
 Use **PRECONDITION** for a fault whose trace requires a setting or runtime
 outside the deployment shown. State that requirement in one sentence. Check
