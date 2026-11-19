@@ -42,7 +42,7 @@ cat >"$scratch/bin/getconf" <<'SH'
 printf '%s\n' "$GC_ENV_TEST_USER_TMP"
 exit "${GC_ENV_TEST_GETCONF_STATUS:-0}"
 SH
-chmod +x "$scratch/bin/"*
+chmod +x "$scratch/bin/xargs" "$scratch/bin/uname" "$scratch/bin/getconf"
 
 export PATH="$scratch/bin:$PATH"
 export GC_ENV_TEST_OS=Darwin GC_ENV_TEST_USER_TMP="$scratch/user-tmp/"

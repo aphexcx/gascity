@@ -451,7 +451,10 @@ echo isolated-test-ran
 			t.Fatal(err)
 		}
 	}
-	f.write(t, "caller-home/caller-marker", "caller\n")
+	callerHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(callerHome, "caller-marker"), []byte("caller\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	f.write(t, "go.mod", "module example.org/fixture\n\ngo 1.23\n")
 	f.write(t, "touched.go", "package fixture\n// run tests\n")
 	// Use the caller's default Go environment file under its private home.
@@ -463,7 +466,7 @@ echo isolated-test-ran
 	if err := os.Symlink(goBin, filepath.Join(f.binDir, "go")); err != nil {
 		t.Fatal(err)
 	}
-	f.env = append(f.env, "HOME="+filepath.Join(f.repo, "caller-home"), "GOENV=", "XDG_CONFIG_HOME=",
+	f.env = append(f.env, "HOME="+callerHome, "GOENV=", "XDG_CONFIG_HOME=",
 		"CGO_ENABLED=", "GOTOOLCHAIN=local")
 	configure := testCommand(goBin, "env", "-w", "CGO_ENABLED=0")
 	configure.Dir, configure.Env = f.repo, f.env
