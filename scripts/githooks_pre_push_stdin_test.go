@@ -40,7 +40,9 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 		bdStdin:  filepath.Join(recordDir, "bd-stdin"),
 		makeRuns: filepath.Join(recordDir, "make-runs"),
 	}
-	f.env = append(os.Environ(),
+	// Git setup, including the first init, must use only fixture-owned state.
+	f.env = slices.DeleteFunc(os.Environ(), func(entry string) bool { return strings.HasPrefix(entry, "GIT_") })
+	f.env = append(f.env,
 		"PATH="+binDir+":/usr/bin:/bin",
 		"GIT_CONFIG_GLOBAL="+filepath.Join(recordDir, "gitconfig"),
 		"GIT_CONFIG_SYSTEM="+filepath.Join(recordDir, "gitconfig-system"),
@@ -592,15 +594,33 @@ wait
 	cmd := testCommand("bash", probe)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "TMPDIR="+dir, "RECORD="+dir)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-done
+		}
+	})
 	first := waitForPIDFile(t, filepath.Join(dir, "1"), 10*time.Second)
 	second := waitForPIDFile(t, filepath.Join(dir, "2"), 10*time.Second)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	_ = waitWithin(t, cmd, 10*time.Second)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("lock fixture did not exit after cancellation")
+	}
 	live := 0
 	for _, pid := range []int{first, second} {
 		if !processGone(pid, time.Second) {

@@ -117,11 +117,16 @@ def test_packages(*variables):
     # Its TEST_ENV then clears repository vars and installs a test gitconfig.
     # Give only the test process a private HOME inside that boundary.
     with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or "/var/tmp") as home:
-        env = dict(os.environ, GC_PREPUSH_TEST_HOME=home, EXTRA_TEST_ENV='HOME="$$GC_PREPUSH_TEST_HOME"')
+        env = dict(os.environ, GC_PREPUSH_TEST_HOME=home)
+        env["EXTRA_TEST_ENV"] = env.get("EXTRA_TEST_ENV", "") + ' HOME="$$GC_PREPUSH_TEST_HOME"'
         # Go normally locates its saved build profile using HOME. Preserve its
         # contents without letting tests write to the caller's configuration.
         if shutil.which("go"):
-            config = subprocess.check_output(["go", "env", "GOENV"], text=True).rstrip("\n")
+            # The config location belongs to the caller. Query the installed
+            # driver without loading a module toolchain or an inherited root.
+            driver_env = dict(os.environ, GOTOOLCHAIN="local")
+            driver_env.pop("GOROOT", None)
+            config = subprocess.check_output(["go", "env", "GOENV"], env=driver_env, text=True).rstrip("\n")
             if config and config != "off":
                 private_config = Path(home, "go.env")
                 try:
