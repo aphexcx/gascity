@@ -53,9 +53,16 @@ assert_contains() {
     else record_fail "$name" "missing '$needle' in: $haystack"; fi
 }
 
-WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")"
-WORK="$(cd "$WORK" && pwd -P)"
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")" || exit 1
+[[ -n "$WORK" ]] || exit 1
+WORK="$(cd "$WORK" && pwd -P)" || exit 1
 trap 'rm -rf "$WORK"' EXIT
+# The linked-repository fixture writes local Git configuration and a commit.
+# Scope Git to its own repositories even when invoked directly from a hook.
+repo_vars=$(git rev-parse --local-env-vars) || exit 1
+while IFS= read -r name; do unset "$name"; done <<< "$repo_vars"
+export HOME="$WORK/home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+mkdir -p "$HOME" || exit 1
 SLOTS="$WORK/gate-slots"
 
 # ---------------- acquire / hold (two slots) ----------------

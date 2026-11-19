@@ -34,8 +34,9 @@ JOB_COUNT="$TEST_DIR/test-local-job-count"
 LOCAL_PARALLEL="$TEST_DIR/test-local-parallel"
 INNER_LIB="$TEST_DIR/lib/inner-parallelism.sh"
 
-scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-load-test.XXXXXX")"
-scratch="$(cd "$scratch" && pwd -P)"
+scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-load-test.XXXXXX")" || exit 1
+[[ -n "$scratch" ]] || exit 1
+scratch="$(cd "$scratch" && pwd -P)" || exit 1
 trap 'rm -rf "$scratch"' EXIT
 
 pass=0; fail=0
