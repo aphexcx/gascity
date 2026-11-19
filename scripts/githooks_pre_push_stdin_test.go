@@ -74,9 +74,7 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 assert_bead_still_claimed() { return 0; }
 `)
 	for _, name := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
-		writeExecutable(t, filepath.Join(repo, "scripts", name), `#!/bin/sh
-test "${0##*/}" != "$FAIL_SELFTEST"
-`)
+		writeExecutable(t, filepath.Join(repo, "scripts", name), "#!/bin/sh\nexit 0\n")
 	}
 
 	f.git(t, "init", "-q", "-b", "main")
@@ -366,6 +364,7 @@ func TestPrePushPackagesOnBothSides(t *testing.T) {
 		{"delete file", "./src"},
 		{"move file", "./dst ./src"},
 		{"delete package", ""},
+		{"only ignored Go file remains", ""},
 	} {
 		t.Run(tc.change, func(t *testing.T) {
 			f := newPrePushFixture(t)
@@ -381,6 +380,9 @@ func TestPrePushPackagesOnBothSides(t *testing.T) {
 				f.git(t, "mv", "src/café.go", "dst/café.go")
 			case "delete package":
 				f.git(t, "rm", "-r", "src")
+			case "only ignored Go file remains":
+				f.git(t, "rm", "-r", "src")
+				f.write(t, "src/_example.go", "package fixture\n")
 			}
 			head := f.commit(t, tc.change)
 			f.runRealLintRecipe(t)
@@ -406,18 +408,105 @@ func TestPrePushHarnessSelfTests(t *testing.T) {
 		for _, script := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
 			t.Run(change+"/"+script, func(t *testing.T) {
 				f := newPrePushFixture(t)
-				base, head := f.commitOld, f.commitNew
+				f.write(t, "scripts/"+script, "#!/bin/sh\nexit 1\n")
+				base := f.commit(t, "configure failing self-test")
 				if change == "script only" {
 					f.write(t, "scripts/push-gate-lock-lib.sh", "# changed\n")
-					base, head = head, f.commit(t, "change harness")
+				} else {
+					f.write(t, "touched.go", "package fixture\n// change\n")
 				}
-				f.env = append(f.env, "FAIL_SELFTEST="+script)
+				head := f.commit(t, "change input")
 				code, out := f.run(t, "HEAD "+head+" refs/heads/main "+base+"\n")
 				if code != 1 || !strings.Contains(out, script+" took ") {
 					t.Fatalf("expected timed failure of %s, got exit %d: %s", script, code, out)
 				}
 			})
 		}
+	}
+}
+
+func TestPrePushSelfTestEnvironment(t *testing.T) {
+	f := newPrePushFixture(t)
+	// The caller's Git vars describe this temporary pushing repo. Check the
+	// child's boundary before allowing it to create a commit in its own repo.
+	f.write(t, "scripts/test-push-gate-lock.sh", `#!/bin/sh
+set -eu
+test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GC_PUSH_GATE_NO_CAP-}${GC_TEST_INNER_P-}" || exit 31
+test "$GIT_CONFIG_NOSYSTEM" = 1 && test "$GIT_CONFIG_GLOBAL" = /dev/null || exit 32
+test ! -e "$HOME/caller-marker" || exit 33
+scratch=$(mktemp -d "$HOME/fixture.XXXXXX")
+git -C "$scratch" init -q
+git -C "$scratch" config user.name fixture
+git -C "$scratch" config user.email fixture@example.invalid
+git -C "$scratch" commit -q --allow-empty -m fixture
+`)
+	f.write(t, "caller-home/caller-marker", "caller\n")
+	head := f.commit(t, "exercise isolated self-test")
+	f.env = append(f.env, "GIT_DIR="+filepath.Join(f.repo, ".git"), "GIT_WORK_TREE="+f.repo,
+		"GIT_INDEX_FILE="+filepath.Join(f.repo, ".git", "index"), "HOME="+filepath.Join(f.repo, "caller-home"),
+		"GC_PUSH_GATE_NO_CAP=1", "GC_TEST_INNER_P=7")
+	code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
+	if code != 0 || f.gitOut(t, "config", "user.name") != "test" || f.gitOut(t, "rev-parse", "HEAD") != head {
+		t.Fatalf("self-test environment: exit %d, %s", code, out)
+	}
+}
+
+func TestPrePushSelfTestsRequireScratch(t *testing.T) {
+	for _, script := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
+		t.Run(script, func(t *testing.T) {
+			root := repoRoot(t)
+			path := filepath.Join(root, "scripts", script)
+			source, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Exercise only initialization, ending before the cleanup trap or
+			// any fixture workload. The parent of the scratch path is absent.
+			setup, _, ok := strings.Cut(string(source), "\ntrap ")
+			if !ok {
+				t.Fatal("missing scratch cleanup boundary")
+			}
+			dir := t.TempDir()
+			lib := "push-gate-lock-lib.sh"
+			if err := os.Symlink(filepath.Join(root, "scripts", lib), filepath.Join(dir, lib)); err != nil {
+				t.Fatal(err)
+			}
+			probe := filepath.Join(dir, script)
+			writeExecutable(t, probe, setup+"\nprintf 'reached cleanup registration\\n'\n")
+			cmd := testCommand("bash", probe)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(cmd.Dir, "absent"))
+			if out, err := cmd.CombinedOutput(); err == nil {
+				t.Fatalf("scratch initialization succeeded without a directory: %s", out)
+			}
+		})
+	}
+}
+
+func TestPrePushLocalEnvironmentDisablesHostSweep(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "scripts", "test-local-environment.sh")
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inspect the environment passed to the first runner. Its direct and Make
+	// entry points must both opt out before any process inspection happens.
+	setup, _, ok := strings.Cut(string(source), "\noutput=")
+	if !ok {
+		t.Fatal("missing runner invocation")
+	}
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "probe")
+	writeExecutable(t, probe, setup+`
+test "${GC_TEST_NO_ORPHAN_SWEEP-}" = 1
+case " ${EXTRA_TEST_ENV-} " in *" GC_TEST_NO_ORPHAN_SWEEP=1 "*) ;; *) exit 1 ;; esac
+`)
+	cmd := testCommand("bash", probe)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GC_TEST_NO_ORPHAN_SWEEP=", "EXTRA_TEST_ENV=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("direct and Make runner environments must disable the host sweep: %v, %s", err, out)
 	}
 }
 
