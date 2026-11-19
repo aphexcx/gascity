@@ -28,6 +28,10 @@ class InventoryError(Exception):
 
 
 def run(command, cwd, allowed=(0,)):
+    value = os.environ.get("GC_CHECK_INVENTORIES_TIMEOUT") or "60"
+    if not re.fullmatch(r"[0-9]+", value) or int(value) == 0:
+        raise InventoryError("GC_CHECK_INVENTORIES_TIMEOUT must be a positive integer of seconds")
+    timeout = int(value)
     try:
         process = subprocess.Popen(
             command, cwd=cwd, text=True, stdout=subprocess.PIPE,
@@ -36,7 +40,7 @@ def run(command, cwd, allowed=(0,)):
     except OSError as error:
         raise InventoryError(f"{shlex.join(command)}: {error}") from error
     try:
-        output, _ = process.communicate(timeout=60)
+        output, _ = process.communicate(timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt):
         # Discovery can start a test binary and its TestMain children. Reap
         # this command's own process group rather than leaving those behind.
@@ -45,7 +49,7 @@ def run(command, cwd, allowed=(0,)):
         except ProcessLookupError:
             pass
         output, _ = process.communicate()
-        raise InventoryError(f"{shlex.join(command)} interrupted or timed out after 60s\n{output}") from None
+        raise InventoryError(f"{shlex.join(command)} interrupted or timed out after {timeout}s\n{output}") from None
     result = subprocess.CompletedProcess(command, process.returncode, output)
     if result.returncode not in allowed:
         raise InventoryError(

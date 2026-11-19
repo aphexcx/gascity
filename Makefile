@@ -1264,7 +1264,7 @@ help:
 ## check-inventories: check BUILD generation, integration shard routing, and the resource census without running test shards
 .PHONY: check-inventories
 check-inventories:
-	@$(TEST_ENV) python3 scripts/check-inventories.py
+	@$(TEST_ENV) GC_CHECK_INVENTORIES_TIMEOUT='$(subst ','"'"',$(value GC_CHECK_INVENTORIES_TIMEOUT))' python3 scripts/check-inventories.py
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
 ## source tree used by whole-repo scan guards. Run after adding packages.
