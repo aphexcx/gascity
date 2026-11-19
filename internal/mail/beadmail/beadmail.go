@@ -705,7 +705,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	labels := []string{"thread:" + threadID, "reply-to:" + id}
 
 	b, err := p.store.Create(beads.Bead{
-		Title:       deriveReplyTitle(subject, original.Title, body),
+		Title:       mail.ReplySubject(subject, original.Title, body),
 		Description: body,
 		Type:        messageBeadType,
 		Assignee:    to, // reply goes back to sender
@@ -758,32 +758,6 @@ func isRemovedMessageBead(b beads.Bead) bool {
 	// Retention-swept mail is system-aged, not user-removed; it stays
 	// addressable until PurgeReadMessageWisps deletes it.
 	return b.Metadata["close_reason"] != RetentionSweepCloseReason
-}
-
-// deriveReplyTitle returns a non-empty title for a reply message. Callers
-// that go through bd create fail validation ("title is required") if the
-// reply's title is empty, so this fallback chain always returns a usable
-// string. Precedence: explicit subject → "Re: <original>" (deduped) →
-// first line of reply body → literal "(reply)".
-func deriveReplyTitle(subject, originalTitle, body string) string {
-	if subject != "" {
-		return subject
-	}
-	if originalTitle != "" {
-		trimmed := strings.TrimLeft(originalTitle, " \t")
-		if strings.HasPrefix(strings.ToLower(trimmed), "re:") {
-			return originalTitle
-		}
-		return "Re: " + originalTitle
-	}
-	snippet := strings.SplitN(body, "\n", 2)[0]
-	if len(snippet) > 80 {
-		snippet = snippet[:77] + "..."
-	}
-	if snippet != "" {
-		return snippet
-	}
-	return "(reply)"
 }
 
 // Thread returns all messages sharing a thread ID, ordered by creation time.
@@ -1300,17 +1274,18 @@ func beadToMessage(b beads.Bead) mail.Message {
 		read = false
 	}
 	return mail.Message{
-		ID:        b.ID,
-		From:      from,
-		To:        to,
-		Subject:   b.Title,
-		Body:      b.Description,
-		CreatedAt: b.CreatedAt,
-		Read:      read,
-		ThreadID:  extractLabel(b.Labels, "thread:"),
-		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
-		Priority:  extractPriority(b.Labels),
-		CC:        extractCC(b.Labels),
+		ID:            b.ID,
+		From:          from,
+		FromSessionID: b.Metadata[fromSessionIDMetadataKey],
+		To:            to,
+		Subject:       b.Title,
+		Body:          b.Description,
+		CreatedAt:     b.CreatedAt,
+		Read:          read,
+		ThreadID:      extractLabel(b.Labels, "thread:"),
+		ReplyTo:       extractLabel(b.Labels, "reply-to:"),
+		Priority:      extractPriority(b.Labels),
+		CC:            extractCC(b.Labels),
 	}
 }
 

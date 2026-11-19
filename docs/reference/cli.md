@@ -2609,7 +2609,9 @@ to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to vie
 
 With --context/--city-url the inbox is read from a REMOTE city; with no
 argument it lists mail addressed to this client's remote identity
-("&lt;local city&gt;/&lt;identity&gt;") — where a far-side 'gc mail reply' lands.
+("&lt;local city&gt;/&lt;identity&gt;") stored in that city. A bare 'gc mail reply' there
+answers you in your own city's inbox instead, when that city has a context
+for yours.
 
 ```
 gc mail inbox [session] [flags]
@@ -2677,15 +2679,26 @@ gc mail read <id> [flags]
 
 Reply to a message. The reply is addressed to the original sender.
 
-Inherits the thread ID from the original message for conversation tracking.
+Local replies inherit the original thread ID. A From of the form CITY/AGENT
+that is not a sender of this city is answered in CITY: the reply starts a new
+message in that city's inbox through the context whose city is CITY. The From
+alone chooses the city, so the answer goes to the city the From names, which
+may not be the city the mail came from. A sender name that contains a slash is
+read as CITY/AGENT. A From that a session or a configured agent of this city
+sent is answered here. If no context matches, two match, or the From also
+matches a local rig or session, the command exits with an error before sending.
+To choose the destination yourself, use gc --context CITY mail send AGENT.
+An unqualified From override is indistinguishable from local mail.
+A qualified override is trusted as written.
+
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
-With --context/--city-url the reply is sent inside a REMOTE city (the reply
-is addressed by that city to the original sender); the sender is
-"&lt;local city&gt;/&lt;identity&gt;" and --notify is refused.
+With --context/--city-url, the message ID and its thread belong to the
+selected city. Both remote delivery modes use the sender
+"&lt;local city&gt;/&lt;identity&gt;" and require replying without --notify.
 
 ```
 gc mail reply <id> [-s subject] [-m body] [flags]

@@ -6,6 +6,7 @@ package mail //nolint:revive // internal package, always imported qualified
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -60,6 +61,30 @@ type Message struct {
 	Priority  int       `json:"priority,omitempty"`
 	CC        []string  `json:"cc,omitempty"`
 	Rig       string    `json:"rig,omitempty"`
+	// FromSessionID is the local route captured by the storing provider.
+	// Session IDs are meaningful only within that store.
+	FromSessionID string `json:"-"`
+}
+
+// ReplySubject derives a non-empty reply subject from the original or the body.
+func ReplySubject(subject, originalTitle, body string) string {
+	if subject != "" {
+		return subject
+	}
+	if originalTitle != "" {
+		if strings.HasPrefix(strings.ToLower(strings.TrimLeft(originalTitle, " \t")), "re:") {
+			return originalTitle
+		}
+		return "Re: " + originalTitle
+	}
+	snippet, _, _ := strings.Cut(body, "\n")
+	if len(snippet) > 80 {
+		return snippet[:77] + "..."
+	}
+	if snippet != "" {
+		return snippet
+	}
+	return "(reply)"
 }
 
 // HandoffIntent is the domain-shaped request for handoff mail. It lets the

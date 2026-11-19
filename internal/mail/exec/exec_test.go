@@ -356,6 +356,26 @@ esac
 	}
 }
 
+func TestGetUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		unsupported  bool
+	}{
+		{"empty-success", "exit 0", true},
+		{"unknown-operation", "exit 2", true},
+		{"invalid-response", "echo '{invalid'", false},
+		{"provider-error", "exit 1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProvider(writeScript(t, t.TempDir(), tc.script))
+			_, err := p.Get("m-1")
+			if err == nil || errors.Is(err, ErrGetUnsupported) != tc.unsupported {
+				t.Errorf("Get error = %v, want unsupported=%t", err, tc.unsupported)
+			}
+		})
+	}
+}
+
 func TestUnknownOperation_exit2(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `exit 2`)

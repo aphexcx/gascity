@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,8 +11,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clientcontext"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const remoteMailMessageJSON = `{"id":"mc-wisp-1","from":"alpha/mayor","to":"mayor","subject":"hello","body":"round trip","created_at":"2026-08-18T17:00:00Z","read":false}`
@@ -70,6 +79,441 @@ func TestRemoteMailSender(t *testing.T) {
 	}
 }
 
+func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
+	for _, provider := range []string{"file", "exec"} {
+		t.Run(provider, func(t *testing.T) { testRemoteMailRoundTrip(t, provider) })
+	}
+}
+
+func testRemoteMailRoundTrip(t *testing.T, eventProvider string) {
+	t.Helper()
+	clearRemoteMailIdentityEnv(t)
+	t.Setenv("GC_NO_API", "")
+	t.Setenv("GC_MAIL", "")
+	origin := newCharCity(t, charCityBasic, nil)
+	seedLocalCity(t)
+	cityPath := os.Getenv("GC_CITY")
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "alpha", cityPath)
+	cities := http.NewServeMux()
+	for _, state := range []*controllerState{origin.cs, receiver} {
+		mux := api.NewSupervisorMux(&singleCityStateResolver{state: state}, nil, false, "test", "", time.Now())
+		cities.Handle("/v0/city/"+state.cityName+"/", mux.WithAnyHostAllowed().Handler())
+	}
+	var hits []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.Method+" "+r.URL.Path)
+		cities.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	var out, errOut bytes.Buffer
+	if rc := doContextAdd(clientcontext.Context{Name: "peer", City: "alpha", URL: server.URL}, &out, &errOut); rc != 0 {
+		t.Fatal(errOut.String())
+	}
+	prev := contextFlag
+	t.Cleanup(func() { contextFlag = prev })
+	contextFlag = "peer"
+	t.Setenv("GC_CITY", origin.cityPath)
+	from := remoteMailSender("")
+	if rc := cmdMailSendJSON([]string{"human", "Any news?"}, false, false, "", "", "Question", "", "", false, &out, &errOut); rc != 0 {
+		t.Fatal(errOut.String())
+	}
+	local := receiver.MailProvider("")
+	incoming, err := local.Inbox("human")
+	if err != nil || len(incoming) != 1 || incoming[0].From != from {
+		t.Fatalf("receiving city inbox=%+v err=%v", incoming, err)
+	}
+	original := incoming[0]
+	if rc := cmdMailInboxWithJSON([]string{"human"}, false, &out, &errOut); rc != 0 {
+		t.Fatal(errOut.String())
+	}
+	contextFlag = ""
+	// The message belongs to the explicitly selected city. GC_CITY still
+	// points at the origin city that issued the first send.
+	prevCity := cityFlag
+	t.Cleanup(func() { cityFlag = prevCity })
+	cityFlag = cityPath
+	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	supervisor, err := events.NewFileRecorder(eventPath, io.Discard, events.WithMaxSize(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	supervisor.Record(events.Event{Type: events.MailSent, Subject: "before"})
+	activeFile, err := os.Stat(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_EVENTS_ROTATION_ENABLED", "true")
+	t.Setenv("GC_EVENTS_ROTATION_MAX_SIZE_BYTES", "1")
+	replyEventPath := eventPath
+	if eventProvider == "exec" {
+		dir := t.TempDir()
+		script := filepath.Join(dir, "events-provider")
+		replyEventPath = filepath.Join(dir, "records.jsonl")
+		if err := os.WriteFile(script, []byte(`#!/bin/sh
+if [ "$1" = record ]; then
+  cat >> "${0%/*}/records.jsonl"
+  printf '\n' >> "${0%/*}/records.jsonl"
+fi
+`), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_EVENTS", "exec:"+script)
+	} else {
+		t.Setenv("GC_EVENTS", "file")
+	}
+	replyEvents := func() []events.Event {
+		t.Helper()
+		all, err := events.ReadAll(replyEventPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var replies []events.Event
+		for _, event := range all {
+			if event.Type == events.MailReplied {
+				replies = append(replies, event)
+			}
+		}
+		return replies
+	}
+	for _, jsonOut := range []bool{false, true} {
+		out.Reset()
+		errOut.Reset()
+		rc := cmdMailReplyJSON([]string{original.ID, "An answer"}, "", "", true, jsonOut, &out, &errOut)
+		duds, err := local.Inbox(from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rc == 0 || len(duds) != 0 || !strings.Contains(out.String()+errOut.String(), "gc --context "+charCityName+" mail send human") {
+			t.Errorf("missing context (json=%t): exit=%d local replies=%d stdout=%q stderr=%q", jsonOut, rc, len(duds), &out, &errOut)
+		}
+	}
+	if rc := doContextAdd(clientcontext.Context{Name: "return-route", City: charCityName, URL: server.URL}, &out, &errOut); rc != 0 {
+		t.Fatal(errOut.String())
+	}
+	if got := replyEvents(); len(got) != 0 {
+		t.Errorf("refused replies recorded events: %+v", got)
+	}
+	var previousID string
+	for i, jsonOut := range []bool{false, true} {
+		out.Reset()
+		errOut.Reset()
+		rc := cmdMailReplyJSON([]string{original.ID, "An answer"}, "", "", false, jsonOut, &out, &errOut)
+		if rc != 0 {
+			t.Fatalf("configured context: exit=%d stderr=%q", rc, &errOut)
+		}
+		if jsonOut {
+			var result mailActionResult
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.Command != "mail.reply" || result.Message == nil || result.Message.To != "human" {
+				t.Errorf("reply JSON: %s (%v)", &out, err)
+			}
+		} else if !strings.Contains(out.String(), charCityName) {
+			t.Errorf("confirmation missing destination city: %q", &out)
+		}
+		inbox, err := origin.cs.MailProvider("").Inbox("human")
+		if err != nil || len(inbox) != i+1 {
+			t.Errorf("origin inbox: got %d deliveries, want %d (err=%v)", len(inbox), i+1, err)
+		} else {
+			m := inbox[0]
+			if i == 1 && m.ID == previousID {
+				m = inbox[1]
+			}
+			previousID = m.ID
+			if m.From != "alpha/human" || m.Subject != "Re: Question" || m.Body != "An answer" {
+				t.Errorf("delivered reply: %+v", m)
+			}
+			replies := replyEvents()
+			if len(replies) != i+1 {
+				t.Errorf("after reply %d, got %d mail.replied events", i+1, len(replies))
+			} else if e := replies[i]; e.Actor != "alpha/human" || e.Subject != m.ID || e.Message != charCityName+"/human" || !bytes.Equal(e.Payload, mailEventPayload(&m)) {
+				t.Errorf("mail.replied event=%+v payload=%s, delivered=%+v", e, e.Payload, m)
+			}
+		}
+	}
+	if duds, err := local.Inbox(from); err != nil || len(duds) != 0 {
+		t.Errorf("local replies=%d err=%v", len(duds), err)
+	}
+	// An explicitly selected city still replies inside its own store.
+	cityFlag = ""
+	contextFlag = "peer"
+	if rc := cmdMailReplyJSON([]string{original.ID, "Within alpha"}, "", "", false, false, &out, &errOut); rc != 0 {
+		t.Fatal(errOut.String())
+	}
+	if got := replyEvents(); len(got) != 2 {
+		t.Errorf("after explicit context reply, got %d mail.replied events, want 2", len(got))
+	}
+	after, err := os.Stat(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(activeFile, after) {
+		t.Error("a one-shot reply rotated the active supervisor log")
+	}
+	supervisor.Record(events.Event{Type: events.MailSent, Subject: "after"})
+	all, err := events.ReadAll(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 || all[len(all)-1].Subject != "after" {
+		t.Error("supervisor event after the reply is missing from the log")
+	}
+	want := []string{"POST /v0/city/alpha/mail", "GET /v0/city/alpha/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/" + charCityName + "/mail", "POST /v0/city/alpha/mail/" + original.ID + "/reply"}
+	if strings.Join(hits, ",") != strings.Join(want, ",") {
+		t.Errorf("requests=%v want %v", hits, want)
+	}
+}
+
+func TestMailReplyToLocalSender(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	t.Setenv("GC_MAIL", "")
+	const rigConfig = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n\n[[agent]]\nname = 'worker'\nscope = 'rig'\n"
+	city := newCharCity(t, charCityBasic+rigConfig, func(t *testing.T, store beads.Store) {
+		for _, alias := range []string{"operator", "crew/night"} {
+			_, err := store.Create(beads.Bead{
+				Type: session.BeadType, Labels: []string{session.LabelSession},
+				Metadata: map[string]string{"alias": alias},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		retired, err := store.Create(beads.Bead{
+			Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"alias": "crew/retired", "alias_history": "crew/former"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(retired.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Setenv("GC_CITY", city.cityPath)
+	provider := city.cs.MailProvider("")
+	for _, sender := range []string{"operator", "forge/worker", "crew/night"} {
+		original, err := provider.Send(sender, "human", "Question", "Any news?")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out, errOut bytes.Buffer
+		if rc := cmdMailReplyJSON([]string{original.ID, "An answer"}, "", "", false, true, &out, &errOut); rc != 0 {
+			t.Fatalf("local reply to %s: exit=%d stderr=%q", sender, rc, &errOut)
+		}
+		inbox, err := provider.Inbox(sender)
+		if err != nil || len(inbox) != 1 || inbox[0].ReplyTo != original.ID {
+			t.Errorf("local inbox for %s: %+v, err=%v", sender, inbox, err)
+		}
+	}
+	orphan, err := provider.Send("unknown", "human", "Question", "Any news?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	rc := cmdMailReplyJSON([]string{orphan.ID, "An answer"}, "", "", false, true, &out, &errOut)
+	inbox, err := provider.Inbox("unknown")
+	if rc == 0 || !strings.Contains(out.String(), "gc --context CITY mail send unknown") || len(inbox) != 0 || err != nil {
+		t.Errorf("unknown sender: exit=%d inbox=%v err=%v output=%q", rc, inbox, err, &out)
+	}
+	// Exec mail and older unbound messages only supply the display address.
+	alias := mail.Message{From: "crew/night"}
+	resolver := mailReplyResolver{cfg: city.cs.Config(), sessions: city.cs.SessionsBeadStore().Store}
+	if target, _, err := resolver.target(alias, false, io.Discard); target != nil || err != nil {
+		t.Errorf("local session alias without stored sender binding: target=%v err=%v", target, err)
+	}
+	registry := clientcontext.File{Contexts: []clientcontext.Context{
+		{Name: "forge", URL: "https://peer.invalid"},
+		{Name: "crew", URL: "https://crew.invalid"},
+	}}
+	if err := registry.Save(DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := resolver.target(mail.Message{From: "forge/worker"}, false, io.Discard)
+	if target != nil || err != nil {
+		t.Errorf("configured local agent: target=%v err=%v", target, err)
+	}
+	target, _, err = resolver.target(mail.Message{From: "forge/ghost"}, false, io.Discard)
+	if target != nil || err == nil || !strings.Contains(err.Error(), "gc --context forge mail send ghost") {
+		t.Fatalf("ambiguous local rig and peer city: target=%v err=%v", target, err)
+	}
+	for _, address := range []string{alias.From, "crew/former", "crew/retired"} {
+		if target, _, err := resolver.target(mail.Message{From: address}, false, io.Discard); target != nil || err == nil || !strings.Contains(err.Error(), "gc --context crew mail send ") {
+			t.Errorf("ambiguous session address %q and peer city: target=%v err=%v", address, target, err)
+		}
+	}
+}
+
+func TestMailReplyToLocalSenderWithMatchingContext(t *testing.T) {
+	for _, name := range []string{"forge", "peer"} {
+		t.Run(name, func(t *testing.T) {
+			clearRemoteMailIdentityEnv(t)
+			t.Setenv("GC_MAIL", "")
+			const rig = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n[[agent]]\nname = 'worker'\nscope = 'rig'\n"
+			city := newCharCity(t, charCityBasic+rig, func(t *testing.T, store beads.Store) {
+				_, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"alias": "forge/lane"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			t.Setenv("GC_CITY", city.cityPath)
+			server := unexpectedMailServer(t)
+			var errOut bytes.Buffer
+			if rc := doContextAdd(clientcontext.Context{Name: name, City: "forge", URL: server.URL}, io.Discard, &errOut); rc != 0 {
+				t.Fatal(errOut.String())
+			}
+			provider := city.cs.MailProvider("")
+			for _, from := range []string{"forge/lane", "forge/worker", "forge/ghost"} {
+				original, err := provider.Send(from, "human", "Question", "Any news?")
+				if err != nil {
+					t.Fatal(err)
+				}
+				stored, err := provider.Get(original.ID)
+				if err != nil || (stored.FromSessionID != "") != (from == "forge/lane") {
+					t.Fatalf("sender %q binding=%q err=%v", from, stored.FromSessionID, err)
+				}
+				for i, jsonOut := range []bool{false, true} {
+					var out, stderr bytes.Buffer
+					rc := cmdMailReplyJSON([]string{original.ID, "Answer"}, "", "", false, jsonOut, &out, &stderr)
+					inbox, err := provider.Inbox(from)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if from == "forge/ghost" {
+						msg := out.String() + stderr.String()
+						if rc != 1 || len(inbox) != 0 || !strings.Contains(msg, "matches both a local address namespace") || !strings.Contains(msg, "gc --context "+name+" mail send ghost") {
+							t.Errorf("collision: rc=%d deliveries=%d diagnostic=%q", rc, len(inbox), msg)
+						}
+						continue
+					}
+					if rc != 0 || len(inbox) != i+1 || inbox[0].ReplyTo != original.ID {
+						t.Errorf("%s json=%t: rc=%d inbox=%v stderr=%q", from, jsonOut, rc, inbox, &stderr)
+					}
+					if jsonOut {
+						var result mailActionResult
+						if err := json.Unmarshal(out.Bytes(), &result); err != nil || !result.OK || result.City != "" {
+							t.Errorf("local JSON %q err=%v", &out, err)
+						}
+					} else if strings.Contains(out.String(), "(as ") {
+						t.Errorf("unexpected remote confirmation %q", &out)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMailReplyRefusesUnresolvedOrigin(t *testing.T) {
+	clearRemoteMailIdentityEnv(t)
+	t.Setenv("GC_HOME", t.TempDir())
+	seedLocalCity(t)
+	registry := clientcontext.File{Contexts: []clientcontext.Context{
+		{Name: "peer-one", City: "ridge", URL: "https://one.invalid"},
+		{Name: "peer-two", City: "ridge", URL: "https://two.invalid"},
+		{Name: "hollow", City: "elsewhere", URL: "https://three.invalid"},
+	}}
+	if err := registry.Save(DefaultPath()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ from, hint string }{
+		{"", "gc --context CITY mail send AGENT"},
+		{"/worker", "gc --context CITY mail send AGENT"},
+		{"ridge/", "gc --context CITY mail send AGENT"},
+		{"ridge/forge/worker", "gc --context CITY mail send forge/worker"},
+		{"hollow/worker", "gc --context CITY mail send worker"},
+	} {
+		resolver := mailReplyResolver{cfg: &config.City{}}
+		target, _, err := resolver.target(mail.Message{From: tc.from}, false, io.Discard)
+		if target != nil || err == nil || !strings.Contains(err.Error(), tc.hint) {
+			t.Errorf("sender %q: target=%v err=%v, want %q", tc.from, target, err, tc.hint)
+		}
+	}
+}
+
+func TestMailReplyWithUnreadableConfig(t *testing.T) {
+	for _, file := range []string{"city.toml", "contexts.toml"} {
+		t.Run(file, func(t *testing.T) {
+			clearRemoteMailIdentityEnv(t)
+			t.Setenv("GC_MAIL", "")
+			const cfg = "\n[[rigs]]\nname = 'forge'\npath = 'forge'\n[[agent]]\nname = 'worker'\nscope = 'rig'\n[[agent]]\nname = 'alice'\n"
+			city := newCharCity(t, charCityBasic+cfg, nil)
+			t.Setenv("GC_CITY", city.cityPath)
+			sessions := city.cs.SessionsBeadStore().Store
+			addAlias := func(alias string) {
+				t.Helper()
+				_, err := sessions.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"alias": alias}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			addAlias("forge/lane")
+			provider := city.cs.MailProvider("")
+			senders := []string{"alice", "forge/lane", "forge/worker", "forge/late", "ridge/worker"}
+			originals := map[string]string{}
+			for _, from := range senders {
+				m, err := provider.Send(from, "human", "Question", "Any news?")
+				if err != nil {
+					t.Fatal(err)
+				}
+				originals[from] = m.ID
+			}
+			addAlias("forge/late")
+			path := DefaultPath()
+			broken := "[broken"
+			if file == "city.toml" {
+				broken = "[[agent]]\nname = 42\n"
+				path = filepath.Join(city.cityPath, file)
+			}
+			if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, from := range senders {
+				t.Run(from, func(t *testing.T) {
+					var out, stderr bytes.Buffer
+					id := originals[from]
+					rc := cmdMailReply([]string{id, "Answer"}, "", "", false, &out, &stderr)
+					inbox, err := provider.Inbox(from)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantRC, diagnostic := 0, ""
+					switch {
+					case file == "city.toml" && from == "alice":
+						diagnostic = `recipient "alice" not checked`
+					case file == "city.toml" && (from == "forge/worker" || from == "ridge/worker"):
+						wantRC, diagnostic = 1, "cannot tell whether \""+from+"\" is local; use gc --context CITY mail send worker"
+					case file == "contexts.toml" && from == "forge/late":
+						diagnostic = "replied locally without checking contexts"
+					case file == "contexts.toml" && from == "ridge/worker":
+						wantRC, diagnostic = 1, "use gc --context CITY mail send worker after configuring the origin"
+					}
+					if rc != wantRC || (wantRC == 1 && len(inbox) != 0) || (wantRC == 0 && (len(inbox) != 1 || inbox[0].ReplyTo != id)) {
+						t.Errorf("rc=%d want=%d inbox=%v stderr=%q", rc, wantRC, inbox, &stderr)
+					}
+					warnings := 0
+					if wantRC == 0 && diagnostic != "" {
+						warnings = 1
+					}
+					if !strings.Contains(stderr.String(), diagnostic) || strings.Count(stderr.String(), "gc mail reply: warning:") != warnings {
+						t.Errorf("stderr=%q want %d warnings and %q", &stderr, warnings, diagnostic)
+					}
+				})
+			}
+			if file == "contexts.toml" {
+				t.Setenv("GC_ALIAS", "absent")
+				var out, stderr bytes.Buffer
+				rc := cmdMailReply([]string{originals["forge/late"], "Answer"}, "", "", false, &out, &stderr)
+				inbox, err := provider.Inbox("forge/late")
+				if rc != 1 || err != nil || len(inbox) != 1 || strings.Contains(stderr.String(), "replied locally") {
+					t.Errorf("unresolved reply sender: rc=%d inbox=%v err=%v stderr=%q", rc, inbox, err, &stderr)
+				}
+			}
+		})
+	}
+}
+
 func TestRemoteMailSubject(t *testing.T) {
 	if got := remoteMailSubject("s", "b"); got != "s" {
 		t.Errorf("explicit subject: %q", got)
@@ -92,13 +536,19 @@ func TestRemoteMailSubject(t *testing.T) {
 	}
 }
 
+func unexpectedMailServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected remote mail request %s", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // Local-only modes are refused before the wire is touched.
 func TestCmdMailSendRemote_RefusesLocalOnlyModes(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("server must not be contacted for a refused mode")
-		w.WriteHeader(500)
-	}))
-	defer srv.Close()
+	srv := unexpectedMailServer(t)
 	cases := []struct {
 		name        string
 		notify, all bool
@@ -304,53 +754,6 @@ func TestCmdMailInboxRemote_ListsAndDefaultsRecipient(t *testing.T) {
 	}
 	if got["recipient"] != "alpha/mayor" {
 		t.Errorf("json recipient=%v", got["recipient"])
-	}
-}
-
-// End-to-end dispatch: with --context set, `gc mail send|reply|inbox` route to
-// the remote city instead of the (absent) local store, and the sticky/flag
-// resolution never falls back locally on a remote error.
-func TestCmdMail_ContextDispatchesRemote(t *testing.T) {
-	clearRemoteMailIdentityEnv(t)
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
-	var hits []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits = append(hits, r.Method+" "+r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		switch r.Method {
-		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"items":[],"total":0}`))
-		default:
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(remoteMailMessageJSON))
-		}
-	}))
-	defer srv.Close()
-	// A loopback http URL is accepted for a context (TLS is required only for
-	// non-loopback hosts).
-	prev := contextFlag
-	contextFlag = "peer"
-	t.Cleanup(func() { contextFlag = prev })
-	var out, errb bytes.Buffer
-	if code := doContextAdd(clientcontext.Context{Name: "peer", URL: srv.URL, City: "mc"}, &out, &errb); code != 0 {
-		t.Fatalf("seed context: %q", errb.String())
-	}
-
-	out.Reset()
-	errb.Reset()
-	if code := cmdMailSendJSON([]string{"mayor", "hi"}, false, false, "", "", "", "", "", false, &out, &errb); code != 0 {
-		t.Fatalf("send exit %d; stderr=%q", code, errb.String())
-	}
-	if code := cmdMailReplyJSON([]string{"mc-wisp-1", "ack"}, "", "", false, false, &out, &errb); code != 0 {
-		t.Fatalf("reply exit %d; stderr=%q", code, errb.String())
-	}
-	if code := cmdMailInboxWithJSON([]string{"mayor"}, false, &out, &errb); code != 0 {
-		t.Fatalf("inbox exit %d; stderr=%q", code, errb.String())
-	}
-	want := []string{"POST /v0/city/mc/mail", "POST /v0/city/mc/mail/mc-wisp-1/reply", "GET /v0/city/mc/mail"}
-	if strings.Join(hits, ",") != strings.Join(want, ",") {
-		t.Errorf("hits=%v want %v", hits, want)
 	}
 }
 
