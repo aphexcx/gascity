@@ -438,6 +438,7 @@ set -eu
 test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GIT_CONFIG_COUNT-}" || exit 31
 test "$GIT_CONFIG_NOSYSTEM" = 1 && test "$GIT_CONFIG_GLOBAL" = /dev/null || exit 32
 test ! -e "$HOME/caller-marker" || exit 33
+test "$(go env CGO_ENABLED)" = 0 || exit 34
 scratch=$(mktemp -d "$HOME/fixture.XXXXXX")
 git -C "$scratch" init -q
 git -C "$scratch" config user.name fixture
@@ -453,9 +454,25 @@ echo isolated-test-ran
 	f.write(t, "caller-home/caller-marker", "caller\n")
 	f.write(t, "go.mod", "module example.org/fixture\n\ngo 1.23\n")
 	f.write(t, "touched.go", "package fixture\n// run tests\n")
-	head := f.commit(t, "exercise isolated self-test")
+	// Use the caller's default Go environment file under its private home.
+	// Both paths must observe the persisted build profile.
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(goBin, filepath.Join(f.binDir, "go")); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "HOME="+filepath.Join(f.repo, "caller-home"), "GOENV=", "XDG_CONFIG_HOME=",
+		"CGO_ENABLED=", "GOTOOLCHAIN=local")
+	configure := testCommand(goBin, "env", "-w", "CGO_ENABLED=0")
+	configure.Dir, configure.Env = f.repo, f.env
+	if out, err := configure.CombinedOutput(); err != nil {
+		t.Fatalf("persist fixture build profile: %v: %s", err, out)
+	}
+	head := f.commit(t, "exercise isolated test environment")
 	f.env = append(f.env, "GIT_DIR="+filepath.Join(f.repo, ".git"), "GIT_WORK_TREE="+f.repo,
-		"GIT_INDEX_FILE="+filepath.Join(f.repo, ".git", "index"), "HOME="+filepath.Join(f.repo, "caller-home"),
+		"GIT_INDEX_FILE="+filepath.Join(f.repo, ".git", "index"),
 		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=probe.owner", "GIT_CONFIG_VALUE_0=caller",
 		"TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
 	writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
