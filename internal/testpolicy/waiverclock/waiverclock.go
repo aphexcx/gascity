@@ -4,11 +4,8 @@
 // Two ledgers carry dated waivers: the runtime provider ledger
 // (internal/testutil/providerledger) and the resource census
 // (internal/testpolicy/resourcecensus). Both are untagged, both run in the
-// unit-core job, and that job runs in .githooks/pre-push. So an expiry date
-// passing turns every Go-touching push in the fleet red with no code change
-// involved. That happened on 2026-08-12 and again on 2026-08-26, and each time
-// it was cleared by whoever happened to be blocked rather than by the waiver's
-// owner.
+// unit-core shards in PR CI. A lapse beyond its grace period can fail CI
+// even on a change unrelated to either ledger.
 //
 // The fix is not to weaken the ratchet. It is that an expiry should fail the
 // OWNER, not every bystander. This package draws the line: structural defects

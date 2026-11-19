@@ -319,11 +319,8 @@ change as any other waiver.
 Two checked ledgers carry dated waivers: the runtime provider ledger
 (`internal/testutil/providerledger`) and the resource census
 (`internal/testpolicy/resourcecensus`). Both are untagged, both land in the
-unit-core shards, and those shards run in `.githooks/pre-push`. A date passing is
-therefore enough on its own to turn every Go-touching push in the fleet red with
-no code change involved. That happened on 2026-08-12 and again on 2026-08-26,
-and both times it was cleared by whoever happened to be blocked rather than by
-the waiver's owner.
+unit-core shards, and PR CI checks both ledgers. A lapse that outlasts its grace
+period can fail CI even when the PR leaves the ledger untouched.
 
 **One clock.** Every dated ledger asks `internal/testpolicy/waiverclock` and
 never reads `time.Now()` itself. A ledger that computes its own answer is a
@@ -1189,8 +1186,7 @@ naming current slot holders the moment it starts waiting. Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness. That 75 is only visible to callers that invoke
-`scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
+`scripts/test-local-parallel` directly: the four Makefile targets run it under `make`,
 which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the

@@ -19,10 +19,8 @@ func lapsedPolicyAndLedger(expires string) (policy, ledger Ledger) {
 }
 
 // TestValidateLapseFollowsTheClockMode is the census half of ga-b51te. The
-// census runs untagged, so it lands in unit-core, which .githooks/pre-push
-// runs -- a date passing here reds every Go-touching push in the fleet. It now
-// warns first and names its owner, and only the owner's strict lanes fail on
-// the first lapsed day.
+// untagged census runs in PR CI's unit-core shards. It warns first and names
+// its owner. Only the owner's strict lanes fail on the first lapsed day.
 func TestValidateLapseFollowsTheClockMode(t *testing.T) {
 	t.Parallel()
 
@@ -168,8 +166,7 @@ func TestValidateLapseMessageRoutesToTheOwner(t *testing.T) {
 }
 
 // TestValidateWarnsBeforeARowLapses is the point of the warn-ahead window: the
-// owner should hear about a date while there is still time to act on it, rather
-// than discovering it from a red pre-push on the morning it passes.
+// owner should hear about a date while there is still time to act on it.
 func TestValidateWarnsBeforeARowLapses(t *testing.T) {
 	t.Parallel()
 

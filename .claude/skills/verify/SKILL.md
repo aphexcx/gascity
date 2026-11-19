@@ -1,6 +1,6 @@
 ---
 name: verify
-description: "Check a change before committing and run the full fast suite before handoff."
+description: "Check a change before committing and verify the pull request's head before handoff."
 ---
 
 # Verify a change
@@ -92,7 +92,9 @@ Check the parent-dependency grammar alongside the sharded fast suite. This compa
 make check-bd-parent-grammar
 ```
 
-Run the sharded fast suite once (13 minutes in a measured push). A normal push runs it for a new branch or changed Go files and supplies this result. Otherwise run it directly. The runner writes per-shard logs and uses Go caches. Before starting tests it sweeps the invoking user's stale processes across the machine. Once they reach the package timeout age, it kills orphaned Go test binaries and holders of abandoned test tmux sockets, and removes those sockets' parent directories. With slot locking available it waits up to 600 seconds by default for a slot under the enclosing city, or under the Git common directory outside a city. A runner exit of 75 before tests start means slot contention (Make can report this as Error 75 and exit 2). Wait for a free slot, retry once and report both attempts in the READY.
+The fork's pre-push hook checks inventories. On Go changes it checks formatting, lints changed packages, runs vet and the Darwin compile, and tests changed packages. For `cmd/gc` it compiles the package and its tests, then runs tests declared in changed test files. The full suite is gated by **CI / required**. Record the CI rows for the PR's head in the READY.
+
+To report a local fast-suite result, run the command below directly (13 minutes in a measured run). The runner writes per-shard logs and uses Go caches. Before starting tests it sweeps the invoking user's stale processes across the machine. Once they reach the package timeout age, it kills orphaned Go test binaries and holders of abandoned test tmux sockets, and removes those sockets' parent directories. With slot locking available it waits up to 600 seconds by default for a slot under the enclosing city, or under the Git common directory outside a city. A runner exit of 75 before tests start means slot contention (Make can report this as Error 75 and exit 2). Wait for a free slot, retry once and report both attempts in the READY.
 
 ```sh
 make test-fast-parallel
