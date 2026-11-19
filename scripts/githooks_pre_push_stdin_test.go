@@ -267,15 +267,7 @@ func TestPrePushBuildTaggedPackages(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newPrePushFixture(t)
-			// Exercise real Go package loading in lint-changed. Record the
-			// remaining Make targets as usual, including the final test list.
-			f.env = append(f.env, "TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
-			writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
-printf '%s\n' "$*" >> "$MAKE_RECORD"
-if [ "$2" = lint-changed ]; then
-    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" GOLANGCI_LINT=/usr/bin/true "$@"
-fi
-`)
+			f.runRealLintRecipe(t)
 			files := map[string]string{
 				"go.mod":        "module example.org/fixture\n\ngo 1.23\n",
 				"tagged/one.go": "//go:build integration\n\npackage tagged\n",
@@ -356,6 +348,19 @@ func (f *prePushFixture) commit(t *testing.T, msg string) string {
 	return f.gitOut(t, "rev-parse", "HEAD")
 }
 
+// Exercise the real Go package loader in lint-changed and record the final
+// package list. Other Make targets and the linter itself stay stubbed.
+func (f *prePushFixture) runRealLintRecipe(t *testing.T) {
+	t.Helper()
+	f.env = append(f.env, "TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
+	writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+printf '%s\n' "$*" >> "$MAKE_RECORD"
+if [ "$2" = lint-changed ]; then
+    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" GOLANGCI_LINT=/usr/bin/true "$@"
+fi
+`)
+}
+
 func TestPrePushPackagesOnBothSides(t *testing.T) {
 	for _, tc := range []struct{ change, want string }{
 		{"delete file", "./src"},
@@ -378,15 +383,7 @@ func TestPrePushPackagesOnBothSides(t *testing.T) {
 				f.git(t, "rm", "-r", "src")
 			}
 			head := f.commit(t, tc.change)
-			// Run the real Make recipe through package loading. Only the linter
-			// binary and unrelated targets are replaced.
-			f.env = append(f.env, "TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
-			writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
-printf '%s\n' "$*" >> "$MAKE_RECORD"
-if [ "$2" = lint-changed ]; then
-    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" GOLANGCI_LINT=/usr/bin/true "$@"
-fi
-`)
+			f.runRealLintRecipe(t)
 			code, out := f.run(t, "HEAD "+head+" refs/heads/main "+base+"\n")
 			calls := f.read(t, f.makeRuns)
 			if code != 0 || !strings.Contains(calls, "--no-print-directory vet\n") {
@@ -462,10 +459,11 @@ func TestPrePushSelectionUsesPushedCommit(t *testing.T) {
 	// Move just the ref after the tracked-tree check. The index and worktree
 	// still contain exactly the pushed commit, so its Go file must be tested.
 	writeExecutable(t, filepath.Join(f.binDir, "git"), `#!/bin/sh
+PATH=/usr/bin:/bin
 if [ "$1 $2" = "diff --quiet" ]; then
-    /usr/bin/git "$@" && /usr/bin/git update-ref HEAD "$MOVE_HEAD_TO"
+    git "$@" && git update-ref HEAD "$MOVE_HEAD_TO"
 else
-    exec /usr/bin/git "$@"
+    exec git "$@"
 fi
 `)
 	f.env = append(f.env, "MOVE_HEAD_TO="+f.commitOld)

@@ -92,7 +92,9 @@ Check the parent-dependency grammar alongside the sharded fast suite. This compa
 make check-bd-parent-grammar
 ```
 
-The fork's pre-push hook checks inventories. On Go changes it checks formatting, lints changed packages, runs vet and the Darwin compile, and tests changed packages. It names packages whose files are all excluded by the local build constraints and leaves them to CI. For `cmd/gc` it compiles the package and its tests, then runs tests declared in changed test files. The full suite is gated by **CI / required**. Record the CI rows for the PR's head in the READY.
+The fork's pre-push hook checks inventories. Go and test-harness changes also run the push-gate lock and local-concurrency self-tests. On Go changes the hook checks formatting, runs vet and the Darwin compile, and lints and tests packages affected by additions, edits, moves or deletions. It names packages excluded by local build constraints. For `cmd/gc` it compiles the package and runs the default-build tests selected from changed test files in bounded batches.
+
+On pull requests, **CI / required** gates the Integration package shards and the cmd/gc process shards. Tagged tests run in their owning integration shards. Record the CI rows for the PR's head in the READY.
 
 To report a local fast-suite result, run the command below directly (13 minutes in a measured run). The runner writes per-shard logs and uses Go caches. Before starting tests it sweeps the invoking user's stale processes across the machine. Once they reach the package timeout age, it kills orphaned Go test binaries and holders of abandoned test tmux sockets, and removes those sockets' parent directories. With slot locking available it waits up to 600 seconds by default for a slot under the enclosing city, or under the Git common directory outside a city. A runner exit of 75 before tests start means slot contention (Make can report this as Error 75 and exit 2). Wait for a free slot, retry once and report both attempts in the READY.
 

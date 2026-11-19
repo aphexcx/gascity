@@ -420,12 +420,17 @@ lint-fix:
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
 	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
+	files= dirs=; \
 	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
 			;; \
 		tracked) \
-			files="$$(git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go')"; \
+			if [ -n "$$GC_PREPUSH_PACKAGE_DIRS" ]; then \
+				dirs="$$(cat "$$GC_PREPUSH_PACKAGE_DIRS")" || exit $$?; \
+			else \
+				files="$$(git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go')" || exit $$?; \
+			fi; \
 			;; \
 		worktree) \
 			files="$$( \
@@ -439,11 +444,13 @@ lint-changed: $(GOLANGCI_LINT)
 			exit 2; \
 			;; \
 	esac; \
-	if [ -z "$$files" ]; then \
+	if [ -n "$$files" ]; then \
+		dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
+	fi; \
+	if [ -z "$$dirs" ]; then \
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
 	pkgs="$$(for dir in $$dirs; do \
 		if [ "$$dir" = "." ]; then pkg="."; else pkg="./$$dir"; fi; \
 		if message=$$(go list "$$pkg" 2>&1 >/dev/null); then \

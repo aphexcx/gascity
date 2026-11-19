@@ -1203,9 +1203,12 @@ PUSH_GATE_FD_SPAN)` is free — an environment defect is never misreported as
 contention. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap entirely for one
 invocation.
 
-The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
-directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
-itself (`fast` and `full` modes) rather than through a `go test` trampoline.
+The pre-push hook runs `scripts/test-push-gate-lock.sh` and
+`scripts/test-local-concurrency.sh` on changes to Go files, module files,
+`Makefile`, `scripts/` or `.githooks/`. The second script also checks the
+local test environment. The fast and full modes of `test-local-parallel`
+run these scripts as the `push-gate-lock-selftest` and
+`local-concurrency-selftest` jobs.
 A trampoline's `exec.Command` call would itself add a tracked subprocess
 occurrence to `internal/testpolicy/resourcecensus`'s baselines — including
 the `scope=all` audit row, which fails on any change, growth or shrinkage

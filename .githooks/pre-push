@@ -48,7 +48,7 @@ if [ "$any_non_deletion" -eq 1 ]; then
 fi
 
 # The fork runs cheap, deterministic checks locally. CI / required gates
-# the full suite on the pull request's head.
+# the integration and CLI process shards on the pull request's head.
 if [ "$any_non_deletion" -eq 0 ]; then
   exit 0
 fi
@@ -69,7 +69,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
   bases+=("$remote_sha")
 done < <(replay_refs)
-if ! git diff --quiet HEAD --; then
+if ! git diff --quiet "$head" --; then
   echo "pre-push: commit or stash tracked changes before pushing" >&2
   exit 1
 fi
@@ -78,8 +78,8 @@ cd "$repo_root"
 # Git may have been launched by Make in dry-run or fix mode. Run fresh
 # checks with read-only lint and full coverage of each selected package.
 unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES MAKEFILES
-export LINT_FLAGS='' RUN=.
-exec python3 - "${bases[@]}" <<'PY'
+export LINT_FLAGS=--allow-serial-runners RUN=.
+exec python3 - "$head" "${bases[@]}" <<'PY'
 import os
 from pathlib import Path
 import re
@@ -89,77 +89,129 @@ import tempfile
 import time
 
 
-def step(target, *variables, env=None):
+head = sys.argv[1]
+
+
+def check_tree():
+    if subprocess.run(["git", "diff", "--quiet", head, "--"]).returncode:
+        sys.exit("pre-push: tracked files changed while checking the pushed commit")
+
+
+def step(target, *args, env=None):
+    # The checks read the checkout. Verify its tracked contents before and
+    # after each command, including the final test or a script-only check.
+    check_tree()
     start = time.monotonic()
-    result = subprocess.run(["make", "--no-print-directory", target, *variables], env=env)
+    result = subprocess.run(args, env=env)
     elapsed = round(time.monotonic() - start)
     print(f"pre-push: {target} took {elapsed} s at load {os.getloadavg()[0]:.2f}",
           file=sys.stderr, flush=True)
     if result.returncode:
         sys.exit(result.returncode if result.returncode > 0 else 128 - result.returncode)
+    check_tree()
+
+
+def make(target, *variables, env=None):
+    step(target, "make", "--no-print-directory", target, *variables, env=env)
+
+
+def batches(values, prefix, separator, suffix=""):
+    # Linux limits a single argv string. Count encoded bytes, including the
+    # variable name, delimiters and terminating NUL, before invoking make.
+    limit = 64 * 1024
+    fixed = len((prefix + suffix).encode()) + 1
+    batch = []
+    size = fixed
+    for value in sorted(values):
+        length = len(value.encode())
+        if fixed + length > limit:
+            sys.exit("pre-push: one selector exceeds the 64 KiB argument limit")
+        if batch and size + len(separator) + length > limit:
+            yield prefix + separator.join(batch) + suffix
+            batch = []
+            size = fixed
+        size += length + (len(separator) if batch else 0)
+        batch.append(value)
+    if batch:
+        yield prefix + separator.join(batch) + suffix
 
 
 def declared_tests(path):
     # Strip Go comments and literals before finding receiver-free declarations.
     # They may contain example test code, especially in raw string fixtures.
     literals = r"""//[^\n]*|/\*.*?\*/|`[^`]*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
-    code = re.sub(literals, " ", path.read_text(encoding="utf-8"), flags=re.DOTALL)
+    source = subprocess.check_output(["git", "show", f"{head}:{path}"]).decode("utf-8")
+    code = re.sub(literals, " ", source, flags=re.DOTALL)
     return {name for name in re.findall(r"\bfunc\s+(Test\w*)\s*\(", code)
             if not name[4:5].islower()}
 
 
 go_bases = []
-packages = set()
-command_changed = False
+changed_dirs = set()
 command_tests = set()
-for base in dict.fromkeys(sys.argv[1:]):
+check_harness = False
+for base in dict.fromkeys(sys.argv[2:]):
     # With rename detection off a move is D + A, including a move across
     # packages. NUL delimiters preserve the exact path read from Git.
-    diff = subprocess.run(["git", "diff", "--no-renames", "--name-status", "-z",
-                           base, "HEAD", "--", "*.go"], stdout=subprocess.PIPE)
-    if diff.returncode:
-        sys.exit(diff.returncode)
-    if not diff.stdout:
-        continue
-    go_bases.append(base)
-    fields = iter(diff.stdout[:-1].split(b"\0"))
+    diff = subprocess.check_output(["git", "diff", "--no-renames", "--name-status", "-z",
+                                    base, head, "--", "*.go", "scripts", ".githooks",
+                                    "Makefile", "go.mod", "go.sum"])
+    if diff:
+        check_harness = True
+    has_go = False
+    fields = iter(diff.split(b"\0")[:-1])
     for status in fields:
         path = Path(os.fsdecode(next(fields)))
-        if path.parent == Path("cmd/gc"):
-            command_changed = True
-            if status != b"D" and path.name.endswith("_test.go"):
-                command_tests.add(path)
-        elif status != b"D":
-            directory = path.parent.as_posix()
-            # The Make recipe expands PKG as a shell word list.
-            if not re.fullmatch(r"[\w./~+-]+", directory):
-                sys.exit(f"pre-push: unsupported Go package path {directory!r}")
-            packages.add("." if directory == "." else "./" + directory)
+        if not path.name.endswith(".go"):
+            continue
+        has_go = True
+        changed_dirs.add(path.parent.as_posix())
+        if status != b"D" and path.parent == Path("cmd/gc") and path.name.endswith("_test.go"):
+            command_tests.add(path)
+    if has_go:
+        go_bases.append(base)
 
-step("check-inventories", "GC_CHECK_INVENTORIES_TIMEOUT=300")
+make("check-inventories", "GC_CHECK_INVENTORIES_TIMEOUT=300")
+if check_harness:
+    for script in ("test-push-gate-lock.sh", "test-local-concurrency.sh"):
+        step(script, "bash", "scripts/" + script)
 if not go_bases:
     sys.exit(0)
+
+# A deletion or move also changes the source package if it survives at head.
+tree = subprocess.check_output(["git", "ls-tree", "-rz", "--name-only", head])
+dirs = changed_dirs.intersection(
+    Path(os.fsdecode(path)).parent.as_posix() for path in tree.split(b"\0") if path.endswith(b".go"))
+for directory in dirs:
+    # The Make recipes expand package directories as shell word lists.
+    if not re.fullmatch(r"[\w./~+-]+", directory):
+        sys.exit(f"pre-push: unsupported Go package path {directory!r}")
+packages = {"." if directory == "." else "./" + directory for directory in dirs}
+
 for base in go_bases:
-    step("fmt-check-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base)
-# lint-changed already loads each changed package with Go. Reuse its list
-# of build-tag exclusions so the test selection uses the same build profile.
-with tempfile.NamedTemporaryFile(mode="r", encoding="utf-8") as exclusions:
-    lint_env = dict(os.environ, GC_PREPUSH_TAGGED_PACKAGES=exclusions.name)
-    for base in go_bases:
-        step("lint-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base, env=lint_env)
+    make("fmt-check-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base)
+# Lint the union once, then use its build-tag exclusions for package tests.
+with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as selected, \
+     tempfile.NamedTemporaryFile(mode="r", encoding="utf-8") as exclusions:
+    selected.writelines(directory + "\n" for directory in sorted(dirs))
+    selected.flush()
+    lint_env = dict(os.environ, GC_PREPUSH_PACKAGE_DIRS=selected.name,
+                    GC_PREPUSH_TAGGED_PACKAGES=exclusions.name)
+    make("lint-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + go_bases[0], env=lint_env)
     tagged = set(exclusions.read().splitlines())
 for package in sorted(tagged):
     print(f"pre-push: {package} left to CI (build-tagged)", file=sys.stderr, flush=True)
 packages.difference_update(tagged)
-step("vet")
-step("test-fsys-darwin-compile")
-if packages:
-    step("test-pkg", "PKG=" + " ".join(sorted(packages)), "COUNT=1")
-if command_changed and "./cmd/gc" not in tagged:
-    step("test-pkg", "PKG=./cmd/gc", "RUN=^$", "COUNT=1")
-    names = sorted({name for path in command_tests for name in declared_tests(path)})
+make("vet")
+make("test-fsys-darwin-compile")
+for group in batches(packages - {"./cmd/gc"}, "PKG=", " "):
+    make("test-pkg", group, "COUNT=1")
+if "./cmd/gc" in packages:
+    make("test-pkg", "PKG=./cmd/gc", "RUN=^$", "COUNT=1")
+    names = {name for path in command_tests for name in declared_tests(path)}
     if names:
-        step("test-pkg", "PKG=./cmd/gc", "RUN=^(" + "|".join(names) + ")$", "COUNT=1")
+        for selector in batches(names, "RUN=^(", "|", ")$"):
+            make("test-pkg", "PKG=./cmd/gc", selector, "COUNT=1")
     else:
         print("pre-push: no tests declared in changed cmd/gc test files", file=sys.stderr)
 PY
