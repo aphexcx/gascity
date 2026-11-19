@@ -427,6 +427,15 @@ func TestPrePushHarnessSelfTests(t *testing.T) {
 	}
 }
 
+func TestPrePushFixtureIsolatesCallerIndex(t *testing.T) {
+	index := filepath.Join(t.TempDir(), "caller-index")
+	t.Setenv("GIT_INDEX_FILE", index)
+	newPrePushFixture(t)
+	if _, err := os.Stat(index); !os.IsNotExist(err) {
+		t.Fatalf("caller index after fixture setup: want absent, got %v", err)
+	}
+}
+
 func TestPrePushSelfTestEnvironment(t *testing.T) {
 	f := newPrePushFixture(t)
 	// Ownership checks need the same Git context as the push. The actual
@@ -439,6 +448,7 @@ test -z "${GIT_DIR-}${GIT_WORK_TREE-}${GIT_INDEX_FILE-}${GIT_CONFIG_COUNT-}" || 
 test "$GIT_CONFIG_NOSYSTEM" = 1 && test "$GIT_CONFIG_GLOBAL" = /dev/null || exit 32
 test ! -e "$HOME/caller-marker" || exit 33
 test "$(go env CGO_ENABLED)" = 0 || exit 34
+test "${GC_REAL_PROCESS_SIGNAL_TESTS-}" = 1 || exit 35
 scratch=$(mktemp -d "$HOME/fixture.XXXXXX")
 git -C "$scratch" init -q
 git -C "$scratch" config user.name fixture
@@ -483,9 +493,16 @@ if [ "$2" = test-pkg ]; then
     PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" CHECK_ICU=true "$@"
 fi
 `)
-	code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
-	if code != 0 || !strings.Contains(out, "isolated-test-ran") || f.gitOut(t, "config", "user.name") != "test" || f.gitOut(t, "rev-parse", "HEAD") != head {
-		t.Fatalf("self-test environment: exit %d, %s", code, out)
+	f.env = append(f.env, "EXTRA_TEST_ENV=GC_REAL_PROCESS_SIGNAL_TESTS=1")
+	for _, goroot := range []string{"", filepath.Join(callerHome, "stale-go-root")} {
+		t.Run("GOROOT="+filepath.Base(goroot), func(t *testing.T) {
+			fixture := *f
+			fixture.env = append(slices.Clone(f.env), "GOROOT="+goroot)
+			code, out := fixture.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
+			if code != 0 || !strings.Contains(out, "isolated-test-ran") || f.gitOut(t, "config", "user.name") != "test" || f.gitOut(t, "rev-parse", "HEAD") != head {
+				t.Fatalf("self-test environment: exit %d, %s", code, out)
+			}
+		})
 	}
 }
 
