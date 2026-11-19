@@ -1,10 +1,12 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -71,6 +73,11 @@ printf '%s\n' "$*" >> "$MAKE_RECORD"
 	writeExecutable(t, filepath.Join(repo, "scripts", "push-ownership-guard.sh"), `#!/usr/bin/env bash
 assert_bead_still_claimed() { return 0; }
 `)
+	for _, name := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
+		writeExecutable(t, filepath.Join(repo, "scripts", name), `#!/bin/sh
+test "${0##*/}" != "$FAIL_SELFTEST"
+`)
+	}
 
 	f.git(t, "init", "-q", "-b", "main")
 	f.git(t, "config", "user.email", "test@example.com")
@@ -331,6 +338,143 @@ func TestPrePushChangedCommandTests(t *testing.T) {
 	}
 }
 
+func (f *prePushFixture) write(t *testing.T, rel, body string) {
+	t.Helper()
+	path := filepath.Join(f.repo, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *prePushFixture) commit(t *testing.T, msg string) string {
+	t.Helper()
+	f.git(t, "add", "-A")
+	f.git(t, "commit", "-qm", msg)
+	return f.gitOut(t, "rev-parse", "HEAD")
+}
+
+func TestPrePushPackagesOnBothSides(t *testing.T) {
+	for _, tc := range []struct{ change, want string }{
+		{"delete file", "./src"},
+		{"move file", "./dst ./src"},
+		{"delete package", ""},
+	} {
+		t.Run(tc.change, func(t *testing.T) {
+			f := newPrePushFixture(t)
+			f.write(t, "go.mod", "module example.org/fixture\n\ngo 1.23\n")
+			f.write(t, "src/stays.go", "package fixture\n")
+			f.write(t, "src/café.go", "package fixture\n")
+			f.write(t, "dst/stays.go", "package fixture\n")
+			base := f.commit(t, "add packages")
+			switch tc.change {
+			case "delete file":
+				f.git(t, "rm", "src/café.go")
+			case "move file":
+				f.git(t, "mv", "src/café.go", "dst/café.go")
+			case "delete package":
+				f.git(t, "rm", "-r", "src")
+			}
+			head := f.commit(t, tc.change)
+			// Run the real Make recipe through package loading. Only the linter
+			// binary and unrelated targets are replaced.
+			f.env = append(f.env, "TOOL_PATH="+os.Getenv("PATH"), "REPO_MAKEFILE="+filepath.Join(repoRoot(t), "Makefile"))
+			writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+printf '%s\n' "$*" >> "$MAKE_RECORD"
+if [ "$2" = lint-changed ]; then
+    PATH="$TOOL_PATH" GOTOOLCHAIN=local exec make -f "$REPO_MAKEFILE" GOLANGCI_LINT=/usr/bin/true "$@"
+fi
+`)
+			code, out := f.run(t, "HEAD "+head+" refs/heads/main "+base+"\n")
+			calls := f.read(t, f.makeRuns)
+			if code != 0 || !strings.Contains(calls, "--no-print-directory vet\n") {
+				t.Fatalf("exit %d: %s\n%s", code, out, calls)
+			}
+			if tc.want == "" {
+				if strings.Contains(calls, "test-pkg") {
+					t.Errorf("passed a deleted package to test-pkg: %s", calls)
+				}
+			} else if !strings.Contains(calls, "test-pkg PKG="+tc.want+" COUNT=1\n") ||
+				!strings.Contains(out, "lint-changed: "+tc.want) {
+				t.Errorf("expected both lint and tests on %q: %s\n%s", tc.want, out, calls)
+			}
+		})
+	}
+}
+
+func TestPrePushHarnessSelfTests(t *testing.T) {
+	for _, change := range []string{"go", "script only"} {
+		for _, script := range []string{"test-push-gate-lock.sh", "test-local-concurrency.sh"} {
+			t.Run(change+"/"+script, func(t *testing.T) {
+				f := newPrePushFixture(t)
+				base, head := f.commitOld, f.commitNew
+				if change == "script only" {
+					f.write(t, "scripts/push-gate-lock-lib.sh", "# changed\n")
+					base, head = head, f.commit(t, "change harness")
+				}
+				f.env = append(f.env, "FAIL_SELFTEST="+script)
+				code, out := f.run(t, "HEAD "+head+" refs/heads/main "+base+"\n")
+				if code != 1 || !strings.Contains(out, script+" took ") {
+					t.Fatalf("expected timed failure of %s, got exit %d: %s", script, code, out)
+				}
+			})
+		}
+	}
+}
+
+func TestPrePushCommandTestBatchSize(t *testing.T) {
+	f := newPrePushFixture(t)
+	var source strings.Builder
+	source.WriteString("package main\nimport \"testing\"\n")
+	var want []string
+	for i := range 2200 {
+		name := fmt.Sprintf("TestSelectedCommandWithLongName%04d", i)
+		want = append(want, name)
+		fmt.Fprintf(&source, "func %s(t *testing.T) {}\n", name)
+	}
+	f.write(t, "cmd/gc/selected_test.go", source.String())
+	head := f.commit(t, "add command tests")
+	code, out := f.run(t, "HEAD "+head+" refs/heads/main "+f.commitNew+"\n")
+	if code != 0 {
+		t.Fatalf("exit %d: %.500s", code, out)
+	}
+	var got []string
+	for _, line := range strings.Split(f.read(t, f.makeRuns), "\n") {
+		for _, arg := range strings.Fields(line) {
+			if strings.HasPrefix(arg, "RUN=^(") {
+				if len(arg) >= 64*1024 {
+					t.Errorf("RUN argument has %d bytes", len(arg))
+				}
+				names := strings.TrimSuffix(strings.TrimPrefix(arg, "RUN=^("), ")$")
+				got = append(got, strings.Split(names, "|")...)
+			}
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected %d sorted names exactly once, got %d", len(want), len(got))
+	}
+}
+
+func TestPrePushSelectionUsesPushedCommit(t *testing.T) {
+	f := newPrePushFixture(t)
+	// Move just the ref after the tracked-tree check. The index and worktree
+	// still contain exactly the pushed commit, so its Go file must be tested.
+	writeExecutable(t, filepath.Join(f.binDir, "git"), `#!/bin/sh
+if [ "$1 $2" = "diff --quiet" ]; then
+    /usr/bin/git "$@" && /usr/bin/git update-ref HEAD "$MOVE_HEAD_TO"
+else
+    exec /usr/bin/git "$@"
+fi
+`)
+	f.env = append(f.env, "MOVE_HEAD_TO="+f.commitOld)
+	code, out := f.run(t, "HEAD "+f.commitNew+" refs/heads/main "+f.commitOld+"\n")
+	if code != 0 || !strings.Contains(f.read(t, f.makeRuns), "test-pkg PKG=. COUNT=1") {
+		t.Fatalf("missing tests for pushed commit, exit %d: %s", code, out)
+	}
+}
+
 func TestPrePushPinsMakeChecks(t *testing.T) {
 	for _, flags := range []string{"", "n"} {
 		t.Run("MAKEFLAGS="+flags, func(t *testing.T) {
@@ -354,7 +498,7 @@ case "$2" in lint-changed|test-pkg) exec "$REAL_MAKE" "$@";; esac
 `)
 			line := "HEAD " + f.commitNew + " refs/heads/main " + f.commitOld + "\n"
 			code, out := f.run(t, line)
-			if got := f.read(t, record); code != 0 || got != "lint=\nrun=.\n" {
+			if got := f.read(t, record); code != 0 || got != "lint=--allow-serial-runners\nrun=.\n" {
 				t.Fatalf("exit %d, selectors %q, output %s", code, got, out)
 			}
 		})
