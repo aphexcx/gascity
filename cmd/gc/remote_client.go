@@ -141,38 +141,19 @@ func buildRemoteWriteClient(target *remoteTarget) (*api.Client, error) {
 // (preserving per-command test injection and the loopback fallback). A remote
 // resolution or build failure is returned as err.
 func resolveReadTarget() (remoteClient *api.Client, isRemote bool, cityPath string, err error) {
-	ctx, err := resolveContextAllowRemote()
-	if err != nil {
-		return nil, false, "", err
-	}
-	if ctx.Remote != nil {
-		c, berr := buildRemoteClient(ctx.Remote)
-		if berr != nil {
-			return nil, true, "", berr
-		}
-		return c, true, "", nil
-	}
-	return nil, false, ctx.CityPath, nil
+	c, ctx, err := resolveReadClient()
+	return c, ctx.Remote != nil, ctx.CityPath, err
 }
 
-// resolveReadTargetEcho is resolveReadTarget for a READ command that also
-// wants to echo the resolved remote target (the way mutating commands do): it
-// returns the *remoteTarget alongside the no-fallback remote client. For a
-// LOCAL target it returns isRemote=false and a nil client; the caller uses its
-// existing local seam.
-func resolveReadTargetEcho() (remoteClient *api.Client, isRemote bool, target *remoteTarget, err error) {
-	ctx, err := resolveContextAllowRemote()
-	if err != nil {
-		return nil, false, nil, err
+// resolveReadClient retains the selected city for local store reads and the
+// remote target for commands that echo it.
+func resolveReadClient() (*api.Client, resolvedContext, error) {
+	ctx, err := resolveContextAllowRemoteMode(contextResolutionMode{cityOnly: true})
+	if err != nil || ctx.Remote == nil {
+		return nil, ctx, err
 	}
-	if ctx.Remote != nil {
-		c, berr := buildRemoteClient(ctx.Remote)
-		if berr != nil {
-			return nil, true, ctx.Remote, berr
-		}
-		return c, true, ctx.Remote, nil
-	}
-	return nil, false, nil, nil
+	c, err := buildRemoteClient(ctx.Remote)
+	return c, ctx, err
 }
 
 // resolveWriteTarget resolves a MUTATING command's target. It is the write-side

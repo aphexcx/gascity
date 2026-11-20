@@ -883,10 +883,6 @@ func newMailProviderWithSessionStore(msgStore, sessStore beads.Store) mail.Provi
 	return newMailProviderNamedWithSessionStore(cityPath, mailProviderName(), msgStore, sessStore, true)
 }
 
-func newCommandMailProvider(store beads.Store) mail.Provider {
-	return newMailProviderNamed(mailProviderName(), store, true)
-}
-
 func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
 	return newMailProviderNamed(v, store, true)
 }
@@ -925,25 +921,44 @@ func newMailProviderNamedWithSessionStore(cityPath, v string, msgStore, sessStor
 // (newCityMailProvider, class_store.go). Byte-identical until a class backend is
 // configured (both resolvers are identity at the single-store bd backend).
 func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int) {
-	// For exec: and test doubles, no store needed.
-	v := mailProviderName()
-	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		return newCommandMailProvider(nil), 0
-	}
+	cityPath, err := resolveCity()
+	mailbox, code := openResolvedCityMail(cityPath, err, stderr, cmdName)
+	return mailbox.provider, code
+}
 
-	store, cityPath, code := openCityStoreWithPath(stderr, cmdName)
-	if store == nil {
-		return nil, code
+type commandMailbox struct {
+	provider     mail.Provider
+	cfg          *config.City
+	sessionStore beads.Store
+}
+
+func openResolvedCityMail(cityPath string, cityErr error, stderr io.Writer, cmdName string) (commandMailbox, int) {
+	v := os.Getenv("GC_MAIL")
+	var cfg *config.City
+	if cityErr == nil && !isStorelessMailProviderName(v) {
+		cfg, _ = loadCityConfig(cityPath, io.Discard)
+		if v == "" && cfg != nil {
+			v = cfg.Mail.Provider
+		}
 	}
-	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
-	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity —
-	// where a relocated class is SERVED from does not depend on it, because the
-	// routes come from cliStorageRoutes, which reads the city's own [storage].
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if isStorelessMailProviderName(v) {
+		return commandMailbox{provider: newMailProviderNamedWithSessionStore(cityPath, v, nil, nil, true)}, 0
+	}
+	if cityErr != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, cityErr) //nolint:errcheck // best-effort stderr
+		return commandMailbox{}, 1
+	}
+	store, code := openResolvedCityStore(cityPath, cfg, stderr, cmdName)
+	if store == nil {
+		return commandMailbox{}, code
+	}
 	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	return newMailProviderWithSessionStore(msgStore, sessStore), 0
+	return commandMailbox{
+		provider:     newMailProviderNamedWithSessionStore(cityPath, v, msgStore, sessStore, true),
+		cfg:          cfg,
+		sessionStore: sessStore,
+	}, 0
 }
 
 // eventsProviderName returns the events provider name.
