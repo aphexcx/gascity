@@ -237,6 +237,8 @@ jobs:
         run: bash scripts/test-push-gate-lock.sh
       - name: Local concurrency and environment
         run: bash scripts/test-local-concurrency.sh
+      - name: Scripts package tests
+        run: go test -count=1 ./scripts
 
   preflight-static:
     name: Preflight / static checks

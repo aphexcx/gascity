@@ -11,6 +11,25 @@ import (
 // ultimately feed, directly or through an intermediate rollup.
 const ciRequiredRoot = "ci-required"
 
+func TestCIRequiredRunsScriptsForNonGoInputs(t *testing.T) {
+	// The scripts package exercises .githooks/pre-push, .githooks/lib/beads-chain.sh,
+	// scripts/push-ownership-guard.sh, scripts/test-push-ownership-guard.sh and
+	// extensionless helpers such as scripts/with-push-gate-slot. An unconditional
+	// job covers each input even when it is the only file in the pull request.
+	wf := readCriticalPathWorkflow(t, "ci.yml")
+	const id = "local-harness-self-tests"
+	job := wf.Jobs[id]
+	if !slices.Contains(wf.Jobs[ciRequiredRoot].Needs, id) || job.ContinueOnError ||
+		job.If != "" || !slices.Equal(job.Needs, []string{"runner-policy"}) {
+		t.Fatalf("%s must require %s on every path", ciRequiredRoot, id)
+	}
+	if !slices.ContainsFunc(job.Steps, func(step ciCriticalPathStep) bool {
+		return step.If == "" && !step.ContinueOnError && step.Run == "go test -count=1 ./scripts"
+	}) {
+		t.Fatalf("%s must run the scripts package, including on hook-only and script-only changes", id)
+	}
+}
+
 // ciAggregateJobs summarize a subset of the job graph by reading
 // needs.*.result -- they never run tests themselves, so they are exempt
 // from the coverage requirement below. ci-preflight and ci-integration
