@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Heavy `go test` fan-out runs here, at push time, instead of on every commit
-# (#3628). pre-commit previously invoked `make test-fast-parallel` on every
-# commit. Its outer shard fan-out can compile ~2.8 GiB test binaries per job,
-# so the canonical runner now derives concurrency from both CPU and available
-# memory while preserving an explicit LOCAL_TEST_JOBS override. Running the
-# suite at push time also fires it only when Go sources actually change.
-#
 # git feeds "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref
 # on stdin (see githooks(5)).
 
@@ -31,22 +24,13 @@ replay_refs() {
 # own pre-push hook alive.
 "$repo_root/.githooks/lib/beads-chain.sh" pre-push "$@" < <(replay_refs)
 
-go_changed=0
 any_non_deletion=0
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
   fi
   any_non_deletion=1
-  # New remote branch: no cheap base to diff against — run the suite.
-  if [ "$remote_sha" = "$zero" ]; then
-    go_changed=1
-    continue
-  fi
-  if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
-    go_changed=1
-  fi
 done < <(replay_refs)
 
 # Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
@@ -63,16 +47,214 @@ if [ "$any_non_deletion" -eq 1 ]; then
   fi
 fi
 
-# Print inventory drift before any long fan-out, including BUILD/shard-only
-# pushes for which the Go-source scan below does not select the fast suite.
-if [ "$any_non_deletion" -eq 1 ]; then
-  make --no-print-directory check-inventories
-fi
-
-if [ "$go_changed" -eq 0 ]; then
+# The fork runs cheap, deterministic checks locally. CI / required gates
+# the integration and CLI process shards on the pull request's head.
+if [ "$any_non_deletion" -eq 0 ]; then
   exit 0
 fi
+head=$(git rev-parse HEAD)
+bases=()
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" != "$zero" ] || continue
+  if ! commit=$(git rev-parse --verify "$local_sha^{commit}" 2>/dev/null) || [ "$commit" != "$head" ]; then
+    echo "pre-push: check out the commit being pushed; it must match HEAD" >&2
+    exit 1
+  fi
+  if [ "$remote_sha" = "$zero" ]; then
+    ref=${GC_PREPUSH_BASE_REF:-refs/remotes/origin/integration}
+    if ! remote_sha=$(git merge-base "$head" "$ref" 2>/dev/null); then
+      echo "pre-push: no merge base with $ref; git fetch origin integration" >&2
+      exit 1
+    fi
+  fi
+  bases+=("$remote_sha")
+done < <(replay_refs)
+if ! git diff --quiet "$head" --; then
+  echo "pre-push: commit or stash tracked changes before pushing" >&2
+  exit 1
+fi
 
-# The Makefile and direct sharded runner share scripts/test-local-job-count as
-# their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+cd "$repo_root"
+# Git may have been launched by Make in dry-run or fix mode. Run fresh
+# checks with read-only lint and full coverage of each selected package.
+unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES MAKEFILES
+export LINT_FLAGS=--allow-serial-runners RUN=.
+# Only pushes with Go changes need a slot. Make the wrapper the hook process
+# so cancellation reaches the entire group, including the active Make recipe.
+runner=(python3)
+for base in "${bases[@]}"; do
+  if ! git diff --quiet --no-renames "$base" "$head" -- '*.go'; then
+    runner=(scripts/with-push-gate-slot -- python3)
+    break
+  fi
+done
+exec "${runner[@]}" - "$head" "${bases[@]}" <<'PY'
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+head = sys.argv[1]
+
+
+def terminate(signum, _frame):
+    # The slot wrapper signals the whole group. Unwind the temporary file and
+    # private HOME contexts while the wrapper drains the subprocesses.
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, terminate)
+
+
+def check_tree():
+    if subprocess.run(["git", "diff", "--quiet", head, "--"]).returncode:
+        sys.exit("pre-push: tracked files changed while checking the pushed commit")
+
+
+def make(target, *variables, env=None):
+    # The checks read the checkout. Verify its tracked contents before and
+    # after each command, including the final test or a script-only check.
+    check_tree()
+    start = time.monotonic()
+    result = subprocess.run(["make", "--no-print-directory", target, *variables], env=env)
+    elapsed = round(time.monotonic() - start)
+    print(f"pre-push: {target} took {elapsed} s at load {os.getloadavg()[0]:.2f}",
+          file=sys.stderr, flush=True)
+    if result.returncode:
+        sys.exit(result.returncode if result.returncode > 0 else 128 - result.returncode)
+    check_tree()
+
+
+def test_packages(*variables):
+    # Make resolves compiler settings and caches in the pushing checkout.
+    # Its TEST_ENV then clears repository vars and installs a test gitconfig.
+    # Give only the test process a private HOME inside that boundary.
+    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or "/var/tmp") as home:
+        env = dict(os.environ, GC_PREPUSH_TEST_HOME=home)
+        env["EXTRA_TEST_ENV"] = env.get("EXTRA_TEST_ENV", "") + ' HOME="$$GC_PREPUSH_TEST_HOME"'
+        # Go normally locates its saved build profile using HOME. Preserve its
+        # contents without letting tests write to the caller's configuration.
+        if shutil.which("go"):
+            # The config location belongs to the caller. Query the installed
+            # driver without loading a module toolchain or an inherited root.
+            driver_env = dict(os.environ, GOTOOLCHAIN="local")
+            driver_env.pop("GOROOT", None)
+            config = subprocess.check_output(["go", "env", "GOENV"], env=driver_env, text=True).rstrip("\n")
+            if config and config != "off":
+                private_config = Path(home, "go.env")
+                try:
+                    shutil.copyfile(config, private_config)
+                except FileNotFoundError:
+                    pass  # Go's default config path need not exist.
+                env["GOENV"] = str(private_config)
+        make("test-pkg", *variables, "COUNT=1", env=env)
+
+
+def batches(values, prefix, separator, suffix=""):
+    # Linux limits a single argv string. Count encoded bytes, including the
+    # variable name, delimiters and terminating NUL, before invoking make.
+    limit = 64 * 1024
+    fixed = len((prefix + suffix).encode()) + 1
+    batch = []
+    size = fixed
+    for value in sorted(values):
+        length = len(value.encode())
+        if fixed + length > limit:
+            sys.exit("pre-push: one selector exceeds the 64 KiB argument limit")
+        if batch and size + len(separator) + length > limit:
+            yield prefix + separator.join(batch) + suffix
+            batch = []
+            size = fixed
+        size += length + (len(separator) if batch else 0)
+        batch.append(value)
+    if batch:
+        yield prefix + separator.join(batch) + suffix
+
+
+def declared_tests(path):
+    # Strip Go comments and literals before finding receiver-free declarations.
+    # They may contain example test code, especially in raw string fixtures.
+    literals = r"""//[^\n]*|/\*.*?\*/|`[^`]*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+    source = subprocess.check_output(["git", "show", f"{head}:{path}"]).decode("utf-8")
+    code = re.sub(literals, " ", source, flags=re.DOTALL)
+    return {name for name in re.findall(r"\bfunc\s+(Test\w*)\s*\(", code)
+            if not name[4:5].islower()}
+
+
+go_bases = []
+changed_dirs = set()
+command_tests = set()
+for base in dict.fromkeys(sys.argv[2:]):
+    # With rename detection off a move is D + A, including a move across
+    # packages. NUL delimiters preserve the exact path read from Git.
+    diff = subprocess.check_output(["git", "diff", "--no-renames", "--name-status", "-z",
+                                    base, head, "--", "*.go"])
+    if not diff:
+        continue
+    go_bases.append(base)
+    fields = iter(diff.split(b"\0")[:-1])
+    for status in fields:
+        path = Path(os.fsdecode(next(fields)))
+        changed_dirs.add(path.parent.as_posix())
+        if status != b"D" and path.parent == Path("cmd/gc") and path.name.endswith("_test.go"):
+            command_tests.add(path)
+
+make("check-inventories", "GC_CHECK_INVENTORIES_TIMEOUT=300")
+if not go_bases:
+    sys.exit(0)
+
+# A deletion or move also changes the source package if it survives at head.
+tree = subprocess.check_output(["git", "ls-tree", "-rz", head])
+dirs = set()
+for entry in tree.split(b"\0"):
+    if not entry.endswith(b".go"):
+        continue
+    header, raw_path = entry.split(b"\t", 1)
+    path = Path(os.fsdecode(raw_path))
+    if path.name.startswith((".", "_")):
+        command_tests.discard(path)
+        continue
+    if path.parent.as_posix() in changed_dirs:
+        dirs.add(path.parent.as_posix())
+    if path in command_tests and header.startswith(b"120000 "):
+        print(f"pre-push: {path} left to CI (symlinked test file)", file=sys.stderr)
+        command_tests.remove(path)
+for directory in dirs:
+    # The Make recipes expand package directories as shell word lists.
+    if not re.fullmatch(r"[\w./~+-]+", directory):
+        sys.exit(f"pre-push: unsupported Go package path {directory!r}")
+packages = {"." if directory == "." else "./" + directory for directory in dirs}
+
+for base in go_bases:
+    make("fmt-check-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + base)
+# Lint the union once, then use its build-tag exclusions for package tests.
+with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as selected, \
+     tempfile.NamedTemporaryFile(mode="r", encoding="utf-8") as exclusions:
+    selected.writelines(directory + "\n" for directory in sorted(dirs))
+    selected.flush()
+    lint_env = dict(os.environ, GC_PREPUSH_PACKAGE_DIRS=selected.name,
+                    GC_PREPUSH_TAGGED_PACKAGES=exclusions.name)
+    make("lint-changed", "LINT_CHANGED_SCOPE=tracked", "LINT_CHANGED_REF=" + go_bases[0], env=lint_env)
+    tagged = set(exclusions.read().splitlines())
+for package in sorted(tagged):
+    print(f"pre-push: {package} left to CI (build-tagged)", file=sys.stderr, flush=True)
+packages.difference_update(tagged)
+make("vet")
+make("test-fsys-darwin-compile")
+for group in batches(packages - {"./cmd/gc"}, "PKG=", " "):
+    test_packages(group)
+if "./cmd/gc" in packages:
+    test_packages("PKG=./cmd/gc", "RUN=^$")
+    names = {name for path in command_tests for name in declared_tests(path)}
+    if names:
+        for selector in batches(names, "RUN=^(", "|", ")$"):
+            test_packages("PKG=./cmd/gc", selector)
+    else:
+        print("pre-push: no tests declared in changed cmd/gc test files", file=sys.stderr)
+PY

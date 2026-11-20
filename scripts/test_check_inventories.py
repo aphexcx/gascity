@@ -110,6 +110,17 @@ class BuildInventoryTests(unittest.TestCase):
             kill.assert_called_once_with(123, check.signal.SIGKILL)
             self.assertEqual(process.communicate.call_count, 2)
 
+    def test_configured_timeout(self):
+        with mock.patch.dict(os.environ, GC_CHECK_INVENTORIES_TIMEOUT="1"):
+            with self.assertRaisesRegex(check.InventoryError, "timed out after 1s"):
+                check.run([check.sys.executable, "-c", "import time; time.sleep(3)"], Path.cwd())
+
+    def test_invalid_timeout(self):
+        for value in ("abc", "0"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, GC_CHECK_INVENTORIES_TIMEOUT=value):
+                with self.assertRaisesRegex(check.InventoryError, "GC_CHECK_INVENTORIES_TIMEOUT"):
+                    check.run([check.sys.executable, "-V"], Path.cwd())
+
     def test_absent_bazel_is_explicit_and_generator_still_runs(self):
         with tempfile.TemporaryDirectory(prefix="inventory-test-", dir="/var/tmp") as directory:
             root = Path(directory)
@@ -193,7 +204,7 @@ class HookInventoryTests(unittest.TestCase):
         head = self.commit()
         result = self.hook("pre-push", f"refs/heads/topic {head} refs/heads/topic {base}\n")
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
-        self.assertEqual((self.root / "make.calls").read_text().splitlines(), ["--no-print-directory check-inventories"])
+        self.assertEqual((self.root / "make.calls").read_text().splitlines(), ["--no-print-directory check-inventories GC_CHECK_INVENTORIES_TIMEOUT=300"])
 
 
 if __name__ == "__main__":

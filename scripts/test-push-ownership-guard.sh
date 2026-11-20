@@ -1167,6 +1167,7 @@ setup_hook_push_scenario() {
         git config commit.gpgsign false
         install_guard_hook "$work"
         printf 'base\n' > f.txt; git add -A; git commit -qm base
+        git update-ref refs/remotes/origin/integration HEAD
         git checkout -q -b "$branch"
         printf 'more\n' >> f.txt; git add -A; git commit -qm work
     )

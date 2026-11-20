@@ -5,14 +5,20 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-local-env-test.XXXXXX")"
+[[ -n "$scratch" ]]
 scratch="$(cd "$scratch" && pwd -P)"
 default_log_root="$(cd /var/tmp && pwd -P)"
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin" "$scratch/user-tmp" "$scratch/caller tmp"
+ln -s "$(command -v xargs)" "$scratch/bin/real-xargs"
 
 cat >"$scratch/bin/xargs" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+# Leave compiler and system probes using the real xargs.
+if [[ "${1-} ${2-} ${3-} ${5-} ${6-}" != "-0 -n1 -P bash -c" ]]; then
+  exec "$(dirname "$0")/real-xargs" "$@"
+fi
 # Consume the original jobs, then exercise their unchanged worker with one
 # command that exposes only the environment values this test owns.
 while IFS= read -r -d '' spec; do
@@ -36,11 +42,14 @@ cat >"$scratch/bin/getconf" <<'SH'
 printf '%s\n' "$GC_ENV_TEST_USER_TMP"
 exit "${GC_ENV_TEST_GETCONF_STATUS:-0}"
 SH
-chmod +x "$scratch/bin/"*
+chmod +x "$scratch/bin/xargs" "$scratch/bin/uname" "$scratch/bin/getconf"
 
 export PATH="$scratch/bin:$PATH"
 export GC_ENV_TEST_OS=Darwin GC_ENV_TEST_USER_TMP="$scratch/user-tmp/"
 export LOCAL_TEST_JOBS=1 CMD_GC_PROCESS_TOTAL=1 GC_PUSH_GATE_NO_CAP=1 GC_TEST_NO_SLICE=1
+# The probe starts no real test jobs. Disable host cleanup in the direct
+# runner and carry that setting through Make's env -i boundary as well.
+export GC_TEST_NO_ORPHAN_SWEEP=1 EXTRA_TEST_ENV=GC_TEST_NO_ORPHAN_SWEEP=1
 unset TMPDIR LOCAL_TEST_LOG_DIR GC_TEST_INNER_P GO_TEST_TIMEOUT
 cd "$repo_root"
 
