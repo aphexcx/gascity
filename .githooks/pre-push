@@ -79,11 +79,21 @@ cd "$repo_root"
 # checks with read-only lint and full coverage of each selected package.
 unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES MAKEFILES
 export LINT_FLAGS=--allow-serial-runners RUN=.
-exec python3 - "$head" "${bases[@]}" <<'PY'
+# Only pushes with Go changes need a slot. Make the wrapper the hook process
+# so cancellation reaches the entire group, including the active Make recipe.
+runner=(python3)
+for base in "${bases[@]}"; do
+  if ! git diff --quiet --no-renames "$base" "$head" -- '*.go'; then
+    runner=(scripts/with-push-gate-slot -- python3)
+    break
+  fi
+done
+exec "${runner[@]}" - "$head" "${bases[@]}" <<'PY'
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -91,6 +101,15 @@ import time
 
 
 head = sys.argv[1]
+
+
+def terminate(signum, _frame):
+    # The slot wrapper signals the whole group. Unwind the temporary file and
+    # private HOME contexts while the wrapper drains the subprocesses.
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, terminate)
 
 
 def check_tree():

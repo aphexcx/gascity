@@ -49,7 +49,11 @@ func newPrePushFixture(t *testing.T) *prePushFixture {
 		"BD_STDIN_RECORD="+f.bdStdin,
 		"MAKE_RECORD="+f.makeRuns,
 		"GC_PREPUSH_BASE_REF=",
+		"GC_CITY_PATH="+recordDir,
 	)
+	if err := os.WriteFile(filepath.Join(recordDir, "city.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// `bd` records exactly what the chain handed it on stdin.
 	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env sh
@@ -60,12 +64,15 @@ cat > "$BD_STDIN_RECORD"
 printf '%s\n' "$*" >> "$MAKE_RECORD"
 `)
 
-	for _, dir := range []string{".githooks/lib", "scripts"} {
+	for _, dir := range []string{".githooks/lib", "scripts/lib"} {
 		if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	for _, rel := range []string{".githooks/pre-push", ".githooks/lib/beads-chain.sh"} {
+	for _, rel := range []string{
+		".githooks/pre-push", ".githooks/lib/beads-chain.sh",
+		"scripts/with-push-gate-slot", "scripts/push-gate-lock-lib.sh", "scripts/lib/harness-reap.sh",
+	} {
 		body, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
@@ -192,6 +199,79 @@ func (f *prePushFixture) checkGoPush(t *testing.T, base, output string) {
 	if got := f.read(t, f.makeRuns); got != want.String() {
 		t.Errorf("make invocations:\n%s\nwant:\n%s", got, want.String())
 	}
+}
+
+func TestPrePushSupervisesGoChecks(t *testing.T) {
+	t.Run("busy slot", func(t *testing.T) {
+		f := newPrePushFixture(t)
+		flock, err := exec.LookPath("flock")
+		if err != nil {
+			t.Skip("slot contention requires flock")
+		}
+		if err := os.Symlink(flock, filepath.Join(f.binDir, "flock")); err != nil {
+			t.Fatal(err)
+		}
+		f.write(t, "cmd/gc/main.go", "package main\n")
+		head := f.commit(t, "change command package")
+		// Run the push inside the real wrapper so its only slot stays occupied.
+		cmd := testCommand("scripts/with-push-gate-slot", "--", ".githooks/pre-push", "origin", "fixture")
+		cmd.Dir = f.repo
+		f.env = append(f.env, "GC_PUSH_GATE_NO_CAP=0", "PUSH_GATE_MAX_CONCURRENT=1", "PUSH_GATE_MAX_WAIT_SECONDS=0")
+		cmd.Env = f.env
+		cmd.Stdin = strings.NewReader("HEAD " + head + " refs/heads/main " + f.commitNew + "\n")
+		out, err := cmd.CombinedOutput()
+		if err == nil || cmd.ProcessState.ExitCode() != 75 || !strings.Contains(string(out), "timed out after 0s waiting for a free slot") {
+			t.Errorf("wanted push-gate slot refusal, got %v: %s", err, out)
+		}
+		if calls := strings.TrimSpace(f.read(t, f.makeRuns)); calls != "" && calls != "--no-print-directory check-inventories GC_CHECK_INVENTORIES_TIMEOUT=300" {
+			t.Errorf("Go checks ran with the slot held: %s", calls)
+		}
+	})
+
+	t.Run("cancel package test", func(t *testing.T) {
+		f := newPrePushFixture(t)
+		record := t.TempDir()
+		f.env = append(f.env, "RECORD="+record, "TMPDIR="+t.TempDir())
+		writeExecutable(t, filepath.Join(f.binDir, "make"), `#!/bin/sh
+if [ "$2" = test-pkg ]; then
+    test -d "$GC_PREPUSH_TEST_HOME" || exit 1
+    echo "$GC_PREPUSH_TEST_HOME" > "$RECORD/home"
+    echo $$ > "$RECORD/pid"
+    exec sleep 60
+fi
+`)
+		cmd := testCommand(".githooks/pre-push", "origin", "fixture")
+		cmd.Dir = f.repo
+		cmd.Env = f.env
+		cmd.Stdin = strings.NewReader("HEAD " + f.commitNew + " refs/heads/main " + f.commitOld + "\n")
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		pid := waitForPIDFile(t, filepath.Join(record, "pid"), 15*time.Second)
+		home := strings.TrimSpace(f.read(t, filepath.Join(record, "home")))
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Error("canceled hook returned success")
+			}
+		case <-time.After(30 * time.Second):
+			t.Error("hook failed to drain on SIGTERM")
+		}
+		if !processGone(pid, time.Second) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Error("package test survived cancellation")
+		}
+		if _, err := os.Stat(home); !os.IsNotExist(err) {
+			t.Errorf("private test HOME after cancellation: stat %q: %v", home, err)
+		}
+	})
 }
 
 func TestPrePushNewBranchBase(t *testing.T) {
