@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -46,6 +47,12 @@ type MaintenanceProvider interface {
 	// is held it returns *supervisor.MaintenanceInProgressError so the
 	// POST handler can translate to 409 Conflict.
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
+}
+
+// SessionLaunchBuilder supplies a lazy full-launch resolver for calls that may
+// start a runtime. Returning the closure must not build or publish launch inputs.
+type SessionLaunchBuilder interface {
+	SessionLaunchBuilder() worker.SessionRuntimeResolver
 }
 
 // State provides read access to controller-managed state.

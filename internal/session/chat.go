@@ -542,8 +542,14 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
-	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &resumeCommand, &hints, true); err != nil {
+	migratedCommand, migratedHints := resumeCommand, hints
+	if err := m.clearIncompatibleACPMetadata(id, &b, sessName, &migratedCommand, &migratedHints, true); err != nil {
 		return err
+	}
+	// Migration still validates and persists the current provider settings.
+	// Only cached launches consume its cheaper command/environment projection.
+	if strings.TrimSpace(hints.Command) == "" {
+		resumeCommand, hints = migratedCommand, migratedHints
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -953,7 +959,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 }
 
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (runtime.NudgeDelivery, error) {
-	if !m.sp.IsRunning(sessName) {
+	if !m.sp.IsRunning(sessName) || m.controllerOwnsRestart(b) {
 		return runtime.NudgeDelivery{}, nil
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1040,6 +1046,13 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 		if err != nil {
 			return err
 		}
+		if m.controllerDefersMessage(b, sessName) {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
+				return err
+			}
+			delivery = runtime.NudgeDelivery{Queued: true}
+			return nil
+		}
 		delivery, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
 		return err
 	})
@@ -1049,11 +1062,11 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (runtime.NudgeDelivery, error) {
 	var delivery runtime.NudgeDelivery
 	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if !m.sp.IsRunning(sessName) {
+		if !m.sp.IsRunning(sessName) || m.controllerOwnsRestart(b) {
 			delivery = runtime.NudgeDelivery{}
 			return nil
 		}
@@ -1069,12 +1082,27 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
-		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+	waitingForController := false
+	return m.awaitControllerRestart(ctx, func() error {
+		return withSessionMutationLock(id, func() error {
+			b, sessName, err := m.sessionBead(id)
+			if err != nil {
+				return err
+			}
+			if m.controllerRestartPending(b) {
+				waitingForController = true
+				if err := m.requestControllerWake(b); err != nil {
+					return err
+				}
+			}
+			if waitingForController {
+				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+				}
+				return nil
+			}
+			return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+		})
 	})
 }
 
@@ -1144,6 +1172,13 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, res
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if m.controllerDefersMessage(b, sessName) {
+			if err := m.queueControllerMessage(b, sessName, message); err != nil {
+				return err
+			}
+			delivery = runtime.NudgeDelivery{Queued: true}
+			return nil
 		}
 		delivery, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
 		return err

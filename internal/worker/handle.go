@@ -190,6 +190,8 @@ type NudgeRequest struct {
 
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
+	// Queued means durable delivery is owned by the session queue.
+	Queued    bool `json:"queued,omitempty"`
 	Delivered bool `json:"delivered"`
 	// Undelivered names WHY a live delivery did not happen, for the callers
 	// that downgrade to the queue and have to tell a human what they did.
@@ -211,7 +213,7 @@ type NudgeResult struct {
 // nudgeResultFromDelivery projects a runtime's delivery evidence onto the
 // handle's result without reinterpreting any of it.
 func nudgeResultFromDelivery(d runtime.NudgeDelivery) NudgeResult {
-	return NudgeResult{Delivered: d.Delivered, Bytes: d.Bytes, Submit: d.Submit, Held: d.Held}
+	return NudgeResult{Queued: d.Queued, Delivered: d.Delivered, Bytes: d.Bytes, Submit: d.Submit, Held: d.Held}
 }
 
 // UnconfirmedSubmitError is the retry signal a caller without an evidence
@@ -237,7 +239,7 @@ func (r NudgeResult) Landed() bool {
 }
 
 func (r NudgeResult) delivery() runtime.NudgeDelivery {
-	return runtime.NudgeDelivery{Delivered: r.Delivered, Bytes: r.Bytes, Submit: r.Submit, Held: r.Held}
+	return runtime.NudgeDelivery{Queued: r.Queued, Delivered: r.Delivered, Bytes: r.Bytes, Submit: r.Submit, Held: r.Held}
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not
@@ -363,7 +365,10 @@ type SessionHandle struct {
 	sidecarRetryScheduled bool
 	// resolveStartup delegates launch inputs to the manager's resolver under
 	// the operation lock instead of reusing this handle's construction snapshot.
-	resolveStartup bool
+	resolveStartup     bool
+	buildSessionLaunch SessionRuntimeResolver
+	launchProvider     runtime.Provider
+	controllerRunning  func() bool
 }
 
 var (

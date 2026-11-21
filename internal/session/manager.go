@@ -589,6 +589,9 @@ type Manager struct {
 	resumeConfigResolver    func(Info, map[string]string) (string, ProviderResume, runtime.Config, error)
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	controllerRunning       func() bool
+	pokeController          func() error
+	withdrawWaitNudges      func([]string) error
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -1246,16 +1249,31 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // suspended, it is resumed first using resumeCommand. If the tmux session
 // died (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-			return err
-		}
+	waitingForController := false
+	return m.awaitControllerRestart(ctx, func() error {
+		return withSessionMutationLock(id, func() error {
+			b, sessName, err := m.sessionBead(id)
+			if err != nil {
+				return err
+			}
+			if m.controllerRestartPending(b) {
+				waitingForController = true
+				if err := m.requestControllerWake(b); err != nil {
+					return err
+				}
+			}
+			if waitingForController {
+				if m.restartOrKillPending(b) || !m.sp.IsRunning(sessName) {
+					return fmt.Errorf("%w: %s", ErrControllerRestartPending, id)
+				}
+				return m.sp.Attach(sessName)
+			}
+			if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+				return err
+			}
 
-		return m.sp.Attach(sessName)
+			return m.sp.Attach(sessName)
+		})
 	})
 }
 
