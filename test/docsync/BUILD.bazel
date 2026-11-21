@@ -5,6 +5,7 @@ go_test(
     srcs = [
         "connected_clients_test.go",
         "docsync_test.go",
+        "review_md_test.go",
         "testenv_import_test.go",
         "verify_skill_test.go",
     ],
