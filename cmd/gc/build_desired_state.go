@@ -4560,7 +4560,7 @@ func selectOrPlanPoolSessionBead(
 	if !bp.hasCompleteSessionSnapshot() {
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
+	slot, err := claimFreshPoolSlotWithPreference(bp, cfgAgent, usedSlots, request.PreferredSlot)
 	if err != nil {
 		return session.Info{}, 0, nil, err
 	}
@@ -4747,12 +4747,17 @@ func poolAliasCollisionFromInfos(infos []session.Info, alias string) error {
 	return nil
 }
 
-// claimFreshPoolSlotInfo selects the lowest free in-cap concrete slot for a
-// fresh pool row. Snapshot holders contribute to a local occupied union only:
-// adding them to the shared request-order usedSlots map would let an anonymous
+// claimFreshPoolSlotInfo selects a fresh slot for a request without a work bead.
+func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+	return claimFreshPoolSlotWithPreference(bp, cfgAgent, usedSlots, 0)
+}
+
+// claimFreshPoolSlotWithPreference selects the work bead's last slot when free
+// and within capacity, falling back to the lowest free slot. Snapshot holders
+// contribute only to local occupancy. Adding them to usedSlots would let an anonymous
 // request processed first block a later concrete resume of that same holder.
 // Only the newly selected slot is published to usedSlots.
-func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+func claimFreshPoolSlotWithPreference(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool, preferred int) (int, error) {
 	upper, unlimited, canonical, err := freshPoolSlotUpperBound(cfgAgent)
 	if err != nil {
 		return 0, err
@@ -4794,6 +4799,10 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 			}
 			occupied[slot] = true
 		}
+	}
+	if preferred > 0 && (unlimited || preferred <= upper) && !occupied[preferred] {
+		usedSlots[preferred] = true
+		return preferred, nil
 	}
 	for slot := 1; unlimited || slot <= upper; slot++ {
 		if occupied[slot] {
