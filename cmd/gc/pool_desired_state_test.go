@@ -55,7 +55,7 @@ func TestReturningPoolWorkSlot(t *testing.T) {
 			for range tc.want {
 				_, err := bp.beadStore.Create(beads.Bead{
 					Title: "returning work", Type: "task", Status: "open",
-					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", "gc.last_pool_slot": tc.record},
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", beadmeta.LastPoolSlotMetadataKey: tc.record},
 				})
 				if err != nil {
 					t.Fatal(err)
