@@ -400,6 +400,7 @@ it cannot fix a policy mismatch. Review all three files and rerun
 `make check-inventories` without an update flag. Pre-commit runs this check
 for staged Go, BUILD, shard, census, or generator inputs, including deletions.
 Pre-push prints its result before starting the fast test shards.
+`GC_CHECK_INVENTORIES_TIMEOUT` defaults to 60 seconds per command. Both hooks set it to 300 seconds.
 
 `[[reviewed_hermetic_body]]` rows record a narrower fact than a Small-test
 classification: the exact untagged top-level test body and every statically

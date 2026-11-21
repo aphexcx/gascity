@@ -17,7 +17,7 @@ staged_spec=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/o
 # shard entry just as adding one can leave a missing entry.
 staged_inventories=$(git diff --cached --name-only -- '*.go' 'BUILD.bazel' '**/BUILD.bazel' 'MODULE.bazel' 'go.mod' 'go.sum' 'Makefile' 'scripts/check-inventories.py' 'scripts/test_check_inventories.py' 'scripts/test-integration-shard' 'scripts/runtime-tmux-tests.manifest' 'tools/bazel/repo_tree.py' 'test/test-resources.toml' 'TESTING.md')
 if [ -n "$staged_inventories" ]; then
-  make --no-print-directory check-inventories
+  make --no-print-directory check-inventories GC_CHECK_INVENTORIES_TIMEOUT=300
 fi
 
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ] && [ -z "$staged_spec" ]; then
