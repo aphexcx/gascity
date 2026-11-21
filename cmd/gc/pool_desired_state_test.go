@@ -29,8 +29,10 @@ func TestReturningPoolWorkSlot(t *testing.T) {
 	}{
 		{"closed previous session", "worker#2", 2, false, []int{2}},
 		{"occupied previous slot", "worker#2", 2, true, []int{1}},
+		{"another slot occupied", "worker#3", 3, true, []int{3}},
 		{"above capacity", "worker#3", 2, false, []int{1}},
 		{"malformed", "worker#two", 2, false, []int{1}},
+		{"overflow", "worker#999999999999999999999999", 2, false, []int{1}},
 		{"zero", "worker#0", 2, false, []int{1}},
 		{"negative", "worker#-2", 2, false, []int{1}},
 		{"foreign template", "other/worker#2", 2, false, []int{1}},
@@ -68,6 +70,7 @@ func TestReturningPoolWorkSlot(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatal(errs)
 			}
+			demand["worker"] = mergeScaleCheckDemand(scaleCheckDemand{}, demand["worker"], counts["worker"])
 			states := ComputePoolDesiredStatesWithDemandTracedAt(cfg, nil, nil, counts, demand, now, nil)
 			if len(states) != 1 || len(states[0].Requests) != len(tc.want) {
 				t.Fatalf("unexpected demand: %+v", states)

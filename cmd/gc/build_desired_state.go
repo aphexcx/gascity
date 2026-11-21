@@ -226,6 +226,7 @@ type defaultScaleCheckTarget struct {
 type scaleCheckDemand struct {
 	Count          int
 	WorkBeadIDs    []string
+	PreferredSlots map[string]int
 	Titles         map[string]string
 	Packs          map[string]string
 	Workspaces     map[string]string
@@ -2077,6 +2078,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			entry := demand[template]
 			entry.Count++
 			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if slot := lastClaimedPoolSlot(b, template); slot > 0 {
+				if entry.PreferredSlots == nil {
+					entry.PreferredSlots = make(map[string]int)
+				}
+				entry.PreferredSlots[b.ID] = slot
+			}
 			if entry.Titles == nil {
 				entry.Titles = make(map[string]string)
 			}
@@ -2132,6 +2139,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.StoreRefs == nil && len(incoming.StoreRefs) > 0 {
 		existing.StoreRefs = make(map[string]string, len(incoming.StoreRefs))
 	}
+	if existing.PreferredSlots == nil && len(incoming.PreferredSlots) > 0 {
+		existing.PreferredSlots = make(map[string]int, len(incoming.PreferredSlots))
+	}
 	if existing.Titles == nil && len(incoming.Titles) > 0 {
 		existing.Titles = make(map[string]string, len(incoming.Titles))
 	}
@@ -2155,6 +2165,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 			continue
 		}
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
+		if slot := incoming.PreferredSlots[id]; slot > 0 {
+			existing.PreferredSlots[id] = slot
+		}
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]
 		}
