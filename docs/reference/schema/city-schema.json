@@ -200,7 +200,7 @@
         },
         "max_active_sessions": {
           "type": "integer",
-          "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nReplaces pool.max."
+          "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nA fresh numbered session for a returning bead uses its previous slot on the same agent if that slot is free and within the cap, or the lowest free slot otherwise.\nReplaces pool.max."
         },
         "min_active_sessions": {
           "type": "integer",
