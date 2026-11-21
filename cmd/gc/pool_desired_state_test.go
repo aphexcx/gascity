@@ -19,6 +19,73 @@ import (
 
 func intPtr(n int) *int { return &n }
 
+func TestReturningPoolWorkSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		record   string
+		capacity int
+		occupied bool
+		want     []int
+	}{
+		{"closed previous session", "worker#2", 2, false, []int{2}},
+		{"occupied previous slot", "worker#2", 2, true, []int{1}},
+		{"above capacity", "worker#3", 2, false, []int{1}},
+		{"malformed", "worker#two", 2, false, []int{1}},
+		{"zero", "worker#0", 2, false, []int{1}},
+		{"negative", "worker#-2", 2, false, []int{1}},
+		{"foreign template", "other/worker#2", 2, false, []int{1}},
+		{"unrecorded", "", 2, false, []int{1}},
+		{"singleton", "worker#2", 1, false, []int{0}},
+		{"two beads last claimed in the same slot", "worker#2", 2, false, []int{2, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{{
+				Name: "worker", WorkDir: "lanes/{{.AgentBase}}", MaxActiveSessions: &tc.capacity,
+			}}}
+			old := freshSlotTestInfo("old", "worker", "worker-2", 2)
+			old.Closed = true
+			rows := []sessionpkg.Info{old}
+			if tc.occupied {
+				holder := freshSlotTestInfo("holder", "worker", "worker-2", 2)
+				holder.MetadataState = string(sessionpkg.StateDraining)
+				rows = append(rows, holder)
+			}
+			bp := freshSlotTestParams(cfg)
+			bp.sessionBeads = newSessionBeadSnapshotFromInfos(rows)
+			for range tc.want {
+				_, err := bp.beadStore.Create(beads.Bead{
+					Title: "returning work", Type: "task", Status: "open",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", "gc.last_pool_slot": tc.record},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now()
+			counts, demand, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+				template: "worker", storeKey: "city", store: bp.beadStore,
+			}}, newWorkStartDeferralPass(now, nil))
+			if len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			states := ComputePoolDesiredStatesWithDemandTracedAt(cfg, nil, nil, counts, demand, now, nil)
+			if len(states) != 1 || len(states[0].Requests) != len(tc.want) {
+				t.Fatalf("unexpected demand: %+v", states)
+			}
+			slots := map[int]bool{}
+			for i, request := range states[0].Requests {
+				_, _, plan, err := selectOrPlanPoolSessionBead(bp, &cfg.Agents[0], "worker", nil, request, now, map[string]bool{}, slots)
+				if err != nil || plan == nil {
+					t.Fatalf("expected a fresh plan: plan=%+v, err=%v", plan, err)
+				}
+				if plan.slot != tc.want[i] {
+					t.Errorf("request %d chose slot %d, want %d", i, plan.slot, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestNestedCapUsageRejectionTyped verifies that the retyped rejection producer
 // returns the typed site/reason constants for each cap kind, and that the
 // underlying string values are byte-identical to the pre-S26b literals.

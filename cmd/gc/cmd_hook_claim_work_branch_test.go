@@ -441,6 +441,38 @@ func TestHookClaimIdentityPatchSkipsSessionFallbackOnPartialWorktreeEvidence(t *
 	assertNoWorkDirConflict(t, bead, patch)
 }
 
+func TestClaimRecordsLastPoolSlot(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	t.Setenv("GC_CITY", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Type: session.BeadType, Title: "slot session", Metadata: map[string]string{
+		"template": "project/worker", "pool_slot": "2", "work_dir": "/slots/worker-2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=" + row.ID}}
+	var ops hookClaimOps
+	ops.applyDefaults()
+	work := beads.Bead{Metadata: beads.StringMap{"gc.last_pool_slot": "other/worker#1"}}
+	patch := hookClaimIdentityPatch(work, opts, ops, cityDir)
+	if got := patch["gc.last_pool_slot"]; got != "project/worker#2" {
+		t.Fatalf("recorded slot = %q, want project/worker#2", got)
+	}
+	if _, wroteDir := patch[beadmeta.WorkDirMetadataKey]; wroteDir {
+		t.Fatal("claim published the pool directory as worktree evidence")
+	}
+	work.Metadata["gc.last_pool_slot"] = patch["gc.last_pool_slot"]
+	if _, changed := hookClaimIdentityPatch(work, opts, ops, cityDir)["gc.last_pool_slot"]; changed {
+		t.Fatal("a repeated claim rewrote the slot record")
+	}
+}
+
 // TestSessionStampableWorkDirRefusesPoolManaged covers gc-j0cfh: the WorkDir of a
 // pool-managed session is the slot label, a directory shared by every bead the
 // slot ever runs, so stamping it would manufacture worktree-ownership evidence
