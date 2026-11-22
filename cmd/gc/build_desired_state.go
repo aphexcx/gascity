@@ -929,8 +929,11 @@ func buildDesiredStateWithSessionBeadsAt(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			healthyStores := make(map[string]bool)
-			defaultCounts, defaultDemand, partialTemplates, errs := readDefaultScaleCheckDemand(cfg, defaultScaleTargets, startDeferral, demandReadyCache, healthyStores)
+			probe := defaultScaleCheckRead{cache: demandReadyCache}
+			if len(bp.cityPoolRigDemand) > 0 {
+				probe.healthyStores = make(map[string]bool)
+			}
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, startDeferral, probe)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -967,10 +970,10 @@ func buildDesiredStateWithSessionBeadsAt(
 				entry := mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 				if _, eligible := bp.cityPoolRigDemand[template]; eligible {
 					entry.affinityRigs = cfg.Rigs
-					if partialTemplates[template] && healthyStores["city"] {
+					if partialTemplates[template] && probe.healthyStores["city"] {
 						proven := make(map[string]string)
 						for id, ref := range entry.StoreRefs {
-							if healthyStores[ref] {
+							if probe.healthyStores[ref] {
 								proven[id] = ref
 							}
 						}
@@ -2011,11 +2014,16 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
-	return readDefaultScaleCheckDemand(cfg, targets, startDeferral, nil, nil)
+type defaultScaleCheckRead struct {
+	cache         *readyDemandCache
+	healthyStores map[string]bool // optional per-group read results for partial city-pool demand
 }
 
-func readDefaultScaleCheckDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, cache *readyDemandCache, healthyStores map[string]bool) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, reads ...defaultScaleCheckRead) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+	var probe defaultScaleCheckRead
+	if len(reads) > 0 {
+		probe = reads[0]
+	}
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
 	if len(targets) == 0 {
@@ -2083,9 +2091,9 @@ func readDefaultScaleCheckDemand(cfg *config.City, targets []defaultScaleCheckTa
 		// should wake pools must create an actionable root, such as a
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
-		ready, readyErr := cache.controllerDemandReady(group.store)
-		if healthyStores != nil {
-			healthyStores[key] = readyErr == nil
+		ready, readyErr := probe.cache.controllerDemandReady(group.store)
+		if probe.healthyStores != nil {
+			probe.healthyStores[key] = readyErr == nil
 		}
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
