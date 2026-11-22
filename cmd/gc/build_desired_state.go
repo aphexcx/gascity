@@ -225,6 +225,10 @@ type defaultScaleCheckTarget struct {
 }
 
 type scaleCheckDemand struct {
+	// affinityRigs is set by the city-wide default probe. These rigs qualify
+	// live concrete capacity for tickets from the same repository.
+	affinityRigs []config.Rig
+
 	Count          int
 	WorkBeadIDs    []string
 	Titles         map[string]string
@@ -502,6 +506,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
+	bp.cityPoolRigDemand = make(map[string]bool)
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
 
 	// Pre-compute suspended rig paths (config + runtime state).
@@ -777,6 +782,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			}
 			if agentutil.AgentIsCrossStoreEligible(&cfg.Agents[i]) && !storeScopedControlDispatcher && ownTarget.storeKey == "city" && ownTarget.store != nil && ownTarget.err == nil {
 				defaultScaleTargets = append(defaultScaleTargets, cityPoolRigTargets(ownTarget, cfg.Rigs, rigStores, suspendedRigPaths)...)
+				bp.cityPoolRigDemand[template] = true
 			}
 			continue
 		}
@@ -957,7 +963,11 @@ func buildDesiredStateWithSessionBeadsAt(
 				if count > scaleCheckCounts[template] {
 					scaleCheckCounts[template] = count
 				}
-				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
+				entry := mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
+				if bp.cityPoolRigDemand[template] {
+					entry.affinityRigs = cfg.Rigs
+				}
+				scaleCheckDemandByTemplate[template] = entry
 			}
 		}
 		poolPartialRetentionTemplates = mergeScaleCheckPartialTemplates(poolPartialRetentionTemplates, poolScaleCheckPartialTemplates)
@@ -3803,6 +3813,21 @@ func canonicalEvidenceStoreRef(storeRef string) string {
 	}
 }
 
+func configuredTriggerRig(storeRef string, rigs []config.Rig) string {
+	if len(rigs) == 0 {
+		return ""
+	}
+	name, ok := strings.CutPrefix(canonicalEvidenceStoreRef(storeRef), "rig:")
+	if ok {
+		for _, rig := range rigs {
+			if rig.Name == name {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
@@ -4516,6 +4541,9 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
+	if preferred != nil && !bp.poolSessionMatchesTriggerRig(template, *preferred, request) {
+		preferred = nil
+	}
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
 		if !isManualSessionInfoForAgent(*preferred, cfgAgent) && bp.poolStartDeferredTriggers.contains(preferred.TriggerBeadID, preferred.TriggerBeadStoreRef) {
 			return session.Info{}, 0, nil, fmt.Errorf("pool session %s trigger is deferred", preferred.ID)

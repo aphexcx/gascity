@@ -20,6 +20,9 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
+	// cityPoolRigDemand records the pools whose default probe includes rig stores.
+	cityPoolRigDemand map[string]bool
+
 	city            *config.City
 	cityName        string
 	cityPath        string
