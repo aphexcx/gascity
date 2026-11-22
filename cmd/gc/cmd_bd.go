@@ -208,12 +208,16 @@ var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarge
 }
 
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
+	return bdCommandEnvWithOptions(cityPath, cfg, target, bdEnvOptions{allowRecovery: true})
+}
+
+func bdCommandEnvWithOptions(cityPath string, cfg *config.City, target execStoreTarget, opts bdEnvOptions) ([]string, error) {
 	var overrides map[string]string
 	var err error
 	if target.ScopeKind == "rig" {
-		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+		overrides, err = opts.rigEnv(context.Background(), cityPath, cfg, target.ScopeRoot)
 	} else {
-		overrides, err = bdRuntimeEnvWithError(cityPath)
+		overrides, err = opts.cityEnv(context.Background(), cityPath)
 	}
 	if err != nil {
 		return nil, err
@@ -614,7 +618,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
 	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
 	// travel — see refuseRigScopedClassOwnedTarget.
-	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
+	if code, handled := maybeRouteBdByIDWithConfig(cityPath, cfg, rigName, bdArgs, stdout, stderr); handled {
 		return code
 	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
@@ -746,13 +750,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// the target scope rather than the city keeps a rig that overrides the
 	// city backend, and owns no binding of its own, on the ambient bd its
 	// runtime env already implies.
-	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
+	opts := bdEnvOptions{cityConfig: cfg, allowRecovery: true}
+	bdPath, err := opts.resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	env, err := bdCommandEnv(cityPath, cfg, target)
+	env, err := bdCommandEnvWithOptions(cityPath, cfg, target, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1222,7 +1227,8 @@ func resolveBdCity(cityName string) (string, error) {
 	if strings.TrimSpace(cityName) != "" {
 		return validateCityPath(cityName)
 	}
-	return resolveCity()
+	ctx, err := resolveContextMode(contextResolutionMode{cityOnly: true})
+	return ctx.CityPath, err
 }
 
 // extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
