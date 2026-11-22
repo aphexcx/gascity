@@ -1905,7 +1905,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 				eligible, threshold)
 			confirmGateBlocked = true
 		default:
-			retentionResult, retentionErr = pruneOrderTrackingSelections(selections)
+			retentionResult, retentionErr = pruneOrderTrackingSelections(selections, now, retentionPolicy, onlyOrders)
 			result.trackingDeleted = retentionResult.deleted
 		}
 	}

@@ -4781,15 +4781,60 @@ func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Ti
 }
 
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
-	ids, err := closedOrderTrackingCandidates(store, now, policy, onlyOrders)
+	selection, err := closedOrderTrackingCandidates(store, now, policy, onlyOrders)
 	if err != nil {
 		return 0, err
 	}
-	return pruneClosedOrderTracking(store, ids)
+	result, err := pruneOrderTrackingSelections([]orderTrackingRetentionSelection{selection}, now, policy, onlyOrders)
+	return result.deleted, err
 }
 
 func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
 	selections, _, readErr := prepareOrderTrackingRetention(stores, now, policy, onlyOrders)
-	result, pruneErr := pruneOrderTrackingSelections(selections)
+	result, pruneErr := pruneOrderTrackingSelections(selections, now, policy, onlyOrders)
 	return result, errors.Join(readErr, pruneErr)
+}
+
+func TestOrderTrackingSweepRechecksChangedHistory(t *testing.T) {
+	now := time.Now()
+	var seed []beads.Bead
+	for i := range 11 {
+		seed = append(seed, beads.Bead{
+			ID: fmt.Sprintf("run-%02d", i), Title: "order:sample", Status: "closed",
+			CreatedAt: now.Add(-9 * 24 * time.Hour), Labels: []string{labelOrderTracking},
+		})
+	}
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	for _, changedID := range []string{"run-00", "run-10"} {
+		t.Run(changedID, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(20, seed, nil)
+			selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+			if err != nil || count != 1 {
+				t.Fatalf("count %d, err %v, want one eligible", count, err)
+			}
+			// Another writer reopens the selected bead or a member of the
+			// retained ten while the sweep is checking its other stores.
+			if err := store.Reopen(changedID); err != nil {
+				t.Fatal(err)
+			}
+			result, err := pruneOrderTrackingSelections(selections, now, policy, nil)
+			if err != nil || result.deleted != 0 {
+				t.Fatalf("deleted %d, err %v, want zero after reopening %s", result.deleted, err, changedID)
+			}
+			if _, err := store.Get("run-00"); err != nil {
+				t.Fatalf("selected bead must survive: %v", err)
+			}
+		})
+	}
+	t.Run("two scopes share storage", func(t *testing.T) {
+		store := beads.NewMemStoreFrom(20, seed, nil)
+		stores := []beads.Store{
+			orderTrackingSweepScopedStore{Store: store, label: "first"},
+			orderTrackingSweepScopedStore{Store: store, label: "second"},
+		}
+		result, err := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, policy, nil)
+		if err != nil || result.deleted != 1 || result.storesSwept != 2 {
+			t.Fatalf("result %+v, err %v, want one deletion across both scopes", result, err)
+		}
+	})
 }
