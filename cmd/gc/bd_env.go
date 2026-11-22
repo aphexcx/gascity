@@ -105,8 +105,25 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 // bdEnvOptions carries a config snapshot only for the one-shot command that
 // loaded it. Other callers retain their own config reads and recovery policy.
 type bdEnvOptions struct {
-	cityConfig    *config.City
-	allowRecovery bool
+	cityConfig *config.City
+	recovery   bdRecoveryLevel
+}
+
+type bdRecoveryLevel uint8
+
+const (
+	bdRecoveryDisabled bdRecoveryLevel = iota
+	// A passthrough can reconcile a running server's port from disk. Starting
+	// provider health or recovery belongs to the lifecycle owners.
+	bdRecoveryFromState
+	bdRecoveryWithProvider
+)
+
+func bdRecoveryFor(allowed bool) bdRecoveryLevel {
+	if allowed {
+		return bdRecoveryWithProvider
+	}
+	return bdRecoveryDisabled
 }
 
 func (opts bdEnvOptions) pinConfig(cityPath string) (*config.City, error) {
@@ -1450,6 +1467,10 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 }
 
 func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	return bdRecoveryFor(allowRecovery).cityDoltTarget(ctx, cityPath)
+}
+
+func (level bdRecoveryLevel) cityDoltTarget(ctx context.Context, cityPath string) (contract.DoltConnectionTarget, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.DoltConnectionTarget{}, false, err
 	}
@@ -1462,7 +1483,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 			return recoveryPort
 		}
 		recoveryChecked = true
-		port, err := currentPublishedOrRecoveredManagedDoltPort(cityPath, allowRecovery)
+		port, err := currentPublishedOrRecoveredManagedDoltPort(cityPath, level != bdRecoveryDisabled)
 		if err != nil {
 			recoveryErr = err
 			return ""
@@ -1475,7 +1496,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		recoveryPort = ""
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
-		if !allowRecovery || !contract.IsManagedRuntimeUnavailable(err) {
+		if level == bdRecoveryDisabled || !contract.IsManagedRuntimeUnavailable(err) {
 			return contract.DoltConnectionTarget{}, false, err
 		}
 		if port := recoveredManagedDoltPort(); port != "" {
@@ -1498,7 +1519,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
-	if allowRecovery {
+	if level == bdRecoveryWithProvider {
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
@@ -1514,7 +1535,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	// case where currentPublishedOrRecoveredManagedDoltPort encounters a publish
 	// failure (e.g., write permission error, post-publish re-validation failure)
 	// while the server is still accessible.
-	if allowRecovery {
+	if level != bdRecoveryDisabled {
 		if owned, _ := managedDoltLifecycleOwned(cityPath); owned {
 			if port := currentResolvableManagedDoltPort(cityPath); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
@@ -1744,7 +1765,11 @@ func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecov
 }
 
 func applyResolvedCityDoltEnvContext(ctx context.Context, env map[string]string, cityPath string, allowRecovery bool) error {
-	target, ok, err := resolvedRuntimeCityDoltTargetContext(ctx, cityPath, allowRecovery)
+	return bdRecoveryFor(allowRecovery).applyCityDoltEnv(ctx, env, cityPath)
+}
+
+func (level bdRecoveryLevel) applyCityDoltEnv(ctx context.Context, env map[string]string, cityPath string) error {
+	target, ok, err := level.cityDoltTarget(ctx, cityPath)
 	if err != nil {
 		return err
 	}
@@ -1801,24 +1826,23 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 }
 
 func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
-	return (bdEnvOptions{allowRecovery: allowRecovery}).applyResolvedRigDoltEnv(ctx, env, cityPath, rigPath, explicitRig)
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).applyResolvedRigDoltEnv(ctx, env, cityPath, rigPath, explicitRig)
 }
 
 func (opts bdEnvOptions) applyResolvedRigDoltEnv(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig) error {
-	allowRecovery := opts.allowRecovery
 	if usedCanonical, err := opts.applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
 		if errors.As(err, &invalid) {
 			fallback, fallbackErr := contract.AllowsInvalidInheritedCityFallback(fsys.OSFS{}, cityPath, rigPath)
 			if fallbackErr == nil && fallback {
-				return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+				return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 			}
 		}
 		if rigAllowsResolvedCityTargetFallback(cityPath, rigPath) {
-			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+			return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 		}
-		if allowRecovery && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
-			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, true)
+		if opts.recovery != bdRecoveryDisabled && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
+			return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 		}
 		return err
 	} else if usedCanonical {
@@ -1833,7 +1857,7 @@ func (opts bdEnvOptions) applyResolvedRigDoltEnv(ctx context.Context, env map[st
 	}
 	// Rigs without local endpoint authority inherit the resolved city target.
 	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
-	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+	return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 }
 
 // applyLegacyRigExternalTarget projects a legacy config.Rig{DoltHost,DoltPort}
@@ -1887,7 +1911,7 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
-	return (bdEnvOptions{allowRecovery: allowRecovery}).rigEnv(ctx, cityPath, cfg, rigPath)
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).rigEnv(ctx, cityPath, cfg, rigPath)
 }
 
 func (opts bdEnvOptions) rigEnv(ctx context.Context, cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
@@ -2040,7 +2064,7 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
-	return (bdEnvOptions{allowRecovery: allowRecovery}).cityEnv(ctx, cityPath)
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).cityEnv(ctx, cityPath)
 }
 
 func (opts bdEnvOptions) cityEnv(ctx context.Context, cityPath string) (map[string]string, error) {
@@ -2125,7 +2149,7 @@ func (opts bdEnvOptions) cityEnv(ctx context.Context, cityPath string) (map[stri
 	} else if bound {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, opts.allowRecovery); err != nil {
+	if err := opts.recovery.applyCityDoltEnv(ctx, env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {

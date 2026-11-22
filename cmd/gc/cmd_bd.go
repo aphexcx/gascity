@@ -208,7 +208,7 @@ var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarge
 }
 
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
-	return bdCommandEnvWithOptions(cityPath, cfg, target, bdEnvOptions{allowRecovery: true})
+	return bdCommandEnvWithOptions(cityPath, cfg, target, bdEnvOptions{recovery: bdRecoveryWithProvider})
 }
 
 func bdCommandEnvWithOptions(cityPath string, cfg *config.City, target execStoreTarget, opts bdEnvOptions) ([]string, error) {
@@ -750,7 +750,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// the target scope rather than the city keeps a rig that overrides the
 	// city backend, and owns no binding of its own, on the ambient bd its
 	// runtime env already implies.
-	opts := bdEnvOptions{cityConfig: cfg, allowRecovery: true}
+	opts := bdEnvOptions{cityConfig: cfg, recovery: bdRecoveryFromState}
 	bdPath, err := opts.resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

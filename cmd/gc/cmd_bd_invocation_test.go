@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -356,20 +357,30 @@ func TestBdInvocationProviderLifecycle(t *testing.T) {
 			})
 		}
 	}
-	t.Run("reachable", func(t *testing.T) {
-		f := newBdInvocationFixture(t, "city")
-		log, port := recordingBdProvider(t, f, true)
-		printer := filepath.Join(f.root, "ports", "bd")
-		writeBdFixtureFile(t, printer, "#!/bin/sh\nprintf '%s %s' \"$GC_DOLT_PORT\" \"$BEADS_DOLT_SERVER_PORT\"\n", 0o700)
-		t.Setenv("PATH", filepath.Dir(printer)+":"+os.Getenv("PATH"))
-		var stdout, stderr bytes.Buffer
-		if code := doBd(f.args, &stdout, &stderr); code != 0 || stdout.String() != fmt.Sprintf("%d %d", port, port) {
-			t.Fatalf("gc bd version = %d, projected ports %q, stderr %q", code, stdout.String(), stderr.String())
-		}
-		if got, err := os.ReadFile(log); err != nil || len(got) != 0 {
-			t.Fatalf("provider operations = %q, %v; want empty", got, err)
-		}
-	})
+	for _, state := range []string{"reachable", "provider-state"} {
+		t.Run(state, func(t *testing.T) {
+			f := newBdInvocationFixture(t, "city")
+			log, port := recordingBdProvider(t, f, state == "reachable")
+			if state == "provider-state" {
+				// The published port is stale, but the provider already has a
+				// running endpoint. Recover its state without invoking its script.
+				port = writeReachableProviderManagedDoltState(t, f.city)
+			}
+			printer := filepath.Join(f.root, "ports", "bd")
+			writeBdFixtureFile(t, printer, "#!/bin/sh\nprintf '%s %s' \"$GC_DOLT_PORT\" \"$BEADS_DOLT_SERVER_PORT\"\n", 0o700)
+			t.Setenv("PATH", filepath.Dir(printer)+":"+os.Getenv("PATH"))
+			var stdout, stderr bytes.Buffer
+			if code := doBd(f.args, &stdout, &stderr); code != 0 || stdout.String() != fmt.Sprintf("%d %d", port, port) {
+				t.Fatalf("gc bd version = %d, projected ports %q, stderr %q", code, stdout.String(), stderr.String())
+			}
+			if got := currentManagedDoltPort(f.city); got != strconv.Itoa(port) {
+				t.Errorf("published port = %q, want %d", got, port)
+			}
+			if got, err := os.ReadFile(log); err != nil || len(got) != 0 {
+				t.Fatalf("provider operations = %q, %v; want empty", got, err)
+			}
+		})
+	}
 	t.Run("health-owner", func(t *testing.T) {
 		f := newBdInvocationFixture(t, "city")
 		log, _ := recordingBdProvider(t, f, false)
