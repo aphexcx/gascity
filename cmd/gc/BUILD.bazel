@@ -1435,6 +1435,7 @@ go_test(
         "session_refresh_async_gate_test.go",
         "session_resolve_test.go",
         "session_scaffold_staging_test.go",
+        "session_setup_render_equal_test.go",
         "session_sleep_test.go",
         "session_startup_menu_test.go",
         "session_state_helpers_test.go",
