@@ -271,6 +271,9 @@ func parseScaleCheckCount(agentName, check, out string) (int, error) {
 
 // SessionSetupContext holds template variables for session_setup command expansion.
 type SessionSetupContext struct {
+	// TriggerRig is the configured rig containing the session's trigger ticket, if any.
+	TriggerRig string
+
 	Session   string // tmux session name
 	Agent     string // qualified agent name
 	AgentBase string // unqualified agent name or pool instance name

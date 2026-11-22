@@ -197,11 +197,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	resolveWorkDir := resolveConfiguredWorkDir
+	resolveWorkDir := resolveConfiguredWorkDirForTrigger
 	if p.readOnly {
-		resolveWorkDir = resolveConfiguredWorkDirPath
+		resolveWorkDir = resolveConfiguredWorkDirPathForTrigger
 	}
-	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs, p.triggerRig)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -601,6 +601,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// agree (#5315).
 	workspaceCtx := workdirutil.WorkspacePathContextForQualifiedName(p.cityPath, p.cityName, qualifiedName, *cfgAgent, p.rigs)
 	setupCtx := SessionSetupContext{
+		TriggerRig:    p.triggerRig,
 		Session:       sessName,
 		Agent:         qualifiedName,
 		AgentBase:     dirCtx.AgentBase,

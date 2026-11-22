@@ -16,6 +16,9 @@ import (
 
 // PathContext holds template variables for work_dir expansion.
 type PathContext struct {
+	// TriggerRig is the configured rig containing the session's trigger ticket, if any.
+	TriggerRig string
+
 	Agent         string
 	AgentBase     string
 	Rig           string
@@ -286,6 +289,12 @@ func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.R
 // ResolveWorkDirPathStrict returns the effective session working directory and
 // surfaces work_dir template errors to callers that need to fail closed.
 func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) (string, error) {
+	return ResolveWorkDirPathWithTriggerRig(cityPath, cityName, qualifiedName, a, rigs, "")
+}
+
+// ResolveWorkDirPathWithTriggerRig resolves a session's configured work_dir
+// with the rig of its trigger available to the template.
+func ResolveWorkDirPathWithTriggerRig(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig, triggerRig string) (string, error) {
 	if a.WorkDir == "" {
 		if rigName := ConfiguredRigName(cityPath, a, rigs); rigName != "" {
 			if rigRoot := RigRootForName(rigName, rigs); rigRoot != "" {
@@ -308,6 +317,7 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 		return ResolveDirPath(cityPath, a.Dir), nil
 	}
 	ctx := WorkspacePathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
+	ctx.TriggerRig = triggerRig
 	expanded, err := ExpandTemplateStrict(a.WorkDir, ctx)
 	if err != nil {
 		return "", fmt.Errorf("expand work_dir %q: %w", a.WorkDir, err)

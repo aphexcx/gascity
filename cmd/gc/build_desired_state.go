@@ -3658,6 +3658,13 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
+	if bp != nil && cfgAgent != nil && request.WorkBeadID == "" && poolSessionIsLiveInfo(info) {
+		if _, eligible := bp.cityPoolRigDemand[cfgAgent.QualifiedName()]; eligible && sessionTriggerRig(info, bp.rigs) != "" {
+			// A minimum seat with no ticket keeps the working directory of
+			// its running process, including the provenance used to render it.
+			return info, nil
+		}
+	}
 	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
 	if err != nil {
 		return info, err
@@ -3829,6 +3836,13 @@ func canonicalEvidenceStoreRef(storeRef string) string {
 	}
 }
 
+func sessionTriggerRig(info session.Info, rigs []config.Rig) string {
+	if strings.TrimSpace(info.TriggerBeadID) == "" {
+		return ""
+	}
+	return configuredTriggerRig(info.TriggerBeadStoreRef, rigs)
+}
+
 func configuredTriggerRig(storeRef string, rigs []config.Rig) string {
 	if len(rigs) == 0 {
 		return ""
@@ -3851,7 +3865,8 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	// Pure path computation: this feeds a metadata patch, so it must never
 	// create directories (gc-r9fx dry-run purity).
 	workAgent := sessionBeadConfigAgent(cfgAgent, qualifiedName)
-	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, workAgent, bp.rigs)
+	triggerRig := configuredTriggerRig(request.WorkStoreRef, bp.rigs)
+	base, err := resolveConfiguredWorkDirPathForTrigger(bp.cityPath, bp.cityName, qualifiedName, workAgent, bp.rigs, triggerRig)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -3999,6 +4014,7 @@ func resolveTemplateForSessionBeadInfo(
 ) (TemplateParams, error) {
 	local := *bp
 	local.beadNames = map[string]string{qualifiedName: info.SessionNameMetadata}
+	local.triggerRig = sessionTriggerRig(info, bp.rigs)
 	cfgAgent = preserveLegacyPoolWorkspace(&local, cfgAgent, qualifiedName, info)
 	tp, err := resolveTemplatePrepared(&local, cfgAgent, qualifiedName, fpExtra)
 	if err != nil {
@@ -6518,7 +6534,7 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	if err != nil {
 		return
 	}
-	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	workDir, err := resolveConfiguredWorkDirForTrigger(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs, bp.triggerRig)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck

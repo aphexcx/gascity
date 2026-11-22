@@ -1442,13 +1442,17 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName, a, rigs, "")
+}
+
+func resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, triggerRig string) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
 	}
-	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName, *a, rigs)
+	workDir, err := workdirutil.ResolveWorkDirPathWithTriggerRig(cityPath, cityName, qualifiedName, *a, rigs, triggerRig)
 	if err != nil {
 		return "", err
 	}
@@ -1467,7 +1471,14 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 // it. Only session-start paths may call this; pure computations use
 // resolveConfiguredWorkDirPath.
 func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+	return ensureAgentWorkDir(resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs))
+}
+
+func resolveConfiguredWorkDirForTrigger(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, triggerRig string) (string, error) {
+	return ensureAgentWorkDir(resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName, a, rigs, triggerRig))
+}
+
+func ensureAgentWorkDir(dir string, err error) (string, error) {
 	if err != nil {
 		return "", err
 	}
