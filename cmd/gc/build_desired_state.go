@@ -506,7 +506,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
-	bp.cityPoolRigDemand = make(map[string]bool)
+	bp.cityPoolRigDemand = make(map[string]map[string]string)
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
 
 	// Pre-compute suspended rig paths (config + runtime state).
@@ -782,7 +782,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			}
 			if agentutil.AgentIsCrossStoreEligible(&cfg.Agents[i]) && !storeScopedControlDispatcher && ownTarget.storeKey == "city" && ownTarget.store != nil && ownTarget.err == nil {
 				defaultScaleTargets = append(defaultScaleTargets, cityPoolRigTargets(ownTarget, cfg.Rigs, rigStores, suspendedRigPaths)...)
-				bp.cityPoolRigDemand[template] = true
+				bp.cityPoolRigDemand[template] = nil
 			}
 			continue
 		}
@@ -929,7 +929,8 @@ func buildDesiredStateWithSessionBeadsAt(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, startDeferral, demandReadyCache)
+			healthyStores := make(map[string]bool)
+			defaultCounts, defaultDemand, partialTemplates, errs := readDefaultScaleCheckDemand(cfg, defaultScaleTargets, startDeferral, demandReadyCache, healthyStores)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -964,8 +965,17 @@ func buildDesiredStateWithSessionBeadsAt(
 					scaleCheckCounts[template] = count
 				}
 				entry := mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
-				if bp.cityPoolRigDemand[template] {
+				if _, eligible := bp.cityPoolRigDemand[template]; eligible {
 					entry.affinityRigs = cfg.Rigs
+					if partialTemplates[template] && healthyStores["city"] {
+						proven := make(map[string]string)
+						for id, ref := range entry.StoreRefs {
+							if healthyStores[ref] {
+								proven[id] = ref
+							}
+						}
+						bp.cityPoolRigDemand[template] = proven
+					}
 				}
 				scaleCheckDemandByTemplate[template] = entry
 			}
@@ -2001,8 +2011,11 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
-	cache := optionalReadyDemandCache(caches)
+func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+	return readDefaultScaleCheckDemand(cfg, targets, startDeferral, nil, nil)
+}
+
+func readDefaultScaleCheckDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, cache *readyDemandCache, healthyStores map[string]bool) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
 	if len(targets) == 0 {
@@ -2071,6 +2084,9 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// vapor/root-only wisp. Molecule containers and formula step
 		// beads remain hidden by readyExcludeTypes.
 		ready, readyErr := cache.controllerDemandReady(group.store)
+		if healthyStores != nil {
+			healthyStores[key] = readyErr == nil
+		}
 		if readyErr != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
@@ -4608,8 +4624,11 @@ func selectOrPlanPoolSessionBead(
 	}
 
 	if bp.poolScaleCheckPartialTemplates[template] {
-		delete(usedSlots, slot)
-		return session.Info{}, 0, nil, errPoolSessionCreatePartial
+		ref, proven := bp.cityPoolRigDemand[template][request.WorkBeadID]
+		if !proven || request.Tier != "new" || ref != request.WorkStoreRef {
+			delete(usedSlots, slot)
+			return session.Info{}, 0, nil, errPoolSessionCreatePartial
+		}
 	}
 
 	// Provider-health gate: refuse new creates when the registry reports this

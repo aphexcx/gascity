@@ -16,7 +16,7 @@ import (
 type cityPoolFixture struct {
 	root     string
 	cfg      *config.City
-	store    *beads.MemStore
+	store    beads.Store
 	rigs     map[string]beads.Store
 	sessions []beads.Bead
 }
@@ -45,7 +45,7 @@ func newCityPoolFixture(t *testing.T) *cityPoolFixture {
 
 func (f *cityPoolFixture) route(t *testing.T, rig, id string) {
 	t.Helper()
-	var store beads.Store = f.store
+	store := f.store
 	if rig != "" {
 		store = f.rigs[rig]
 	}
@@ -127,6 +127,85 @@ func TestBuildDesiredState_CityScopedPoolMissingBoundRigStoreStaysPartial(t *tes
 	if ds.ScaleCheckCounts["worker"] != 1 || !ds.ScaleCheckPartialTemplates["worker"] || len(ds.State) != 1 {
 		t.Fatalf("count=%d partial=%v realized=%d", ds.ScaleCheckCounts["worker"], ds.ScaleCheckPartialTemplates, len(ds.State))
 	}
+	for _, tp := range ds.State {
+		if tp.Env["GC_TRIGGER_BEAD_ID"] != "alpha-1" || tp.Env["GC_TRIGGER_BEAD_STORE_REF"] != "rig:alpha" {
+			t.Fatalf("fresh session did not bind to the proven alpha ticket")
+		}
+	}
+}
+
+func TestCityPoolPartialCreateRequiresProvenDemand(t *testing.T) {
+	t.Run("minimum cannot add unproven starts", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		f.cfg.Agents[0].MinActiveSessions = intPtr(3)
+		delete(f.rigs, "beta")
+		f.route(t, "alpha", "alpha-1")
+		ds := f.build()
+		if !ds.PoolScaleCheckPartialTemplates["worker"] || len(ds.State) != 1 {
+			t.Fatalf("partial=%v realized=%d, want one proven start", ds.PoolScaleCheckPartialTemplates, len(ds.State))
+		}
+	})
+	t.Run("rig pool still rejects fresh creates", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		a := &f.cfg.Agents[0]
+		a.Dir, a.Scope = "alpha", "rig"
+		f.rigs["alpha"] = &readyFailStore{Store: f.rigs["alpha"]}
+		f.route(t, "", "city-1")
+		ds := f.build()
+		if !ds.PoolScaleCheckPartialTemplates[a.QualifiedName()] || ds.ScaleCheckCounts[a.QualifiedName()] != 1 || len(ds.State) != 0 {
+			t.Fatalf("counts=%v partial=%v realized=%d", ds.ScaleCheckCounts, ds.PoolScaleCheckPartialTemplates, len(ds.State))
+		}
+	})
+	t.Run("failed city read prevents fresh creates", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		f.store = &readyFailStore{Store: f.store}
+		f.route(t, "alpha", "alpha-1")
+		ds := f.build()
+		if !ds.PoolScaleCheckPartialTemplates["worker"] || ds.ScaleCheckCounts["worker"] != 1 || len(ds.State) != 0 {
+			t.Fatalf("counts=%v partial=%v realized=%d", ds.ScaleCheckCounts, ds.PoolScaleCheckPartialTemplates, len(ds.State))
+		}
+	})
+	t.Run("existing seat serves the proven ticket", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		delete(f.rigs, "beta")
+		b := f.live(t, "rig:alpha")
+		f.route(t, "alpha", "previous")
+		ds := f.build()
+		if !ds.PoolScaleCheckPartialTemplates["worker"] || len(ds.State) != 1 {
+			t.Fatalf("partial=%v realized=%d", ds.PoolScaleCheckPartialTemplates, len(ds.State))
+		}
+		if _, ok := ds.State[b.Metadata["session_name"]]; !ok {
+			t.Fatalf("existing session missing from %v", mapKeys(ds.State))
+		}
+	})
+	t.Run("partial retains live capacity", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		delete(f.rigs, "beta")
+		f.route(t, "alpha", "alpha-1")
+		ds := f.build()
+		var live []beads.Bead
+		for _, id := range []string{"slot-a", "slot-b"} {
+			b := protectedPoolSessionBeadAt(id, time.Now())
+			b.Metadata["template"] = "worker"
+			live = append(live, b)
+		}
+		got := retainScaleCheckPartialPoolDesired(f.cfg, map[string]int{"worker": 1}, newSessionBeadSnapshot(live), ds.PoolPartialRetentionTemplates)
+		if got["worker"] != 2 {
+			t.Fatalf("retained=%v, want both live sessions", got)
+		}
+	})
+	t.Run("cap bounds confirmed tickets", func(t *testing.T) {
+		f := newCityPoolFixture(t)
+		delete(f.rigs, "beta")
+		f.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+		for i := 0; i < 5; i++ {
+			f.route(t, "alpha", fmt.Sprintf("alpha-%d", i))
+		}
+		ds := f.build()
+		if !ds.PoolScaleCheckPartialTemplates["worker"] || ds.ScaleCheckCounts["worker"] != 5 || len(ds.State) != 2 {
+			t.Fatalf("counts=%v partial=%v realized=%d", ds.ScaleCheckCounts, ds.PoolScaleCheckPartialTemplates, len(ds.State))
+		}
+	})
 }
 
 func TestBuildDesiredState_CityScopedPoolRigDemandBoundedByMaxActive(t *testing.T) {

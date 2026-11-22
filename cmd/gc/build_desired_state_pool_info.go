@@ -321,7 +321,7 @@ func reusablePoolSessionInfosForRequest(
 // poolSessionMatchesTriggerRig keeps an already running session in its repository.
 // A stopped session can acquire a new work_dir on its next start.
 func (bp *agentBuildParams) poolSessionMatchesTriggerRig(template string, info session.Info, request SessionRequest) bool {
-	if !bp.cityPoolRigDemand[template] || !poolSessionIsLiveInfo(info) || request.WorkBeadID == "" {
+	if _, eligible := bp.cityPoolRigDemand[template]; !eligible || !poolSessionIsLiveInfo(info) || request.WorkBeadID == "" {
 		return true
 	}
 	return configuredTriggerRig(info.TriggerBeadStoreRef, bp.rigs) == configuredTriggerRig(request.WorkStoreRef, bp.rigs)
