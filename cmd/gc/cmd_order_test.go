@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -4570,5 +4571,153 @@ prefix = "ct"
 	}
 	if got.Status != "closed" {
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
+	}
+}
+
+func TestOrderTrackingSweepBehavior(t *testing.T) {
+	now := time.Now()
+	const day = 24 * time.Hour
+	history := func(order string, n int, age time.Duration) []beads.Bead {
+		var runs []beads.Bead
+		for i := range n {
+			run := beads.Bead{
+				ID: fmt.Sprintf("%s-%02d", order, i), Title: "tracking", Type: "task", Status: "closed",
+				CreatedAt: now.Add(-age), Labels: []string{labelOrderTracking}, Ephemeral: i%2 == 0,
+			}
+			if order != "" {
+				run.Labels = append(run.Labels, "order-run:"+order)
+			}
+			runs = append(runs, run)
+		}
+		return runs
+	}
+	open := history("open", 2, 0)
+	open[0].Status, open[0].CreatedAt = "open", now.Add(-11*time.Minute)
+	open[1].Status, open[1].CreatedAt = "open", now.Add(-9*time.Minute)
+	mixed := append(history("mixed", 2, 9*day), history("recent", 10, day)...)
+	for i := 2; i < len(mixed); i++ {
+		mixed[i].Labels = mixed[0].Labels
+	}
+	updated := history("updated", 12, 9*day)
+	updated[0].UpdatedAt = now.Add(-day)
+	updated[1].CreatedAt, updated[1].UpdatedAt = now.Add(-day), now.Add(-10*day)
+	roots := history("root", 14, 9*day)
+	roots = append(roots,
+		beads.Bead{ID: "stamped", Status: "open", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-00"}},
+		beads.Bead{ID: "unstamped", Status: "open", Type: "task", ParentID: "root-01"},
+		beads.Bead{ID: "nudge", Status: "open", Type: nudgeBeadType, Labels: []string{nudgeBeadLabel}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-02"}},
+		beads.Bead{ID: "mail", Status: "open", Type: "message", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-03"}},
+	)
+	for _, tc := range []struct {
+		name       string
+		seed       []beads.Bead
+		deleted    []string
+		closed     []string
+		orders     []string
+		retention  string
+		failedPeer bool
+		cli        bool
+		dryRun     bool
+	}{
+		{name: "empty"},
+		{name: "nine and eleven minutes", seed: open, closed: []string{"open-00"}},
+		{name: "below floor", seed: history("small", 9, 9*day)},
+		{name: "mixed ages and tiers", seed: mixed, deleted: []string{"mixed-00", "mixed-01"}},
+		{name: "recent history", seed: history("recent", 12, day)},
+		{name: "legacy bucket and equal timestamps", seed: history("", 12, 9*day), deleted: []string{"-00", "-01"}},
+		{name: "root ownership and notifications", seed: roots, deleted: []string{"root-02", "root-03"}},
+		{name: "update overrides creation", seed: updated, deleted: []string{"updated-01", "updated-02"}},
+		{name: "configured ttl", seed: history("short", 11, 3*day), retention: "48h", deleted: []string{"short-00"}},
+		{name: "order filter", seed: append(history("alpha", 11, 9*day), history("beta", 11, 9*day)...), orders: []string{"beta"}, deleted: []string{"beta-00"}},
+		{name: "unreadable first store", failedPeer: true, seed: append(history("alpha", 11, 9*day), open...), deleted: []string{"alpha-00"}, closed: []string{"open-00"}},
+		{name: "confirmation threshold", cli: true, seed: append(history("large", 31, 9*day), open...), closed: []string{"open-00"}},
+		{name: "dry run", cli: true, dryRun: true, seed: append(history("large", 31, 9*day), open...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var store beads.Store
+			if tc.cli {
+				// The command owns the confirmation and dry-run branches. Give it
+				// a private file-backed city so it exercises both through the CLI.
+				dir := t.TempDir()
+				t.Chdir(dir)
+				for _, key := range []string{"GC_CITY", "GC_CITY_ROOT", "GC_CITY_PATH"} {
+					t.Setenv(key, dir)
+				}
+				for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "GC_BEADS_SCOPE_ROOT", "GC_BULK_DELETE_CONFIRM_THRESHOLD"} {
+					t.Setenv(key, "")
+				}
+				t.Setenv("GC_BEADS", "file")
+				writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"example\"\nprefix = \"ct\"\n")
+				if err := ensureScopedFileStoreLayout(dir); err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(struct {
+					Seq   int          `json:"seq"`
+					Beads []beads.Bead `json:"beads"`
+				}{len(tc.seed), tc.seed})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".gc", "beads.json"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				code := cmdOrderSweepTrackingWithOptions(10*time.Minute, false, tc.dryRun, false, false, nil, &stdout, &stderr)
+				if tc.dryRun && code != 0 || !tc.dryRun && (code != 1 || !strings.Contains(stderr.String(), "21 beads would be deleted")) {
+					t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+				}
+				store, err = openStoreAtForCity(dir, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				store = beads.NewMemStoreFrom(100, tc.seed, nil)
+				stores := []beads.Store{store}
+				var peerErr error
+				var peer *beads.MemStore
+				if tc.failedPeer {
+					peer = beads.NewMemStoreFrom(100, tc.seed, nil)
+					peerErr = errors.New("read unavailable")
+					stores = append([]beads.Store{&failingListOrderTrackingStore{Store: peer, err: peerErr}}, stores...)
+				}
+				only := orderNameFilter(tc.orders)
+				_, err := sweepStaleOrderTrackingAcrossStores(stores, nil, now, 10*time.Minute, only, false)
+				if !errors.Is(err, peerErr) {
+					t.Fatalf("stale close: %v", err)
+				}
+				cfg := &config.City{}
+				if tc.retention != "" {
+					cfg.Beads.Policies = map[string]config.BeadPolicyConfig{orderTrackingBeadPolicyName: {DeleteAfterClose: tc.retention}}
+				}
+				_, err = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), only)
+				if !errors.Is(err, peerErr) {
+					t.Fatalf("prune: %v", err)
+				}
+				if peer != nil {
+					assertSweepBeadStates(t, peer, tc.seed, nil, nil)
+				}
+			}
+			assertSweepBeadStates(t, store, tc.seed, tc.deleted, tc.closed)
+		})
+	}
+}
+
+func assertSweepBeadStates(t *testing.T, store beads.Store, seed []beads.Bead, deleted, closed []string) {
+	t.Helper()
+	for _, original := range seed {
+		got, err := store.Get(original.ID)
+		if slices.Contains(deleted, original.ID) {
+			if !errors.Is(err, beads.ErrNotFound) {
+				t.Errorf("Get(%q) = %v, want deleted", original.ID, err)
+			}
+			continue
+		}
+		want := original.Status
+		if slices.Contains(closed, original.ID) {
+			want = "closed"
+		}
+		if err != nil || got.Status != want {
+			t.Errorf("Get(%q) status %q, err %v, want %q", original.ID, got.Status, err, want)
+		}
 	}
 }
