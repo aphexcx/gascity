@@ -3270,13 +3270,29 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	return result, nil
 }
 
-// A selection keeps the candidates and the newer closed runs that establish
-// their retention floor. Other history can be released after counting.
+// Bound the serial reads needed before a store's first guarded deletion.
+const maxRetentionPointReads = 64
+
+// A selection keeps the confirmed candidate IDs. Small selections retain
+// their ranking references for point reads; large ones re-read the history.
 type orderTrackingRetentionSelection struct {
 	store      beads.Store
 	label      string
 	ids        []string
 	references []orders.OrderRun
+	bulk       bool
+}
+
+func (s *orderTrackingRetentionSelection) rememberReferences(runs ...orders.OrderRun) {
+	if s.bulk {
+		return
+	}
+	if len(runs) > maxRetentionPointReads-len(s.references) {
+		s.bulk = true
+		s.references = nil
+		return
+	}
+	s.references = append(s.references, runs...)
 }
 
 func prepareOrderTrackingRetention(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]orderTrackingRetentionSelection, int, error) {
@@ -3324,6 +3340,9 @@ func pruneOrderTrackingSelections(selections []orderTrackingRetentionSelection, 
 // deletion. A reopen, removal or reordering while other stores were counted
 // requires a fresh ranking. Only previously counted IDs passed the confirm gate.
 func (s orderTrackingRetentionSelection) currentIDs(now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]string, error) {
+	if s.bulk {
+		return s.refreshedIDs(now, policy, onlyOrders)
+	}
 	reader := beads.HandlesFor(s.store).Live
 	for _, reference := range s.references {
 		b, err := reader.Get(reference.ID)
@@ -3339,23 +3358,27 @@ func (s orderTrackingRetentionSelection) currentIDs(now time.Time, policy orderT
 			name == reference.Scoped && at.Equal(orderTrackingClosedReferenceTime(reference)) {
 			continue
 		}
-		fresh, err := closedOrderTrackingCandidates(s.store, now, policy, onlyOrders)
-		if err != nil {
-			return nil, err
-		}
-		stillEligible := make(map[string]bool, len(fresh.ids))
-		for _, id := range fresh.ids {
-			stillEligible[id] = true
-		}
-		var ids []string
-		for _, id := range s.ids {
-			if stillEligible[id] {
-				ids = append(ids, id)
-			}
-		}
-		return ids, nil
+		return s.refreshedIDs(now, policy, onlyOrders)
 	}
 	return s.ids, nil
+}
+
+func (s orderTrackingRetentionSelection) refreshedIDs(now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]string, error) {
+	fresh, err := closedOrderTrackingCandidates(s.store, now, policy, onlyOrders)
+	if err != nil {
+		return nil, err
+	}
+	stillEligible := make(map[string]bool, len(fresh.ids))
+	for _, id := range fresh.ids {
+		stillEligible[id] = true
+	}
+	var ids []string
+	for _, id := range s.ids {
+		if stillEligible[id] {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 // sweepClosedOrderTrackingRetentionAcrossStoresBounded runs the watchdog prune.
@@ -3428,10 +3451,10 @@ func closedOrderTrackingCandidates(store beads.Store, now time.Time, policy orde
 				continue
 			}
 			selection.ids = append(selection.ids, run.ID)
-			selection.references = append(selection.references, run)
+			selection.rememberReferences(run)
 		}
 		if len(selection.ids) > previous {
-			selection.references = append(selection.references, runs[:policy.retainLast]...)
+			selection.rememberReferences(runs[:policy.retainLast]...)
 		}
 	}
 	return selection, nil

@@ -4838,3 +4838,179 @@ func TestOrderTrackingSweepRechecksChangedHistory(t *testing.T) {
 		}
 	})
 }
+
+type retentionBacklogStore struct {
+	*beads.MemStore
+	gets, historyLists                int
+	getsBeforeFirst, listsBeforeFirst int
+	deletions                         int
+}
+
+func (s *retentionBacklogStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.MemStore.Get(id)
+}
+
+func (s *retentionBacklogStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" && q.Label == labelOrderTracking {
+		s.historyLists++
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *retentionBacklogStore) Delete(id string) error {
+	if s.deletions == 0 {
+		s.getsBeforeFirst, s.listsBeforeFirst = s.gets, s.historyLists
+	}
+	s.deletions++
+	return s.MemStore.Delete(id)
+}
+
+func backlogTrackingRuns(now time.Time, count int) []beads.Bead {
+	seed := make([]beads.Bead, count)
+	for i := range seed {
+		seed[i] = beads.Bead{
+			ID: fmt.Sprintf("run-%05d", i), Title: "order:sample", Status: "closed",
+			CreatedAt: now.Add(-9*24*time.Hour + time.Duration(i)*time.Second), Labels: []string{labelOrderTracking}, Ephemeral: i%2 == 0,
+		}
+	}
+	return seed
+}
+
+func TestOrderTrackingBacklogReadBound(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	for _, tc := range []struct{ count, gets, lists int }{
+		{63, 63, 0}, {64, 64, 0}, {65, 0, 1}, {5010, 0, 1},
+	} {
+		t.Run(fmt.Sprint(tc.count), func(t *testing.T) {
+			seed := backlogTrackingRuns(now, tc.count)
+			// Extra guarded candidates cross the read threshold without
+			// changing which IDs the three neighboring cases should mutate.
+			if tc.count <= 65 {
+				for i := 63; i < tc.count; i++ {
+					seed[i].CreatedAt = seed[0].CreatedAt.Add(-time.Hour)
+					seed = append(seed, beads.Bead{ID: "child-" + seed[i].ID, Status: "open", ParentID: seed[i].ID})
+				}
+				seed = append(seed, beads.Bead{
+					ID: "stale", Title: "order:timer", Status: "open",
+					CreatedAt: now.Add(-11 * time.Minute), Labels: []string{labelOrderTracking},
+				})
+			}
+			store := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(tc.count, seed, nil)}
+			if _, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, 10*time.Minute, nil, false); err != nil {
+				t.Fatal(err)
+			}
+			selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+			if err != nil || count != tc.count-10 {
+				t.Fatalf("selection: count %d, err %v", count, err)
+			}
+			store.gets, store.historyLists = 0, 0
+			ids, err := selections[0].currentIDs(now, policy, nil)
+			if err != nil || len(ids) != count {
+				t.Fatalf("recheck: %d IDs, err %v", len(ids), err)
+			}
+			// For the thousands-row case we only need to reach the first
+			// actual deletion. The boundary cases exercise the whole set.
+			wantCount := 53
+			if tc.count == 5010 {
+				ids = ids[:1]
+				wantCount = 1
+			}
+			deleted, err := pruneClosedOrderTracking(store, ids)
+			if err != nil || deleted != wantCount {
+				t.Fatalf("deleted %d, err %v, want %d", deleted, err, wantCount)
+			}
+			// The unchanged descendant guard also gets the root once.
+			if store.getsBeforeFirst != tc.gets+1 || store.listsBeforeFirst != tc.lists {
+				t.Errorf("before first delete: Get=%d closed-history List=%d, want %d and %d",
+					store.getsBeforeFirst, store.listsBeforeFirst, tc.gets+1, tc.lists)
+			}
+			if tc.count <= 65 {
+				var want []string
+				for _, b := range seed[:wantCount] {
+					want = append(want, b.ID)
+				}
+				assertSweepBeadStates(t, store.MemStore, seed, want, []string{"stale"})
+			}
+		})
+	}
+}
+
+func TestOrderTrackingBulkRecheckPreservesCeilingFloorAndGuards(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	seed := backlogTrackingRuns(now, 65)
+	seed = append(seed,
+		beads.Bead{ID: "incoming", Title: "order:sample", Status: "open", CreatedAt: now, Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "child", Status: "open", ParentID: "run-00001"},
+	)
+	store := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(100, seed, nil)}
+	selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+	if err != nil || count != 55 {
+		t.Fatalf("prepare: count %d, err %v", count, err)
+	}
+	if err := store.Reopen("run-00000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close("incoming"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := pruneOrderTrackingSelections(selections, now, policy, nil)
+	if err != nil || result.deleted != 53 || store.getsBeforeFirst != 1 || store.listsBeforeFirst != 2 {
+		t.Errorf("prune %+v, err %v; first delete after %d Get, %d history List", result, err, store.getsBeforeFirst, store.listsBeforeFirst)
+	}
+	// 00 was reopened. Its neighbor owns live work. 55 became eligible
+	// after confirmation, and the remaining nine still belong to the floor.
+	seed[0].Status = "open"
+	var want []string
+	for _, b := range seed[2:55] {
+		want = append(want, b.ID)
+	}
+	assertSweepBeadStates(t, store.MemStore, seed, want, []string{"incoming"})
+}
+
+func TestOrderTrackingMixedBacklogMatchesIndependentPrune(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	seed := backlogTrackingRuns(now, 84)
+	for i := 62; i < len(seed); i++ {
+		seed[i].UpdatedAt = now.Add(-time.Hour)
+	}
+	seed = append(seed,
+		beads.Bead{ID: "stale", Title: "order:timer", Status: "open", CreatedAt: now.Add(-11 * time.Minute), Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "recent", Title: "order:timer", Status: "open", CreatedAt: now.Add(-9 * time.Minute), Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "live-step", Status: "open", ParentID: "run-00003"},
+	)
+	reference := beads.NewMemStoreFrom(200, seed, nil)
+	actual := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(200, seed, nil)}
+	for _, store := range []beads.Store{reference, actual} {
+		if _, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, 10*time.Minute, nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The watchdog still runs the base's independent ranking and guarded
+	// delete loop. Its budget here exceeds the entire seeded history.
+	n, err := sweepClosedOrderTrackingRetentionBounded(reference, now, policy, nil, len(seed)+1)
+	if err != nil || n != 61 {
+		t.Fatalf("independent prune: %d deletions, err %v", n, err)
+	}
+	actual.gets = 0 // exclude stale-close verification
+	r, err := sweepClosedOrderTrackingRetentionAcrossStores([]beads.Store{actual}, now, policy, nil)
+	if err != nil || r.deleted != n || actual.getsBeforeFirst != 1 || actual.listsBeforeFirst != 2 {
+		t.Errorf("prepared prune: %+v, err %v; first delete after %d Get, %d history List", r, err, actual.getsBeforeFirst, actual.listsBeforeFirst)
+	}
+	var deleted, closed []string
+	for _, b := range seed {
+		run, err := reference.Get(b.ID)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			deleted = append(deleted, b.ID)
+		case err != nil:
+			t.Fatal(err)
+		case b.Status == "open" && run.Status == "closed":
+			closed = append(closed, b.ID)
+		}
+	}
+	assertSweepBeadStates(t, actual.MemStore, seed, deleted, closed)
+}
