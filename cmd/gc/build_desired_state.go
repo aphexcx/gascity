@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -748,10 +749,8 @@ func buildDesiredStateWithSessionBeadsAt(
 			// coldWakeTemplates below) — the default probe IS the
 			// authoritative count, so it scales to total routed demand (bounded
 			// by max_active and the daemon's max_wakes_per_tick), matching the
-			// retired cold-pool-spawner's scale-to-want. Counts sum across
-			// store groups and the beads are distinct per store, so probing
-			// both yields the correct union demand. A city-scoped pool's
-			// own target is already the city store, so it needs no extra probe.
+			// retired cold-pool-spawner's scale-to-want. City-scoped pools
+			// also count routed tickets in the rigs from which they can claim.
 			//
 			// Gated on a healthy own rig store: when the rig store is missing or
 			// errored we stay partial and do NOT wake on cross-store demand —
@@ -775,6 +774,9 @@ func buildDesiredStateWithSessionBeadsAt(
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+			}
+			if agentutil.AgentIsCrossStoreEligible(&cfg.Agents[i]) && !storeScopedControlDispatcher && ownTarget.storeKey == "city" && ownTarget.store != nil && ownTarget.err == nil {
+				defaultScaleTargets = append(defaultScaleTargets, cityPoolRigTargets(ownTarget, cfg.Rigs, rigStores, suspendedRigPaths)...)
 			}
 			continue
 		}
@@ -1956,6 +1958,25 @@ func defaultScaleCheckTargetForAgent(
 	target.store = nil
 	target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", target.template, rigName)
 	return target
+}
+
+func cityPoolRigTargets(own defaultScaleCheckTarget, rigs []config.Rig, stores map[string]beads.Store, suspended map[string]bool) []defaultScaleCheckTarget {
+	var targets []defaultScaleCheckTarget
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Path) == "" || suspended[filepath.Clean(rig.Path)] {
+			continue
+		}
+		store := stores[rig.Name]
+		if store == own.store {
+			continue
+		}
+		target := defaultScaleCheckTarget{template: own.template, storeKey: "rig:" + rig.Name, store: store}
+		if store == nil {
+			target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", own.template, rig.Name)
+		}
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 // defaultScaleCheckCounts reports ready, unassigned, routed work as fresh
