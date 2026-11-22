@@ -4721,3 +4721,75 @@ func assertSweepBeadStates(t *testing.T, store beads.Store, seed []beads.Bead, d
 		}
 	}
 }
+
+func TestOrderSweepTrackingReadsClosedHistoryOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, key := range []string{"GC_CITY", "GC_CITY_ROOT", "GC_CITY_PATH"} {
+		t.Setenv(key, dir)
+	}
+	for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "GC_BEADS_SCOPE_ROOT"} {
+		t.Setenv(key, "")
+	}
+	writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"example\"\nprefix = \"ct\"\n")
+	if err := ensureScopedFileStoreLayout(dir); err != nil {
+		t.Fatal(err)
+	}
+	var history []beads.Bead
+	for i := range 12 {
+		history = append(history, beads.Bead{
+			ID: fmt.Sprintf("ct-%d", i), Title: "order:build", Status: "closed", Type: "task",
+			CreatedAt: time.Now().Add(-24 * time.Hour), Labels: []string{labelOrderTracking, "order-run:build"},
+		})
+	}
+	rows, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "history.json"), string(rows))
+	// Count calls at the exec provider boundary. The real provider still
+	// filters and sorts its rows and chooses its native paging behavior.
+	provider := filepath.Join(dir, "provider")
+	if err := os.WriteFile(provider, []byte(`#!/bin/sh
+set -eu
+case "$1:$2" in
+  list-by-label:order-tracking)
+    printf '%s\n' "$1" >> "$SWEEP_TEST_DIR/calls"
+    cat "$SWEEP_TEST_DIR/history.json" ;;
+  *) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWEEP_TEST_DIR", dir)
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(10*time.Minute, false, false, false, true, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	calls := strings.Fields(readFileString(t, filepath.Join(dir, "calls")))
+	if len(calls) != 2 {
+		t.Fatalf("tracking lists = %d, want 2 (one stale-open read and one closed-history read)", len(calls))
+	}
+}
+
+// The component tests exercise selection and guarded deletion separately from
+// the command's cross-store confirmation gate.
+func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	_, count, err := prepareOrderTrackingRetention(stores, now, policy, onlyOrders)
+	return count, err
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	ids, err := closedOrderTrackingCandidates(store, now, policy, onlyOrders)
+	if err != nil {
+		return 0, err
+	}
+	return pruneClosedOrderTracking(store, ids)
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	selections, _, readErr := prepareOrderTrackingRetention(stores, now, policy, onlyOrders)
+	result, pruneErr := pruneOrderTrackingSelections(selections)
+	return result, errors.Join(readErr, pruneErr)
+}
