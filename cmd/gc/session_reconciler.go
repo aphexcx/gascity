@@ -4039,6 +4039,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		awakeWorkBeads, awakeReadyFlags, wakeTargets, sp, clk.Now(),
 	)
 	awakeInput.DeferredTriggers = reconcileOpts.poolStartDeferredTriggers
+	awakeInput.CityPoolDemandSessions = selectedCityPoolDemandSessions(desiredState)
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 

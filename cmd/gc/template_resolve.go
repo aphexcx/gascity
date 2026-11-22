@@ -76,6 +76,8 @@ type TemplateParams struct {
 	Hints agent.StartupHints
 	// WorkDir is the resolved absolute working directory.
 	WorkDir string
+	// The pool planner chose this session with the ticket's rig affinity.
+	cityPoolDemandSelected bool
 	// Workspace appendices are re-derived when preparation overrides WorkDir.
 	// Retain generated suffixes so user-authored prompt text is never rewritten.
 	laneContextConfigured bool

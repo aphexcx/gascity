@@ -57,12 +57,18 @@ func (f *cityPoolFixture) route(t *testing.T, rig, id string) {
 
 func (f *cityPoolFixture) live(t *testing.T, ref string) beads.Bead {
 	t.Helper()
-	b := protectedPoolSessionBeadAt("session-1", time.Now().Add(-time.Second))
+	return f.liveAt(t, ref, time.Now().Add(-time.Second))
+}
+
+func (f *cityPoolFixture) liveAt(t *testing.T, ref string, createdAt time.Time) beads.Bead {
+	t.Helper()
+	slot := len(f.sessions) + 1
+	b := protectedPoolSessionBeadAt(fmt.Sprintf("session-%d", slot), createdAt)
 	b.Labels = []string{sessionBeadLabel, "template:worker"}
 	b.Metadata["template"] = "worker"
-	b.Metadata["agent_name"] = "worker-1"
-	b.Metadata["pool_slot"] = "1"
-	b.Metadata["session_name"] = "worker-live"
+	b.Metadata["agent_name"] = fmt.Sprintf("worker-%d", slot)
+	b.Metadata["pool_slot"] = fmt.Sprint(slot)
+	b.Metadata["session_name"] = fmt.Sprintf("worker-live-%d", slot)
 	b.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "previous"
 	b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ref
 	b, err := f.store.Create(b)
@@ -85,6 +91,56 @@ func (f *cityPoolFixture) live(t *testing.T, ref string) beads.Bead {
 
 func (f *cityPoolFixture) build() DesiredStateResult {
 	return buildDesiredStateWithSessionBeads("fixture", f.root, time.Now().UTC(), f.cfg, runtime.NewFake(), f.store, f.rigs, newSessionBeadSnapshot(f.sessions), nil, io.Discard)
+}
+
+func TestCityPoolResumeRetainsOwnerInOriginalWorkspace(t *testing.T) {
+	for _, ref := range []string{"city", "rig:beta"} {
+		t.Run(ref, func(t *testing.T) {
+			f := newCityPoolFixture(t)
+			f.cfg.Agents[0].WorkDir = "lanes/{{.TriggerRig}}/{{.AgentBase}}"
+			b := f.live(t, ref)
+			f.route(t, "alpha", "claimed")
+			if err := f.rigs["alpha"].Update("claimed", beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: &b.ID}); err != nil {
+				t.Fatal(err)
+			}
+			ds := f.build()
+			if len(ds.AssignedWorkBeads) != 1 || ds.AssignedWorkBeads[0].Status != "in_progress" || ds.AssignedWorkStoreRefs[0] != "alpha" {
+				t.Fatalf("assigned work=%v stores=%v", ds.AssignedWorkBeads, ds.AssignedWorkStoreRefs)
+			}
+			got := ds.State[b.Metadata["session_name"]]
+			if len(ds.State) != 1 || got.Env["GC_TRIGGER_BEAD_STORE_REF"] != ref || got.Env["GC_TRIGGER_BEAD_ID"] != "previous" {
+				t.Fatalf("sessions=%v, owner trigger=%q/%q", mapKeys(ds.State), got.Env["GC_TRIGGER_BEAD_ID"], got.Env["GC_TRIGGER_BEAD_STORE_REF"])
+			}
+		})
+	}
+}
+
+func TestCityPoolWakeRetainsRigAwareAllocation(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+	now := time.Now()
+	a := f.live(t, "rig:alpha")
+	other := f.liveAt(t, "rig:alpha", now.Add(-24*time.Hour))
+	b := f.liveAt(t, "rig:beta", now.Add(-24*time.Hour))
+	f.route(t, "beta", "beta-1")
+	cr := &CityRuntime{
+		cityName: "fixture", cityPath: f.root, cfg: f.cfg, sp: runtime.NewFake(), stderr: io.Discard,
+		standaloneCityStore: f.store, standaloneRigStores: f.rigs,
+		buildFnWithSessionBeads: func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+			return f.build()
+		},
+	}
+	sessions := newSessionBeadSnapshot(f.sessions)
+	ds := cr.loadDemandSnapshot(sessions, nil, "poke", false).result
+	if len(ds.BaseState) != 2 || ds.BaseState[b.Metadata["session_name"]].Env["GC_TRIGGER_BEAD_ID"] != "beta-1" {
+		t.Fatalf("planner selected %v, want both sessions with beta-1 on the beta session", mapKeys(ds.BaseState))
+	}
+	awake := buildAwakeInputFromReconciler(f.cfg, f.root, sessions.OpenInfos(), ds.PoolDesiredCounts, nil, nil, nil, nil, nil, nil, nil, cr.sp, now)
+	awake.CityPoolDemandSessions = selectedCityPoolDemandSessions(ds.State)
+	decisions := ComputeAwakeSet(awake)
+	if !decisions[a.Metadata["session_name"]].ShouldWake || !decisions[b.Metadata["session_name"]].ShouldWake || decisions[other.Metadata["session_name"]].ShouldWake {
+		t.Fatalf("pool desired=%v, wake decisions=%v", ds.PoolDesiredCounts, decisions)
+	}
 }
 
 func TestBuildDesiredState_CityScopedPoolCountsRigStoreRoutedDemand(t *testing.T) {

@@ -1066,7 +1066,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-			cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, dsResult.PoolStartDeferredTriggers, nil, dsResult.PoolStartDecisionTime)),
+			cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, dsResult.ScaleCheckCounts, dsResult.cityPoolWakeDemand, dsResult.PoolStartDeferredTriggers, nil, dsResult.PoolStartDecisionTime)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)

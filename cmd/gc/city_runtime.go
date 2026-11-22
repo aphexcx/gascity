@@ -2690,7 +2690,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, nil, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, result.cityPoolWakeDemand, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -3577,7 +3577,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-			filteredCfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, wfcResult.PoolStartDeferredTriggers, nil, wfcResult.PoolStartDecisionTime)),
+			filteredCfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openInfos, wfcResult.ScaleCheckCounts, wfcResult.cityPoolWakeDemand, wfcResult.PoolStartDeferredTriggers, nil, wfcResult.PoolStartDecisionTime)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -3862,7 +3862,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
-				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
+				cr.cfg, poolWorkBeads, poolWorkStoreRefs, poolOwnedWorkBeads, openSessionInfos, result.ScaleCheckCounts, result.cityPoolWakeDemand, result.PoolStartDeferredTriggers, trace, result.PoolStartDecisionTime)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)

@@ -64,9 +64,10 @@ type ContinuationClaimCandidate struct {
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
 // scale_check commands.
 type DesiredStateResult struct {
-	State            map[string]TemplateParams
-	BaseState        map[string]TemplateParams
-	ScaleCheckCounts map[string]int // nil when store is nil or scale_check not run
+	State              map[string]TemplateParams
+	BaseState          map[string]TemplateParams
+	ScaleCheckCounts   map[string]int              // nil when store is nil or scale_check not run
+	cityPoolWakeDemand map[string]scaleCheckDemand // same-tick rig provenance for wake-side capacity allocation
 	// ScaleCheckPartialTemplates records all templates whose bead-backed demand
 	// probe failed. PoolScaleCheckPartialTemplates blocks fresh pool creates;
 	// PoolPartialRetentionTemplates preserves existing pool capacity and may also
@@ -823,6 +824,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var storePartial bool
 	var scaleCheckCounts map[string]int
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
+	var cityPoolWakeDemand map[string]scaleCheckDemand
 	var poolScaleCheckPartialTemplates map[string]bool
 	var poolPartialRetentionTemplates map[string]bool
 	var namedScaleCheckPartialTemplates map[string]bool
@@ -970,6 +972,10 @@ func buildDesiredStateWithSessionBeadsAt(
 				entry := mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
 				if _, eligible := bp.cityPoolRigDemand[template]; eligible {
 					entry.affinityRigs = cfg.Rigs
+					if cityPoolWakeDemand == nil {
+						cityPoolWakeDemand = make(map[string]scaleCheckDemand)
+					}
+					cityPoolWakeDemand[template] = entry
 					if partialTemplates[template] && probe.healthyStores["city"] {
 						proven := make(map[string]string)
 						for id, ref := range entry.StoreRefs {
@@ -1257,6 +1263,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		State:                              desired,
 		BaseState:                          baseDesired,
 		ScaleCheckCounts:                   scaleCheckCounts,
+		cityPoolWakeDemand:                 cityPoolWakeDemand,
 		ScaleCheckPartialTemplates:         scaleCheckPartialTemplates,
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
 		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
@@ -3551,6 +3558,7 @@ func realizePoolDesiredSessionsAt(
 		} else {
 			tp.InstanceName = qualifiedInstance
 			tp.PoolSlot = poolSlot
+			_, tp.cityPoolDemandSelected = bp.cityPoolRigDemand[qualifiedName]
 			if usesTransientPoolSlotIdentity(cfgAgent) {
 				clearPoolTemplateRuntimeIdentity(&tp)
 			} else {
@@ -3664,6 +3672,11 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 // build with no store folds locally without a write.
 func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (session.Info, error) {
 	if info.ID == "" {
+		return info, nil
+	}
+	if bp != nil && cfgAgent != nil && request.Tier == "resume" && request.SessionBeadID == info.ID && !bp.poolSessionMatchesTriggerRig(cfgAgent.QualifiedName(), info, request) {
+		// The live owner already claimed this work across stores. Its process
+		// continues in the repository recorded when it started.
 		return info, nil
 	}
 	if bp != nil && cfgAgent != nil && request.WorkBeadID == "" && poolSessionIsLiveInfo(info) {
@@ -4581,7 +4594,7 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
-	if preferred != nil && !bp.poolSessionMatchesTriggerRig(template, *preferred, request) {
+	if preferred != nil && request.Tier != "resume" && !bp.poolSessionMatchesTriggerRig(template, *preferred, request) {
 		preferred = nil
 	}
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionInfo(*preferred) {
