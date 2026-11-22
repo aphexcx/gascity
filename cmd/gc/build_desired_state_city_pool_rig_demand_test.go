@@ -1,0 +1,254 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+type cityPoolFixture struct {
+	root     string
+	cfg      *config.City
+	store    *beads.MemStore
+	rigs     map[string]beads.Store
+	sessions []beads.Bead
+}
+
+func newCityPoolFixture(t *testing.T) *cityPoolFixture {
+	t.Helper()
+	root := t.TempDir()
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "fixture"},
+		Agents: []config.Agent{{
+			Name: "worker", Scope: "city", StartCommand: "true",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+		}},
+	}
+	rigs := make(map[string]beads.Store)
+	for _, name := range []string{"alpha", "beta"} {
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: name, Path: filepath.Join(root, name)})
+		s := beads.NewMemStore()
+		s.HonorExplicitIDs = true
+		rigs[name] = s
+	}
+	return &cityPoolFixture{root: root, cfg: cfg, store: store, rigs: rigs}
+}
+
+func (f *cityPoolFixture) route(t *testing.T, rig, id string) {
+	t.Helper()
+	var store beads.Store = f.store
+	if rig != "" {
+		store = f.rigs[rig]
+	}
+	b, err := store.Create(beads.Bead{ID: id, Title: id, Type: "task", Metadata: map[string]string{"gc.routed_to": f.cfg.Agents[0].QualifiedName()}})
+	if err != nil || b.ID != id {
+		t.Fatalf("creating %s in %q: id=%s, err=%v", id, rig, b.ID, err)
+	}
+}
+
+func (f *cityPoolFixture) live(t *testing.T, ref string) beads.Bead {
+	t.Helper()
+	b := protectedPoolSessionBeadAt("session-1", time.Now().Add(-time.Second))
+	b.Labels = []string{sessionBeadLabel, "template:worker"}
+	b.Metadata["template"] = "worker"
+	b.Metadata["agent_name"] = "worker-1"
+	b.Metadata["pool_slot"] = "1"
+	b.Metadata["session_name"] = "worker-live"
+	b.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "previous"
+	b.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] = ref
+	b, err := f.store.Create(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := collectAllOpenSessionInfos("", f.cfg, f.store, f.rigs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range infos {
+		if info.ID == b.ID && isPoolManagedSessionInfo(info) && poolSessionIsLiveInfo(info) {
+			f.sessions = append(f.sessions, b)
+			return b
+		}
+	}
+	t.Fatal("prepared session is not live")
+	return beads.Bead{}
+}
+
+func (f *cityPoolFixture) build() DesiredStateResult {
+	return buildDesiredStateWithSessionBeads("fixture", f.root, time.Now().UTC(), f.cfg, runtime.NewFake(), f.store, f.rigs, newSessionBeadSnapshot(f.sessions), nil, io.Discard)
+}
+
+func TestBuildDesiredState_CityScopedPoolCountsRigStoreRoutedDemand(t *testing.T) {
+	for _, warm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("warm=%v", warm), func(t *testing.T) {
+			f := newCityPoolFixture(t)
+			if warm {
+				f.live(t, "rig:alpha")
+			}
+			f.route(t, "alpha", "alpha-1")
+			f.route(t, "alpha", "alpha-2")
+			f.route(t, "beta", "beta-1")
+			if got := f.build().ScaleCheckCounts["worker"]; got != 3 {
+				t.Fatalf("count=%d, want 3", got)
+			}
+		})
+	}
+}
+
+func TestBuildDesiredState_CityScopedPoolRigDemandCarriesRigStoreRef(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.route(t, "alpha", "alpha-1")
+	ds := f.build()
+	if len(ds.ReadyUnassignedRoutedWorkBeads) != 1 || ds.ReadyUnassignedRoutedWorkBeads[0].ID != "alpha-1" || len(ds.ReadyUnassignedRoutedWorkStoreRefs) != 1 || ds.ReadyUnassignedRoutedWorkStoreRefs[0] != "rig:alpha" {
+		t.Fatalf("selected work=%v refs=%v", ds.ReadyUnassignedRoutedWorkBeads, ds.ReadyUnassignedRoutedWorkStoreRefs)
+	}
+	for _, tp := range ds.State {
+		if tp.Env["GC_TRIGGER_BEAD_ID"] == "alpha-1" && tp.Env["GC_TRIGGER_BEAD_STORE_REF"] == "rig:alpha" {
+			return
+		}
+	}
+	t.Fatal("no realized session for alpha-1 in rig:alpha")
+}
+
+func TestBuildDesiredState_CityScopedPoolMissingBoundRigStoreStaysPartial(t *testing.T) {
+	f := newCityPoolFixture(t)
+	delete(f.rigs, "beta")
+	f.route(t, "alpha", "alpha-1")
+	ds := f.build()
+	if ds.ScaleCheckCounts["worker"] != 1 || !ds.ScaleCheckPartialTemplates["worker"] || len(ds.State) != 1 {
+		t.Fatalf("count=%d partial=%v realized=%d", ds.ScaleCheckCounts["worker"], ds.ScaleCheckPartialTemplates, len(ds.State))
+	}
+}
+
+func TestBuildDesiredState_CityScopedPoolRigDemandBoundedByMaxActive(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+	for i := 0; i < 5; i++ {
+		f.route(t, "alpha", fmt.Sprintf("alpha-%d", i))
+	}
+	if ds := f.build(); ds.ScaleCheckCounts["worker"] != 5 || len(ds.State) != 2 {
+		t.Fatalf("count=%d realized=%d", ds.ScaleCheckCounts["worker"], len(ds.State))
+	}
+}
+
+func TestBuildDesiredState_CityScopedPoolAliasedRigStoreDoesNotDoubleCount(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.rigs["alpha"] = aliasStore{f.store}
+	f.route(t, "", "shared-1")
+	if got := f.build().ScaleCheckCounts["worker"]; got != 1 {
+		t.Fatalf("count=%d, want 1", got)
+	}
+}
+
+// Independent stores sharing an ID prefix inherit the probe's ID-only limit.
+// Either store may supply the single trigger.
+func TestBuildDesiredState_CityScopedPoolSharedIDKnownLimit(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.route(t, "alpha", "shared-1")
+	f.route(t, "beta", "shared-1")
+	ds := f.build()
+	if ds.ScaleCheckCounts["worker"] != 1 || len(ds.State) != 1 {
+		t.Fatalf("count=%d realized=%d", ds.ScaleCheckCounts["worker"], len(ds.State))
+	}
+	for _, tp := range ds.State {
+		ref := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]
+		if tp.Env["GC_TRIGGER_BEAD_ID"] != "shared-1" || (ref != "rig:alpha" && ref != "rig:beta") {
+			t.Fatalf("unexpected trigger ID/ref: %q/%q", tp.Env["GC_TRIGGER_BEAD_ID"], ref)
+		}
+	}
+}
+
+func TestBuildDesiredState_CityScopedPoolSkipsSuspendedAndUnboundRigs(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Rigs[0].Suspended = true
+	f.cfg.Rigs[1].Path = ""
+	delete(f.rigs, "beta")
+	f.route(t, "alpha", "alpha-1")
+	ds := f.build()
+	if ds.ScaleCheckCounts["worker"] != 0 || ds.ScaleCheckPartialTemplates["worker"] {
+		t.Fatalf("counts=%v partial=%v", ds.ScaleCheckCounts, ds.ScaleCheckPartialTemplates)
+	}
+}
+
+func TestBuildDesiredState_UnscopedCityPoolDoesNotProbeRigStores(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].Scope = ""
+	f.route(t, "alpha", "alpha-1")
+	if got := f.build().ScaleCheckCounts["worker"]; got != 0 {
+		t.Fatalf("count=%d, want 0", got)
+	}
+}
+
+func TestBuildDesiredState_CityScopedCustomScaleCheckPoolUnchanged(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].ScaleCheck = "echo 0"
+	f.live(t, "")
+	f.route(t, "alpha", "alpha-1")
+	ds := f.build()
+	if got, ok := ds.ScaleCheckCounts["worker"]; !ok || got != 0 {
+		t.Fatalf("counts=%v, want custom count 0", ds.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_CityScopedControlDispatcherUnchanged(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].Name = config.ControlDispatcherAgentName
+	f.route(t, "alpha", "alpha-1")
+	if got := f.build().ScaleCheckCounts[config.ControlDispatcherAgentName]; got != 0 {
+		t.Fatalf("count=%d, want 0", got)
+	}
+}
+
+func TestBuildDesiredState_CityPoolLiveSessionRigAffinity(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldRef, newRig string
+		max, wantSessions    int
+		rebind               bool
+	}{
+		{"different rig", "rig:alpha", "beta", 2, 2, false},
+		{"different rig at cap", "rig:alpha", "beta", 1, 1, false},
+		{"same rig", "alpha", "alpha", 2, 1, true},
+		{"city to rig", "", "alpha", 2, 2, false},
+		{"rig to city", "rig:alpha", "", 2, 2, false},
+		{"city to city", "city:fixture", "", 2, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCityPoolFixture(t)
+			f.cfg.Agents[0].MaxActiveSessions = intPtr(tc.max)
+			b := f.live(t, tc.oldRef)
+			f.route(t, tc.newRig, "new-1")
+			ds := f.build()
+			got, err := f.store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantID, wantRef := "previous", tc.oldRef
+			if tc.rebind {
+				wantID, wantRef = "new-1", "city"
+				if tc.newRig != "" {
+					wantRef = "rig:" + tc.newRig
+				}
+			}
+			if len(ds.State) != tc.wantSessions || got.Metadata[beadmeta.TriggerBeadIDMetadataKey] != wantID || got.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] != wantRef {
+				t.Fatalf("realized=%d, trigger=%q/%q; want %d, %q/%q", len(ds.State), got.Metadata[beadmeta.TriggerBeadIDMetadataKey], got.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey], tc.wantSessions, wantID, wantRef)
+			}
+			if tc.wantSessions == 2 {
+				for _, tp := range ds.State {
+					if tp.Env["GC_TRIGGER_BEAD_ID"] == "new-1" {
+						return
+					}
+				}
+				t.Fatal("new ticket has no session")
+			}
+		})
+	}
+}
