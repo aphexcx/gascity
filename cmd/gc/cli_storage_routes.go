@@ -70,6 +70,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -127,6 +128,8 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // TestCLIStorageRoutesDeclineTheRevisionSnapshot pins it.
 var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick}
 
+var cliStorageConfigReads atomic.Int64
+
 // resolveCLIStorageRoutes takes the verdict for one city, exactly once, and
 // turns each of its three arms into routes: nil for a city that relocates
 // nothing, the opened binding for one that has converged, and refusing stores
@@ -153,6 +156,7 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true, Remote
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
+	cliStorageConfigReads.Add(1)
 	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
