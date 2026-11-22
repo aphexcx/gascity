@@ -1471,14 +1471,11 @@ func resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName st
 // it. Only session-start paths may call this; pure computations use
 // resolveConfiguredWorkDirPath.
 func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return ensureAgentWorkDir(resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs))
+	return resolveConfiguredWorkDirForTrigger(cityPath, cityName, qualifiedName, a, rigs, "")
 }
 
 func resolveConfiguredWorkDirForTrigger(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, triggerRig string) (string, error) {
-	return ensureAgentWorkDir(resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName, a, rigs, triggerRig))
-}
-
-func ensureAgentWorkDir(dir string, err error) (string, error) {
+	dir, err := resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, qualifiedName, a, rigs, triggerRig)
 	if err != nil {
 		return "", err
 	}

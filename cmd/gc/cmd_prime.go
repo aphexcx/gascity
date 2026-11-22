@@ -999,11 +999,7 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
 		ctx.WorkDir = gcDir
 	} else if a.WorkDir != "" {
-		triggerRig := ""
-		if strings.TrimSpace(os.Getenv("GC_TRIGGER_BEAD_ID")) != "" {
-			triggerRig = configuredTriggerRig(os.Getenv("GC_TRIGGER_BEAD_STORE_REF"), rigs)
-		}
-		workDir, err := resolveConfiguredWorkDirPathForTrigger(cityPath, cityName, ctx.AgentName, a, rigs, triggerRig)
+		workDir, err := resolveConfiguredWorkDirPath(cityPath, cityName, ctx.AgentName, a, rigs)
 		if err != nil {
 			if stderr != nil {
 				fmt.Fprintf(stderr, "gc prime: resolving work_dir for %q: %v\n", ctx.AgentName, err) //nolint:errcheck
