@@ -2011,14 +2011,20 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 func TestCmdSessionListJSONNoSessionsReturnsEmptyEnvelope(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_NO_API", "1")
 
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
 	if code := cmdSessionList("", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionList(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if loads := loadCityConfigCalls.Load() - before; loads != 1 {
+		t.Errorf("full city config loads = %d, want one shared by the local store and session provider", loads)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())

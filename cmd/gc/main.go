@@ -528,6 +528,9 @@ func cliSessionName(cityPath, cityName, agentName, sessionTemplate string) strin
 // chain serves. The zero value is the authoritative one, so every caller that
 // does not opt in keeps waiting for whatever it needs.
 type contextResolutionMode struct {
+	// cityOnly skips the optional rig name for callers that consume just the
+	// city. Rig bindings that determine which city owns a path still resolve.
+	cityOnly bool
 	// advisory marks a resolution nobody asked for: eager pack-command
 	// discovery and shell completion, which run on every gc invocation
 	// whatever the user typed. Such a caller would rather have no answer than
@@ -1114,7 +1117,7 @@ func rigFromCwd(cityPath string, mode contextResolutionMode) string {
 // it there is what keeps discovery off the repo-cache lock entirely, rather
 // than merely making its acquisition non-blocking.
 func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
-	if mode.advisory {
+	if mode.advisory || mode.cityOnly {
 		return ""
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -1455,13 +1458,21 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, "", 1
 	}
-	store, err := openCityStoreAt(cityPath)
+	store, code := openResolvedCityStore(cityPath, nil, stderr, cmdName)
+	if code != 0 {
+		return nil, "", code
+	}
+	return store, cityPath, code
+}
+
+func openResolvedCityStore(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (beads.Store, int) {
+	store, err := openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, "", 1
+		return nil, 1
 	}
-	return store, cityPath, 0
+	return store, 0
 }
 
 // openCityStoreAt opens a bead store at the given city path.

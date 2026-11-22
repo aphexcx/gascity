@@ -1336,13 +1336,17 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	// broad scan instead of issuing one per candidate (ga-q6ct Layer 2).
 	cityPath, cfg := ambientMailTargetConfig()
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	return resolveMailTargetCandidates(cityPath, cfg, sessStore, candidates, stderr, cmdName)
+}
+
+func resolveMailTargetCandidates(cityPath string, cfg *config.City, sessStore beads.Store, candidates []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	cache := &mailIdentitySessionCache{}
 	for _, c := range candidates {
 		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, sessStore, c, cache)
 		if err == nil {
 			return target, true
 		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
+		if len(candidates) == 1 || !errors.Is(err, session.ErrSessionNotFound) {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return resolvedMailTarget{}, false
 		}
@@ -1449,13 +1453,17 @@ func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients 
 	for _, id := range order {
 		result = append(result, seen[id])
 	}
+	sortMailByCreation(result)
+	return result, nil
+}
+
+func sortMailByCreation(result []mail.Message) {
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
 			return result[i].ID < result[j].ID
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
-	return result, nil
 }
 
 func collectMailCounts(count func(string) (int, int, error), recipients []string) (int, int, error) {
@@ -2083,23 +2091,37 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	// Remote city: read the far-side mailbox over the control plane (see
 	// mail_remote.go). Same deferral of "no city discoverable" as mail send.
-	if remoteC, isRemote, remoteTgt, rerr := resolveReadTargetEcho(); rerr != nil && !isCityDiscoveryNotFound(rerr) {
-		fmt.Fprintf(stderr, "gc mail inbox: %v\n", rerr) //nolint:errcheck // best-effort stderr
+	remoteC, ctx, err := resolveReadClient()
+	if err != nil && !isCityDiscoveryNotFound(err) {
+		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	} else if isRemote {
-		return cmdMailInboxRemote(remoteC, remoteTgt, args, jsonOut, stdout, stderr)
 	}
-	mp, code := openCityMailProvider(stderr, "gc mail inbox")
-	if mp == nil {
+	if ctx.Remote != nil {
+		return cmdMailInboxRemote(remoteC, ctx.Remote, args, jsonOut, stdout, stderr)
+	}
+	mailbox, code := openResolvedCityMail(ctx.CityPath, err, stderr, "gc mail inbox")
+	if mailbox.provider == nil {
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
+	var target resolvedMailTarget
+	var ok bool
+	if mailbox.sessionStore == nil {
+		target, ok = resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
+	} else {
+		candidates := args
+		if len(candidates) == 0 {
+			candidates = defaultMailIdentityCandidates()
+		} else {
+			candidates = args[:1]
+		}
+		target, ok = resolveMailTargetCandidates(ctx.CityPath, mailbox.cfg, mailbox.sessionStore, candidates, stderr, "gc mail inbox")
+	}
 	if !ok {
 		return 1
 	}
 
-	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
+	return doMailInboxTargetWithJSON(mailbox.provider, target, jsonOut, stdout, stderr)
 }
 
 type mailInboxReader interface {
@@ -2116,7 +2138,7 @@ func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, st
 }
 
 func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Inbox, target.recipients)
+	messages, err := readMailInbox(mp, target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2147,6 +2169,23 @@ func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, js
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func readMailInbox(mp mailInboxReader, recipients []string) ([]mail.Message, error) {
+	// An empty recipient set means no mailbox here. To the batch provider
+	// it means every mailbox, so only use its union read for multiple routes.
+	if batch, ok := mp.(mail.MultiRecipientInboxer); ok && len(recipients) > 1 {
+		messages, err := batch.InboxRecipients(recipients)
+		if err != nil {
+			return nil, err
+		}
+		if messages == nil {
+			return []mail.Message{}, nil
+		}
+		sortMailByCreation(messages)
+		return messages, nil
+	}
+	return collectMailMessages(mp.Inbox, recipients)
 }
 
 func cmdMailReadWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
