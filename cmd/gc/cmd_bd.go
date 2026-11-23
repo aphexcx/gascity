@@ -211,6 +211,22 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	return bdCommandEnvWithOptions(cityPath, cfg, target, bdEnvOptions{recovery: bdRecoveryWithProvider})
 }
 
+// Only help and version invocations are known to run without a store.
+func bdPassthroughRecovery(args []string) bdRecoveryLevel {
+	if i, hidden := bdVerbIndexAfterGlobals(args); !hidden && i >= 0 && (args[i] == "version" || args[i] == "help") {
+		return bdRecoveryFromState
+	}
+	if len(args) == 0 {
+		return bdRecoveryWithProvider
+	}
+	for _, arg := range args {
+		if arg != "--version" && arg != "--help" && arg != "-h" {
+			return bdRecoveryWithProvider
+		}
+	}
+	return bdRecoveryFromState
+}
+
 func bdCommandEnvWithOptions(cityPath string, cfg *config.City, target execStoreTarget, opts bdEnvOptions) ([]string, error) {
 	var overrides map[string]string
 	var err error
@@ -750,7 +766,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// the target scope rather than the city keeps a rig that overrides the
 	// city backend, and owns no binding of its own, on the ambient bd its
 	// runtime env already implies.
-	opts := bdEnvOptions{cityConfig: cfg, recovery: bdRecoveryFromState}
+	opts := bdEnvOptions{cityConfig: cfg, recovery: bdPassthroughRecovery(bdArgs)}
 	bdPath, err := opts.resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
