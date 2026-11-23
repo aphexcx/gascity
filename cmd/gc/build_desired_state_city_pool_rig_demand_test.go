@@ -386,6 +386,39 @@ func TestCityPoolAliasKeepsSingleTicketOnItsLiveSession(t *testing.T) {
 	}
 }
 
+// gf-u7hz tracks the second worker planned when an earlier alias recovers before claim.
+func TestBuildDesiredState_CityScopedPoolAliasRecoveryKnownLimit(t *testing.T) {
+	f := newCityPoolFixture(t)
+	f.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+	ledger := f.rigs["alpha"]
+	f.rigs["beta"] = aliasStore{ledger}
+	f.rigs["alpha"] = &readyFailStore{Store: ledger}
+	f.route(t, "beta", "shared-1")
+
+	first := f.build()
+	if !first.PoolScaleCheckPartialTemplates["worker"] || first.ScaleCheckCounts["worker"] != 1 || len(first.State) != 1 {
+		t.Fatalf("first tick: count=%d partial=%v sessions=%v", first.ScaleCheckCounts["worker"], first.PoolScaleCheckPartialTemplates, mapKeys(first.State))
+	}
+	sessions, err := f.store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(sessions) != 1 || sessions[0].Metadata[beadmeta.TriggerBeadStoreRefMetadataKey] != "rig:beta" {
+		t.Fatalf("expected one pending beta session: sessions=%v err=%v", sessions, err)
+	}
+	f.sessions = sessions
+	f.rigs["alpha"] = ledger
+	second := f.build()
+	if second.PoolScaleCheckPartialTemplates["worker"] || second.ScaleCheckCounts["worker"] != 1 ||
+		second.cityPoolWakeDemand["worker"].StoreRefs["shared-1"] != "rig:alpha" {
+		t.Fatalf("recovered tick: count=%d partial=%v stores=%v", second.ScaleCheckCounts["worker"], second.PoolScaleCheckPartialTemplates, second.cityPoolWakeDemand["worker"].StoreRefs)
+	}
+	bindings := make(map[string]string)
+	for name, session := range second.State {
+		bindings[name] = session.Env["GC_TRIGGER_BEAD_ID"] + "/" + session.Env["GC_TRIGGER_BEAD_STORE_REF"]
+	}
+	if len(bindings) != 2 || bindings["worker-gc-1"] != "shared-1/rig:beta" || bindings["worker-gc-2"] != "shared-1/rig:alpha" {
+		t.Fatalf("recovered tick: count=1, realized=%v; want the original beta worker and a second alpha worker", bindings)
+	}
+}
+
 func TestCityPoolCollisionUsesCompleteFirstRigRow(t *testing.T) {
 	const id = "shared-1"
 	repo, base := worktreeTestRepo(t)
