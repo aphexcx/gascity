@@ -32,7 +32,10 @@ func maybeCaptureBdInvocation() {
 	}
 	cwd, err := os.Getwd()
 	if err == nil {
-		env := os.Environ()
+		// Coverage belongs to the test harness, including in re-executed children.
+		env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+			return strings.HasPrefix(kv, "GOCOVERDIR=")
+		})
 		slices.Sort(env)
 		var data []byte
 		data, err = json.MarshalIndent(struct {
@@ -185,6 +188,9 @@ func (f bdInvocationFixture) runIsolated(t *testing.T) string {
 	env := []string{"HOME=" + f.root, "GC_HOME=" + filepath.Join(f.root, "gc-home"), "PATH=" + os.Getenv("PATH"), bdCaptureFile + "=" + f.capture}
 	if city := os.Getenv("GC_CITY_PATH"); city != "" {
 		env = append(env, "GC_CITY_PATH="+city)
+	}
+	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
+		env = append(env, "GOCOVERDIR="+dir)
 	}
 	out, diag, err := runGCBeadsBdCommand(t, env, program, f.args...)
 	if err != nil || out != "fake bd\n" || !strings.HasSuffix(diag, "fake bd diagnostic\n") {
