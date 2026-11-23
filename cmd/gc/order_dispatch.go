@@ -3281,6 +3281,8 @@ type orderTrackingRetentionSelection struct {
 	ids        []string
 	references []orders.OrderRun
 	bulk       bool
+
+	pointCandidates map[string]orders.OrderRun
 }
 
 func (s *orderTrackingRetentionSelection) rememberReferences(runs ...orders.OrderRun) {
@@ -3325,7 +3327,7 @@ func pruneOrderTrackingSelections(selections []orderTrackingRetentionSelection, 
 			errs = append(errs, fmt.Errorf("checking closed order-tracking %s: %w", selection.label, err))
 			continue
 		}
-		n, err := pruneClosedOrderTracking(selection.store, ids)
+		n, err := pruneClosedOrderTracking(selection.store, ids, selection.pointCandidates)
 		result.deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", selection.label, err))
@@ -3336,31 +3338,42 @@ func pruneOrderTrackingSelections(selections []orderTrackingRetentionSelection, 
 	return result, errors.Join(errs...)
 }
 
-// currentIDs checks the small part of the counted history that authorized a
-// deletion. A reopen, removal or reordering while other stores were counted
-// requires a fresh ranking. Only previously counted IDs passed the confirm gate.
-func (s orderTrackingRetentionSelection) currentIDs(now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]string, error) {
+// currentIDs checks the retained floor and saves the counted candidates for
+// individual checks immediately before their guarded deletions.
+func (s *orderTrackingRetentionSelection) currentIDs(now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]string, error) {
 	if s.bulk {
 		return s.refreshedIDs(now, policy, onlyOrders)
 	}
 	reader := beads.HandlesFor(s.store).Live
+	candidates := make(map[string]orders.OrderRun, len(s.ids))
+	for _, id := range s.ids {
+		candidates[id] = orders.OrderRun{}
+	}
 	for _, reference := range s.references {
-		b, err := reader.Get(reference.ID)
+		if _, ok := candidates[reference.ID]; ok {
+			candidates[reference.ID] = reference
+			continue
+		}
+		matches, err := retentionReferenceMatches(reader, reference)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return nil, fmt.Errorf("reading retention reference %q: %w", reference.ID, err)
 		}
-		name, _ := orders.NameFromTrackingBead(b)
-		at := b.UpdatedAt
-		if at.IsZero() {
-			at = b.CreatedAt
+		if !matches {
+			return s.refreshedIDs(now, policy, onlyOrders)
 		}
-		if err == nil && b.ID == reference.ID && b.Status == "closed" && orders.IsTrackingBead(b) &&
-			name == reference.Scoped && at.Equal(orderTrackingClosedReferenceTime(reference)) {
-			continue
-		}
-		return s.refreshedIDs(now, policy, onlyOrders)
 	}
+	s.pointCandidates = candidates
 	return s.ids, nil
+}
+
+func retentionReferenceMatches(reader beads.LiveReader, reference orders.OrderRun) (bool, error) {
+	b, err := reader.Get(reference.ID)
+	if err != nil {
+		return false, err
+	}
+	name, _ := orders.NameFromTrackingBead(b)
+	return b.ID == reference.ID && b.Status == "closed" && orders.IsTrackingBead(b) &&
+		name == reference.Scoped && beadLastActivity(b).Equal(orderTrackingClosedReferenceTime(reference)), nil
 }
 
 func (s orderTrackingRetentionSelection) refreshedIDs(now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) ([]string, error) {
@@ -3460,13 +3473,23 @@ func closedOrderTrackingCandidates(store beads.Store, now time.Time, policy orde
 	return selection, nil
 }
 
-func pruneClosedOrderTracking(store beads.Store, ids []string) (int, error) {
+func pruneClosedOrderTracking(store beads.Store, ids []string, candidates map[string]orders.OrderRun) (int, error) {
 	warnings := make(retentionRowWarnings)
 	defer warnings.report()
 	deleted := 0
 	var retained []string
 	var deleteErr error
+	reader := beads.HandlesFor(store).Live
 	for _, id := range ids {
+		if reference, ok := candidates[id]; ok {
+			matches, err := retentionReferenceMatches(reader, reference)
+			if err != nil && !errors.Is(err, beads.ErrNotFound) {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("reading retention candidate %q: %w", id, err))
+			}
+			if !matches {
+				continue
+			}
+		}
 		// deleteWorkflowBead is the graph-aware delete (dep unwind) the
 		// retention prune uses; it stays raw graph residual. A closed
 		// tracking root can still own OPEN steps — the delete refuses
