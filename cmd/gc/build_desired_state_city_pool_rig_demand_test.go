@@ -332,6 +332,34 @@ func TestBuildDesiredState_CityScopedPoolAliasedRigStoreDoesNotDoubleCount(t *te
 	}
 }
 
+func TestCityPoolFreshRecoveryKeepsAssignedTicketRig(t *testing.T) {
+	for _, state := range []string{"asleep", "drained"} {
+		t.Run(state, func(t *testing.T) {
+			f := newCityPoolFixture(t)
+			f.cfg.Agents[0].WakeMode = "fresh"
+			owner := f.live(t, "rig:alpha")
+			if err := f.store.SetMetadata(owner.ID, "state", state); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			f.sessions[0], err = f.store.Get(owner.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := f.live(t, "rig:alpha")
+			f.route(t, "alpha", "owned")
+			if err := f.rigs["alpha"].Update("owned", beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: &owner.ID}); err != nil {
+				t.Fatal(err)
+			}
+			ds := f.build()
+			tp := ds.BaseState[live.Metadata["session_name"]]
+			if len(ds.BaseState) != 1 || tp.Env["GC_TRIGGER_BEAD_ID"] != "owned" || tp.Env["GC_TRIGGER_BEAD_STORE_REF"] != "rig:alpha" {
+				t.Fatalf("recovery planned=%v, live trigger=%q/%q", mapKeys(ds.BaseState), tp.Env["GC_TRIGGER_BEAD_ID"], tp.Env["GC_TRIGGER_BEAD_STORE_REF"])
+			}
+		})
+	}
+}
+
 // Independent stores sharing an ID prefix inherit the probe's ID-only limit.
 // Either store may supply the single trigger.
 func TestBuildDesiredState_CityScopedPoolSharedIDKnownLimit(t *testing.T) {

@@ -73,6 +73,35 @@ func triggerRigFixture(t *testing.T) (*agentBuildParams, *config.Agent) {
 	return bp, a
 }
 
+func TestRigPoolFreshRecoveryKeepsLegacyStoreRef(t *testing.T) {
+	f := newCityPoolFixture(t)
+	a := &f.cfg.Agents[0]
+	a.Dir, a.Scope, a.WakeMode = "alpha", "rig", "fresh"
+	template := a.QualifiedName()
+	owner := poolSessionBeadWithState("previous-session", "asleep", "")
+	owner.Labels = []string{sessionBeadLabel, "template:" + template}
+	owner.Metadata["template"] = template
+	owner.Metadata["session_name"] = "previous-session"
+	owner, err := f.store.Create(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sessions = append(f.sessions, owner)
+	f.route(t, "alpha", "owned")
+	if err := f.rigs["alpha"].Update("owned", beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: &owner.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ds := f.build()
+	if len(ds.BaseState) != 1 {
+		t.Fatalf("planned=%v, want one replacement", mapKeys(ds.BaseState))
+	}
+	for name, tp := range ds.BaseState {
+		if name == owner.Metadata["session_name"] || tp.Env["GC_TRIGGER_BEAD_ID"] != "owned" || tp.Env["GC_TRIGGER_BEAD_STORE_REF"] != "" {
+			t.Fatalf("replacement=%s, trigger=%q/%q", name, tp.Env["GC_TRIGGER_BEAD_ID"], tp.Env["GC_TRIGGER_BEAD_STORE_REF"])
+		}
+	}
+}
+
 func TestPoolTriggerWorkDirExpandsTriggerRig(t *testing.T) {
 	bp, a := triggerRigFixture(t)
 	for _, tc := range []struct{ ref, rig string }{

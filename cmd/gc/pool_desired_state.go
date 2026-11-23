@@ -465,6 +465,12 @@ func computePoolDesiredStatesAt(
 						continue
 					}
 					wakeRequestedTemplates[template] = struct{}{}
+					var storeRef string
+					if len(scaleCheckDemand[template].affinityRigs) > 0 {
+						// A replacement can reuse a live seat only in the
+						// repository that holds the assigned work.
+						storeRef = assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex)
+					}
 					resumeRequests = append(resumeRequests, SessionRequest{
 						Template:     template,
 						BeadPriority: beadPriorityRank(beadPriority(wb)),
@@ -473,6 +479,7 @@ func computePoolDesiredStatesAt(
 						// bead must not be reused, so realizePoolDesiredSessions
 						// plans a clean create.
 						WorkBeadID:     wb.ID,
+						WorkStoreRef:   storeRef,
 						WorkBeadTitle:  strings.TrimSpace(wb.Title),
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
