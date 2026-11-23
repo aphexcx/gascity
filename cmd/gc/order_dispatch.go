@@ -3355,10 +3355,7 @@ func (s *orderTrackingRetentionSelection) currentIDs(now time.Time, policy order
 			continue
 		}
 		matches, err := retentionReferenceMatches(reader, reference)
-		if err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return nil, fmt.Errorf("reading retention reference %q: %w", reference.ID, err)
-		}
-		if !matches {
+		if err != nil || !matches {
 			return s.refreshedIDs(now, policy, onlyOrders)
 		}
 	}
