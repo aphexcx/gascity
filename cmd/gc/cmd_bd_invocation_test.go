@@ -344,19 +344,62 @@ func recordingBdProvider(t *testing.T, f bdInvocationFixture, reachable bool) (l
 
 func TestBdInvocationProviderLifecycle(t *testing.T) {
 	for _, scope := range []string{"city", "rig-cwd"} {
-		for _, args := range [][]string{{"version"}, {"sql", "SELECT 1"}, {"list"}} {
-			t.Run(scope+"/"+args[0], func(t *testing.T) {
+		for _, tc := range []struct {
+			args []string
+			ops  string
+		}{
+			{[]string{"version"}, ""},
+			{[]string{"help", "list"}, ""},
+			{[]string{"--version"}, ""},
+			{[]string{"--help"}, ""},
+			{[]string{"-h", "--version"}, ""},
+			{[]string{"--json", "version"}, ""},
+			{[]string{"sql", "SELECT 1"}, "health\nrecover\n"},
+			{[]string{"list"}, "health\nrecover\n"},
+			{[]string{"future-command", "--help"}, "health\nrecover\n"},
+		} {
+			t.Run(scope+"/"+strings.Join(tc.args, "_"), func(t *testing.T) {
 				f := newBdInvocationFixture(t, scope)
 				log, _ := recordingBdProvider(t, f, false)
-				f.args = args
+				f.args = tc.args
 				f.run(t)
 				got, err := os.ReadFile(log)
-				if err != nil || len(got) != 0 {
-					t.Fatalf("provider operations = %q, %v; want empty", got, err)
+				if err != nil || string(got) != tc.ops {
+					t.Fatalf("provider operations = %q, %v; want %q", got, err, tc.ops)
 				}
 			})
 		}
 	}
+	t.Run("recover-publishes-endpoint", func(t *testing.T) {
+		f := newBdInvocationFixture(t, "city")
+		log, _ := recordingBdProvider(t, f, false)
+		port := writeReachableProviderManagedDoltState(t, f.city)
+		state := providerManagedDoltStatePath(f.city)
+		staged := state + ".staged"
+		if err := os.Rename(state, staged); err != nil {
+			t.Fatal(err)
+		}
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\n[ \"$1\" = recover ] && mv %q %q\n", log, staged, state)
+		writeBdFixtureFile(t, filepath.Join(f.root, "gc-beads-bd.sh"), script, 0o700)
+		f.args = []string{"list"}
+		f.run(t)
+		raw, err := os.ReadFile(f.capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var capture struct{ Env []string }
+		if err := json.Unmarshal(raw, &capture); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+			if !slices.Contains(capture.Env, key+"="+strconv.Itoa(port)) {
+				t.Errorf("bd did not receive %s=%d after recovery", key, port)
+			}
+		}
+		if got, err := os.ReadFile(log); err != nil || string(got) != "health\nrecover\n" {
+			t.Errorf("provider operations = %q, %v; want health then recover", got, err)
+		}
+	})
 	for _, state := range []string{"reachable", "provider-state"} {
 		t.Run(state, func(t *testing.T) {
 			f := newBdInvocationFixture(t, "city")
@@ -427,8 +470,11 @@ func TestBdInvocationRoutingConfigParity(t *testing.T) {
 			stderr.Reset()
 			// Enter the by-ID door through the command, then inspect the memo
 			// it filled. A missing subject is sufficient to exercise routing.
-			doBd([]string{"--city", city, "show", "demo-abc"}, io.Discard, io.Discard)
 			before := cliStorageConfigReads.Load()
+			doBd([]string{"--city", city, "show", "demo-abc"}, io.Discard, io.Discard)
+			if n := cliStorageConfigReads.Load() - before; n != 0 {
+				t.Errorf("by-id command performed %d raw config reads; want 0", n)
+			}
 			got := observe()
 			if cliStorageConfigReads.Load() != before || got != want || stderr.String() != remedy {
 				t.Errorf("by-id routes %q, stderr %q; want shared routes %q, stderr %q", got, stderr, want, remedy)
