@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 type cityPoolFixture struct {
@@ -357,6 +358,83 @@ func TestCityPoolFreshRecoveryKeepsAssignedTicketRig(t *testing.T) {
 				t.Fatalf("recovery planned=%v, live trigger=%q/%q", mapKeys(ds.BaseState), tp.Env["GC_TRIGGER_BEAD_ID"], tp.Env["GC_TRIGGER_BEAD_STORE_REF"])
 			}
 		})
+	}
+}
+
+func TestCityPoolAliasKeepsSingleTicketOnItsLiveSession(t *testing.T) {
+	for _, tc := range []struct{ name, source, alias, wantRef string }{
+		{"city ledger", "", "alpha", "city"},
+		{"rig ledger", "alpha", "beta", "rig:alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range 32 {
+				f := newCityPoolFixture(t)
+				ledger := f.store
+				if tc.source != "" {
+					ledger = f.rigs[tc.source]
+				}
+				f.rigs[tc.alias] = aliasStore{ledger}
+				live := f.live(t, tc.wantRef)
+				f.route(t, tc.source, "previous")
+				ds := f.build()
+				tp := ds.BaseState[live.Metadata["session_name"]]
+				if ds.ScaleCheckCounts["worker"] != 1 || len(ds.BaseState) != 1 || tp.Env["GC_TRIGGER_BEAD_STORE_REF"] != tc.wantRef {
+					t.Errorf("build %d: count=%d sessions=%v ref=%q, want one live session in %s", i, ds.ScaleCheckCounts["worker"], mapKeys(ds.BaseState), tp.Env["GC_TRIGGER_BEAD_STORE_REF"], tc.wantRef)
+				}
+			}
+		})
+	}
+}
+
+func TestCityPoolCollisionUsesCompleteFirstRigRow(t *testing.T) {
+	const id = "shared-1"
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	spec := worktree.Spec{
+		RepoDir: repo, Root: root, Path: filepath.Join(root, id), Branch: "work/shared", Base: base,
+		BeadID: id, StoreRef: "rig:alpha", Creator: "gc-sling", Owner: "gc-sling", Generation: "1", Lifecycle: worktree.LifecycleActive,
+	}
+	report, err := worktree.Ensure(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.BaseSHA = report.Provenance.BaseSHA
+	alpha := beads.Bead{ID: id, Title: "Alpha ticket", Type: "task", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: "worker",
+		beadmeta.WorkDirMetadataKey:  spec.Path, beadmeta.WorkBranchMetadataKey: spec.Branch,
+		beadmeta.WorktreeRepoMetadataKey: repo, beadmeta.WorktreeRootMetadataKey: root,
+		beadmeta.WorktreeBaseRefMetadataKey: base, beadmeta.WorktreeBaseSHAMetadataKey: spec.BaseSHA,
+		beadmeta.WorktreeCreatorMetadataKey: spec.Creator, beadmeta.WorktreeOwnerMetadataKey: spec.Owner,
+		beadmeta.WorktreeGenerationMetadataKey: spec.Generation, beadmeta.WorktreeLifecycleMetadataKey: spec.Lifecycle,
+	}}
+	// If beta is visited first, all of its optional metadata and its invalid
+	// worktree evidence must disappear when alpha replaces it.
+	beta := beads.Bead{ID: id, Title: "Beta ticket", Type: "task", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: "worker", beadmeta.PackMetadataKey: "other",
+		beadmeta.PackWorkspaceMetadataKey: "/other", beadmeta.BrainParentSIDMetadataKey: "other",
+		beadmeta.WorktreeOwnerMetadataKey: "incomplete",
+	}}
+	for i := range 32 {
+		f := newCityPoolFixture(t)
+		if _, err := f.rigs["beta"].Create(beta); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.rigs["alpha"].Create(alpha); err != nil {
+			t.Fatal(err)
+		}
+		ds := f.build()
+		d := ds.cityPoolWakeDemand["worker"]
+		if ds.ScaleCheckCounts["worker"] != 1 || len(ds.BaseState) != 1 || d.StoreRefs[id] != spec.StoreRef || d.Titles[id] != alpha.Title || d.WorktreeSpecs[id] == nil || *d.WorktreeSpecs[id] != spec {
+			t.Errorf("build %d: count=%d sessions=%v ref=%q title=%q spec=%+v", i, ds.ScaleCheckCounts["worker"], mapKeys(ds.BaseState), d.StoreRefs[id], d.Titles[id], d.WorktreeSpecs[id])
+		}
+		if d.Packs[id] != "" || d.Workspaces[id] != "" || d.ParentSIDs[id] != "" || d.WorktreeErrors[id] != "" {
+			t.Errorf("build %d: beta metadata leaked: pack=%q workspace=%q parent=%q error=%q", i, d.Packs[id], d.Workspaces[id], d.ParentSIDs[id], d.WorktreeErrors[id])
+		}
+		for _, tp := range ds.BaseState {
+			if tp.Env["GC_TRIGGER_BEAD_ID"] != id || tp.Env["GC_TRIGGER_BEAD_STORE_REF"] != spec.StoreRef {
+				t.Errorf("build %d: realized trigger=%q/%q", i, tp.Env["GC_TRIGGER_BEAD_ID"], tp.Env["GC_TRIGGER_BEAD_STORE_REF"])
+			}
+		}
 	}
 }
 

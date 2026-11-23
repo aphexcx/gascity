@@ -935,7 +935,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			probe := defaultScaleCheckRead{cache: demandReadyCache}
+			probe := defaultScaleCheckRead{cache: demandReadyCache, cityPools: bp.cityPoolRigDemand}
 			if len(bp.cityPoolRigDemand) > 0 {
 				probe.healthyStores = make(map[string]bool)
 			}
@@ -2027,7 +2027,8 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 
 type defaultScaleCheckRead struct {
 	cache         *readyDemandCache
-	healthyStores map[string]bool // optional per-group read results for partial city-pool demand
+	healthyStores map[string]bool              // optional per-group read results for partial city-pool demand
+	cityPools     map[string]map[string]string // template membership in the city-wide default probe
 }
 
 func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, reads ...defaultScaleCheckRead) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
@@ -2078,16 +2079,17 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		group.templates[template] = struct{}{}
 	}
 
-	// countedBeads dedups counted bead IDs per template ACROSS store groups.
-	// Bead IDs are unique within a deployment, so a legitimate cross-store
-	// union never collides — but when a rig store aliases the city store as a
-	// distinct Store object (pointer inequality passes: a legacy unscoped
-	// file-store layout, or a rig dir whose missing .beads resolves bd's
-	// walk-up to the city DB), the same beads appear in both the "rig:<name>"
-	// and "city" groups and would double the template's demand. With the city
-	// probe no longer cold-gated, that double-count would be a persistent
-	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	countedBeads := make(map[string]map[string]struct{})
+	// Different store handles can return the same ticket. Keep one whole
+	// row per template and ID so its store and worktree evidence agree.
+	type demandRow struct {
+		bead     *beads.Bead
+		storeKey string
+	}
+	type templateRows struct {
+		index map[string]int
+		rows  []demandRow // first-seen ID order
+	}
+	selected := make(map[string]*templateRows)
 	// The ownership fence the hook applies to every row it serves
 	// (federation.MayClaim via fenceCrossCityHookCandidates). A row this city
 	// may not claim is not demand either: counting it minted a seat whose
@@ -2113,7 +2115,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				ready = nil
 			}
 		}
-		for _, b := range ready {
+		for i, b := range ready {
 			// AGREEMENT: count only rows a T-worker's own query would serve it.
 			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
 			// is not capacity demand — it is a seat that spawns, reads empty and
@@ -2130,15 +2132,28 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if ok, _ := federation.MayClaim(b.Labels, identity); !ok {
 				continue
 			}
-			seen := countedBeads[template]
-			if seen == nil {
-				seen = make(map[string]struct{})
-				countedBeads[template] = seen
+			set := selected[template]
+			if set == nil {
+				set = &templateRows{index: make(map[string]int)}
+				selected[template] = set
 			}
-			if _, dup := seen[b.ID]; dup {
+			row := demandRow{bead: &ready[i], storeKey: group.storeKey}
+			if pos, dup := set.index[b.ID]; dup {
+				// City pools follow ready's store precedence: "city" sorts
+				// before "rig:", then the common prefix leaves rig-name order.
+				if _, cityPool := probe.cityPools[template]; cityPool && row.storeKey < set.rows[pos].storeKey {
+					set.rows[pos] = row
+				}
 				continue
 			}
-			seen[b.ID] = struct{}{}
+			set.index[b.ID] = len(set.rows)
+			set.rows = append(set.rows, row)
+		}
+	}
+
+	for template, set := range selected {
+		for _, row := range set.rows {
+			b := row.bead
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
@@ -2162,8 +2177,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if entry.StoreRefs == nil {
 				entry.StoreRefs = make(map[string]string)
 			}
-			entry.StoreRefs[b.ID] = group.storeKey
-			spec, specErr := worktreeSpecForBead(b, group.storeKey)
+			entry.StoreRefs[b.ID] = row.storeKey
+			spec, specErr := worktreeSpecForBead(*b, row.storeKey)
 			if specErr != nil {
 				if entry.WorktreeErrors == nil {
 					entry.WorktreeErrors = make(map[string]string)
