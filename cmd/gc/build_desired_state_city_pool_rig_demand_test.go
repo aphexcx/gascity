@@ -160,6 +160,54 @@ func TestBuildDesiredState_CityScopedPoolCountsRigStoreRoutedDemand(t *testing.T
 	}
 }
 
+func newSplitCityPoolFixture(t *testing.T) *cityPoolFixture {
+	t.Helper()
+	f := newCityPoolFixture(t)
+	work := beads.NewMemStore()
+	routes := splitRoutes(f.store)
+	registerResidencyRoutes(f.root, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(f.root, routes) })
+	return f
+}
+
+func TestCityPoolSplitSkipsLegacyRigDemand(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy_missing=%v", missing), func(t *testing.T) {
+			f := newSplitCityPoolFixture(t)
+			f.route(t, "", "retained")
+			if err := f.store.Update("retained", beads.UpdateOpts{Status: stringPtr("closed")}); err != nil {
+				t.Fatal(err)
+			}
+			f.route(t, "alpha", "retained")
+			if missing {
+				delete(f.rigs, "alpha")
+			}
+			ds := f.build()
+			if ds.ScaleCheckCounts["worker"] != 0 || ds.PoolScaleCheckPartialTemplates["worker"] || len(ds.State) != 0 {
+				t.Fatalf("count=%d partial=%v realized=%d", ds.ScaleCheckCounts["worker"], ds.PoolScaleCheckPartialTemplates["worker"], len(ds.State))
+			}
+		})
+	}
+	t.Run("ticket only in legacy ledger", func(t *testing.T) {
+		// A ledger-resident row is not runtime-plane demand. An operator
+		// moves it into the authoritative binding with gc storage migrate.
+		f := newSplitCityPoolFixture(t)
+		f.route(t, "alpha", "legacy")
+		ds := f.build()
+		if ds.ScaleCheckCounts["worker"] != 0 || ds.PoolScaleCheckPartialTemplates["worker"] || len(ds.State) != 0 {
+			t.Fatalf("count=%d partial=%v realized=%d", ds.ScaleCheckCounts["worker"], ds.PoolScaleCheckPartialTemplates["worker"], len(ds.State))
+		}
+	})
+	t.Run("open ticket in binding", func(t *testing.T) {
+		f := newSplitCityPoolFixture(t)
+		f.route(t, "", "bound")
+		ds := f.build()
+		if ds.ScaleCheckCounts["worker"] != 1 || ds.PoolScaleCheckPartialTemplates["worker"] || len(ds.State) != 1 {
+			t.Fatalf("count=%d partial=%v realized=%d", ds.ScaleCheckCounts["worker"], ds.PoolScaleCheckPartialTemplates["worker"], len(ds.State))
+		}
+	})
+}
+
 func TestBuildDesiredState_CityScopedPoolRigDemandCarriesRigStoreRef(t *testing.T) {
 	f := newCityPoolFixture(t)
 	f.route(t, "alpha", "alpha-1")

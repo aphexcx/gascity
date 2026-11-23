@@ -782,7 +782,11 @@ func buildDesiredStateWithSessionBeadsAt(
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			if agentutil.AgentIsCrossStoreEligible(&cfg.Agents[i]) && !storeScopedControlDispatcher && ownTarget.storeKey == "city" && ownTarget.store != nil && ownTarget.err == nil {
-				defaultScaleTargets = append(defaultScaleTargets, cityPoolRigTargets(ownTarget, cfg.Rigs, rigStores, suspendedRigPaths)...)
+				// On a converged split the binding serves routed work. Old rig
+				// ledgers can still hold copies left behind by migration.
+				if controlBinding == nil {
+					defaultScaleTargets = append(defaultScaleTargets, cityPoolRigTargets(ownTarget, cfg.Rigs, rigStores, suspendedRigPaths)...)
+				}
 				bp.cityPoolRigDemand[template] = nil
 			}
 			continue
