@@ -13,6 +13,56 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// TestCityPoolIdleSeatAtCap pins the current limit pending the CTO's decision on
+// proactive retirement. A ticket in another rig cannot displace a live seat.
+func TestCityPoolIdleSeatAtCap(t *testing.T) {
+	for _, tc := range []struct {
+		name, sleepAfterIdle, wantReason string
+		wantWake                         bool
+	}{
+		{"idle timer disabled", "", "scaled:demand", true},
+		{"idle timer expired", "1h", "idle-sleep", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCityPoolFixture(t)
+			f.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+			f.cfg.Agents[0].SleepAfterIdle = tc.sleepAfterIdle
+			old := time.Now().Add(-24 * time.Hour)
+			owner := f.liveAt(t, "rig:alpha", old)
+			idle := f.liveAt(t, "rig:alpha", old)
+			if err := f.store.SetMetadata(idle.ID, "detached_at", old.UTC().Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			f.sessions[1], err = f.store.Get(idle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.route(t, "alpha", "owned")
+			if err := f.rigs["alpha"].Update("owned", beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: &owner.ID}); err != nil {
+				t.Fatal(err)
+			}
+			f.route(t, "beta", "waiting")
+			sessions := newSessionBeadSnapshot(f.sessions)
+			cr := &CityRuntime{
+				cityName: "fixture", cityPath: f.root, cfg: f.cfg, sp: runtime.NewFake(), stderr: io.Discard,
+				standaloneCityStore: f.store, standaloneRigStores: f.rigs,
+				buildFnWithSessionBeads: func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+					return f.build()
+				},
+			}
+			ds := cr.loadDemandSnapshot(sessions, nil, "poke", false).result
+			awake := buildAwakeInputFromReconciler(f.cfg, f.root, sessions.OpenInfos(), ds.PoolDesiredCounts, nil, nil, nil, nil, ds.AssignedWorkBeads, nil, nil, cr.sp, time.Now())
+			awake.CityPoolDemandSessions = selectedCityPoolDemandSessions(ds.State)
+			decisions := ComputeAwakeSet(awake)
+			idleDecision := decisions[idle.Metadata["session_name"]]
+			if len(ds.BaseState) != 1 || len(ds.State) != 2 || ds.ScaleCheckCounts["worker"] != 1 || !decisions[owner.Metadata["session_name"]].HasAssignedWork || idleDecision.ShouldWake != tc.wantWake || idleDecision.Reason != tc.wantReason {
+				t.Fatalf("planned=%v discovered=%v count=%v decisions=%v", mapKeys(ds.BaseState), mapKeys(ds.State), ds.PoolDesiredCounts, decisions)
+			}
+		})
+	}
+}
+
 func triggerRigFixture(t *testing.T) (*agentBuildParams, *config.Agent) {
 	t.Helper()
 	f := newCityPoolFixture(t)
