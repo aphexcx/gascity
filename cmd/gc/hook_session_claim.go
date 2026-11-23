@@ -3,9 +3,9 @@ package main
 import (
 	"io"
 	"log"
+	"strconv"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -88,56 +88,47 @@ func hookSessionDrainPending(sessionID string) (bool, error) {
 	return state == session.StateDraining, nil
 }
 
-// hookResolveSessionWorkDir returns the checkout the session identified by
-// sessionID is running in, or "" when that is not knowable. It is the production
-// implementation of the hookClaimOps.ResolveSessionWorkDir seam.
-//
-// A bead routed to a POOL records no checkout of its own: cliBeadRouter.Route
-// normalizes a pool target through agentutil.NormalizePoolRouteTarget, so
-// gc.routed_to names a pool identity and no slot exists to name a worktree until
-// a claim happens (gc-2n4c). Stamping a work_dir at route time would bind a
-// pool-label path to the bead, which is the gc-j0cfh defect. The claiming session
-// is the first actor that knows the concrete tree, and the session bead is the
-// only place that records it: GC_WORK_DIR is not in the env of a pool session.
-//
-// The id is resolved EXACTLY, for the same reason SetCurrentClaim does: the bd
-// fuzzy resolver would otherwise let a prefix collision hand back the checkout of
-// a different session, and this value is stamped onto the work bead as durable
-// execution identity. Every failure yields "" -- an unset gc.work_dir is the
-// honest outcome, and the caller stamps nothing rather than guessing a path.
-func hookResolveSessionWorkDir(sessionID string) string {
+// hookResolveClaimSession reads the claiming session by exact ID. A prefix
+// match could stamp another session's slot or checkout onto the work bead.
+func hookResolveClaimSession(sessionID string) session.Info {
 	if strings.TrimSpace(sessionID) == "" {
-		return ""
+		return session.Info{}
 	}
 	sessFront, err := sessionCurrentClaimFrontDoor()
 	if err != nil {
-		// Each failure below returns the same "" as a session that simply has no
-		// stampable checkout, so without naming the step a lookup fault is
-		// indistinguishable in production from the ordinary refusal. The caller
-		// behavior is unchanged; only the diagnosis is.
-		log.Printf("hookResolveSessionWorkDir: opening the session front door for %q: %v; stamping no %s",
-			sessionID, err, beadmeta.WorkDirMetadataKey)
-		return ""
+		log.Printf("hookResolveClaimSession: opening the session front door for %q: %v", sessionID, err)
+		return session.Info{}
 	}
 	resolved, err := sessFront.ResolveIDByExactID(strings.TrimSpace(sessionID))
 	if err != nil {
-		log.Printf("hookResolveSessionWorkDir: resolving session id %q exactly: %v; stamping no %s",
-			sessionID, err, beadmeta.WorkDirMetadataKey)
-		return ""
+		log.Printf("hookResolveClaimSession: resolving session id %q exactly: %v", sessionID, err)
+		return session.Info{}
 	}
 	info, err := sessFront.Get(resolved)
 	if err != nil {
-		log.Printf("hookResolveSessionWorkDir: reading session bead %q: %v; stamping no %s",
-			resolved, err, beadmeta.WorkDirMetadataKey)
+		log.Printf("hookResolveClaimSession: reading session bead %q: %v", resolved, err)
+		return session.Info{}
+	}
+	return info
+}
+
+func claimedPoolSlotRecord(info session.Info) string {
+	template := strings.TrimSpace(info.Template)
+	slot, err := strconv.Atoi(strings.TrimSpace(info.PoolSlot))
+	if identity := info.CanonicalIdentity(); identity.Present {
+		slot = identity.PoolSlot
+	} else if err != nil {
 		return ""
 	}
-	return sessionStampableWorkDir(info)
+	if template == "" || slot <= 0 {
+		return ""
+	}
+	return template + "#" + strconv.Itoa(slot)
 }
 
 // sessionStampableWorkDir returns the checkout of info that may be stamped onto a
 // work bead as gc.work_dir, or "" when info has none that qualifies. It is the
-// decidable half of hookResolveSessionWorkDir, split out so the pool refusal is
-// testable without a live city.
+// work directory fallback for a claim with no recorded checkout.
 //
 // A POOL-MANAGED session is refused outright: its WorkDir is the slot label
 // (worker-slots/worker-N), a SHARED directory rather than an isolated worktree,

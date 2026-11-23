@@ -186,6 +186,7 @@ const (
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
 	LastHeartbeatAtMetadataKey          = "gc.last_heartbeat_at"
+	LastPoolSlotMetadataKey             = "gc.last_pool_slot" // qualified template#slot of the last numbered pool claim
 	LeaseOwnerMetadataKey               = "gc.lease_owner"
 	LogicalBeadIDMetadataKey            = "gc.logical_bead_id"
 	MaxAttemptsMetadataKey              = "gc.max_attempts"
@@ -535,6 +536,7 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
+	LastPoolSlotMetadataKey,
 	LeaseOwnerMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,

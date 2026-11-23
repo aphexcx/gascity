@@ -124,7 +124,7 @@ func TestHookClaimIdentityPatchResolvesWorkerBranchNotStoreBranch(t *testing.T) 
 	} {
 		// Every case runs twice. "session fallback unwired" is the isolated
 		// predicate. "session fallback wired" is PRODUCTION: applyDefaults always
-		// installs ResolveSessionWorkDir and a claiming session always exports
+		// installs ResolveSession and a claiming session always exports
 		// GC_SESSION_ID, so a case that leaves both unset cannot reach the fallback
 		// at all and therefore cannot say anything about the shipped path.
 		//
@@ -151,7 +151,7 @@ func TestHookClaimIdentityPatchResolvesWorkerBranchNotStoreBranch(t *testing.T) 
 				name: "session fallback wired (production shape)",
 				opts: hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}},
 				ops: func(o hookClaimOps) hookClaimOps {
-					o.ResolveSessionWorkDir = func(string) string { return hookClaimWorkBranchSessionDir }
+					o.ResolveSession = claimTestSessionDir(hookClaimWorkBranchSessionDir)
 					return o
 				},
 			},
@@ -238,8 +238,8 @@ func TestHookClaimIdentityPatchDoesNotManufactureWorkDirConflict(t *testing.T) {
 		beadmeta.LegacyWorkDirMetadataKey: hookClaimWorkBranchStoreDir,
 	}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{hookClaimWorkBranchStoreDir: "someone-elses-branch"}),
-		ResolveSessionWorkDir: func(string) string { return hookClaimWorkBranchSessionDir },
+		ResolveWorkBranch: hookClaimBranchByDir(map[string]string{hookClaimWorkBranchStoreDir: "someone-elses-branch"}),
+		ResolveSession:    claimTestSessionDir(hookClaimWorkBranchSessionDir),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -328,8 +328,8 @@ func TestHookClaimWorkerTreesDedupesIdenticalKeys(t *testing.T) {
 func TestHookClaimIdentityPatchFallsBackToSessionWorkDir(t *testing.T) {
 	bead := beads.Bead{ID: "hw-pool-routed", Metadata: beads.StringMap{}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{"/worktrees/sess-1": "bd-from-session"}),
-		ResolveSessionWorkDir: func(string) string { return "/worktrees/sess-1" },
+		ResolveWorkBranch: hookClaimBranchByDir(map[string]string{"/worktrees/sess-1": "bd-from-session"}),
+		ResolveSession:    claimTestSessionDir("/worktrees/sess-1"),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -350,8 +350,8 @@ func TestHookClaimIdentityPatchFallsBackToSessionWorkDir(t *testing.T) {
 func TestHookClaimIdentityPatchRefusesSessionWorkDirThatIsTheStore(t *testing.T) {
 	bead := beads.Bead{ID: "hw-rig-scoped", Metadata: beads.StringMap{}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{hookClaimWorkBranchStoreDir: "someone-elses-branch"}),
-		ResolveSessionWorkDir: func(string) string { return hookClaimWorkBranchStoreDir },
+		ResolveWorkBranch: hookClaimBranchByDir(map[string]string{hookClaimWorkBranchStoreDir: "someone-elses-branch"}),
+		ResolveSession:    claimTestSessionDir(hookClaimWorkBranchStoreDir),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -377,10 +377,7 @@ func TestHookClaimIdentityPatchPrefersRecordedWorkDirOverSession(t *testing.T) {
 			"/worktrees/recorded": "bd-recorded",
 			"/worktrees/sess-1":   "bd-from-session",
 		}),
-		ResolveSessionWorkDir: func(string) string {
-			t.Error("ResolveSessionWorkDir must not be consulted when the bead records a checkout")
-			return "/worktrees/sess-1"
-		},
+		ResolveSession: claimTestSessionDir("/worktrees/sess-1"),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -401,8 +398,8 @@ func TestHookClaimIdentityPatchPrefersRecordedWorkDirOverSession(t *testing.T) {
 func TestHookClaimIdentityPatchSkipsSessionFallbackForControlBead(t *testing.T) {
 	bead := beads.Bead{ID: "hc-check", Metadata: beads.StringMap{beadmeta.KindMetadataKey: "check"}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{"/worktrees/sess-1": "bd-from-session"}),
-		ResolveSessionWorkDir: func(string) string { return "/worktrees/sess-1" },
+		ResolveWorkBranch: hookClaimBranchByDir(map[string]string{"/worktrees/sess-1": "bd-from-session"}),
+		ResolveSession:    claimTestSessionDir("/worktrees/sess-1"),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -424,8 +421,8 @@ func TestHookClaimIdentityPatchSkipsSessionFallbackOnPartialWorktreeEvidence(t *
 		beadmeta.WorktreeRepoMetadataKey: "/rigs/some-repo",
 	}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookClaimBranchByDir(map[string]string{hookClaimWorkBranchSessionDir: "bd-from-session"}),
-		ResolveSessionWorkDir: func(string) string { return hookClaimWorkBranchSessionDir },
+		ResolveWorkBranch: hookClaimBranchByDir(map[string]string{hookClaimWorkBranchSessionDir: "bd-from-session"}),
+		ResolveSession:    claimTestSessionDir(hookClaimWorkBranchSessionDir),
 	}
 	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}
 
@@ -439,6 +436,42 @@ func TestHookClaimIdentityPatchSkipsSessionFallbackOnPartialWorktreeEvidence(t *
 		t.Errorf("stamped %s = %q; the branch guard refuses partial evidence too", beadmeta.WorkBranchMetadataKey, got)
 	}
 	assertNoWorkDirConflict(t, bead, patch)
+}
+
+func claimTestSessionDir(dir string) func(string) session.Info {
+	return func(string) session.Info { return session.Info{WorkDir: dir} }
+}
+
+func TestClaimRecordsLastPoolSlot(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	t.Setenv("GC_CITY", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Type: session.BeadType, Title: "slot session", Metadata: map[string]string{
+		"template": "project/worker", "pool_slot": "2", "work_dir": "/slots/worker-2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := hookClaimOptions{Env: []string{"GC_SESSION_ID=" + row.ID}}
+	var ops hookClaimOps
+	ops.applyDefaults()
+	work := beads.Bead{Metadata: beads.StringMap{beadmeta.LastPoolSlotMetadataKey: "other/worker#1"}}
+	patch := hookClaimIdentityPatch(work, opts, ops, cityDir)
+	if got := patch[beadmeta.LastPoolSlotMetadataKey]; got != "project/worker#2" {
+		t.Fatalf("recorded slot = %q, want project/worker#2", got)
+	}
+	if _, wroteDir := patch[beadmeta.WorkDirMetadataKey]; wroteDir {
+		t.Fatal("claim published the pool directory as worktree evidence")
+	}
+	work.Metadata[beadmeta.LastPoolSlotMetadataKey] = patch[beadmeta.LastPoolSlotMetadataKey]
+	if _, changed := hookClaimIdentityPatch(work, opts, ops, cityDir)[beadmeta.LastPoolSlotMetadataKey]; changed {
+		t.Fatal("a repeated claim rewrote the slot record")
+	}
 }
 
 // TestSessionStampableWorkDirRefusesPoolManaged covers gc-j0cfh: the WorkDir of a
@@ -821,8 +854,8 @@ func TestHookClaimIdentityPatchLeavesACanonicalOnlyStoreAlone(t *testing.T) {
 		},
 	}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     func(hookClaimWorkTree) string { return "" },
-		ResolveSessionWorkDir: func(string) string { return hookClaimWorkBranchSessionDir },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+		ResolveSession:    claimTestSessionDir(hookClaimWorkBranchSessionDir),
 	}
 	patch := hookClaimIdentityPatch(bead, hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sess1"}}, ops, hookClaimWorkBranchStoreDir)
 
@@ -949,8 +982,8 @@ func TestHookClaimSignalKilledProbeIsNotAnAnswer(t *testing.T) {
 
 	bead := beads.Bead{ID: "gc-signaled", Metadata: beads.StringMap{}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookResolveWorkBranch,
-		ResolveSessionWorkDir: func(string) string { return candidate },
+		ResolveWorkBranch: hookResolveWorkBranch,
+		ResolveSession:    claimTestSessionDir(candidate),
 	}
 	patch := hookClaimIdentityPatch(bead, hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-sig1"}}, ops, f.store)
 
@@ -997,8 +1030,8 @@ func TestHookClaimRefusesTheStoreWhenGitDeclinesToAnswer(t *testing.T) {
 
 	bead := beads.Bead{ID: "gc-dubious", Metadata: beads.StringMap{}}
 	ops := hookClaimOps{
-		ResolveWorkBranch:     hookResolveWorkBranch,
-		ResolveSessionWorkDir: func(string) string { return f.subdir },
+		ResolveWorkBranch: hookResolveWorkBranch,
+		ResolveSession:    claimTestSessionDir(f.subdir),
 	}
 	patch := hookClaimIdentityPatch(bead, hookClaimOptions{Env: []string{"GC_SESSION_ID=mc-dub1"}}, ops, f.store)
 	if got, ok := patch[beadmeta.WorkDirMetadataKey]; ok {

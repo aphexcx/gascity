@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type SessionRequest struct {
 	WorkPack      string // pack route key from the work bead, when known
 	WorkWorkspace string // explicit pack workspace route key from the work bead, when known
 	WorkStoreRef  string // city or rig:<name> store reference for WorkBeadID when known
+	PreferredSlot int    // previous numbered slot for this template, considered only for a fresh row
 	// WorktreeSpec is the single-owner evidence published by the provisioner.
 	// When present, the pool path verifies it before publishing work_dir on a
 	// session bead; a mismatch fails the whole atomic metadata update.
@@ -59,6 +61,18 @@ func beadPriority(b beads.Bead) int {
 	// mid default (P2), not "highest" — match that semantics here so an
 	// unset-priority bead cannot out-schedule an explicitly-labeled P1 bead.
 	return 2
+}
+
+func lastClaimedPoolSlot(work beads.Bead, template string) int {
+	raw, ok := strings.CutPrefix(work.Metadata[beadmeta.LastPoolSlotMetadataKey], template+"#")
+	if !ok {
+		return 0
+	}
+	slot, err := strconv.Atoi(raw)
+	if err != nil || slot <= 0 {
+		return 0
+	}
+	return slot
 }
 
 // beadPriorityRankOffset is the base of the scheduler's descending rank scale.
@@ -479,6 +493,7 @@ func computePoolDesiredStatesAt(
 						// bead must not be reused, so realizePoolDesiredSessions
 						// plans a clean create.
 						WorkBeadID:     wb.ID,
+						PreferredSlot:  lastClaimedPoolSlot(wb, template),
 						WorkStoreRef:   storeRef,
 						WorkBeadTitle:  strings.TrimSpace(wb.Title),
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
@@ -500,6 +515,7 @@ func computePoolDesiredStatesAt(
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
+					PreferredSlot:  lastClaimedPoolSlot(wb, template),
 					WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 					WorkBeadTitle:  strings.TrimSpace(wb.Title),
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
@@ -535,6 +551,7 @@ func computePoolDesiredStatesAt(
 				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
+				PreferredSlot:  lastClaimedPoolSlot(wb, template),
 				WorkStoreRef:   assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex),
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
 				WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
@@ -663,49 +680,9 @@ func computePoolDesiredStatesAt(
 			usage.accept(req, limits)
 		}
 		for j := 0; j < newCount-reusedCount; j++ {
-			workBeadID := ""
-			workBeadTitle := ""
-			workPack := ""
-			workWorkspace := ""
-			workStoreRef := ""
-			workParentSID := ""
-			var worktreeSpec *worktree.Spec
-			worktreeError := ""
+			req := SessionRequest{Template: template, Tier: "new"}
 			if len(residualWorkBeadIDs) > j {
-				workBeadID = residualWorkBeadIDs[j]
-				if demand.Titles != nil {
-					workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-				}
-				if demand.Packs != nil {
-					workPack = strings.TrimSpace(demand.Packs[workBeadID])
-				}
-				if demand.Workspaces != nil {
-					workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-				}
-				if demand.StoreRefs != nil {
-					workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-				}
-				if demand.ParentSIDs != nil {
-					workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-				}
-				if demand.WorktreeSpecs != nil {
-					worktreeSpec = demand.WorktreeSpecs[workBeadID]
-				}
-				if demand.WorktreeErrors != nil {
-					worktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
-				}
-			}
-			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				WorkBeadID:     workBeadID,
-				WorkBeadTitle:  workBeadTitle,
-				WorkPack:       workPack,
-				WorkWorkspace:  workWorkspace,
-				WorkStoreRef:   workStoreRef,
-				BrainParentSID: workParentSID,
-				WorktreeSpec:   worktreeSpec,
-				WorktreeError:  worktreeError,
+				req = requestWithScaleDemandProvenance(req, demand, residualWorkBeadIDs[j])
 			}
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
@@ -823,6 +800,7 @@ func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRe
 func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckDemand, workBeadID string) SessionRequest {
 	workBeadID = strings.TrimSpace(workBeadID)
 	request.WorkBeadID = workBeadID
+	request.PreferredSlot = demand.PreferredSlots[workBeadID]
 	request.WorkBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
 	request.WorkPack = strings.TrimSpace(demand.Packs[workBeadID])
 	request.WorkWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
