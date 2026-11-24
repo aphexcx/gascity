@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 )
 
 // validTmuxName mirrors the local tmux provider's guard: a session name must be
@@ -38,6 +39,7 @@ var ErrInvalidSessionName = errors.New("invalid session name")
 // AcceptStartupDialogs), live SessionLive re-apply via RunLive (a no-op, like
 // k8s), and CopyTo.
 type Provider struct {
+	cacheCity       string
 	conn            *Conn
 	postStartSettle time.Duration // settle before the post-start liveness recheck
 }
@@ -106,6 +108,9 @@ const defaultRemoteShell = "/bin/sh"
 // AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
 // is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	if !validTmuxName.MatchString(name) {
 		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
 	}
@@ -264,6 +269,9 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 // by the original new-session; a launch-only env change is not re-applied
 // (matching tmux B1's "does not re-inject env hints").
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

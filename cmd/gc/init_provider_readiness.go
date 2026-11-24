@@ -103,7 +103,7 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	// Load config to resolve explicit HQ prefix (workspace.prefix field).
 	// Config must be loadable at this point — using DeriveBeadsPrefix as a
 	// silent fallback would create a prefix mismatch between init and runtime.
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -260,7 +260,7 @@ func initHasRemoteImports(cityPath string) (bool, error) {
 
 func loadInitProviderPreflightConfig(cityPath string) (*config.City, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, skipRevisionSnapshot)
 	if err == nil {
 		return cfg, nil
 	}

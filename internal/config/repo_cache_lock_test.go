@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -77,6 +78,225 @@ func TestRepoCacheRootForPathUsesKnownCacheRootsOnly(t *testing.T) {
 			}
 			if ok && got != tc.root {
 				t.Fatalf("root = %q, want %q", got, tc.root)
+			}
+		})
+	}
+}
+
+func TestIsRepoCachePathIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"empty_outside", false},
+		{"empty_inside", true},
+		{"missing_inside", true},
+		{"missing_outside", false},
+		{"root", true},
+		{"case_variant", true},
+		{"outer_link", true},
+		{"outer_file_link", true},
+		{"outer_directory_link", true},
+		{"linked_home", true},
+		{"loop", true},
+		{"outside", false},
+		{"mimic", false},
+		{"relative_link_behind_parent_link", true},
+		{"not_directory", true},
+		{"root_aliases_volume", true},
+		{"missing_before_parent", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			home := filepath.Join(base, "gchome")
+			root := filepath.Join(home, "cache", "repos")
+			t.Setenv("GC_HOME", home)
+			t.Setenv("HOME", base)
+			write := func(path string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := func(target, path string) string {
+				t.Helper()
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			script := filepath.Join(root, "pack", "run.sh")
+			outside := filepath.Join(base, "outside", "run.sh")
+			write(script)
+			write(outside)
+			path := outside
+			switch tc.name {
+			case "empty_outside", "empty_inside":
+				cwd := base
+				if tc.name == "empty_inside" {
+					cwd = root
+				}
+				t.Chdir(cwd)
+				path = ""
+			case "missing_inside":
+				path = filepath.Join(root, "missing", "leaf")
+			case "missing_outside":
+				path = filepath.Join(base, "missing", "leaf")
+			case "missing_before_parent":
+				path = link("missing/../gchome/cache/repos/pack/run.sh", filepath.Join(base, "link"))
+			case "root":
+				path = root
+			case "case_variant":
+				path = strings.Replace(script, "/gchome/", "/GCHOME/", 1)
+				original, err := os.Stat(script)
+				if err != nil {
+					t.Fatal(err)
+				}
+				other, err := os.Stat(path)
+				if os.IsNotExist(err) || (err == nil && !os.SameFile(original, other)) {
+					t.Skip("filesystem does not fold letter case")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "outer_link":
+				path = link(script, filepath.Join(base, "link"))
+			case "outer_file_link":
+				if err := os.Remove(script); err != nil {
+					t.Fatal(err)
+				}
+				link(outside, script)
+				path = link(script, filepath.Join(base, "link"))
+			case "outer_directory_link":
+				cached := link(filepath.Dir(outside), filepath.Join(root, "linked-dir"))
+				path = link(filepath.Join(cached, "run.sh"), filepath.Join(base, "link"))
+			case "linked_home":
+				t.Setenv("GC_HOME", link(home, filepath.Join(base, "linked-home")))
+				var err error
+				path, err = filepath.EvalSymlinks(script)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "loop":
+				path = link("loop", filepath.Join(base, "loop"))
+			case "mimic":
+				path = filepath.Join(base, "mimic", "cache", "repos", strings.Repeat("a", 64), "run.sh")
+				write(path)
+			case "relative_link_behind_parent_link":
+				parent := filepath.Dir(outside)
+				rel, err := filepath.Rel(parent, script)
+				if err != nil {
+					t.Fatal(err)
+				}
+				link(rel, filepath.Join(parent, "relative"))
+				path = filepath.Join(link(parent, filepath.Join(base, "parent")), "relative")
+			case "not_directory":
+				path = filepath.Join(outside, "leaf")
+			case "root_aliases_volume":
+				if err := os.RemoveAll(root); err != nil {
+					t.Fatal(err)
+				}
+				link(string(os.PathSeparator), root)
+			}
+			if got := IsRepoCachePath(path); got != tc.want {
+				t.Errorf("IsRepoCachePath(%q) = %v, want %v", path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsRepoCachePathPhysicalParent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"absolute_link", true},
+		{"absolute_link_decoy", true},
+		{"relative_link", true},
+		{"linked_cwd", true},
+		{"physical_pwd", true},
+		{"local_directory", false},
+		{"local_link", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			home := filepath.Join(base, "gchome")
+			root := filepath.Join(home, "cache", "repos")
+			t.Setenv("GC_HOME", home)
+			t.Setenv("HOME", base)
+			write := func(path string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := filepath.Join(root, "pack", "run.sh")
+			write(script)
+			outside := t.TempDir()
+			link := filepath.Join(outside, "link")
+			if err := os.Symlink(filepath.Dir(script), link); err != nil {
+				t.Fatal(err)
+			}
+			path := link + "/../pack/run.sh"
+			switch tc.name {
+			case "absolute_link_decoy":
+				write(filepath.Join(outside, "pack", "run.sh"))
+			case "relative_link":
+				t.Chdir(base)
+				rel, err := filepath.Rel(base, outside)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path = rel + "/link/../pack/run.sh"
+			case "linked_cwd", "physical_pwd":
+				t.Chdir(link)
+				wantWD := link
+				if tc.name == "physical_pwd" {
+					var err error
+					wantWD, err = filepath.EvalSymlinks(filepath.Dir(script))
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("PWD", wantWD)
+				}
+				wd, err := os.Getwd()
+				if err != nil || wd != wantWD {
+					t.Fatalf("Getwd() = %q, %v; want %q", wd, err, wantWD)
+				}
+				t.Logf("Getwd follows %s spelling: %s", tc.name, wd)
+				path = "../pack/run.sh"
+			case "local_directory", "local_link":
+				script = filepath.Join(outside, "local", "run.sh")
+				write(script)
+				sub := filepath.Join(filepath.Dir(script), "sub")
+				if err := os.Mkdir(sub, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if tc.name == "local_link" {
+					alias := filepath.Join(t.TempDir(), "local-link")
+					if err := os.Symlink(sub, alias); err != nil {
+						t.Fatal(err)
+					}
+					sub = alias
+				}
+				path = sub + "/../run.sh"
+			}
+			original, err := os.Stat(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other, err := os.Stat(path)
+			if err != nil || !os.SameFile(original, other) {
+				t.Fatalf("target %q does not reach script %q: %v", path, script, err)
+			}
+			if got := IsRepoCachePath(path); got != tc.want {
+				t.Errorf("IsRepoCachePath(%q) = %v, want %v", path, got, tc.want)
 			}
 		})
 	}

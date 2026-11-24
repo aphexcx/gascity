@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -150,6 +152,45 @@ func TestRegisterPackCommandsDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("eager pack-command discovery blocked on a held repo-cache lock")
+	}
+}
+
+func TestRootHelpListsCachedPackCommandsWithoutGit(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}, nil} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			f := newPackCacheFixture(t, 1)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "sample0") {
+				t.Fatal("root help omitted discovered pack")
+			}
+			if calls := f.gitCalls(t); calls != "" {
+				t.Fatalf("root help spawned Git: %s", calls)
+			}
+		})
+	}
+}
+
+func TestBuiltinRootConstructionDoesNotReadImports(t *testing.T) {
+	for _, args := range [][]string{
+		{"version"},
+		{"cities"},
+		{"context", "list"},
+		{"shell", "status"},
+		{"gen-doc"},
+		{"login", "--help"},
+		{"session", "list"},
+		{"session", "--help"},
+	} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			_, root := setupDiscoveryLockCity(t)
+			newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptionsForArgs(args))
+			if _, err := os.Stat(filepath.Join(root, ".packman-cache.lock")); !os.IsNotExist(err) {
+				t.Fatalf("constructing builtin %q touched the import cache: %v", args, err)
+			}
+		})
 	}
 }
 

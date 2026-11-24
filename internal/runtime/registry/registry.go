@@ -166,3 +166,15 @@ func (r *Registry) Names() []string {
 	sort.Strings(names)
 	return names
 }
+
+// Prefixes returns the registered selection-name prefixes, sorted.
+func (r *Registry) Prefixes() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prefixes := make([]string, 0, len(r.prefixes))
+	for prefix := range r.prefixes {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	return prefixes
+}

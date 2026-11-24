@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -80,6 +81,7 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
+	City          string               `json:"city,omitempty"`
 	DryRun        bool                 `json:"dry_run,omitempty"`
 }
 
@@ -1334,13 +1336,17 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	// broad scan instead of issuing one per candidate (ga-q6ct Layer 2).
 	cityPath, cfg := ambientMailTargetConfig()
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	return resolveMailTargetCandidates(cityPath, cfg, sessStore, candidates, stderr, cmdName)
+}
+
+func resolveMailTargetCandidates(cityPath string, cfg *config.City, sessStore beads.Store, candidates []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	cache := &mailIdentitySessionCache{}
 	for _, c := range candidates {
 		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, sessStore, c, cache)
 		if err == nil {
 			return target, true
 		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
+		if len(candidates) == 1 || !errors.Is(err, session.ErrSessionNotFound) {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return resolvedMailTarget{}, false
 		}
@@ -1447,13 +1453,17 @@ func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients 
 	for _, id := range order {
 		result = append(result, seen[id])
 	}
+	sortMailByCreation(result)
+	return result, nil
+}
+
+func sortMailByCreation(result []mail.Message) {
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
 			return result[i].ID < result[j].ID
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
-	return result, nil
 }
 
 func collectMailCounts(count func(string) (int, int, error), recipients []string) (int, int, error) {
@@ -1559,7 +1569,9 @@ to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to vie
 
 With --context/--city-url the inbox is read from a REMOTE city; with no
 argument it lists mail addressed to this client's remote identity
-("<local city>/<identity>") — where a far-side 'gc mail reply' lands.`,
+("<local city>/<identity>") stored in that city. A bare 'gc mail reply' there
+answers you in your own city's inbox instead, when that city has a context
+for yours.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailInboxWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -1624,15 +1636,26 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Reply to a message",
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
-Inherits the thread ID from the original message for conversation tracking.
+Local replies inherit the original thread ID. A From of the form CITY/AGENT
+that is not a sender of this city is answered in CITY: the reply starts a new
+message in that city's inbox through the context whose city is CITY. The From
+alone chooses the city, so the answer goes to the city the From names, which
+may not be the city the mail came from. A sender name that contains a slash is
+read as CITY/AGENT. A From that a session or a configured agent of this city
+sent is answered here. If no context matches, two match, or the From also
+matches a local rig or session, the command exits with an error before sending.
+To choose the destination yourself, use gc --context CITY mail send AGENT.
+An unqualified From override is indistinguishable from local mail.
+A qualified override is trusted as written.
+
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
-With --context/--city-url the reply is sent inside a REMOTE city (the reply
-is addressed by that city to the original sender); the sender is
-"<local city>/<identity>" and --notify is refused.`,
+With --context/--city-url, the message ID and its thread belong to the
+selected city. Both remote delivery modes use the sender
+"<local city>/<identity>" and require replying without --notify.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
@@ -2068,23 +2091,37 @@ func cmdMailInbox(args []string, stdout, stderr io.Writer) int {
 func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	// Remote city: read the far-side mailbox over the control plane (see
 	// mail_remote.go). Same deferral of "no city discoverable" as mail send.
-	if remoteC, isRemote, remoteTgt, rerr := resolveReadTargetEcho(); rerr != nil && !isCityDiscoveryNotFound(rerr) {
-		fmt.Fprintf(stderr, "gc mail inbox: %v\n", rerr) //nolint:errcheck // best-effort stderr
+	remoteC, ctx, err := resolveReadClient()
+	if err != nil && !isCityDiscoveryNotFound(err) {
+		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	} else if isRemote {
-		return cmdMailInboxRemote(remoteC, remoteTgt, args, jsonOut, stdout, stderr)
 	}
-	mp, code := openCityMailProvider(stderr, "gc mail inbox")
-	if mp == nil {
+	if ctx.Remote != nil {
+		return cmdMailInboxRemote(remoteC, ctx.Remote, args, jsonOut, stdout, stderr)
+	}
+	mailbox, code := openResolvedCityMail(ctx.CityPath, err, stderr, "gc mail inbox")
+	if mailbox.provider == nil {
 		return code
 	}
 
-	target, ok := resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
+	var target resolvedMailTarget
+	var ok bool
+	if mailbox.sessionStore == nil {
+		target, ok = resolveMailTargetFromArgs(args, stderr, "gc mail inbox")
+	} else {
+		candidates := args
+		if len(candidates) == 0 {
+			candidates = defaultMailIdentityCandidates()
+		} else {
+			candidates = args[:1]
+		}
+		target, ok = resolveMailTargetCandidates(ctx.CityPath, mailbox.cfg, mailbox.sessionStore, candidates, stderr, "gc mail inbox")
+	}
 	if !ok {
 		return 1
 	}
 
-	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
+	return doMailInboxTargetWithJSON(mailbox.provider, target, jsonOut, stdout, stderr)
 }
 
 type mailInboxReader interface {
@@ -2101,7 +2138,7 @@ func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, st
 }
 
 func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Inbox, target.recipients)
+	messages, err := readMailInbox(mp, target.recipients)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2132,6 +2169,23 @@ func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, js
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func readMailInbox(mp mailInboxReader, recipients []string) ([]mail.Message, error) {
+	// An empty recipient set means no mailbox here. To the batch provider
+	// it means every mailbox, so only use its union read for multiple routes.
+	if batch, ok := mp.(mail.MultiRecipientInboxer); ok && len(recipients) > 1 {
+		messages, err := batch.InboxRecipients(recipients)
+		if err != nil {
+			return nil, err
+		}
+		if messages == nil {
+			return []mail.Message{}, nil
+		}
+		sortMailByCreation(messages)
+		return messages, nil
+	}
+	return collectMailMessages(mp.Inbox, recipients)
 }
 
 func cmdMailReadWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
@@ -2310,58 +2364,81 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	if mp == nil {
 		return code
 	}
-	rec := openCityRecorder(stderr)
-
+	original, err := mp.Get(args[0])
+	getUnsupported := errors.Is(err, mailexec.ErrGetUnsupported)
+	if err != nil && !getUnsupported {
+		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
+	}
 	sender := defaultMailIdentity()
 	providerName := mailProviderName()
+	execProvider := strings.HasPrefix(providerName, "exec:")
+	providerLocal := execProvider && !strings.Contains(original.From, "/")
 	var store beads.Store
 	var cityPath string
 	var cfg *config.City
+	var configErr error
 	var notifySetupErr error
-	if sender != "human" || notify {
+	if sender != "human" || notify || (!providerLocal && original.From != "human") {
 		switch {
-		case strings.HasPrefix(providerName, "exec:"):
+		case execProvider:
 			var err error
 			cityPath, err = resolveCity()
 			if err == nil {
-				cfg, _ = loadCityConfig(cityPath, stderr)
+				cfg, configErr = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 				store, err = openStoreAtForCity(cityPath, cityPath)
 			}
 			if err != nil {
+				standalone := cityPath == "" && isCityDiscoveryNotFound(err)
+				if !standalone && !providerLocal && !knownLocalMailSender(original, cfg) {
+					return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+				}
 				notifySetupErr = err
 				store = nil
 			}
-		case !isStorelessMailProvider():
+		case !isStorelessMailProviderName(providerName):
 			var storeCode int
-			store, storeCode = openCityStore(stderr, "gc mail reply")
+			store, cityPath, storeCode = openCityStoreWithPath(stderr, "gc mail reply")
 			if store == nil {
 				return storeCode
 			}
-			var err error
-			cityPath, err = resolveCity()
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			cfg, _ = loadCityConfig(cityPath, stderr)
-		}
-		if sender != "human" {
-			if store != nil {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr, "gc mail reply")
-				if !ok {
-					return 1
-				}
-				sender = resolved
-			}
+			cfg, configErr = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		}
 	}
-
-	// Determine body from remaining args if -m not set.
+	var sessions beads.Store
+	if store != nil {
+		sessions = cliSessionStore(store, cfg, cityPath)
+	}
+	var target *remoteTarget
+	var recipient string
+	var routeWarnings strings.Builder
+	if !getUnsupported {
+		resolver := mailReplyResolver{cfg: cfg, configErr: configErr, sessions: sessions}
+		target, recipient, err = resolver.target(original, providerLocal, &routeWarnings)
+		if err != nil {
+			return mailReplyError("unresolved_reply_target", err, jsonOut, stdout, stderr)
+		}
+	}
 	body := message
 	if body == "" && len(args) > 1 {
 		body = strings.Join(args[1:], " ")
 	}
-
+	if target != nil {
+		c, err := buildRemoteWriteClient(target)
+		if err != nil {
+			return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)
+		}
+		from := loadedCityName(cfg, cityPath) + "/" + remoteMailIdentity()
+		rec := cliFactoryEventsRecorder(cityPath, cfg)
+		return sendRemoteReply(c, target, rec, args[0], recipient, from, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
+	}
+	if sender != "human" && sessions != nil {
+		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessions, stderr, "gc mail reply")
+		if !ok {
+			return 1
+		}
+		sender = resolved
+	}
+	rec := openCityRecorder(stderr)
 	var nf nudgeFunc
 	if notify && store != nil {
 		nf = newMailNudgeFunc(sender)
@@ -2369,7 +2446,11 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
 	}
 
-	return doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
+	code = doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
+	if code == 0 && routeWarnings.Len() != 0 {
+		fmt.Fprint(stderr, routeWarnings.String()) //nolint:errcheck // best-effort stderr
+	}
+	return code
 }
 
 // doMailReply creates a reply to an existing message.

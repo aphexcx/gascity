@@ -25,7 +25,13 @@ var (
 
 // NewSeamBacked constructs an ssh provider for ep served through the seams.
 func NewSeamBacked(ep Endpoint) runtime.Provider {
+	return NewSeamBackedForCity(ep, "")
+}
+
+// NewSeamBackedForCity binds launch validation to the selected city.
+func NewSeamBackedForCity(ep Endpoint, city string) runtime.Provider {
 	raw := NewProvider(ep)
+	raw.cacheCity = city
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }

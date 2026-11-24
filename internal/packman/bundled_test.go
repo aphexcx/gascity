@@ -204,7 +204,7 @@ func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T)
 		switch strings.Join(args, " ") {
 		case "rev-parse HEAD":
 			return commit, nil
-		case "status --porcelain":
+		case "status --porcelain", "update-index --refresh":
 			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git call: %v", args)
@@ -249,7 +249,7 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	runGit = func(_ string, args ...string) (string, error) {
 		gitCalls = append(gitCalls, args)
 		switch args[0] {
-		case "checkout":
+		case "checkout", "update-index":
 			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git call: %v", args)

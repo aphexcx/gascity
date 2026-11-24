@@ -8,7 +8,7 @@ import (
 )
 
 func TestResolveHelper(t *testing.T) {
-	cred, err := Resolve(Rule{Match: "github.com", Helper: "printf 'ghp_tok\\n'"})
+	cred, err := Resolve(Rule{Match: "github.com", Helper: "set -e; printf 'ghp_tok\\n'"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -91,11 +91,13 @@ func TestRunCredentialCommandDeclineOnEmptyOutput(t *testing.T) {
 }
 
 func TestRunCredentialCommandEmit(t *testing.T) {
-	cred, ok, err := RunCredentialCommand("printf 'username=bot\\npassword=tok\\n'", Request{Host: "github.com"})
-	if err != nil {
-		t.Fatalf("RunCredentialCommand: %v", err)
-	}
-	if !ok || cred.Username != "bot" || cred.Password != "tok" {
-		t.Fatalf("unexpected credential: %+v ok=%v", cred, ok)
+	for _, prefix := range []string{"", "HELPER=1; "} {
+		cred, ok, err := RunCredentialCommand(prefix+"printf 'username=bot\\npassword=tok\\n'", Request{Host: "github.com"})
+		if err != nil {
+			t.Fatalf("RunCredentialCommand(%q): %v", prefix, err)
+		}
+		if !ok || cred.Username != "bot" || cred.Password != "tok" {
+			t.Fatalf("unexpected credential: %+v ok=%v", cred, ok)
+		}
 	}
 }

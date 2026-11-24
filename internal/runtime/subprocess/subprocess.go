@@ -36,16 +36,18 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // Provider manages agent sessions as child processes.
 type Provider struct {
-	mu       sync.Mutex
-	dir      string                  // socket/meta file directory
-	procs    map[string]*sessionConn // in-process tracking
-	workDirs map[string]string       // session name → workDir (for CopyTo)
-	ops      providerOps
+	cacheCity string
+	mu        sync.Mutex
+	dir       string                  // socket/meta file directory
+	procs     map[string]*sessionConn // in-process tracking
+	workDirs  map[string]string       // session name → workDir (for CopyTo)
+	ops       providerOps
 }
 
 type providerOps struct {
@@ -122,7 +124,10 @@ func newProvider(dir string) *Provider {
 // Returns an error if a session with that name is already running.
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	euid := os.Geteuid()

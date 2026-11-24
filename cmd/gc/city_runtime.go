@@ -1112,7 +1112,7 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 	if *prevPoolRunning != nil {
 		for sn, info := range cr.poolDeathHandlers {
 			if (*prevPoolRunning)[sn] && !currentSet[sn] {
-				out, err := shellRunHook(info.Command, info.Dir, info.Env)
+				out, err := lifecycleHookRunnerForCity(cr.cityPath)(info.Command, info.Dir, info.Env)
 				if err != nil {
 					fmt.Fprintf(cr.stderr, "on_death %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
 				}
@@ -2034,6 +2034,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if configName == "" {
 		configName = cr.cityName
 	}
+	// Only an applied reload event re-arms FULL validation. Snapshot reads,
+	// preview, and the other loads in this process reuse the previous verdict.
+	config.InvalidateRemoteCacheValidations()
 	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
 	if err != nil {
 		if result != nil {

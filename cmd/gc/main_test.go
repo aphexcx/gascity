@@ -207,6 +207,7 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	maybeCaptureBdInvocation()
 	maybeRunProductMetricsDirectChildEnvSpy()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

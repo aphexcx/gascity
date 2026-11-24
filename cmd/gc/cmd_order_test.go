@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -4570,5 +4571,756 @@ prefix = "ct"
 	}
 	if got.Status != "closed" {
 		t.Fatalf("%s status = %q, want closed — stale-close must run alongside retention", openID, got.Status)
+	}
+}
+
+func TestOrderTrackingSweepBehavior(t *testing.T) {
+	now := time.Now()
+	const day = 24 * time.Hour
+	history := func(order string, n int, age time.Duration) []beads.Bead {
+		var runs []beads.Bead
+		for i := range n {
+			run := beads.Bead{
+				ID: fmt.Sprintf("%s-%02d", order, i), Title: "tracking", Type: "task", Status: "closed",
+				CreatedAt: now.Add(-age), Labels: []string{labelOrderTracking}, Ephemeral: i%2 == 0,
+			}
+			if order != "" {
+				run.Labels = append(run.Labels, "order-run:"+order)
+			}
+			runs = append(runs, run)
+		}
+		return runs
+	}
+	open := history("open", 2, 0)
+	open[0].Status, open[0].CreatedAt = "open", now.Add(-11*time.Minute)
+	open[1].Status, open[1].CreatedAt = "open", now.Add(-9*time.Minute)
+	mixed := append(history("mixed", 2, 9*day), history("recent", 10, day)...)
+	for i := 2; i < len(mixed); i++ {
+		mixed[i].Labels = mixed[0].Labels
+	}
+	updated := history("updated", 12, 9*day)
+	updated[0].UpdatedAt = now.Add(-day)
+	updated[1].CreatedAt, updated[1].UpdatedAt = now.Add(-day), now.Add(-10*day)
+	roots := history("root", 14, 9*day)
+	roots = append(roots,
+		beads.Bead{ID: "stamped", Status: "open", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-00"}},
+		beads.Bead{ID: "unstamped", Status: "open", Type: "task", ParentID: "root-01"},
+		beads.Bead{ID: "nudge", Status: "open", Type: nudgeBeadType, Labels: []string{nudgeBeadLabel}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-02"}},
+		beads.Bead{ID: "mail", Status: "open", Type: "message", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-03"}},
+	)
+	for _, tc := range []struct {
+		name       string
+		seed       []beads.Bead
+		deleted    []string
+		closed     []string
+		orders     []string
+		retention  string
+		failedPeer bool
+		cli        bool
+		dryRun     bool
+	}{
+		{name: "empty"},
+		{name: "nine and eleven minutes", seed: open, closed: []string{"open-00"}},
+		{name: "below floor", seed: history("small", 9, 9*day)},
+		{name: "mixed ages and tiers", seed: mixed, deleted: []string{"mixed-00", "mixed-01"}},
+		{name: "recent history", seed: history("recent", 12, day)},
+		{name: "legacy bucket and equal timestamps", seed: history("", 12, 9*day), deleted: []string{"-00", "-01"}},
+		{name: "root ownership and notifications", seed: roots, deleted: []string{"root-02", "root-03"}},
+		{name: "update overrides creation", seed: updated, deleted: []string{"updated-01", "updated-02"}},
+		{name: "configured ttl", seed: history("short", 11, 3*day), retention: "48h", deleted: []string{"short-00"}},
+		{name: "order filter", seed: append(history("alpha", 11, 9*day), history("beta", 11, 9*day)...), orders: []string{"beta"}, deleted: []string{"beta-00"}},
+		{name: "unreadable first store", failedPeer: true, seed: append(history("alpha", 11, 9*day), open...), deleted: []string{"alpha-00"}, closed: []string{"open-00"}},
+		{name: "confirmation threshold", cli: true, seed: append(history("large", 31, 9*day), open...), closed: []string{"open-00"}},
+		{name: "dry run", cli: true, dryRun: true, seed: append(history("large", 31, 9*day), open...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var store beads.Store
+			if tc.cli {
+				// The command owns the confirmation and dry-run branches. Give it
+				// a private file-backed city so it exercises both through the CLI.
+				dir := t.TempDir()
+				t.Chdir(dir)
+				for _, key := range []string{"GC_CITY", "GC_CITY_ROOT", "GC_CITY_PATH"} {
+					t.Setenv(key, dir)
+				}
+				for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "GC_BEADS_SCOPE_ROOT", "GC_BULK_DELETE_CONFIRM_THRESHOLD"} {
+					t.Setenv(key, "")
+				}
+				t.Setenv("GC_BEADS", "file")
+				writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"example\"\nprefix = \"ct\"\n")
+				if err := ensureScopedFileStoreLayout(dir); err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(struct {
+					Seq   int          `json:"seq"`
+					Beads []beads.Bead `json:"beads"`
+				}{len(tc.seed), tc.seed})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".gc", "beads.json"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				code := cmdOrderSweepTrackingWithOptions(10*time.Minute, false, tc.dryRun, false, false, nil, &stdout, &stderr)
+				if tc.dryRun && code != 0 || !tc.dryRun && (code != 1 || !strings.Contains(stderr.String(), "21 beads would be deleted")) {
+					t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+				}
+				store, err = openStoreAtForCity(dir, dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				store = beads.NewMemStoreFrom(100, tc.seed, nil)
+				stores := []beads.Store{store}
+				var peerErr error
+				var peer *beads.MemStore
+				if tc.failedPeer {
+					peer = beads.NewMemStoreFrom(100, tc.seed, nil)
+					peerErr = errors.New("read unavailable")
+					stores = append([]beads.Store{&failingListOrderTrackingStore{Store: peer, err: peerErr}}, stores...)
+				}
+				only := orderNameFilter(tc.orders)
+				_, err := sweepStaleOrderTrackingAcrossStores(stores, nil, now, 10*time.Minute, only, false)
+				if !errors.Is(err, peerErr) {
+					t.Fatalf("stale close: %v", err)
+				}
+				cfg := &config.City{}
+				if tc.retention != "" {
+					cfg.Beads.Policies = map[string]config.BeadPolicyConfig{orderTrackingBeadPolicyName: {DeleteAfterClose: tc.retention}}
+				}
+				_, err = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, orderTrackingRetentionPolicyForConfig(cfg), only)
+				if !errors.Is(err, peerErr) {
+					t.Fatalf("prune: %v", err)
+				}
+				if peer != nil {
+					assertSweepBeadStates(t, peer, tc.seed, nil, nil)
+				}
+			}
+			assertSweepBeadStates(t, store, tc.seed, tc.deleted, tc.closed)
+		})
+	}
+}
+
+func assertSweepBeadStates(t *testing.T, store beads.Store, seed []beads.Bead, deleted, closed []string) {
+	t.Helper()
+	for _, original := range seed {
+		got, err := store.Get(original.ID)
+		if slices.Contains(deleted, original.ID) {
+			if !errors.Is(err, beads.ErrNotFound) {
+				t.Errorf("Get(%q) = %v, want deleted", original.ID, err)
+			}
+			continue
+		}
+		want := original.Status
+		if slices.Contains(closed, original.ID) {
+			want = "closed"
+		}
+		if err != nil || got.Status != want {
+			t.Errorf("Get(%q) status %q, err %v, want %q", original.ID, got.Status, err, want)
+		}
+	}
+}
+
+func TestOrderSweepTrackingReadsClosedHistoryOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, key := range []string{"GC_CITY", "GC_CITY_ROOT", "GC_CITY_PATH"} {
+		t.Setenv(key, dir)
+	}
+	for _, key := range []string{"GC_RIG", "GC_RIG_ROOT", "GC_BEADS_SCOPE_ROOT"} {
+		t.Setenv(key, "")
+	}
+	writeFile(t, filepath.Join(dir, "city.toml"), "[workspace]\nname = \"example\"\nprefix = \"ct\"\n")
+	if err := ensureScopedFileStoreLayout(dir); err != nil {
+		t.Fatal(err)
+	}
+	var history []beads.Bead
+	old := time.Now().Add(-9 * 24 * time.Hour)
+	for i := range 12 {
+		run := beads.Bead{
+			ID: fmt.Sprintf("ct-%d", i), Title: "order:build", Status: "closed", Type: "task",
+			CreatedAt: old.Add(time.Duration(i) * time.Second), Labels: []string{labelOrderTracking, "order-run:build"},
+		}
+		row, err := json.Marshal(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dir, run.ID+".json"), string(row))
+		history = append(history, run)
+	}
+	rows, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "history.json"), string(rows))
+	// Count calls at the exec provider boundary. The real provider still
+	// filters and sorts its rows and chooses its native paging behavior.
+	provider := filepath.Join(dir, "provider")
+	if err := os.WriteFile(provider, []byte(`#!/bin/sh
+set -eu
+printf '%s %s\n' "$1" "${2:-}" >> "$SWEEP_TEST_DIR/calls"
+case "$1:${2:-}" in
+  list-by-label:order-tracking)
+    cat "$SWEEP_TEST_DIR/history.json" ;;
+  get:ct-*) cat "$SWEEP_TEST_DIR/$2.json" ;;
+  children:*|dep-list:*|list:*) printf '[]\n' ;;
+  delete:--force) test -f "$SWEEP_TEST_DIR/$3.json" && rm -f "$SWEEP_TEST_DIR/$3.json" ;;
+  *) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWEEP_TEST_DIR", dir)
+	t.Setenv("GC_BEADS", "exec:"+provider)
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepTrackingWithOptions(10*time.Minute, false, false, false, true, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	calls := readFileString(t, filepath.Join(dir, "calls"))
+	before, _, found := strings.Cut(calls, "delete --force\n")
+	gets := strings.Count(before, "get ct-")
+	lists := strings.Count(calls, "list-by-label order-tracking\n")
+	if !found || strings.Count(calls, "delete --force\n") != 2 || lists != 2 || gets != 12 {
+		t.Fatalf("want 2 deletes, 2 tracking lists and 12 Gets before first delete, got:\n%s", calls)
+	}
+	t.Logf("12 expired runs, 2 candidates: %d tracking lists, %d Gets before first delete", lists, gets)
+}
+
+// The component tests exercise selection and guarded deletion separately from
+// the command's cross-store confirmation gate.
+func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	_, count, err := prepareOrderTrackingRetention(stores, now, policy, onlyOrders)
+	return count, err
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	selection, err := closedOrderTrackingCandidates(store, now, policy, onlyOrders)
+	if err != nil {
+		return 0, err
+	}
+	result, err := pruneOrderTrackingSelections([]orderTrackingRetentionSelection{selection}, now, policy, onlyOrders)
+	return result.deleted, err
+}
+
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	selections, _, readErr := prepareOrderTrackingRetention(stores, now, policy, onlyOrders)
+	result, pruneErr := pruneOrderTrackingSelections(selections, now, policy, onlyOrders)
+	return result, errors.Join(readErr, pruneErr)
+}
+
+func TestOrderTrackingSweepRechecksChangedHistory(t *testing.T) {
+	now := time.Now()
+	var seed []beads.Bead
+	for i := range 11 {
+		seed = append(seed, beads.Bead{
+			ID: fmt.Sprintf("run-%02d", i), Title: "order:sample", Status: "closed",
+			CreatedAt: now.Add(-9 * 24 * time.Hour), Labels: []string{labelOrderTracking},
+		})
+	}
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	for _, changedID := range []string{"run-00", "run-10"} {
+		t.Run(changedID, func(t *testing.T) {
+			store := beads.NewMemStoreFrom(20, seed, nil)
+			selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+			if err != nil || count != 1 {
+				t.Fatalf("count %d, err %v, want one eligible", count, err)
+			}
+			// Another writer reopens the selected bead or a member of the
+			// retained ten while the sweep is checking its other stores.
+			if err := store.Reopen(changedID); err != nil {
+				t.Fatal(err)
+			}
+			result, err := pruneOrderTrackingSelections(selections, now, policy, nil)
+			if err != nil || result.deleted != 0 {
+				t.Fatalf("deleted %d, err %v, want zero after reopening %s", result.deleted, err, changedID)
+			}
+			if _, err := store.Get("run-00"); err != nil {
+				t.Fatalf("selected bead must survive: %v", err)
+			}
+		})
+	}
+	t.Run("two scopes share storage", func(t *testing.T) {
+		store := beads.NewMemStoreFrom(20, seed, nil)
+		stores := []beads.Store{
+			orderTrackingSweepScopedStore{Store: store, label: "first"},
+			orderTrackingSweepScopedStore{Store: store, label: "second"},
+		}
+		result, err := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, policy, nil)
+		if err != nil || result.deleted != 1 || result.storesSwept != 2 {
+			t.Fatalf("result %+v, err %v, want one deletion across both scopes", result, err)
+		}
+	})
+}
+
+type retentionBacklogStore struct {
+	*beads.MemStore
+	gets, historyLists                int
+	getsBeforeFirst, listsBeforeFirst int
+	deletions                         int
+}
+
+func (s *retentionBacklogStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.MemStore.Get(id)
+}
+
+func (s *retentionBacklogStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" && q.Label == labelOrderTracking {
+		s.historyLists++
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *retentionBacklogStore) Delete(id string) error {
+	if s.deletions == 0 {
+		s.getsBeforeFirst, s.listsBeforeFirst = s.gets, s.historyLists
+	}
+	s.deletions++
+	return s.MemStore.Delete(id)
+}
+
+func backlogTrackingRuns(now time.Time, count int) []beads.Bead {
+	seed := make([]beads.Bead, count)
+	for i := range seed {
+		seed[i] = beads.Bead{
+			ID: fmt.Sprintf("run-%05d", i), Title: "order:sample", Status: "closed",
+			CreatedAt: now.Add(-9*24*time.Hour + time.Duration(i)*time.Second), Labels: []string{labelOrderTracking}, Ephemeral: i%2 == 0,
+		}
+	}
+	return seed
+}
+
+func TestOrderTrackingBacklogReadBound(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	for _, tc := range []struct{ count, gets, lists int }{
+		{63, 11, 0}, {64, 11, 0}, {65, 0, 1}, {5010, 0, 1},
+	} {
+		t.Run(fmt.Sprint(tc.count), func(t *testing.T) {
+			seed := backlogTrackingRuns(now, tc.count)
+			// Extra guarded candidates cross the read threshold without
+			// changing which IDs the three neighboring cases should mutate.
+			if tc.count <= 65 {
+				for i := 63; i < tc.count; i++ {
+					seed[i].CreatedAt = seed[0].CreatedAt.Add(-time.Hour)
+					seed = append(seed, beads.Bead{ID: "child-" + seed[i].ID, Status: "open", ParentID: seed[i].ID})
+				}
+				seed = append(seed, beads.Bead{
+					ID: "stale", Title: "order:timer", Status: "open",
+					CreatedAt: now.Add(-11 * time.Minute), Labels: []string{labelOrderTracking},
+				})
+			}
+			store := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(tc.count, seed, nil)}
+			if _, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, 10*time.Minute, nil, false); err != nil {
+				t.Fatal(err)
+			}
+			selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+			if err != nil || count != tc.count-10 {
+				t.Fatalf("selection: count %d, err %v", count, err)
+			}
+			store.gets, store.historyLists = 0, 0
+			// For the thousands-row case we only need to reach the first
+			// actual deletion. The boundary cases exercise the whole set.
+			wantCount := 53
+			if tc.count == 5010 {
+				selections[0].ids = selections[0].ids[:1]
+				wantCount = 1
+			}
+			result, err := pruneOrderTrackingSelections(selections, now, policy, nil)
+			if err != nil || result.deleted != wantCount {
+				t.Fatalf("deleted %d, err %v, want %d", result.deleted, err, wantCount)
+			}
+			// The unchanged descendant guard also gets the root once.
+			if store.getsBeforeFirst != tc.gets+1 || store.listsBeforeFirst != tc.lists {
+				t.Errorf("before first delete: Get=%d closed-history List=%d, want %d and %d",
+					store.getsBeforeFirst, store.listsBeforeFirst, tc.gets+1, tc.lists)
+			}
+			if tc.count <= 65 {
+				var want []string
+				for _, b := range seed[:wantCount] {
+					want = append(want, b.ID)
+				}
+				assertSweepBeadStates(t, store.MemStore, seed, want, []string{"stale"})
+			}
+		})
+	}
+}
+
+func TestOrderTrackingBulkRecheckPreservesCeilingFloorAndGuards(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	seed := backlogTrackingRuns(now, 65)
+	seed = append(seed,
+		beads.Bead{ID: "incoming", Title: "order:sample", Status: "open", CreatedAt: now, Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "child", Status: "open", ParentID: "run-00001"},
+	)
+	store := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(100, seed, nil)}
+	selections, count, err := prepareOrderTrackingRetention([]beads.Store{store}, now, policy, nil)
+	if err != nil || count != 55 {
+		t.Fatalf("prepare: count %d, err %v", count, err)
+	}
+	if err := store.Reopen("run-00000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close("incoming"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := pruneOrderTrackingSelections(selections, now, policy, nil)
+	if err != nil || result.deleted != 53 || store.getsBeforeFirst != 1 || store.listsBeforeFirst != 2 {
+		t.Errorf("prune %+v, err %v; first delete after %d Get, %d history List", result, err, store.getsBeforeFirst, store.listsBeforeFirst)
+	}
+	// 00 was reopened. Its neighbor owns live work. 55 became eligible
+	// after confirmation, and the remaining nine still belong to the floor.
+	seed[0].Status = "open"
+	var want []string
+	for _, b := range seed[2:55] {
+		want = append(want, b.ID)
+	}
+	assertSweepBeadStates(t, store.MemStore, seed, want, []string{"incoming"})
+}
+
+func TestOrderTrackingMixedBacklogMatchesIndependentPrune(t *testing.T) {
+	now := time.Now()
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}
+	seed := backlogTrackingRuns(now, 84)
+	for i := 62; i < len(seed); i++ {
+		seed[i].UpdatedAt = now.Add(-time.Hour)
+	}
+	seed = append(seed,
+		beads.Bead{ID: "stale", Title: "order:timer", Status: "open", CreatedAt: now.Add(-11 * time.Minute), Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "recent", Title: "order:timer", Status: "open", CreatedAt: now.Add(-9 * time.Minute), Labels: []string{labelOrderTracking}},
+		beads.Bead{ID: "live-step", Status: "open", ParentID: "run-00003"},
+	)
+	reference := beads.NewMemStoreFrom(200, seed, nil)
+	actual := &retentionBacklogStore{MemStore: beads.NewMemStoreFrom(200, seed, nil)}
+	for _, store := range []beads.Store{reference, actual} {
+		if _, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, 10*time.Minute, nil, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The watchdog still runs the base's independent ranking and guarded
+	// delete loop. Its budget here exceeds the entire seeded history.
+	n, err := sweepClosedOrderTrackingRetentionBounded(reference, now, policy, nil, len(seed)+1)
+	if err != nil || n != 61 {
+		t.Fatalf("independent prune: %d deletions, err %v", n, err)
+	}
+	actual.gets = 0 // exclude stale-close verification
+	r, err := sweepClosedOrderTrackingRetentionAcrossStores([]beads.Store{actual}, now, policy, nil)
+	if err != nil || r.deleted != n || actual.getsBeforeFirst != 1 || actual.listsBeforeFirst != 2 {
+		t.Errorf("prepared prune: %+v, err %v; first delete after %d Get, %d history List", r, err, actual.getsBeforeFirst, actual.listsBeforeFirst)
+	}
+	var deleted, closed []string
+	for _, b := range seed {
+		run, err := reference.Get(b.ID)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			deleted = append(deleted, b.ID)
+		case err != nil:
+			t.Fatal(err)
+		case b.Status == "open" && run.Status == "closed":
+			closed = append(closed, b.ID)
+		}
+	}
+	assertSweepBeadStates(t, actual.MemStore, seed, deleted, closed)
+}
+
+// retentionOracle ranks a snapshot using the retention policy, independently
+// of the order decoder, candidate selection, recheck and watchdog.
+func retentionOracle(rows []beads.Bead, now time.Time) []string {
+	groups := make(map[string][]beads.Bead)
+	for _, b := range rows {
+		if b.Status != "closed" || !slices.Contains(b.Labels, "order-tracking") {
+			continue
+		}
+		for _, label := range b.Labels {
+			if name, ok := strings.CutPrefix(label, "order-run:"); ok {
+				groups[name] = append(groups[name], b)
+				break
+			}
+		}
+	}
+	closedAt := func(b beads.Bead) time.Time {
+		if b.UpdatedAt.IsZero() {
+			return b.CreatedAt
+		}
+		return b.UpdatedAt
+	}
+	var eligible []string
+	for _, group := range groups {
+		slices.SortFunc(group, func(a, b beads.Bead) int {
+			if c := closedAt(b).Compare(closedAt(a)); c != 0 {
+				return c
+			}
+			return strings.Compare(b.ID, a.ID)
+		})
+		for i, b := range group {
+			if i >= 10 && closedAt(b).Before(now.Add(-7*24*time.Hour)) {
+				eligible = append(eligible, b.ID)
+			}
+		}
+	}
+	slices.Sort(eligible)
+	return eligible
+}
+
+func retentionSeed(now time.Time, counts ...int) []beads.Bead {
+	var rows []beads.Bead
+	for group, count := range counts {
+		name := fmt.Sprintf("job-%d", group)
+		for i := range count {
+			// Equal timestamp pairs exercise the ID tie-break. Alternate the
+			// storage of the reference time to exercise the creation fallback.
+			at := now.Add(-9*24*time.Hour + time.Duration(i/2)*time.Minute)
+			b := beads.Bead{
+				ID: fmt.Sprintf("%s-%02d", name, i), Status: "closed", CreatedAt: at,
+				Labels: []string{"order-tracking", "order-run:" + name},
+			}
+			if i%2 == 1 {
+				b.CreatedAt, b.UpdatedAt = at.Add(-24*time.Hour), at
+			}
+			rows = append(rows, b)
+		}
+	}
+	return rows
+}
+
+type retentionScriptStore struct {
+	*beads.MemStore
+	t         *testing.T
+	afterGet  func(string)
+	readFault func(string, beads.Bead) (beads.Bead, error)
+	gets      int
+	histories int
+	deleted   []string
+}
+
+func (s *retentionScriptStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	b, err := s.MemStore.Get(id)
+	if s.afterGet != nil {
+		s.afterGet(id)
+	}
+	if err == nil && s.readFault != nil {
+		return s.readFault(id, b)
+	}
+	return b, err
+}
+
+func (s *retentionScriptStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "closed" && q.Label == "order-tracking" {
+		s.histories++
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *retentionScriptStore) Delete(id string) error {
+	b, err := s.MemStore.Get(id)
+	if err != nil {
+		return err
+	}
+	if b.Status != "closed" {
+		s.t.Errorf("deleting %s while its status is %q", id, b.Status)
+	}
+	if err := s.MemStore.Delete(id); err != nil {
+		return err
+	}
+	s.deleted = append(s.deleted, id)
+	return nil
+}
+
+func (s *retentionScriptStore) snapshot() []beads.Bead {
+	s.t.Helper()
+	rows, err := s.MemStore.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return rows
+}
+
+func (s *retentionScriptStore) prepare(now time.Time) []orderTrackingRetentionSelection {
+	s.t.Helper()
+	selections, _, err := prepareOrderTrackingRetention([]beads.Store{s}, now, orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}, nil)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return selections
+}
+
+func (s *retentionScriptStore) prune(now time.Time, selections []orderTrackingRetentionSelection) error {
+	s.deleted = nil
+	_, err := pruneOrderTrackingSelections(selections, now, orderTrackingRetentionPolicy{deleteAfterClose: 7 * 24 * time.Hour}, nil)
+	slices.Sort(s.deleted)
+	return err
+}
+
+func (s *retentionScriptStore) checkDeletes(counted, eligible []string, keep string) {
+	s.t.Helper()
+	var want []string
+	for _, id := range eligible {
+		if id != keep && slices.Contains(counted, id) {
+			want = append(want, id)
+		}
+	}
+	if !slices.Equal(s.deleted, want) {
+		s.t.Errorf("deleted %v, want %v (confirmed %v, oracle %v, keep %q)", s.deleted, want, counted, eligible, keep)
+	}
+}
+
+func TestOrderTrackingRecheckOracle(t *testing.T) {
+	now := time.Now()
+	for _, counts := range [][]int{{11, 11}, {11, 11, 11, 11}, {21, 21, 21}, {21, 21, 22}, {21, 22, 22}} {
+		for _, change := range []string{"stable", "reopen", "remove", "move", "new close"} {
+			t.Run(fmt.Sprintf("%v/%s", counts, change), func(t *testing.T) {
+				rows := retentionSeed(now, counts...)
+				s := &retentionScriptStore{MemStore: beads.NewMemStoreFrom(0, rows, nil), t: t}
+				counted := retentionOracle(rows, now)
+				selections := s.prepare(now)
+				floor := counts[0] - 1
+				switch change {
+				case "reopen":
+					rows[floor].Status = "open"
+				case "remove":
+					rows = slices.Delete(rows, floor, floor+1)
+				case "move":
+					rows[floor].Labels = []string{"order-tracking", "order-run:elsewhere"}
+				case "new close":
+					b := rows[floor]
+					b.ID, b.UpdatedAt = "newest", now
+					rows = append(rows, b)
+				}
+				s.MemStore = beads.NewMemStoreFrom(0, rows, nil)
+				if err := s.prune(now, selections); err != nil {
+					t.Fatal(err)
+				}
+				s.checkDeletes(counted, retentionOracle(rows, now), "")
+				if change == "stable" {
+					// Each guarded delete gets its target once in addition to
+					// the point rechecks. Above 64 a history List replaces them.
+					points, lists := len(rows), 1
+					if len(rows) > 64 {
+						points, lists = 0, 2
+					}
+					if s.gets != points+len(counted) || s.histories != lists {
+						t.Errorf("Get=%d List=%d, want %d and %d", s.gets, s.histories, points+len(counted), lists)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestOrderTrackingRecheckBeforeDelete(t *testing.T) {
+	now := time.Now()
+	for _, restoreFloor := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restore_floor_%t", restoreFloor), func(t *testing.T) {
+			rows := retentionSeed(now, 11)
+			s := &retentionScriptStore{MemStore: beads.NewMemStoreFrom(0, rows, nil), t: t}
+			selections := s.prepare(now)
+			candidate, floor := rows[0].ID, rows[1].ID
+			if restoreFloor {
+				if err := s.MemStore.Delete(floor); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var eligible []string
+			changed := false
+			s.afterGet = func(id string) {
+				// The oldest retained run is the last floor reference read.
+				if !restoreFloor && id != floor {
+					return
+				}
+				s.afterGet = nil
+				changed = true
+				reopened := slices.Clone(rows)
+				reopened[0].Status = "open"
+				s.MemStore = beads.NewMemStoreFrom(0, reopened, nil)
+				eligible = retentionOracle(reopened, now)
+			}
+			if err := s.prune(now, selections); err != nil {
+				t.Fatal(err)
+			}
+			s.checkDeletes(retentionOracle(rows, now), eligible, "")
+			b, err := s.MemStore.Get(candidate)
+			if !changed || err != nil || b.Status != "open" {
+				t.Errorf("after reopen: changed=%t Get(%s) status=%q err=%v", changed, candidate, b.Status, err)
+			}
+		})
+	}
+}
+
+func TestOrderTrackingPointCheck(t *testing.T) {
+	now := time.Now()
+	readErr := errors.New("test read error")
+	for _, role := range []string{"candidate", "floor"} {
+		for _, change := range []string{"status", "time", "name", "label", "wrong-id", "error", "not-found"} {
+			t.Run(role+"/"+change, func(t *testing.T) {
+				rows := retentionSeed(now, 11, 11)
+				s := &retentionScriptStore{MemStore: beads.NewMemStoreFrom(0, rows, nil), t: t}
+				counted := retentionOracle(rows, now)
+				selections := s.prepare(now)
+				target := &rows[0]
+				if role == "floor" {
+					target = &rows[10]
+				}
+				var keep string
+				switch change {
+				case "status":
+					target.Status = "open"
+				case "time":
+					target.UpdatedAt = now
+					if role == "floor" {
+						target.UpdatedAt = rows[0].CreatedAt.Add(-time.Hour)
+					}
+				case "name":
+					target.Labels = []string{"order-tracking", "order-run:elsewhere"}
+				case "label":
+					target.Labels = []string{"order-run:job-0"}
+				default:
+					if role == "candidate" {
+						keep = target.ID
+					}
+					s.readFault = func(id string, b beads.Bead) (beads.Bead, error) {
+						if id == target.ID {
+							switch change {
+							case "error":
+								return beads.Bead{}, readErr
+							case "not-found":
+								return beads.Bead{}, beads.ErrNotFound
+							case "wrong-id":
+								b.ID = "different"
+							}
+						}
+						return b, nil
+					}
+				}
+				s.MemStore = beads.NewMemStoreFrom(0, rows, nil)
+				eligible := retentionOracle(rows, now)
+				err := s.prune(now, selections)
+				if change == "error" && role == "candidate" {
+					if !errors.Is(err, readErr) {
+						t.Errorf("prune error %v, want candidate read error", err)
+					}
+				} else if err != nil {
+					t.Errorf("prune: %v", err)
+				}
+				s.checkDeletes(counted, eligible, keep)
+				if role == "floor" && s.histories != 2 {
+					t.Errorf("history reads %d, want confirmation and fresh ranking", s.histories)
+				}
+				if keep != "" {
+					if _, err := s.MemStore.Get(keep); err != nil {
+						t.Errorf("kept candidate %s: %v", keep, err)
+					}
+				}
+				if role == "floor" && change == "error" {
+					next := retentionOracle(s.snapshot(), now)
+					if err := s.prune(now, s.prepare(now)); err != nil {
+						t.Fatal(err)
+					}
+					s.checkDeletes(next, next, "")
+				}
+			})
+		}
 	}
 }

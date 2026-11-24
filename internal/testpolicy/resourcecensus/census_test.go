@@ -1970,17 +1970,20 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	t.Parallel()
 
 	audit := findRow(t, bootstrapPolicy.AuditBaseline, ScopeAll, ResourceListenerHelper)
-	if audit.BaselineCalls != 63 || audit.BaselineFiles != 23 || audit.ReportedCalls != 58 || audit.ReportedFiles != 23 {
-		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 63/23, 58/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
+	if audit.BaselineCalls != 64 || audit.BaselineFiles != 24 || audit.ReportedCalls != 58 || audit.ReportedFiles != 23 {
+		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 64/24, 58/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
 	}
 	if audit.OwnerBead != "ga-cp3hwi" || audit.MigrationTarget != "P0.4c-listener-helper" {
 		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
 	}
 
-	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
-		row := findRow(t, rows, ScopeUntagged, ResourceListenerHelper)
-		if row.BaselineCalls != 43 || row.BaselineFiles != 13 || row.ReportedCalls != 38 || row.ReportedFiles != 13 {
-			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 43/13, 38/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
+	for _, tc := range []struct {
+		rows         []Baseline
+		calls, files int
+	}{{bootstrapPolicy.Debt, 44, 14}, {bootstrapPolicy.SmallDebt, 43, 13}} {
+		row := findRow(t, tc.rows, ScopeUntagged, ResourceListenerHelper)
+		if row.BaselineCalls != tc.calls || row.BaselineFiles != tc.files || row.ReportedCalls != 38 || row.ReportedFiles != 13 {
+			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want %d/%d, 38/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles, tc.calls, tc.files)
 		}
 		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener-helper" {
 			t.Fatalf("listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)

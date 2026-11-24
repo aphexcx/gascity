@@ -3334,6 +3334,7 @@ type Agent struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 	// MaxActiveSessions is the agent-level cap on concurrent sessions.
 	// Nil means inherit from rig, then workspace, then unlimited.
+	// A fresh numbered session for a returning bead uses its previous slot on the same agent if that slot is free and within the cap, or the lowest free slot otherwise.
 	// Replaces pool.max.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions is the minimum number of sessions to keep alive.

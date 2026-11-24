@@ -26,11 +26,11 @@ import (
 
 // missingRequiredBuiltinImports reports which required builtin packs are
 // not reachable from the composed config's explicit imports/includes.
-func missingRequiredBuiltinImports(fs fsys.FS, cfg *config.City, cityPath string) []string {
+func missingRequiredBuiltinImports(fs fsys.FS, cfg *config.City, cityPath string, mode ...config.CacheValidationMode) []string {
 	if cfg == nil {
 		return nil
 	}
-	reachable := config.ReachablePackNames(cfg, fs, cityPath)
+	reachable := config.ReachablePackNames(cfg, fs, cityPath, mode...)
 	var missing []string
 	for _, name := range requiredBuiltinPackNames(cityPath) {
 		if !reachable[name] {
@@ -57,7 +57,7 @@ func warnMissingRequiredBuiltinImports(fs fsys.FS, cfg *config.City, tomlPath st
 		return
 	}
 	cityPath := filepath.Dir(tomlPath)
-	missing := missingRequiredBuiltinImports(fs, cfg, cityPath)
+	missing := missingRequiredBuiltinImports(fs, cfg, cityPath, config.CacheValidationQuick)
 	if len(missing) == 0 {
 		return
 	}
@@ -324,7 +324,7 @@ func (c *builtinImportDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	refs := doctorOwnedLegacyRefs(c.cityPath, scan.Refs)
 
 	var missing []string
-	cfg, loadErr := loadCityConfigWithoutBuiltinPackRefresh(c.cityPath, io.Discard)
+	cfg, loadErr := loadPrematerializedCityConfig(fsys.OSFS{}, filepath.Join(c.cityPath, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true}, io.Discard)
 	if loadErr == nil {
 		missing = missingRequiredBuiltinImports(fsys.OSFS{}, cfg, c.cityPath)
 	}
@@ -612,7 +612,7 @@ func (c *builtinImportDoctorCheck) Fix(_ *doctor.CheckContext) error {
 // "everything required and not literally imported" when the config still
 // does not compose.
 func (c *builtinImportDoctorCheck) missingAfterIncludeStrip() []string {
-	if cfg, loadErr := loadCityConfigWithoutBuiltinPackRefresh(c.cityPath, io.Discard); loadErr == nil {
+	if cfg, loadErr := loadPrematerializedCityConfig(fsys.OSFS{}, filepath.Join(c.cityPath, "city.toml"), config.LoadOptions{SkipRevisionSnapshot: true}, io.Discard); loadErr == nil {
 		return missingRequiredBuiltinImports(fsys.OSFS{}, maskLegacySystemPacksRoutes(cfg, c.cityPath), c.cityPath)
 	}
 	declared, err := collectAllImportsFS(c.cityPath)

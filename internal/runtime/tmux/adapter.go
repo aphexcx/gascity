@@ -15,10 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 	"github.com/gastownhall/gascity/internal/runtime/lanectx"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -27,11 +29,12 @@ import (
 
 // Provider adapts [Tmux] to the [runtime.Provider] interface.
 type Provider struct {
-	tm       *Tmux
-	cfg      Config
-	cache    *StateCache
-	mu       sync.Mutex
-	workDirs map[string]string // session name → workDir (for CopyTo)
+	cacheCity string
+	tm        *Tmux
+	cfg       Config
+	cache     *StateCache
+	mu        sync.Mutex
+	workDirs  map[string]string // session name → workDir (for CopyTo)
 }
 
 var instanceTokenReader = rand.Reader
@@ -80,6 +83,10 @@ func (p *Provider) IsCityScoped(cityName string) bool {
 // and runtime readiness polling. Steps are conditional on Config fields;
 // an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
+	ctx = cacheexec.WithCityOrWithoutCity(ctx, p.cacheCity, "standalone tmux launch without loaded city configuration")
 	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
 	if err != nil {
@@ -233,7 +240,8 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	ctx := cacheexec.WithCityOrWithoutCity(context.Background(), p.cacheCity, "standalone tmux live setup without loaded city configuration")
+	runSessionLive(ctx, p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -247,6 +255,10 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
+	ctx = cacheexec.WithCityOrWithoutCity(ctx, p.cacheCity, "standalone tmux relaunch without loaded city configuration")
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
 	// unconfirmed startup nudge on this path was suppressed by
@@ -1378,6 +1390,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.tm.cfg.SocketName != "" {
 		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
 	}
+	cacheexec.GuardCachedExecCommand(cacheexec.WithCityOrWithoutCity(runCtx, "", "standalone tmux setup operation without loaded city configuration"), c)
 	stdout := newCommandOutputTail(setupCommandOutputLimit)
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)

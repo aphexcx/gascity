@@ -10,13 +10,13 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 718
-baseline_files = 211
+baseline_calls = 719
+baseline_files = 212
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-cp3hwi owns this point-in-time source census; gf-jzn owns the tagged private tmux client ownership proof"
+resource_owner = "ga-cp3hwi owns this point-in-time source census; gf-jzn owns the tagged private tmux client ownership proof; gf-6fw9 owns the tagged cross-process import-cache validation proof"
 migration_target = "P0.4a"
 expires = "2026-12-31"
 
@@ -36,13 +36,13 @@ expires = "2026-12-31"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 63
-baseline_files = 23
+baseline_calls = 64
+baseline_files = 24
 reported_calls = 58
 reported_files = 23
 owner_bead = "ga-cp3hwi"
 invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
-resource_owner = "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
+resource_owner = "ga-cp3hwi owns this all-source audit; gf-beal owns the configured runtime capability refusal proof; tagged calls stay Large and receive no Medium exemption"
 migration_target = "P0.4c-listener-helper"
 expires = "2026-12-31"
 
@@ -116,26 +116,26 @@ expires = "2026-12-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 331
-baseline_files = 67
+baseline_calls = 332
+baseline_files = 68
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
 invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
+resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage; gf-beal owns the registry launch refusal server"
 migration_target = "P0.4c"
 expires = "2026-12-31"
 
 [[debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 43
-baseline_files = 13
+baseline_calls = 44
+baseline_files = 14
 reported_calls = 38
 reported_files = 13
 owner_bead = "ga-cp3hwi"
 invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
+resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership; gf-beal owns the configured runtime capability refusal proof"
 migration_target = "P0.4c-listener-helper"
 expires = "2026-12-31"
 
@@ -208,6 +208,28 @@ expires = "2026-12-31"
 # top-level Go test identity. Only matching resources lexically inside that
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestRuntimeRegistryLaunchGuard"
+resources = ["http_test_server"]
+owner_bead = "gf-beal"
+invariant = "every registered runtime refuses dirty imports before backend access"
+resource_owner = "a test-owned loopback server counts unexpected Kubernetes API requests and closes through test cleanup"
+migration_target = "cache-execution-boundary"
+expires = "2026-12-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestConfiguredTextRunnersExplicitCity"
+resources = ["listener_helper"]
+owner_bead = "gf-beal"
+invariant = "every configured runner retains its explicit city outside the city directory"
+resource_owner = "the runtime capability runner owns its temporary listener and must refuse dirty configuration before executing the fixture"
+migration_target = "cache-execution-boundary"
+expires = "2026-12-31"
+
 [[medium]]
 package_dir = "internal/api"
 package_name = "api"

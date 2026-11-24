@@ -102,6 +102,43 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	}
 }
 
+// bdEnvOptions carries a config snapshot only for the one-shot command that
+// loaded it. Other callers retain their own config reads and recovery policy.
+type bdEnvOptions struct {
+	cityConfig *config.City
+	recovery   bdRecoveryLevel
+}
+
+type bdRecoveryLevel uint8
+
+const (
+	bdRecoveryDisabled bdRecoveryLevel = iota
+	// A passthrough can reconcile a running server's port from disk. Starting
+	// provider health or recovery belongs to the lifecycle owners.
+	bdRecoveryFromState
+	bdRecoveryWithProvider
+)
+
+func bdRecoveryFor(allowed bool) bdRecoveryLevel {
+	if allowed {
+		return bdRecoveryWithProvider
+	}
+	return bdRecoveryDisabled
+}
+
+func (opts bdEnvOptions) pinConfig(cityPath string) (*config.City, error) {
+	if opts.cityConfig != nil {
+		return opts.cityConfig, nil
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	// Reading a pin must not rewrite a managed provider's running shim.
+	return loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+}
+
 // workspacePinnedBdBinary resolves the pinned bd executable in the order
 // workspace.env BD_BIN, then workspace.env PATH, then an ambient BD_BIN. It
 // adds one strictness to workspacePinnedBdBinaryOptional: a workspace PATH
@@ -109,28 +146,19 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 // Returning "" means no pin was configured anywhere, and the caller keeps its
 // own ambient executable lookup.
 func workspacePinnedBdBinary(cityPath string) (string, error) {
-	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	return (bdEnvOptions{}).workspacePinnedBdBinary(cityPath)
+}
+
+func (opts bdEnvOptions) workspacePinnedBdBinary(cityPath string) (string, error) {
+	pinned, err := opts.workspacePinnedBdBinaryOptional(cityPath)
 	if err != nil {
 		return "", err
 	}
 	if pinned != "" {
 		return pinned, nil
 	}
-	// This re-stats and re-parses the city.toml that
-	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
-	// workspace.env configured a PATH at all. The duplicate is deliberate: it
-	// keeps the optional resolver's contract to a single answer ("which bd is
-	// pinned") rather than returning an intermediate signal that exists only
-	// for this one strict caller. Both loads use the no-refresh loader, which
-	// omits the managed-provider-shim rewrite the full loader performs, so what
-	// repeats here is a parse and not a side effect.
-	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	} else if err != nil {
-		return "", err
-	}
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
+	cfg, err := opts.pinConfig(cityPath)
+	if err != nil || cfg == nil {
 		return "", err
 	}
 	if _, configured := cfg.Workspace.Env["PATH"]; configured {
@@ -162,20 +190,21 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 // mind when changing either: this function decides whether a pin exists,
 // that one only applies a pin already decided here.
 func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
-	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	} else if err != nil {
+	cfg, err := (bdEnvOptions{}).pinConfig(cityPath)
+	if err != nil || cfg == nil {
 		return "", err
 	}
-	// Resolving an executable is an environment-only operation. Use the
-	// no-refresh loader here: the full loader rewrites the generated managed
-	// provider shim as a config-load side effect, which can race an in-flight
-	// lifecycle operation and replace a caller's already-selected provider
-	// entrypoint.
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
-		return "", err
+	return workspacePinFromConfig(cfg)
+}
+
+func (opts bdEnvOptions) workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
+	if opts.cityConfig == nil {
+		return workspacePinnedBdBinaryOptional(cityPath)
 	}
+	return workspacePinFromConfig(opts.cityConfig)
+}
+
+func workspacePinFromConfig(cfg *config.City) (string, error) {
 	env := expandEnvMap(cfg.Workspace.Env)
 	if raw := strings.TrimSpace(env["BD_BIN"]); raw != "" {
 		if !filepath.IsAbs(raw) {
@@ -256,13 +285,17 @@ var errBdNotOnPath = errors.New("bd not found in PATH")
 // but unresolvable pin is returned verbatim rather than masked as a missing
 // binary.
 func resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
+	return (bdEnvOptions{}).resolveBdBinaryForScope(cityPath, scopeRoot)
+}
+
+func (opts bdEnvOptions) resolveBdBinaryForScope(cityPath, scopeRoot string) (string, error) {
 	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return "", err
 	}
 	usesCityBackend := samePath(cityPath, scopeRoot) || !scopeOverridesCityBackend(cityPath, scopeRoot)
 	if bound || usesCityBackend {
-		pinned, err := workspacePinnedBdBinary(cityPath)
+		pinned, err := opts.workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return "", err
 		}
@@ -636,12 +669,12 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 // library's credential ladder does the rest. Nothing here branches on which
 // backend the binding names, which is why no name has to be registered, no
 // connection shape parsed, and no credential resolved on this side.
-func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+func (opts bdEnvOptions) applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
 	completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot))
 	if err != nil || !completeBinding {
 		return completeBinding, err
 	}
-	hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	hosted, err := opts.selectsHostedCredentials(cityPath)
 	if err != nil {
 		return true, err
 	}
@@ -653,10 +686,10 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if credentialsFile != "" {
 		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 	}
-	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+	if err := opts.applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 		return true, err
 	}
-	bdBin, err := workspacePinnedBdBinary(cityPath)
+	bdBin, err := opts.workspacePinnedBdBinary(cityPath)
 	if err != nil {
 		return true, err
 	}
@@ -669,10 +702,21 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 // the exact hosted beads-workspace storage selector, gc installs its fixed
 // bridge to the credential-provider protocol.
 func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
+	return (bdEnvOptions{}).applyHostedBeadsCredentialEnv(env, cityPath)
+}
+
+func (opts bdEnvOptions) selectsHostedCredentials(cityPath string) (bool, error) {
+	if opts.cityConfig != nil {
+		return configSelectsHostedBeadsCredentialProvider(opts.cityConfig), nil
+	}
+	return citySelectsHostedBeadsCredentialProvider(cityPath)
+}
+
+func (opts bdEnvOptions) applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error {
 	if env == nil {
 		return nil
 	}
-	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	selected, err := opts.selectsHostedCredentials(cityPath)
 	if err != nil {
 		return err
 	}
@@ -787,7 +831,7 @@ func projectCredentialProviderEnv(env map[string]string) {
 // (TestCityConfigLoadersDeclineTheRevisionSnapshot) deliberately scoped itself
 // to that file and left the other Provenance-discarding call sites — this one
 // among them — for later.
-var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick}
 
 // hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
 // per city.
@@ -917,6 +961,10 @@ func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
 // (true, err) on a known backend that failed to project; caller MUST
 // surface this error rather than retrying.
 func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
+	return (bdEnvOptions{}).applyCanonicalScopeBackendEnv(env, cityPath, scopeRoot)
+}
+
+func (opts bdEnvOptions) applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot string) (bool, error) {
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return false, err
@@ -924,7 +972,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	if resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false, nil
 	}
-	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, scopeRoot); err != nil {
+	if completeBinding, err := opts.applyCompleteNonDoltStorageBindingEnv(env, cityPath, scopeRoot); err != nil {
 		return true, err
 	} else if completeBinding {
 		return true, nil
@@ -934,7 +982,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		return true, metaErr
 	}
 	if resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity && meta.Backend == "" {
-		if inherited, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+		if inherited, err := opts.applyCityStorageBindingEnv(env, cityPath); err != nil {
 			return true, err
 		} else if inherited {
 			return true, nil
@@ -1001,7 +1049,11 @@ func unprojectableBackendError(backend, scopeRoot string) error {
 // environment. Returns (false, nil) when the city names a backend the caller's
 // Dolt path handles.
 func applyCityStorageBindingEnv(env map[string]string, cityPath string) (bool, error) {
-	if completeBinding, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
+	return (bdEnvOptions{}).applyCityStorageBindingEnv(env, cityPath)
+}
+
+func (opts bdEnvOptions) applyCityStorageBindingEnv(env map[string]string, cityPath string) (bool, error) {
+	if completeBinding, err := opts.applyCompleteNonDoltStorageBindingEnv(env, cityPath, cityPath); err != nil {
 		return true, err
 	} else if completeBinding {
 		return true, nil
@@ -1415,6 +1467,10 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 }
 
 func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, allowRecovery bool) (contract.DoltConnectionTarget, bool, error) {
+	return bdRecoveryFor(allowRecovery).cityDoltTarget(ctx, cityPath)
+}
+
+func (level bdRecoveryLevel) cityDoltTarget(ctx context.Context, cityPath string) (contract.DoltConnectionTarget, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.DoltConnectionTarget{}, false, err
 	}
@@ -1427,7 +1483,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 			return recoveryPort
 		}
 		recoveryChecked = true
-		port, err := currentPublishedOrRecoveredManagedDoltPort(cityPath, allowRecovery)
+		port, err := currentPublishedOrRecoveredManagedDoltPort(cityPath, level != bdRecoveryDisabled)
 		if err != nil {
 			recoveryErr = err
 			return ""
@@ -1440,7 +1496,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		recoveryPort = ""
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
-		if !allowRecovery || !contract.IsManagedRuntimeUnavailable(err) {
+		if level == bdRecoveryDisabled || !contract.IsManagedRuntimeUnavailable(err) {
 			return contract.DoltConnectionTarget{}, false, err
 		}
 		if port := recoveredManagedDoltPort(); port != "" {
@@ -1463,7 +1519,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
-	if allowRecovery {
+	if level == bdRecoveryWithProvider {
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
@@ -1479,7 +1535,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	// case where currentPublishedOrRecoveredManagedDoltPort encounters a publish
 	// failure (e.g., write permission error, post-publish re-validation failure)
 	// while the server is still accessible.
-	if allowRecovery {
+	if level != bdRecoveryDisabled {
 		if owned, _ := managedDoltLifecycleOwned(cityPath); owned {
 			if port := currentResolvableManagedDoltPort(cityPath); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
@@ -1709,7 +1765,11 @@ func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecov
 }
 
 func applyResolvedCityDoltEnvContext(ctx context.Context, env map[string]string, cityPath string, allowRecovery bool) error {
-	target, ok, err := resolvedRuntimeCityDoltTargetContext(ctx, cityPath, allowRecovery)
+	return bdRecoveryFor(allowRecovery).applyCityDoltEnv(ctx, env, cityPath)
+}
+
+func (level bdRecoveryLevel) applyCityDoltEnv(ctx context.Context, env map[string]string, cityPath string) error {
+	target, ok, err := level.cityDoltTarget(ctx, cityPath)
 	if err != nil {
 		return err
 	}
@@ -1766,19 +1826,23 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 }
 
 func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
-	if usedCanonical, err := applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).applyResolvedRigDoltEnv(ctx, env, cityPath, rigPath, explicitRig)
+}
+
+func (opts bdEnvOptions) applyResolvedRigDoltEnv(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig) error {
+	if usedCanonical, err := opts.applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
 		if errors.As(err, &invalid) {
 			fallback, fallbackErr := contract.AllowsInvalidInheritedCityFallback(fsys.OSFS{}, cityPath, rigPath)
 			if fallbackErr == nil && fallback {
-				return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+				return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 			}
 		}
 		if rigAllowsResolvedCityTargetFallback(cityPath, rigPath) {
-			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+			return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 		}
-		if allowRecovery && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
-			return applyResolvedCityDoltEnvContext(ctx, env, cityPath, true)
+		if opts.recovery != bdRecoveryDisabled && contract.IsManagedRuntimeUnavailable(err) && rigAllowsManagedCityRuntimeRecovery(cityPath, rigPath) {
+			return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 		}
 		return err
 	} else if usedCanonical {
@@ -1793,7 +1857,7 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 	}
 	// Rigs without local endpoint authority inherit the resolved city target.
 	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
-	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+	return opts.recovery.applyCityDoltEnv(ctx, env, cityPath)
 }
 
 // applyLegacyRigExternalTarget projects a legacy config.Rig{DoltHost,DoltPort}
@@ -1847,11 +1911,15 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).rigEnv(ctx, cityPath, cfg, rigPath)
+}
+
+func (opts bdEnvOptions) rigEnv(ctx context.Context, cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
 	if ok {
 		return cached, nil
 	}
-	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
+	env, cityErr := opts.cityEnv(ctx, cityPath)
 	// The city projection carries the shared-server opt-out when the CITY is
 	// proxied. It belongs to the rig only if the rig is proxied too (re-added
 	// below); a direct or external rig keeps bd's own resolution.
@@ -1892,7 +1960,7 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), nil
 	}
-	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
+	if err := opts.applyResolvedRigDoltEnv(ctx, env, cityPath, rigPath, explicitRig); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
@@ -1996,12 +2064,16 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
+	return (bdEnvOptions{recovery: bdRecoveryFor(allowRecovery)}).cityEnv(ctx, cityPath)
+}
+
+func (opts bdEnvOptions) cityEnv(ctx context.Context, cityPath string) (map[string]string, error) {
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath)
 	if ok {
 		return cached, nil
 	}
 	env := cityRuntimeEnvMapForCity(cityPath)
-	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+	if err := opts.applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return env, err
 	}
 	pinBdStoreRoot(env, cityPath)
@@ -2046,7 +2118,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
-	if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+	if err := opts.applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
 		return env, err
 	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {
@@ -2070,14 +2142,14 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 		}
 		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil
 	}
-	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+	if bound, err := opts.applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		return env, err
 	} else if bound {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery); err != nil {
+	if err := opts.recovery.applyCityDoltEnv(ctx, env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
@@ -2175,10 +2247,14 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 // scripts must use the same schema-compatible executable before any worker
 // session exists.
 func applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error {
+	return (bdEnvOptions{}).applyWorkspacePinnedBdBinary(env, cityPath)
+}
+
+func (opts bdEnvOptions) applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error {
 	if env == nil {
 		return nil
 	}
-	pinned, err := workspacePinnedBdBinaryOptional(cityPath)
+	pinned, err := opts.workspacePinnedBdBinaryOptional(cityPath)
 	if err != nil {
 		return err
 	}

@@ -798,6 +798,9 @@ func stubCachedPackGit(t *testing.T) {
 	t.Helper()
 	prev := runGit
 	runGit = func(dir string, args ...string) (string, error) {
+		if len(args) == 2 && args[0] == "update-index" && args[1] == "--refresh" {
+			return "", nil
+		}
 		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
 			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
 			if err != nil {

@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime/rppcheck"
 	"github.com/spf13/cobra"
@@ -57,7 +60,9 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 			if note != "" {
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}
+			cityPath, _ := resolveCity() // explicit executable checks can run outside a city
 			res, err := rppcheck.Run(ctx, target, rppcheck.Options{
+				CityPath:     cityPath,
 				Command:      command,
 				SessionName:  sessionName,
 				RequireNudge: promptDelivery == config.PromptDeliveryNudgeFallback,
@@ -107,10 +112,24 @@ The protocol contract is docs/reference/exec-session-provider.md.`,
 // declared, the argument passes through unchanged (the checker
 // PATH-resolves bare names like the exec provider does).
 func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, promptDelivery string) {
+	defer func() {
+		if path, err := exec.LookPath(target); err == nil {
+			if absolute, err := filepath.Abs(path); err == nil && !cacheexec.HasOwner(absolute) {
+				config.RegisterHistoricalRemoteCacheForPath(absolute)
+			}
+		}
+	}()
 	if strings.Contains(arg, "/") {
+		// Best-effort lock loading leaves historical recovery available on errors.
+		if cityPath, err := resolveCity(); err == nil && config.IsRepoCachePath(arg) {
+			_, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		}
 		return arg, "", ""
 	}
 	if _, err := os.Stat(arg); err == nil {
+		if cityPath, err := resolveCity(); err == nil && runtimeCheckPathIsCached(arg) {
+			_, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		}
 		return arg, "", ""
 	}
 	cityPath, err := resolveCity()
@@ -127,4 +146,11 @@ func resolveRuntimeCheckTarget(arg string, stderr io.Writer) (target, note, prom
 		return arg, "", ""
 	}
 	return rt.Command, fmt.Sprintf("resolved runtime %q from pack %q: %s", arg, rt.PackName, rt.Command), rt.PromptDelivery
+}
+
+func runtimeCheckPathIsCached(path string) bool {
+	if executable, err := exec.LookPath(path); err == nil {
+		path = executable
+	}
+	return config.IsRepoCachePath(path)
 }

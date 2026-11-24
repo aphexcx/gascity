@@ -309,8 +309,11 @@ gc --context a mail send mayor -s "Re: hello from A" -m "…"
 ```
 
 The sender defaults to `<local city>/<identity>` (`--from` overrides it); `--all`
-and `--notify` are refused for a remote city. gc has no cross-city addressing
-yet, so answer with `gc --context <city> mail send`, not a bare `gc mail reply`.
+and `--notify` are refused for a remote city. On B, a bare `gc mail reply <id>`
+answers A through B's context whose `city` is `a`. With no such context, or
+with two, it exits 1 and names the `gc --context <city> mail send` form. The
+From alone picks the city, so the answer goes to the city the From names,
+which may not be the city the mail came from.
 `gc --context <peer> mail send` makes exactly one request:
 `POST /v0/city/{peer}/mail`. It performs no city lookup, version request, session
 resolution, or follow-up read, so the existing `grant_command` works with both

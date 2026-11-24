@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -764,7 +765,7 @@ var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeSessionList dispatches `session list` to the supervisor API when a
 // controller is up; otherwise falls back to the local iterator. Emits
 // exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+func routeSessionList(cityPath string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]api.SessionView]
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
@@ -778,7 +779,9 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 			return err
 		},
 		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
-		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
+		func() int {
+			return doSessionListFallback(cityPath, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+		},
 	)
 }
 
@@ -952,12 +955,13 @@ func sortSessionsCreatedDesc(sessions []session.Info) {
 }
 
 // doSessionListFallback is the direct-bd path for "gc session list".
-func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+func doSessionListFallback(cityPath, stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, code := openCityStore(storeStderr, "gc session list")
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	store, code := openResolvedCityStore(cityPath, cfg, storeStderr, "gc session list")
 	if store == nil {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", code)
@@ -965,7 +969,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		return code
 	}
 
-	providerCtx := loadSessionProviderContext()
+	providerCtx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	// Every store consumer here is session-class (the ready gc:wait set, the
 	// session-bead list, and the session catalog), so route the whole flow through
 	// the session coordination-class store for relocation-safety.
@@ -1056,7 +1060,6 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
 	}
 	readyWaitSet := waitRes.set
-	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
 	// Build attachment cache. Active sessions already have Info.Attached

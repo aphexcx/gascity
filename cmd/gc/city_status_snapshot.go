@@ -135,7 +135,7 @@ func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Prov
 	if providerName == "" {
 		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
 	}
-	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+	p, err := newEventsProviderForNameWithConfig(cityPath, providerName, eventsPath, stderr, config.EventsConfig{})
 	if err != nil {
 		return nil
 	}

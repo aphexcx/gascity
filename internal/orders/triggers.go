@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
@@ -72,6 +73,16 @@ const ConditionCheckTimedOutMarker = "timed out"
 // non-event triggers.
 func CheckTrigger(a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provider, cursorFn CursorFunc) TriggerResult {
 	return CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, TriggerOptions{})
+}
+
+// CheckTriggerForCity binds configured condition text to the caller's city.
+func CheckTriggerForCity(city string, a Order, now time.Time, lastRunFn LastRunFunc, ep events.Provider, cursorFn CursorFunc, opts TriggerOptions) TriggerResult {
+	ctx := opts.ConditionCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opts.ConditionCtx = cacheexec.WithCity(ctx, city)
+	return CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts)
 }
 
 // CheckTriggerWithOptions evaluates an order trigger using explicit execution
@@ -306,6 +317,9 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	if parent == nil {
 		parent = context.Background()
 	}
+	if !cacheexec.HasScope(parent) {
+		parent = cacheexec.WithoutCity(parent, "standalone condition evaluator without loaded city configuration")
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
@@ -317,6 +331,7 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 		cmd.Dir = opts.ConditionDir
 	}
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
+	cacheexec.GuardConfiguredExecCommand(ctx, cmd)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)

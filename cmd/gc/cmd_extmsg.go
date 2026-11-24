@@ -71,7 +71,7 @@ func (f *extMsgConversationFlags) conversationRef(cityPath string) (extmsg.Conve
 	}
 	scope := strings.TrimSpace(f.scopeID)
 	if scope == "" {
-		cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), skipRevisionSnapshot)
 		if err != nil {
 			return extmsg.ConversationRef{}, fmt.Errorf("resolving default scope from city config: %w", err)
 		}

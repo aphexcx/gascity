@@ -15,6 +15,14 @@ func TestRenderPeek(t *testing.T) {
 		name, input, suggestion, kept string
 	}{
 		{"suggestion", box("\x1b[2mTry the next step\x1b[0m"), "Try the next step", "❯\u00a0"},
+		{"cursor placeholder", box("\x1b[7mT\x1b[0;2mry the next step\x1b[0m"), "Try the next step", "❯\u00a0"},
+		{"cursor on draft", box("\x1b[7mR\x1b[27mun the checks"), "", "Run the checks"},
+		{"unicode cursor placeholder", box("\x1b[7mÉ\x1b[0;2mcrivez un message\x1b[0m"), "Écrivez un message", "❯\u00a0"},
+		{"wrapped cursor placeholder", box("\x1b[7mT\x1b[0;2mry\n  another task\x1b[0m"), "Try\n  another task", "❯\u00a0"},
+		{"typed continuation", box("\x1b[7mT\x1b[0;2mry\x1b[0m\n  actual input"), "ry", "T\n  actual input"},
+		{"inverse typed suffix", box("\x1b[7mT\x1b[27myped\x1b[2m completion\x1b[0m"), "completion", "Typed"},
+		{"color is not inverse", box("\x1b[38;5;7mT\x1b[0;2myped completion\x1b[0m"), "yped completion", "❯\u00a0T"},
+		{"unframed cursor", prompt + "\x1b[7mT\x1b[0;2mext\x1b[0m", "", "Text"},
 		{"live capture", frame + "\x1b[39m❯\u00a0\x1b[2mkeep going\x1b[0m\n" + frame, "keep going", "❯\u00a0"},
 		{"typed", box("Run the checks"), "", "Run the checks"},
 		{"status", "\x1b[2mWorking\x1b[0m\n" + box("typed"), "", "Working"},

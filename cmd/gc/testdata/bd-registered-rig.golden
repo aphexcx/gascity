@@ -1,0 +1,38 @@
+{
+  "Cwd": "{root}/repo",
+  "Args": [
+    "{root}/bin/bd",
+    "version"
+  ],
+  "Env": [
+    "BD_BACKUP_ENABLED=false",
+    "BD_BIN=",
+    "BD_DOLT_SYNC_CLI_REMOTES=false",
+    "BD_EXPORT_AUTO=false",
+    "BD_ROUTING_MODE=off",
+    "BEADS_BACKEND=doltlite",
+    "BEADS_BACKUP_ENABLED=false",
+    "BEADS_DIR={root}/repo/.beads",
+    "BEADS_DOLT_AUTO_START=0",
+    "BEADS_DOLT_SERVER_PORT=",
+    "BEADS_DOLT_SERVER_TLS=",
+    "BEADS_DOLT_SYNC_CLI_REMOTES=false",
+    "BEADS_ROUTING_MODE=off",
+    "GC_BEADS_BACKEND=doltlite",
+    "GC_BEADS_PREFIX=repo",
+    "GC_BIN={gc}",
+    "GC_CITY={root}/city",
+    "GC_CITY_PATH={root}/city",
+    "GC_CITY_RUNTIME_DIR={root}/city/.gc/runtime",
+    "GC_CONTROL_DISPATCHER_TRACE_DEFAULT={root}/city/.gc/runtime/control-dispatcher-trace.log",
+    "GC_HOME={root}/gc-home",
+    "GC_RIG=repo",
+    "GC_RIG_ROOT={root}/repo",
+    "GC_STORE_ROOT={root}/repo",
+    "GC_STORE_SCOPE=rig",
+    "GC_TEST_BD_CAPTURE_FILE={root}/capture",
+    "HOME={root}",
+    "PATH={root}/bin:/usr/bin:/bin:/usr/sbin",
+    "PWD={root}/repo"
+  ]
+}

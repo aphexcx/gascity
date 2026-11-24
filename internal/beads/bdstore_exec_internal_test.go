@@ -14,11 +14,56 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/cacheexec"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
+
+func TestCachedBDExecutionsRefusedBeforeSideEffects(t *testing.T) {
+	for _, operation := range []string{"runner", "purge", "version", "local-runner"} {
+		t.Run(operation, func(t *testing.T) {
+			cacheexec.Reset()
+			t.Cleanup(cacheexec.Reset)
+			local, cached := t.TempDir(), t.TempDir()
+			marker := filepath.Join(local, "executed")
+			binaryDir := cached
+			if operation == "local-runner" {
+				binaryDir = local
+			}
+			binary := filepath.Join(binaryDir, "bd")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf executed > '"+marker+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binaryDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			dirty := errors.New("dirty cached bd executable")
+			scans := 0
+			cacheexec.Register(cached, func(context.Context) error { scans++; return dirty })
+			var err error
+			switch operation {
+			case "runner", "local-runner":
+				_, err = ExecCommandRunnerWithEnvContext(t.Context(), map[string]string{"BD_BIN": binary})(local, "bd", "list", "--json")
+			case "purge":
+				_, err = execPurge(local, os.Environ(), []string{"purge", "--json"})
+			case "version":
+				_, err = probeBinaryVersion("bd")
+			}
+			if operation == "local-runner" {
+				if err != nil || scans != 0 {
+					t.Fatalf("local bd must not scan imports: error=%v scans=%d", err, scans)
+				}
+				return
+			}
+			if !errors.Is(err, dirty) {
+				t.Errorf("cached bd was not refused: %v", err)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Errorf("cached bd ran before validation: %v", err)
+			}
+		})
+	}
+}
 
 // TestExecCommandRunnerTimesOut verifies the runner returns a "timed
 // out" error when the command exceeds bdCommandTimeout. No race: we

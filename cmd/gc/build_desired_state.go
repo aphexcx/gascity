@@ -226,6 +226,7 @@ type defaultScaleCheckTarget struct {
 type scaleCheckDemand struct {
 	Count          int
 	WorkBeadIDs    []string
+	PreferredSlots map[string]int
 	Titles         map[string]string
 	Packs          map[string]string
 	Workspaces     map[string]string
@@ -287,6 +288,7 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 }
 
 func evaluatePendingPools(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
@@ -320,9 +322,9 @@ func evaluatePendingPools(
 			var d int
 			var err error
 			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, scaleCheckRunnerForCity(cityPath))
 			} else {
-				d, err = evaluatePool(agentName, sp, dir, probeEnv, shellScaleCheck)
+				d, err = evaluatePool(agentName, sp, dir, probeEnv, scaleCheckRunnerForCity(cityPath))
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
@@ -366,12 +368,13 @@ func evaluatePendingPools(
 // count is additive new demand; legacy no-store callers still use desired
 // counts.
 func evaluatePendingPoolsMap(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (map[string]int, map[string]bool) {
-	counts, partials := evaluatePendingPools(cfg, pendingPools, stderr, trace)
+	counts, partials := evaluatePendingPools(cityPath, cfg, pendingPools, stderr, trace)
 	m := make(map[string]int, len(counts))
 	var partialTemplates map[string]bool
 	for j, pw := range pendingPools {
@@ -913,7 +916,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			"beads": len(unassignedRoutedBeads),
 		})
 		subPhaseStart = time.Now()
-		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
@@ -1020,7 +1023,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		}
 	} else {
 		// No store — use scale_check counts directly.
-		scaleCheckCounts, _ = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		scaleCheckCounts, _ = evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr, trace)
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
 		for _, pw := range pendingPools {
 			cfgAgent := &cfg.Agents[pw.agentIdx]
@@ -2075,6 +2078,12 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			entry := demand[template]
 			entry.Count++
 			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+			if slot := lastClaimedPoolSlot(b, template); slot > 0 {
+				if entry.PreferredSlots == nil {
+					entry.PreferredSlots = make(map[string]int)
+				}
+				entry.PreferredSlots[b.ID] = slot
+			}
 			if entry.Titles == nil {
 				entry.Titles = make(map[string]string)
 			}
@@ -2130,6 +2139,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.StoreRefs == nil && len(incoming.StoreRefs) > 0 {
 		existing.StoreRefs = make(map[string]string, len(incoming.StoreRefs))
 	}
+	if existing.PreferredSlots == nil && len(incoming.PreferredSlots) > 0 {
+		existing.PreferredSlots = make(map[string]int, len(incoming.PreferredSlots))
+	}
 	if existing.Titles == nil && len(incoming.Titles) > 0 {
 		existing.Titles = make(map[string]string, len(incoming.Titles))
 	}
@@ -2153,6 +2165,9 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 			continue
 		}
 		existing.WorkBeadIDs = append(existing.WorkBeadIDs, id)
+		if slot := incoming.PreferredSlots[id]; slot > 0 {
+			existing.PreferredSlots[id] = slot
+		}
 		if incoming.Titles != nil {
 			existing.Titles[id] = incoming.Titles[id]
 		}
@@ -4545,7 +4560,7 @@ func selectOrPlanPoolSessionBead(
 	if !bp.hasCompleteSessionSnapshot() {
 		return session.Info{}, 0, nil, errPoolSessionCreatePartial
 	}
-	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
+	slot, err := claimFreshPoolSlotWithPreference(bp, cfgAgent, usedSlots, request.PreferredSlot)
 	if err != nil {
 		return session.Info{}, 0, nil, err
 	}
@@ -4732,12 +4747,17 @@ func poolAliasCollisionFromInfos(infos []session.Info, alias string) error {
 	return nil
 }
 
-// claimFreshPoolSlotInfo selects the lowest free in-cap concrete slot for a
-// fresh pool row. Snapshot holders contribute to a local occupied union only:
-// adding them to the shared request-order usedSlots map would let an anonymous
+// claimFreshPoolSlotInfo selects a fresh slot for a request without a work bead.
+func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+	return claimFreshPoolSlotWithPreference(bp, cfgAgent, usedSlots, 0)
+}
+
+// claimFreshPoolSlotWithPreference selects the work bead's last slot when free
+// and within capacity, falling back to the lowest free slot. Snapshot holders
+// contribute only to local occupancy. Adding them to usedSlots would let an anonymous
 // request processed first block a later concrete resume of that same holder.
 // Only the newly selected slot is published to usedSlots.
-func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool) (int, error) {
+func claimFreshPoolSlotWithPreference(bp *agentBuildParams, cfgAgent *config.Agent, usedSlots map[int]bool, preferred int) (int, error) {
 	upper, unlimited, canonical, err := freshPoolSlotUpperBound(cfgAgent)
 	if err != nil {
 		return 0, err
@@ -4779,6 +4799,10 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 			}
 			occupied[slot] = true
 		}
+	}
+	if preferred > 0 && (unlimited || preferred <= upper) && !occupied[preferred] {
+		usedSlots[preferred] = true
+		return preferred, nil
 	}
 	for slot := 1; unlimited || slot <= upper; slot++ {
 		if occupied[slot] {

@@ -420,12 +420,17 @@ lint-fix:
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
 lint-changed: $(GOLANGCI_LINT)
 	@export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"; \
+	files= dirs=; \
 	case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
 			;; \
 		tracked) \
-			files="$$(git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go')"; \
+			if [ -n "$$GC_PREPUSH_PACKAGE_DIRS" ]; then \
+				dirs="$$(cat "$$GC_PREPUSH_PACKAGE_DIRS")" || exit $$?; \
+			else \
+				files="$$(git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go')" || exit $$?; \
+			fi; \
 			;; \
 		worktree) \
 			files="$$( \
@@ -439,16 +444,28 @@ lint-changed: $(GOLANGCI_LINT)
 			exit 2; \
 			;; \
 	esac; \
-	if [ -z "$$files" ]; then \
+	if [ -n "$$files" ]; then \
+		dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
+	fi; \
+	if [ -z "$$dirs" ]; then \
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	dirs="$$(printf '%s\n' "$$files" | sed '/^$$/d' | sort -u | while IFS= read -r file; do dirname "$$file"; done | sort -u)"; \
 	pkgs="$$(for dir in $$dirs; do \
 		if [ "$$dir" = "." ]; then pkg="."; else pkg="./$$dir"; fi; \
-		if ! go list "$$pkg" >/dev/null; then \
-			echo "lint-changed: unable to load $$pkg" >&2; \
-			exit 1; \
+		if message=$$(go list "$$pkg" 2>&1 >/dev/null); then \
+			[ -z "$$message" ] || printf '%s\n' "$$message" >&2; \
+		else \
+			rc=$$?; \
+			if [ -n "$$GC_PREPUSH_TAGGED_PACKAGES" ]; then \
+				tagged=$$(go list -e -f 'package {{.ImportPath}}: build constraints exclude all Go files in {{.Dir}}' "$$pkg") || exit $$?; \
+				if [ "$$message" = "$$tagged" ]; then \
+					printf '%s\n' "$$pkg" >> "$$GC_PREPUSH_TAGGED_PACKAGES" || exit $$?; \
+					continue; \
+				fi; \
+			fi; \
+			printf '%s\n' "$$message" "lint-changed: unable to load $$pkg" >&2; \
+			exit "$$rc"; \
 		fi; \
 		printf '%s\n' "$$pkg"; \
 	done)" || exit $$?; \
@@ -1264,7 +1281,7 @@ help:
 ## check-inventories: check BUILD generation, integration shard routing, and the resource census without running test shards
 .PHONY: check-inventories
 check-inventories:
-	@$(TEST_ENV) python3 scripts/check-inventories.py
+	@$(TEST_ENV) GC_CHECK_INVENTORIES_TIMEOUT='$(subst ','"'"',$(value GC_CHECK_INVENTORIES_TIMEOUT))' python3 scripts/check-inventories.py
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
 ## source tree used by whole-repo scan guards. Run after adding packages.

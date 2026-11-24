@@ -21,6 +21,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/cachevalidation"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
@@ -60,6 +61,7 @@ func (c *Config) outputBufferLines() int {
 
 // Provider manages agent sessions using the Agent Client Protocol.
 type Provider struct {
+	cacheCity     string
 	mu            sync.Mutex
 	dir           string                  // socket/meta file directory
 	conns         map[string]*sessionConn // in-process tracking
@@ -118,6 +120,9 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // optionally sends the initial nudge. Returns an error if a session with
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := cachevalidation.ValidateLaunchForCity(ctx, cfg, p.cacheCity); err != nil {
+		return err
+	}
 	p.mu.Lock()
 
 	// Check in-memory tracking first.

@@ -53,9 +53,31 @@ assert_contains() {
     else record_fail "$name" "missing '$needle' in: $haystack"; fi
 }
 
-WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")"
-WORK="$(cd "$WORK" && pwd -P)"
-trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-gate-test.XXXXXX")" || exit 1
+[[ -n "$WORK" ]] || exit 1
+WORK="$(cd "$WORK" && pwd -P)" || exit 1
+cleanup() {
+    local pid
+    local children
+    children=$(jobs -p)
+    for pid in $children; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    # Let each supervised wrapper drain its own group before removing FIFOs.
+    wait
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# The linked-repository fixture writes local Git configuration and a commit.
+# Scope Git to its own repositories even when invoked directly from a hook.
+export GIT_CEILING_DIRECTORIES="$WORK"
+repo_vars=$(git rev-parse --local-env-vars) || exit 1
+while IFS= read -r name; do unset "$name"; done <<< "$repo_vars"
+export HOME="$WORK/home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+mkdir -p "$HOME" || exit 1
 SLOTS="$WORK/gate-slots"
 
 # ---------------- acquire / hold (two slots) ----------------
@@ -411,7 +433,7 @@ assert_eq "slots_dir.under_city_root" "$SLOTS_FROM_CITY" "$CITY_ENV/.gc/gate-slo
 
 NOCITY="$WORK/no-city-repo"
 mkdir -p "$NOCITY"
-(cd "$NOCITY" && git init -q .) 2>/dev/null || true
+git -C "$NOCITY" init -q || { echo "push-gate-lock: git init failed for no-city-repo" >&2; exit 1; }
 SLOTS_FALLBACK="$(cd "$NOCITY" && GC_CITY_PATH="" GC_CITY="" GC_CITY_ROOT="" HOME="$WORK/unrelated-home" push_gate_slots_dir)"
 assert_eq "slots_dir.falls_back_to_repo_relative" "$SLOTS_FALLBACK" "$NOCITY/.git/gate-slots"
 
@@ -419,7 +441,7 @@ LINKED_REPO="$WORK/linked-repo"
 LINKED_A="$WORK/linked-a"
 LINKED_B="$WORK/linked-b"
 mkdir -p "$LINKED_REPO"
-git -C "$LINKED_REPO" init -q
+git -C "$LINKED_REPO" init -q || { echo "push-gate-lock: git init failed for linked-repo" >&2; exit 1; }
 git -C "$LINKED_REPO" config user.name "Push Gate Test"
 git -C "$LINKED_REPO" config user.email "push-gate-test@example.invalid"
 : >"$LINKED_REPO/tracked"

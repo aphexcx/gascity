@@ -37,7 +37,13 @@ var (
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.
 func NewSeamBackedWithConfig(cfg Config) runtime.Provider {
+	return NewSeamBackedWithConfigForCity(cfg, "")
+}
+
+// NewSeamBackedWithConfigForCity binds launch validation to the selected city.
+func NewSeamBackedWithConfigForCity(cfg Config, city string) runtime.Provider {
 	raw := NewProviderWithConfig(cfg)
+	raw.cacheCity = city
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: raw, seams: runtime.NewProviderFromSeams(rt, tp)}
 }

@@ -30,9 +30,9 @@ package main
 // their command loaded, one passes nil because it only ever had a path, and two
 // pass whatever a load that ignores its own error returned. Where a city serves
 // its coordination classes from is a property of the CITY, not of the caller's
-// snapshot, so this file reads city.toml once and answers from that — otherwise
-// the store a migrated city serves would depend on which call site got there
-// first.
+// snapshot, so this file normally reads city.toml once. The bd passthrough
+// has just loaded that same city's full config and can supply it when first
+// opening its by-ID door. Both paths fill the same memo through the boot gate.
 //
 // # A refused city gets a store that refuses
 //
@@ -70,6 +70,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -110,11 +111,21 @@ var (
 // A city this build cannot serve gets routes whose stores refuse. See
 // refusedClassStore.
 func cliStorageRoutes(cityPath string) *storageRoutes {
+	return cliStorageRoutesWithConfig(cityPath, nil)
+}
+
+func cliStorageRoutesWithConfig(cityPath string, cfg *config.City) *storageRoutes {
 	if cityPath == "" {
 		return nil
 	}
 	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = resolveCLIStorageRoutes(cityPath) })
+	entry.once.Do(func() {
+		if cfg == nil {
+			entry.routes = resolveCLIStorageRoutes(cityPath)
+		} else {
+			entry.routes = cliStorageRoutesFromConfig(cityPath, cfg)
+		}
+	})
 	return entry.routes
 }
 
@@ -125,7 +136,9 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // 10 s of an 11 s `gc ready` once the bd-env loads were memoized (cherry,
 // 2026-09-23). Same rule as cmd_agent.go and the bd_env.go probe (ga-s3cnmy);
 // TestCLIStorageRoutesDeclineTheRevisionSnapshot pins it.
-var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true, RemoteCacheValidation: config.CacheValidationQuick}
+
+var cliStorageConfigReads atomic.Int64
 
 // resolveCLIStorageRoutes takes the verdict for one city, exactly once, and
 // turns each of its three arms into routes: nil for a city that relocates
@@ -153,10 +166,15 @@ var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
+	cliStorageConfigReads.Add(1)
 	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
 	}
+	return cliStorageRoutesFromConfig(cityPath, cfg)
+}
+
+func cliStorageRoutesFromConfig(cityPath string, cfg *config.City) *storageRoutes {
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
 		// The one and only place a class store is given an emit target. A

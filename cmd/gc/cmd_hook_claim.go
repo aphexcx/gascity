@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/federation"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const hookClaimCommandName = "hook"
@@ -238,12 +239,9 @@ type hookClaimOps struct {
 	// detached HEAD) omits the branch key — the session back-reference is still
 	// stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
-	// ResolveSessionWorkDir returns the checkout the CLAIMING session is running
-	// in, used only as the fallback when the bead records no checkout of its own
-	// (gc-2n4c: a pool-routed bead cannot record one, because no slot is chosen
-	// until this claim). Empty result means nothing is knowable and nothing is
-	// stamped.
-	ResolveSessionWorkDir hookResolveSessionWorkDirFunc
+	// ResolveSession reads the exact claiming row for its numbered pool slot
+	// and, when the work bead has no checkout of its own, its work directory.
+	ResolveSession func(sessionID string) session.Info
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -322,18 +320,17 @@ type hookClaimOps struct {
 }
 
 type (
-	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc              func(io.Writer) error
-	hookDrainPendingFunc          func(sessionID string) (bool, error)
-	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
-	hookResolveSessionWorkDirFunc func(sessionID string) string
-	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc     func(sessionID, beadID string) error
-	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc           func(io.Writer) error
+	hookDrainPendingFunc       func(sessionID string) (bool, error)
+	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc  func(tree hookClaimWorkTree) string
+	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc  func(sessionID, beadID string) error
+	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
 	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
 	// the lease and, if so, the previous owner.
@@ -622,8 +619,8 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
-	if ops.ResolveSessionWorkDir == nil {
-		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
+	if ops.ResolveSession == nil {
+		ops.ResolveSession = hookResolveClaimSession
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
@@ -1969,6 +1966,14 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	sessionID := hookClaimSessionID(opts.Env)
 	isControl := beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
 
+	var claimSession session.Info
+	if sessionID != "" && !isControl && ops.ResolveSession != nil {
+		claimSession = ops.ResolveSession(sessionID)
+		if record := claimedPoolSlotRecord(claimSession); record != "" && record != bead.Metadata[beadmeta.LastPoolSlotMetadataKey] {
+			patch[beadmeta.LastPoolSlotMetadataKey] = record
+		}
+	}
+
 	storeHead := hookClaimResolveStoreHead(dir)
 	trees := hookClaimWorkerTrees(bead, storeHead)
 	// A pool-routed bead records no checkout at all, so fall back to the checkout
@@ -1999,9 +2004,8 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	// an empty path, so INTRODUCING a path is what first exposes a half-published
 	// bead to its missing-key error. A bead carrying some but not all of the eight
 	// ownership keys would go from spawning unmanaged to being starved outright.
-	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl &&
-		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) && ops.ResolveSessionWorkDir != nil {
-		if sessionDir := strings.TrimSpace(ops.ResolveSessionWorkDir(sessionID)); sessionDir != "" {
+	if hookClaimRecordsNoWorkDir(bead) && hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
+		if sessionDir := sessionStampableWorkDir(claimSession); sessionDir != "" {
 			if tree, admitted := storeHead.Admit(sessionDir); admitted {
 				patch[beadmeta.WorkDirMetadataKey] = sessionDir
 				trees = []hookClaimWorkTree{tree}

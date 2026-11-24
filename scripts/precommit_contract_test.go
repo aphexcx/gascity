@@ -381,19 +381,8 @@ func localTestCgroupEnv(t *testing.T, version, limit, current string) []string {
 	}
 }
 
-func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
+func TestFastSuiteUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	repoRoot := repoRoot(t)
-	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-push"))
-	if err != nil {
-		t.Fatalf("read pre-push hook: %v", err)
-	}
-	content := string(script)
-	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
-		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
-	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
-		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
-	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
 		if err != nil {

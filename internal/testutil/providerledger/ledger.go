@@ -174,7 +174,7 @@ func Catalog() []Entry {
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
-				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
+				repoSymbol("internal/runtime/subprocess", "NewSeamBackedForCity"),
 				"internal/runtime/subprocess/seam_conformance_test.go",
 				"TestSubprocessSeamConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
@@ -199,7 +199,7 @@ func Catalog() []Entry {
 					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 			provedRuntime(
-				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
+				repoSymbol("internal/runtime/acp", "NewSeamBackedForCity"),
 				"internal/runtime/acp/conformance_test.go",
 				"TestACPConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
@@ -211,7 +211,7 @@ func Catalog() []Entry {
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
-				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
+				repoSymbol("internal/runtime/t3bridge", "NewSeamBackedForCity"),
 				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
@@ -220,7 +220,7 @@ func Catalog() []Entry {
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
-				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
+				repoSymbol("internal/runtime/k8s", "NewSeamBackedForCity"),
 				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
 				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
@@ -246,7 +246,7 @@ func Catalog() []Entry {
 		builtin(
 			"exec", "prefix:exec:", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
+				repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"),
 				"internal/runtime/exec/exec_test.go",
 				"TestExecConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
@@ -254,7 +254,7 @@ func Catalog() []Entry {
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			waivedRuntime(
-				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
+				repoSymbol("internal/runtime/t3bridge", "NewSeamBackedForCity"),
 				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
@@ -263,7 +263,7 @@ func Catalog() []Entry {
 		builtin(
 			"ssh", "prefix:ssh:", nil,
 			provedRuntimeScoped(
-				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
+				repoSymbol("internal/runtime/ssh", "NewSeamBackedForCity"),
 				"internal/runtime/ssh/conformance_integration_test.go",
 				"TestSSHConformance",
 				"hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered",
@@ -275,7 +275,7 @@ func Catalog() []Entry {
 		builtin(
 			"tmux", "exact:tmux", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
+				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfigForCity"),
 				"internal/runtime/tmux/adapter_test.go",
 				"TestTmuxConformance",
 				repoSymbol("internal/runtime/tmux", "tmuxConformanceConfig"),

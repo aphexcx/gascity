@@ -108,8 +108,8 @@ func startupRebaselineWindowShort(s string) string {
 
 // TestStartupContentRebaselineWriteObservation: case x precondition x writer.
 //
-//	case receipt_skip: an unrelated file at the locked-import root makes the
-//	  PreStart's materialize-skills skip (reported only in the receipt FILE);
+//	case receipt_skip: a different HEAD with the same tree makes the QUICK
+//	  PreStart materialize-skills check skip (reported only in the receipt FILE);
 //	  the tracked startup sources stay clean, so the bead's Pending record has
 //	  no Sources and Skipped=false. The cache is restored before the commit.
 //	case commit_sources: the launch is clean (materialization succeeds, no
@@ -190,12 +190,11 @@ func TestStartupContentRebaselineWriteObservation(t *testing.T) {
 						}
 					}
 					priorHash := h.read().StartedConfigHash
-					unrelated := filepath.Join(f.cacheDirs[1], "unrelated-file")
+					var acceptedHead string
 					trackedStray := filepath.Join(f.cacheDirs[1], "skills", "plan", "stray")
 					if kase == "receipt_skip" {
-						if err := os.WriteFile(unrelated, []byte("unrelated"), 0o644); err != nil {
-							t.Fatal(err)
-						}
+						acceptedHead = strings.TrimSpace(gitOutputImport(t, f.cacheDirs[1], "rev-parse", "HEAD"))
+						mustGitImport(t, f.cacheDirs[1], "commit", "--allow-empty", "-m", "move HEAD without changing startup sources")
 					}
 					if err := f.sp.Stop("worker"); err != nil {
 						t.Fatal(err)
@@ -288,9 +287,8 @@ func TestStartupContentRebaselineWriteObservation(t *testing.T) {
 					// Between the snapshot and the commit.
 					switch kase {
 					case "receipt_skip":
-						if err := os.Remove(unrelated); err != nil { // the gate: restore the cache, then commit
-							t.Fatal(err)
-						}
+						// Restore the locked HEAD before committing the startup result.
+						mustGitImport(t, f.cacheDirs[1], "update-ref", "HEAD", acceptedHead)
 					case "commit_sources", "pre_receipt":
 						if err := os.WriteFile(trackedStray, []byte("dirty at commit"), 0o644); err != nil {
 							t.Fatal(err)
