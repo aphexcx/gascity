@@ -44,12 +44,14 @@ type syntheticCacheVerifier struct {
 	validate func(cachePath, repository, commit string) error
 }
 
+var validateSyntheticCache = builtinpacks.ValidateSyntheticRepo
+
 // newSyntheticCacheVerifier returns a verifier scoped to a single readiness
 // pass.
 func newSyntheticCacheVerifier() *syntheticCacheVerifier {
 	return &syntheticCacheVerifier{
 		valid:    make(map[string]struct{}),
-		validate: builtinpacks.ValidateSyntheticRepo,
+		validate: validateSyntheticCache,
 	}
 }
 
@@ -101,7 +103,7 @@ func newWarmSyntheticCacheVerifier() *syntheticCacheVerifier {
 					return nil
 				}
 			}
-			if vErr := builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit); vErr != nil {
+			if vErr := validateSyntheticCache(cachePath, repository, commit); vErr != nil {
 				warmSyntheticCacheVerdicts.Delete(key)
 				return vErr
 			}

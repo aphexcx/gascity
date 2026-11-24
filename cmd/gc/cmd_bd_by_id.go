@@ -918,6 +918,10 @@ func bdIDIsClassReserved(id string) bool {
 // step-completion write the core pack renders on every worked bead. See
 // refuseRigScopedClassOwnedTarget.
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
+	return maybeRouteBdByIDWithConfig(cityPath, nil, rigName, bdArgs, stdout, stderr)
+}
+
+func maybeRouteBdByIDWithConfig(cityPath string, cfg *config.City, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	classIDs := bdArgsAddressedClassIDs(bdArgs)
 	mutationIDs := bdByIDMutationSubjects(bdArgs)
@@ -931,6 +935,11 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// subject must not pay that, and neither must a mutation whose argv
 		// cannot be scanned into ids at all — there would be nothing to probe.
 		return 0, false
+	}
+	// The class door and its derived residency index read this same once-per-city
+	// memo. Supply the command's config only after the subject cost gate above.
+	if cfg != nil {
+		cliStorageRoutesWithConfig(cityPath, cfg)
 	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
 	if err != nil {
