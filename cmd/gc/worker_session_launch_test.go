@@ -107,6 +107,7 @@ func TestWorkerEntryLaunchPreservesSessionContext(t *testing.T) {
 }
 
 func TestCLIStartedCreatesRetainBaseNaming(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
 	for _, name := range []string{"singleton-materialize", "aliased-pool", "tmux-alias", "adhoc-pool", "configured-named"} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("GC_SESSION", "fake")
