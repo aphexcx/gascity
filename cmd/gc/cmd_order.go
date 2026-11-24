@@ -1891,7 +1891,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		// unguarded — a degraded store is exactly when accidental mass deletion
 		// is most dangerous.
 		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
-		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
+		selections, eligible, countErr := prepareOrderTrackingRetention(stores, now, retentionPolicy, onlyOrders)
 		threshold := bulkDeleteConfirmThreshold()
 		switch {
 		case countErr != nil:
@@ -1905,7 +1905,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 				eligible, threshold)
 			confirmGateBlocked = true
 		default:
-			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
+			retentionResult, retentionErr = pruneOrderTrackingSelections(selections, now, retentionPolicy, onlyOrders)
 			result.trackingDeleted = retentionResult.deleted
 		}
 	}
