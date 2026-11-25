@@ -1399,7 +1399,8 @@ func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg
 	if concreteIdentity == "" || concreteIdentity == template {
 		return "", "", false, nil
 	}
-	templateDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	triggerRig := sessionTriggerRig(candidate.info, cfg.Rigs)
+	templateDir, err = workdirutil.ResolveWorkDirPathWithTriggerRig(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs, triggerRig)
 	if err != nil || templateDir == "" {
 		return "", "", false, nil
 	}
@@ -1410,7 +1411,7 @@ func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg
 			return "", "", false, fmt.Errorf("resolving concrete pool work_dir: unknown pool instance %q for %q", concreteIdentity, template)
 		}
 		instance := cfgAgent.PoolSlotInstance(slot)
-		concreteDir, err = workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), instance.QualifiedName(), instance, cfg.Rigs)
+		concreteDir, err = workdirutil.ResolveWorkDirPathWithTriggerRig(cityPath, preparedStartCityName(cityPath, cfg), instance.QualifiedName(), instance, cfg.Rigs, triggerRig)
 		if err != nil {
 			return "", "", false, fmt.Errorf("resolving work_dir for pool instance %q: %w", concreteIdentity, err)
 		}

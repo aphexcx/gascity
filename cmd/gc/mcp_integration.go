@@ -422,7 +422,7 @@ func resolveSessionMCPProjection(
 	}
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
-		workDir, err = resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+		workDir, err = resolveConfiguredWorkDirForTrigger(cityPath, loadedCityName(cfg, cityPath), identity, agent, cfg.Rigs, sessionTriggerRig(info, cfg.Rigs))
 		if err != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for session %q: %w", sessionID, err)
 		}

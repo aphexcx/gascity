@@ -186,8 +186,8 @@ func preserveLegacyPoolWorkspace(bp *agentBuildParams, a *config.Agent, name str
 	}
 	legacy := *a
 	legacy.PoolName = ""
-	oldDir, oldErr := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, name, &legacy, bp.rigs)
-	newDir, newErr := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, name, a, bp.rigs)
+	oldDir, oldErr := resolveConfiguredWorkDirPathForTrigger(bp.cityPath, bp.cityName, name, &legacy, bp.rigs, bp.triggerRig)
+	newDir, newErr := resolveConfiguredWorkDirPathForTrigger(bp.cityPath, bp.cityName, name, a, bp.rigs, bp.triggerRig)
 	if oldErr != nil || newErr != nil || oldDir == newDir || !samePreparedWorkDirPath(resolveWorkDirAgainstCity(bp.cityPath, recorded), oldDir) {
 		return a
 	}

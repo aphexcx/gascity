@@ -12,6 +12,19 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+func selectedCityPoolDemandSessions(state map[string]TemplateParams) map[string]bool {
+	var selected map[string]bool
+	for name, tp := range state {
+		if tp.cityPoolDemandSelected {
+			if selected == nil {
+				selected = make(map[string]bool)
+			}
+			selected[name] = true
+		}
+	}
+	return selected
+}
+
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
 // existing data. Runtime liveness is populated from the already-computed
 // wakeTargets; attachment and pending interactions come from provider
