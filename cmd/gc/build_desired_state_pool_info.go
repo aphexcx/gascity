@@ -299,12 +299,12 @@ func reusablePoolSessionInfosForRequest(
 	used map[string]bool,
 ) []session.Info {
 	candidates := reusablePoolSessionInfos(bp, cfgAgent, template, used)
-	if request.SessionBeadID != "" {
-		return candidates
-	}
 	filtered := candidates[:0]
 	for _, info := range candidates {
-		if poolSessionConsumesNewDemandInfo(info) {
+		if !bp.poolSessionMatchesTriggerRig(template, info, request) {
+			continue
+		}
+		if request.SessionBeadID != "" || poolSessionConsumesNewDemandInfo(info) {
 			filtered = append(filtered, info)
 			continue
 		}
@@ -316,6 +316,15 @@ func reusablePoolSessionInfosForRequest(
 		filtered = append(filtered, info)
 	}
 	return filtered
+}
+
+// poolSessionMatchesTriggerRig keeps an already running session in its repository.
+// A stopped session can acquire a new work_dir on its next start.
+func (bp *agentBuildParams) poolSessionMatchesTriggerRig(template string, info session.Info, request SessionRequest) bool {
+	if _, eligible := bp.cityPoolRigDemand[template]; !eligible || !poolSessionIsLiveInfo(info) || request.WorkBeadID == "" {
+		return true
+	}
+	return configuredTriggerRig(info.TriggerBeadStoreRef, bp.rigs) == configuredTriggerRig(request.WorkStoreRef, bp.rigs)
 }
 
 // findReusableCanonicalNonExpandingPoolSessionInfo is the session.Info sibling of

@@ -20,6 +20,7 @@ go_test(
     srcs = [
         "pool_isolation_test.go",
         "testenv_import_test.go",
+        "workdir_render_equal_test.go",
         "workdir_test.go",
     ],
     data = glob(

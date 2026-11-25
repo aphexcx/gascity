@@ -479,6 +479,12 @@ func computePoolDesiredStatesAt(
 						continue
 					}
 					wakeRequestedTemplates[template] = struct{}{}
+					var storeRef string
+					if len(scaleCheckDemand[template].affinityRigs) > 0 {
+						// A replacement can reuse a live seat only in the
+						// repository that holds the assigned work.
+						storeRef = assignedWorkRequestStoreRef(assignedWorkStoreRefs, workIndex)
+					}
 					resumeRequests = append(resumeRequests, SessionRequest{
 						Template:     template,
 						BeadPriority: beadPriorityRank(beadPriority(wb)),
@@ -488,6 +494,7 @@ func computePoolDesiredStatesAt(
 						// plans a clean create.
 						WorkBeadID:     wb.ID,
 						PreferredSlot:  lastClaimedPoolSlot(wb, template),
+						WorkStoreRef:   storeRef,
 						WorkBeadTitle:  strings.TrimSpace(wb.Title),
 						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
@@ -589,8 +596,14 @@ func computePoolDesiredStatesAt(
 		if len(candidates) == 0 {
 			continue
 		}
-		req.SessionBeadID = candidates[0].SessionBeadID
-		protectedNewRequests[req.Template] = candidates[1:]
+		rigs := scaleCheckDemand[req.Template].affinityRigs
+		for j, candidate := range candidates {
+			if configuredTriggerRig(req.WorkStoreRef, rigs) == configuredTriggerRig(candidate.WorkStoreRef, rigs) {
+				req.SessionBeadID = candidate.SessionBeadID
+				protectedNewRequests[req.Template] = append(candidates[:j], candidates[j+1:]...)
+				break
+			}
+		}
 	}
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
@@ -648,6 +661,11 @@ func computePoolDesiredStatesAt(
 		selectedConcrete = append(selectedConcrete, inFlight[:inFlightCount]...)
 		demand := scaleCheckDemand[template]
 		selectedConcrete, residualWorkBeadIDs := allocateScaleDemandToConcrete(demand, selectedConcrete)
+		if len(demand.affinityRigs) > 0 {
+			// A live seat retained for another repository still occupies capacity.
+			// Admit residual tickets up to the ordinary nested caps.
+			newCount = capNewDemandCount(limits, usage, agent, max(newCount, reusedCount+len(residualWorkBeadIDs)))
+		}
 		if scaleCount > 0 && len(protected)+len(inFlight) > 0 && trace != nil {
 			trace.RecordDecision(TraceSitePoolInFlightReuse, TraceReasonInFlightReuse, TraceOutcomeAccepted, template, "", traceRecordPayload{
 				"scale_check":   scaleCount,
@@ -748,31 +766,35 @@ func allocateScaleDemandToConcrete(demand scaleCheckDemand, concrete []SessionRe
 	}
 
 	matched := make(map[string]struct{}, len(allocated))
-	unmatchedConcrete := make([]int, 0, len(allocated))
+	availableByRig := make(map[string][]int)
 	for i, request := range allocated {
 		id := strings.TrimSpace(request.WorkBeadID)
-		if _, demanded := demandSet[id]; demanded {
+		rig := configuredTriggerRig(request.WorkStoreRef, demand.affinityRigs)
+		if _, demanded := demandSet[id]; demanded && rig == configuredTriggerRig(demand.StoreRefs[id], demand.affinityRigs) {
 			if _, alreadyMatched := matched[id]; !alreadyMatched {
 				matched[id] = struct{}{}
 				allocated[i] = requestWithScaleDemandProvenance(request, demand, id)
 				continue
 			}
 		}
-		unmatchedConcrete = append(unmatchedConcrete, i)
+		availableByRig[rig] = append(availableByRig[rig], i)
 	}
 
 	remaining := make([]string, 0, len(uniqueDemand)-len(matched))
 	for _, id := range uniqueDemand {
-		if _, covered := matched[id]; !covered {
-			remaining = append(remaining, id)
+		if _, covered := matched[id]; covered {
+			continue
 		}
+		rig := configuredTriggerRig(demand.StoreRefs[id], demand.affinityRigs)
+		if slots := availableByRig[rig]; len(slots) > 0 {
+			i := slots[0]
+			allocated[i] = requestWithScaleDemandProvenance(allocated[i], demand, id)
+			availableByRig[rig] = slots[1:]
+			continue
+		}
+		remaining = append(remaining, id)
 	}
-	rebound := minInt(len(unmatchedConcrete), len(remaining))
-	for i := 0; i < rebound; i++ {
-		idx := unmatchedConcrete[i]
-		allocated[idx] = requestWithScaleDemandProvenance(allocated[idx], demand, remaining[i])
-	}
-	return allocated, remaining[rebound:]
+	return allocated, remaining
 }
 
 func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckDemand, workBeadID string) SessionRequest {

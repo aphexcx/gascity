@@ -24,6 +24,7 @@ type AwakeInput struct {
 	SessionBeads             []AwakeSessionBead
 	WorkBeads                []AwakeWorkBead    // in_progress assigned work plus ready open assigned work
 	ScaleCheckCounts         map[string]int     // agent template → scale_check count
+	CityPoolDemandSessions   map[string]bool    // concrete sessions selected by the rig-aware pool planner
 	NamedSessionDemand       map[string]bool    // named-session identity → routed/assigned work demand
 	NamedSessionRoutedDemand map[string]bool    // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
 	NamedSessionWorkQ        map[string]bool    // named-session identity → bridge-carried work_query demand
@@ -233,9 +234,16 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now))
+		candidates := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now))
+		creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template))
+		candidates = append(candidates, creating...)
+		if len(input.CityPoolDemandSessions) > 0 {
+			sort.SliceStable(candidates, func(i, j int) bool {
+				return input.CityPoolDemandSessions[candidates[i].SessionName] && !input.CityPoolDemandSessions[candidates[j].SessionName]
+			})
+		}
 		filled := countAssignedScaleSlots(input.excludeDeferredSessions(input.SessionBeads), input.WorkBeads, input.NamedSessions, template)
-		for _, bead := range active {
+		for _, bead := range candidates {
 			if filled >= count {
 				break
 			}
@@ -243,17 +251,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 				continue
 			}
 			desired[bead.SessionName] = "scaled:demand"
-			filled++
-		}
-		creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template))
-		for _, bead := range creating {
-			if filled >= count {
-				break
+			if isCreatingCandidateState(bead.State) {
+				desired[bead.SessionName] = "scaled:creating"
 			}
-			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead) {
-				continue
-			}
-			desired[bead.SessionName] = "scaled:creating"
 			filled++
 		}
 	}

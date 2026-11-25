@@ -2058,6 +2058,11 @@ provider = "stub"
 session_live = ["theme apply {{.Session}}"]
 
 [[agent]]
+name = "worker-theme"
+provider = "stub"
+session_live = ["theme rig={{.TriggerRig}}"]
+
+[[agent]]
 name = "rig-worker"
 dir = "myrig"
 provider = "stub"
@@ -2114,6 +2119,14 @@ command = "/bin/echo"
 				SessionName: "test-city__myrig__polecat__furiosa-1",
 			},
 			want: []string{"theme agent=myrig/polecat__furiosa-1 base=polecat__furiosa-1 rig=myrig root=" + rigDir},
+		},
+		{
+			name: "explicit resume currently omits the trigger rig from session live",
+			info: session.Info{
+				Template: "worker-theme", AgentName: "worker-theme-1", SessionName: "worker-theme-1",
+				TriggerBeadID: "work-1", TriggerBeadStoreRef: "rig:myrig",
+			},
+			want: []string{"theme rig="},
 		},
 		{
 			name: "missing session live stays empty",
