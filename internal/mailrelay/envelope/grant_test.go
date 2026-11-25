@@ -13,7 +13,7 @@ import (
 
 func TestGrant(t *testing.T) {
 	key := signingKey(1)
-	keys := map[string]ed25519.PublicKey{"alpha": key.Public().(ed25519.PublicKey)}
+	keys := map[string]ed25519.PublicKey{"alpha": key.Public().(ed25519.PublicKey), "beta": signingKey(2).Public().(ed25519.PublicKey)}
 	req := Request{Method: "POST", Path: "/v1/city/alpha/mail", RawQuery: "page=1", Body: []byte("sealed")}
 	token, err := MintGrant(key, "alpha", "alpha", req, 2*time.Minute)
 	if err != nil {
@@ -36,7 +36,8 @@ func TestGrant(t *testing.T) {
 			t.Fatalf("listener %s: %v", aud, err)
 		}
 	}
-	v, err := NewGrantVerifier(keys, nil)
+	replay := citywriteauth.NewMemoryReplayGuard()
+	v, err := NewGrantVerifier(keys, replay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +74,9 @@ func TestGrant(t *testing.T) {
 	if err := v.Verify(signGrantForTest(t, grant, key), other); !errors.Is(err, citywriteauth.ErrCityMismatch) {
 		t.Fatalf("kid and city differ: %v", err)
 	}
+	if err := replay.Use(grant.JTI, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("rejected identity consumed a replay ID: %v", err)
+	}
 	for _, ttl := range []time.Duration{0, -time.Second, 121 * time.Second} {
 		if _, err := MintGrant(key, "alpha", "alpha", req, ttl); err == nil {
 			t.Fatalf("accepted TTL %v", ttl)
@@ -94,4 +98,27 @@ func signGrantForTest(t *testing.T, g citywriteauth.Grant, key ed25519.PrivateKe
 		t.Fatal(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(data) + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, data))
+}
+
+func TestGrantRequestSyntax(t *testing.T) {
+	key := signingKey(1)
+	v, err := NewGrantVerifier(map[string]ed25519.PublicKey{"alpha": key.Public().(ed25519.PublicKey)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range []Request{
+		{Method: "BAD METHOD", Path: "/v1/city/alpha/mail"},
+		{Method: "GET:", Path: "/v1/city/alpha/mail"},
+		{Method: "GET", Path: "/v1/city/alpha/mail\n"},
+		{Method: "GET", Path: "/v1/city/alpha/mail\x00"},
+		{Method: "GET", Path: "/v1/city/alpha/mail", RawQuery: "tag=\r"},
+		{Method: "GET", Path: "/v1/city/alpha/mail", RawQuery: "\x7f"},
+	} {
+		if _, err := MintGrant(key, "alpha", "alpha", req, time.Minute); !errors.Is(err, ErrFormat) {
+			t.Errorf("MintGrant(%+q) = %v, want ErrFormat", req, err)
+		}
+		if err := v.Verify("", req); !errors.Is(err, ErrFormat) {
+			t.Errorf("Verify(%+q) = %v, want ErrFormat", req, err)
+		}
+	}
 }

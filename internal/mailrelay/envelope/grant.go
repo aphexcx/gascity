@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,9 @@ const GrantAudience = "gc-mail-relay.v1"
 
 const maxGrantTTL = 2 * time.Minute
 
+// A method is a nonempty HTTP token (RFC 9110, section 9.1).
+var methodToken = regexp.MustCompile("^[!#$%&'*+.^_`|~A-Za-z0-9-]+$")
+
 // Request contains the parts of a relay request bound by its grant. Path is
 // the request URL's path without the query, starting with /v1/city/{city}/.
 type Request struct {
@@ -25,9 +29,13 @@ type Request struct {
 }
 
 func (r Request) expectation() (citywriteauth.Expect, error) {
+	control := func(c rune) bool { return c < 0x20 || c == 0x7f }
+	if !methodToken.MatchString(r.Method) || strings.ContainsFunc(r.Path, control) || strings.ContainsFunc(r.RawQuery, control) {
+		return citywriteauth.Expect{}, ErrFormat
+	}
 	tail, found := strings.CutPrefix(r.Path, "/v1/city/")
 	city, rest, slash := strings.Cut(tail, "/")
-	if !found || !slash || !ValidCityID(city) || r.Method == "" || rest == "" {
+	if !found || !slash || !ValidCityID(city) || rest == "" {
 		return citywriteauth.Expect{}, ErrAddress
 	}
 	return citywriteauth.Expect{City: city, ReqDigest: citywriteauth.ReqDigest(r.Method, r.Path, r.RawQuery, r.Body)}, nil
@@ -60,21 +68,30 @@ func MintGrant(key ed25519.PrivateKey, kid, city string, req Request, ttl time.D
 }
 
 // GrantVerifier verifies request grants and consumes their single-use IDs.
-type GrantVerifier struct{ verifier *citywriteauth.Verifier }
+type GrantVerifier struct {
+	byCity map[string]*citywriteauth.Verifier
+}
 
 // NewGrantVerifier pins the relay audience, lifetime cap and 30-second skew.
 // A nil replay guard uses the city verifier's in-memory single-use guard.
 func NewGrantVerifier(keys map[string]ed25519.PublicKey, replay citywriteauth.ReplayGuard) (*GrantVerifier, error) {
-	for city := range keys {
-		if !ValidCityID(city) {
-			return nil, ErrAddress
-		}
-	}
 	v, err := citywriteauth.New(citywriteauth.Options{Keys: keys, Aud: GrantAudience, MaxTTL: maxGrantTTL, Skew: 30 * time.Second, Replay: replay})
 	if err != nil {
 		return nil, err
 	}
-	return &GrantVerifier{verifier: v}, nil
+	// Only the path city's key can authorize its request. Select it before
+	// Verify consumes a replay ID; WithKeys preserves the shared replay guard.
+	byCity := make(map[string]*citywriteauth.Verifier, len(keys))
+	for city, key := range keys {
+		if !ValidCityID(city) {
+			return nil, ErrAddress
+		}
+		byCity[city], err = v.WithKeys(map[string]ed25519.PublicKey{city: key})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &GrantVerifier{byCity: byCity}, nil
 }
 
 // Verify checks the signed request and requires its authenticated signer to
@@ -84,7 +101,14 @@ func (v *GrantVerifier) Verify(token string, req Request) error {
 	if err != nil {
 		return err
 	}
-	g, err := v.verifier.Verify(token, expect)
+	verifier := v.byCity[expect.City]
+	if verifier == nil {
+		return citywriteauth.ErrUnknownKey
+	}
+	g, err := verifier.Verify(token, expect)
+	if errors.Is(err, citywriteauth.ErrUnknownKey) {
+		return citywriteauth.ErrCityMismatch
+	}
 	if err != nil {
 		return err
 	}
