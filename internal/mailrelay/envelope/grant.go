@@ -72,24 +72,50 @@ type GrantVerifier struct {
 	byCity map[string]*citywriteauth.Verifier
 }
 
+// cityReplay hands a replay guard one city's grant IDs. A city ID holds no
+// slash, so the city and the ID cannot run together.
+type cityReplay struct {
+	city  string
+	guard citywriteauth.ReplayGuard
+}
+
+// Use records the city, a slash and the ID as one string.
+func (r cityReplay) Use(jti string, exp time.Time) error {
+	return r.guard.Use(r.city+"/"+jti, exp)
+}
+
 // NewGrantVerifier pins the relay audience, lifetime cap and 30-second skew.
-// A nil replay guard uses the city verifier's in-memory single-use guard.
+// A grant's ID is single-use within its own city, so two cities may use the
+// same ID. The replay guard receives the city, a slash and the ID as one
+// string, such as "alpha/shared-id", and never the ID alone. A guard that
+// stores IDs stores that string. A nil replay guard becomes one in-memory
+// guard, which receives the same strings as a supplied guard.
 func NewGrantVerifier(keys map[string]ed25519.PublicKey, replay citywriteauth.ReplayGuard) (*GrantVerifier, error) {
-	v, err := citywriteauth.New(citywriteauth.Options{Keys: keys, Aud: GrantAudience, MaxTTL: maxGrantTTL, Skew: 30 * time.Second, Replay: replay})
-	if err != nil {
-		return nil, err
+	if len(keys) == 0 {
+		return nil, errors.New("relay grant verifier requires at least one city key")
 	}
-	// Only the path city's key can authorize its request. Select it before
-	// Verify consumes a replay ID; WithKeys preserves the shared replay guard.
+	if replay == nil {
+		replay = citywriteauth.NewMemoryReplayGuard()
+	}
+	// Only the path city's key can authorize its request, so each city's
+	// verifier trusts that one key. The city it adds to a replay ID is
+	// therefore both the grant's signer and the city of the request path.
 	byCity := make(map[string]*citywriteauth.Verifier, len(keys))
 	for city, key := range keys {
 		if !ValidCityID(city) {
 			return nil, ErrAddress
 		}
-		byCity[city], err = v.WithKeys(map[string]ed25519.PublicKey{city: key})
+		v, err := citywriteauth.New(citywriteauth.Options{
+			Keys:   map[string]ed25519.PublicKey{city: key},
+			Aud:    GrantAudience,
+			MaxTTL: maxGrantTTL,
+			Skew:   30 * time.Second,
+			Replay: cityReplay{city: city, guard: replay},
+		})
 		if err != nil {
 			return nil, err
 		}
+		byCity[city] = v
 	}
 	return &GrantVerifier{byCity: byCity}, nil
 }

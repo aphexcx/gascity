@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestGrant(t *testing.T) {
 			t.Fatalf("listener %s: %v", aud, err)
 		}
 	}
-	replay := citywriteauth.NewMemoryReplayGuard()
+	replay := &recordingReplay{next: citywriteauth.NewMemoryReplayGuard()}
 	v, err := NewGrantVerifier(keys, replay)
 	if err != nil {
 		t.Fatal(err)
@@ -71,11 +72,12 @@ func TestGrant(t *testing.T) {
 	other.Path = "/v1/city/beta/mail"
 	grant.City, grant.JTI = "beta", "another-use"
 	grant.Req = citywriteauth.ReqDigest(other.Method, other.Path, other.RawQuery, other.Body)
+	used := len(replay.ids)
 	if err := v.Verify(signGrantForTest(t, grant, key), other); !errors.Is(err, citywriteauth.ErrCityMismatch) {
 		t.Fatalf("kid and city differ: %v", err)
 	}
-	if err := replay.Use(grant.JTI, time.Now().Add(time.Minute)); err != nil {
-		t.Fatalf("rejected identity consumed a replay ID: %v", err)
+	if len(replay.ids) != used {
+		t.Fatalf("rejected identity reached the replay guard: %q", replay.ids[used:])
 	}
 	for _, ttl := range []time.Duration{0, -time.Second, 121 * time.Second} {
 		if _, err := MintGrant(key, "alpha", "alpha", req, ttl); err == nil {
@@ -120,5 +122,71 @@ func TestGrantRequestSyntax(t *testing.T) {
 		if err := v.Verify("", req); !errors.Is(err, ErrFormat) {
 			t.Errorf("Verify(%+q) = %v, want ErrFormat", req, err)
 		}
+	}
+}
+
+// recordingReplay records every ID a verifier hands its replay guard.
+type recordingReplay struct {
+	next citywriteauth.ReplayGuard
+	ids  []string
+}
+
+func (r *recordingReplay) Use(id string, exp time.Time) error {
+	r.ids = append(r.ids, id)
+	return r.next.Use(id, exp)
+}
+
+func TestGrantReplayIsPerCity(t *testing.T) {
+	signers := map[string]ed25519.PrivateKey{"alpha": signingKey(1), "beta": signingKey(2)}
+	keys := map[string]ed25519.PublicKey{}
+	for city, key := range signers {
+		keys[city] = key.Public().(ed25519.PublicKey)
+	}
+	cities := []string{"alpha", "beta"}
+	now := time.Now().Unix()
+	for _, supplied := range []bool{false, true} {
+		name := "default guard"
+		var guard citywriteauth.ReplayGuard
+		var record *recordingReplay
+		if supplied {
+			name = "supplied guard"
+			record = &recordingReplay{next: citywriteauth.NewMemoryReplayGuard()}
+			guard = record
+		}
+		t.Run(name, func(t *testing.T) {
+			v, err := NewGrantVerifier(keys, guard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Each city signs, with its own key, a grant for its own path. The
+			// two grants carry the same ID.
+			tokens, reqs := map[string]string{}, map[string]Request{}
+			for _, city := range cities {
+				req := Request{Method: "POST", Path: "/v1/city/" + city + "/mail", Body: []byte("sealed")}
+				grant := citywriteauth.Grant{Kid: city, Aud: GrantAudience, City: city, IAT: now, Exp: now + 60, JTI: "shared-id"}
+				grant.Req = citywriteauth.ReqDigest(req.Method, req.Path, req.RawQuery, req.Body)
+				tokens[city], reqs[city] = signGrantForTest(t, grant, signers[city]), req
+			}
+			for _, city := range cities {
+				if err := v.Verify(tokens[city], reqs[city]); err != nil {
+					t.Errorf("%s: first use of its own grant = %v, want accepted", city, err)
+				}
+			}
+			for _, city := range cities {
+				if err := v.Verify(tokens[city], reqs[city]); !errors.Is(err, citywriteauth.ErrReplay) {
+					t.Errorf("%s: second use of its own grant = %v, want ErrReplay", city, err)
+				}
+			}
+			if record == nil {
+				return
+			}
+			want := []string{"alpha/shared-id", "beta/shared-id", "alpha/shared-id", "beta/shared-id"}
+			if !slices.Equal(record.ids, want) {
+				t.Errorf("replay IDs given to the supplied guard = %q, want %q", record.ids, want)
+			}
+		})
+	}
+	if _, err := NewGrantVerifier(nil, nil); err == nil {
+		t.Error("accepted an empty key set")
 	}
 }
