@@ -1,10 +1,14 @@
 package envelope
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/url"
 	"slices"
 	"testing"
 	"time"
@@ -188,5 +192,85 @@ func TestGrantReplayIsPerCity(t *testing.T) {
 	}
 	if _, err := NewGrantVerifier(nil, nil); err == nil {
 		t.Error("accepted an empty key set")
+	}
+}
+
+func TestGrantBindsEscapedPath(t *testing.T) {
+	key := signingKey(1)
+	v, err := NewGrantVerifier(map[string]ed25519.PublicKey{"alpha": key.Public().(ed25519.PublicKey)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromURL := RequestFromURL
+	parse := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	body := []byte("sealed")
+
+	// Two escaped paths that decode alike are two routes, so two bindings.
+	for _, pair := range [][2]string{
+		{"/v1/city/alpha/mail/a%2Fb", "/v1/city/alpha/mail/a/b"},
+		{"/v1/city/alpha/mail/%61", "/v1/city/alpha/mail/a"},
+	} {
+		first := fromURL("POST", parse(pair[0]+"?page=1"), body)
+		second := fromURL("POST", parse(pair[1]+"?page=1"), body)
+		firstExpect, err := first.expectation()
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondExpect, err := second.expectation()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if firstExpect.ReqDigest == secondExpect.ReqDigest {
+			t.Errorf("%s and %s share one binding", pair[0], pair[1])
+		}
+		token, err := MintGrant(key, "alpha", "alpha", first, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Verify(token, second); !errors.Is(err, citywriteauth.ErrReqMismatch) {
+			t.Errorf("a grant for %s on the route %s = %v, want ErrReqMismatch", pair[0], pair[1], err)
+		}
+	}
+
+	// The city is read from the same escaped form.
+	if _, err := MintGrant(key, "alpha", "alpha", fromURL("POST", parse("/v1/city/al%70ha/mail"), body), time.Minute); !errors.Is(err, ErrAddress) {
+		t.Errorf("a grant for an escaped city segment = %v, want ErrAddress", err)
+	}
+
+	// The minting side and the verifying side derive the same request: what
+	// Go writes on the wire for one is what Go reads back for the other.
+	out, err := http.NewRequest("POST", "https://relay.example/v1/city/alpha/mail/a%2Fb?page=1", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire bytes.Buffer
+	if err := out.Write(&wire); err != nil {
+		t.Fatal(err)
+	}
+	in, err := http.ReadRequest(bufio.NewReader(&wire))
+	if err != nil {
+		t.Fatal(err)
+	}
+	minted, served := fromURL(out.Method, out.URL, body), fromURL(in.Method, in.URL, body)
+	if minted.Path != "/v1/city/alpha/mail/a%2Fb" || served.Path != minted.Path || served.RawQuery != minted.RawQuery {
+		t.Errorf("minted %q?%q, served %q?%q, want the escaped path and page=1 on both sides", minted.Path, minted.RawQuery, served.Path, served.RawQuery)
+	}
+	fresh, err := MintGrant(key, "alpha", "alpha", minted, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Verify(fresh, served); err != nil {
+		t.Errorf("the verifying side refused the minting side's own grant: %v", err)
+	}
+
+	// A nil URL is refused, never a panic.
+	if _, err := MintGrant(key, "alpha", "alpha", RequestFromURL("POST", nil, body), time.Minute); !errors.Is(err, ErrAddress) {
+		t.Errorf("a grant for a nil URL = %v, want ErrAddress", err)
 	}
 }
