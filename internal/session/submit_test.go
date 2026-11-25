@@ -478,6 +478,48 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 }
 
+func TestIsGoTestExecutable(t *testing.T) {
+	running, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	binary := filepath.Join(dir, "session_test")
+	if err := os.Symlink(running, binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(binary, "link_test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("spy_test", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalArg := os.Args[0]
+	t.Cleanup(func() { os.Args[0] = originalArg })
+	for _, tc := range []struct {
+		name, arg0, candidate, srcDir string
+		want                          bool
+	}{
+		{"absolute invocation", binary, binary, dir, true},
+		{"relative invocation", "./session_test", binary, dir, true},
+		{"symlink invocation", "link_test", binary, dir, true},
+		{"relative candidate", binary, "./session_test", dir, true},
+		{"renamed spy", binary, "spy_test", dir, false},
+		{"go test", binary, "session.test", "", true},
+		{"outside Bazel", binary, binary, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TEST_SRCDIR", tc.srcDir)
+			os.Args[0] = tc.arg0
+			if got := isGoTestExecutable(tc.candidate); got != tc.want {
+				t.Errorf("isGoTestExecutable(%q) with argv[0] %q = %t, want %t", tc.candidate, tc.arg0, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")

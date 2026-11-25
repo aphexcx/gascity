@@ -714,13 +714,28 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 }
 
 func isGoTestExecutable(path string) bool {
-	// The running bazel test binary drops the .test suffix but keeps the
-	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match.
-	if os.Getenv("TEST_SRCDIR") != "" && path == os.Args[0] && strings.HasSuffix(filepath.Base(path), "_test") {
+	name := filepath.Base(path)
+	if strings.HasSuffix(name, ".test") {
 		return true
 	}
-	return strings.HasSuffix(filepath.Base(path), ".test")
+	if os.Getenv("TEST_SRCDIR") == "" || !strings.HasSuffix(name, "_test") {
+		return false
+	}
+	// Bazel may invoke the test through a relative path or a runfiles symlink.
+	// Only refuse the running executable, so a separate spy can still launch.
+	running, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if path == running {
+		return true
+	}
+	candidate, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(running)
+	return err == nil && os.SameFile(candidate, current)
 }
 
 func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {
