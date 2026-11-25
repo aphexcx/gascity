@@ -293,6 +293,7 @@ filegroup(
         "//internal/mail/beadmail:bazel_repo_srcs",
         "//internal/mail/exec:bazel_repo_srcs",
         "//internal/mail/mailtest:bazel_repo_srcs",
+        "//internal/mailrelay/envelope:bazel_repo_srcs",
         "//internal/materialize:bazel_repo_srcs",
         "//internal/migrate:bazel_repo_srcs",
         "//internal/modelwindow:bazel_repo_srcs",
