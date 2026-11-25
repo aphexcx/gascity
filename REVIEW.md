@@ -1,8 +1,9 @@
 # Review rules
 
-Every reviewer of a pull request here (a person, the codex gate, a second
-model's read) reads this file from the base branch, integration, never
-from the pull request's own head. It says what our cities run, what
+The codex gate and a second model's read take this file from the base
+branch, integration, never from the pull request's own head. A reviewer
+that reads a working tree reads the pull request's copy and must
+compare it with integration's. This file says what our cities run, what
 failure looks like there, what not to report, and the few rules a diff
 can show. A REVIEW.md in a pull request is under review itself, by the
 rules of integration's copy.
@@ -65,9 +66,12 @@ MAJOR at least.
   one sentence, never as MAJOR.
 - A fault is not a PRECONDITION when state a session already carries
   takes it there. A session whose bead holds an MCP identity or an MCP
-  server snapshot is routed by that state (`transportForBead`,
-  `internal/session/manager.go`), so a finding that traces a tmux
-  session of ours into ACP code that way keeps its grade.
+  server snapshot is routed to ACP by that state only when its
+  configured transport is ACP or its process already runs on ACP
+  (`transportForBead`, `internal/session/manager.go`). A finding that
+  traces a tmux session of ours into the code that handles that state
+  keeps its grade; one that needs either of those two is a
+  PRECONDITION.
 - What a CI job itself prints when it runs on this pull request: a
   format or lint error, a failing test, a generated file out of date.
   The fault the diff shows is still reported when a job's output is its
@@ -76,12 +80,17 @@ MAJOR at least.
   security fault in the diff, whatever a scanner says.
 - Always reviewed by hand: a change to REVIEW.md itself. A change that
   removes, weakens or hides a rule of this file is MAJOR, and the finding
-  says which rule and what later reviews lose.
+  says which rule and what later reviews lose. A removal the Pruning
+  section calls for, made in a pull request that says which review of
+  the rule found it unused, is not a weakening and is not MAJOR; every
+  other removal keeps its grade.
 - At most five NOTE (or NIT) findings in one review: report the five
   that matter most and count the rest in one line. A MINOR is a real
   fault, never capped and never dropped.
-- A claim without a file:line is not reported. Every finding names the
-  file and line it rests on.
+- A claim that names neither a file:line nor a commit and a line of
+  its message is not reported. Every finding names the file and line
+  it rests on, or, when it rests on a commit message, the commit and
+  the line of its message.
 
 ## Triggers (rules a diff can show)
 
