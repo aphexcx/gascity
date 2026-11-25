@@ -27,8 +27,10 @@ var methodToken = regexp.MustCompile("^[!#$%&'*+.^_`|~A-Za-z0-9-]+$")
 // and never URL.Path, starting with /v1/city/{city}/. The city and the request
 // binding are read from that escaped form, so an escaped slash and a path
 // separator never share a binding, and a city segment that carries a percent
-// escape is refused. The minting side and the verifying side both build a
-// Request with RequestFromURL.
+// escape is refused. A path that Go would rewrite before reporting it, one
+// whose raw form is not a valid encoding such as a raw non-ASCII byte, is
+// refused, so Path is always the path as it traveled. The minting side and
+// the verifying side both build a Request with RequestFromURL.
 type Request struct {
 	Method, Path, RawQuery string
 	Body                   []byte
@@ -36,10 +38,11 @@ type Request struct {
 
 // RequestFromURL derives the Request bound by a grant from a request URL, the
 // same way on the minting and the verifying side: Path is u.EscapedPath() and
-// RawQuery is u.RawQuery. A nil URL gives an empty path, which MintGrant and
-// Verify refuse with ErrAddress.
+// RawQuery is u.RawQuery. A nil URL, or a URL whose raw path EscapedPath would
+// rewrite, gives an empty path, which MintGrant and Verify refuse with
+// ErrAddress.
 func RequestFromURL(method string, u *url.URL, body []byte) Request {
-	if u == nil {
+	if u == nil || (u.RawPath != "" && u.EscapedPath() != u.RawPath) {
 		return Request{Method: method, Body: body}
 	}
 	return Request{Method: method, Path: u.EscapedPath(), RawQuery: u.RawQuery, Body: body}

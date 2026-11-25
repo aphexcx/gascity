@@ -274,3 +274,60 @@ func TestGrantBindsEscapedPath(t *testing.T) {
 		t.Errorf("a grant for a nil URL = %v, want ErrAddress", err)
 	}
 }
+
+func TestGrantPathIsTheWirePath(t *testing.T) {
+	key := signingKey(1)
+	v, err := NewGrantVerifier(map[string]ed25519.PublicKey{"alpha": key.Public().(ed25519.PublicKey)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("sealed")
+
+	// Each row is a request path as it travels, parsed the way a Go server
+	// reads a request line. A path whose raw form is not a valid encoding is
+	// one Go would rewrite before reporting it.
+	bound := map[string]string{}
+	for _, row := range []struct {
+		wire    string
+		refused bool
+	}{
+		{"/v1/city/alpha/mail/a%2Fb/é", true},
+		{"/v1/city/alpha/mail/a/b/é", true},
+		{"/v1/city/al%70ha/mail/é", true},
+		{"/v1/city/alpha/mail/a%2Fb/%C3%A9", false},
+		{"/v1/city/alpha/mail/a/b/%C3%A9", false},
+		{"/v1/city/al%70ha/mail/%C3%A9", false},
+		{"/v1/city/alpha/mail/a%2Fb", false},
+		{"/v1/city/alpha/mail/a/b", false},
+		{"/v1/city/alpha/mail", false},
+	} {
+		u, err := url.ParseRequestURI(row.wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := RequestFromURL("POST", u, body)
+
+		// The bound path is the wire path, byte for byte, or the request is refused.
+		if req.Path != row.wire && req.Path != "" {
+			t.Errorf("the wire path %q is bound as %q, want the wire path or a refusal", row.wire, req.Path)
+		}
+		if refused := req.Path == ""; refused != row.refused {
+			t.Errorf("the wire path %q: refused = %v, want %v", row.wire, refused, row.refused)
+		}
+		if req.Path == "" {
+			if _, err := MintGrant(key, "alpha", "alpha", req, time.Minute); !errors.Is(err, ErrAddress) {
+				t.Errorf("a grant for the refused wire path %q = %v, want ErrAddress", row.wire, err)
+			}
+			if err := v.Verify("", req); !errors.Is(err, ErrAddress) {
+				t.Errorf("Verify of the refused wire path %q = %v, want ErrAddress", row.wire, err)
+			}
+			continue
+		}
+
+		// No two different wire paths share a bound path.
+		if other, shared := bound[req.Path]; shared {
+			t.Errorf("the wire paths %q and %q share the bound path %q", other, row.wire, req.Path)
+		}
+		bound[req.Path] = row.wire
+	}
+}
