@@ -56,8 +56,9 @@ func apiSessionTargetRejectedByConfig(identifier string) error {
 }
 
 type apiSessionResolveOptions struct {
-	allowClosed bool
-	materialize bool
+	allowClosed     bool
+	materialize     bool
+	materializeMode worker.CreateMode
 }
 
 type apiNamedSessionSpec = session.NamedSessionSpec
@@ -268,7 +269,7 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 		// through so ordinary sessions can still own those aliases.
 		return "", namedSessionTargetIsReservedIdentity(spec, identifier), fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := s.materializeNamedSessionWithContext(ctx, store, spec)
+	id, err := s.materializeNamedSessionWithMode(ctx, store, spec, opts.materializeMode)
 	return id, true, err
 }
 
@@ -294,6 +295,10 @@ func parseAPITemplateTarget(identifier string) (string, bool) {
 }
 
 func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store beads.Store, spec apiNamedSessionSpec) (string, error) {
+	return s.materializeNamedSessionWithMode(ctx, store, spec, "")
+}
+
+func (s *Server) materializeNamedSessionWithMode(ctx context.Context, store beads.Store, spec apiNamedSessionSpec, mode worker.CreateMode) (string, error) {
 	if bead, ok, err := s.findCanonicalNamedSession(store, spec); err != nil {
 		return "", err
 	} else if ok {
@@ -394,7 +399,14 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return herr
 		}
 		var createErr error
-		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
+		createMode := mode
+		if createMode == "" {
+			createMode = worker.CreateModeStarted
+			if s.controllerRunning() {
+				createMode = worker.CreateModeDeferred
+			}
+		}
+		info, createErr = handle.Create(ctx, createMode)
 		return createErr
 	})
 	if err == nil {

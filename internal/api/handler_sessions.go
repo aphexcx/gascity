@@ -356,7 +356,9 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionTargetIDWithContext(r.Context(), store.Store, r.PathValue("id"), apiSessionResolveOptions{
+		materialize: true, materializeMode: worker.CreateModeStarted,
+	})
 	if err != nil {
 		writeResolveError(w, err)
 		return

@@ -99,6 +99,9 @@ type NudgeHeld struct {
 // that zeroed a landed payload is exactly what turns "hold" into a clean
 // re-post of a message already in the terminal.
 type NudgeDelivery struct {
+	// Queued means session delivery durably accepted this message for a later
+	// incarnation. It is not terminal paste evidence and must not be replayed.
+	Queued bool
 	// Delivered reports that a paste was handed to the session's terminal.
 	// It is the summary flag; Bytes says how much of the payload that paste
 	// carried. On tmux a paste either lands whole or errors, so Delivered
