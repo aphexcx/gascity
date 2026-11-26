@@ -122,10 +122,10 @@ SELECT ?, ? WHERE unixepoch() <= ? ON CONFLICT(id) DO NOTHING`, id, expiry.Unix(
 
 func (s *store) post(ctx context.Context, label envelope.Label, wire []byte, rate int, now time.Time) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		var sender string
-		err := tx.QueryRowContext(ctx, "SELECT sender FROM labels WHERE id=?", []byte(label.ID)).Scan(&sender)
+		var sender, recipient string
+		err := tx.QueryRowContext(ctx, "SELECT sender, recipient FROM labels WHERE id=?", []byte(label.ID)).Scan(&sender, &recipient)
 		switch {
-		case err == nil && sender == label.From:
+		case err == nil && sender == label.From && recipient == label.To:
 			return nil
 		case err == nil:
 			return errConflict

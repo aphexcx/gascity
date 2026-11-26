@@ -535,3 +535,172 @@ func TestHeldRead(t *testing.T) {
 		t.Fatal("post did not wake reader")
 	}
 }
+
+type postRoute struct{ from, to string }
+
+func (f *fixture) checkQueue(city string, after, number int64, wire []byte) {
+	f.t.Helper()
+	body := f.call(city, "GET", fmt.Sprintf("queue?after=%d&wait=0s", after), nil, 200)
+	var batch []Delivery
+	if err := json.Unmarshal(body, &batch); err != nil || batch == nil {
+		f.t.Fatalf("%s: invalid queue: %v", city, err)
+	}
+	if wire == nil {
+		if len(batch) != 0 {
+			f.t.Fatalf("%s: got %d envelopes, want an empty queue", city, len(batch))
+		}
+		return
+	}
+	if len(batch) != 1 || batch[0].Number != number || !bytes.Equal(batch[0].Envelope, wire) {
+		f.t.Fatalf("%s: want exactly the posted envelope at number %d, got %d entries", city, number, len(batch))
+	}
+}
+
+type postState struct {
+	queues, labels, envelopes, statements, rates int
+	last, posts                                  int64
+}
+
+func (f *fixture) postState(owner postRoute) postState {
+	f.t.Helper()
+	var s postState
+	// A fresh fixture has just one queue and one rate counter after its first post.
+	err := f.server.store.db.QueryRow(`SELECT
+		(SELECT count(*) FROM queues), (SELECT count(*) FROM labels),
+		(SELECT count(*) FROM envelopes), (SELECT count(*) FROM statements),
+		(SELECT count(*) FROM rates), queues.last, rates.posts
+		FROM queues, rates WHERE queues.city=? AND rates.city=?`, owner.to, owner.from).
+		Scan(&s.queues, &s.labels, &s.envelopes, &s.statements, &s.rates, &s.last, &s.posts)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if s.queues != 1 || s.rates != 1 {
+		f.t.Fatalf("want one queue and one rate counter, got %+v", s)
+	}
+	return s
+}
+
+func (f *fixture) checkPostOwner(id string, want postRoute) {
+	f.t.Helper()
+	var got postRoute
+	var count int
+	err := f.server.store.db.QueryRow(`SELECT (SELECT count(*) FROM labels), sender, recipient
+		FROM labels WHERE id=?`, []byte(id)).Scan(&count, &got.from, &got.to)
+	if err != nil || count != 1 || got != want {
+		f.t.Fatalf("label %s: got %d labels, owner %v, error %v; want one label owned by %v", id, count, got, err, want)
+	}
+}
+
+func TestRepeatedPostTable(t *testing.T) {
+	toAlpha, toBeta := postRoute{"hub", "alpha"}, postRoute{"hub", "beta"}
+	fromAlpha, fromBeta := postRoute{"alpha", "hub"}, postRoute{"beta", "hub"}
+	for _, tc := range []struct {
+		name          string
+		first, second postRoute
+		between       string
+		status        int
+		number        int64
+		emptyCity     string
+	}{
+		{"row01", toAlpha, toAlpha, "", 204, 1, "beta"},
+		{"row02", toAlpha, toBeta, "", 409, 1, "beta"},
+		{"row03", fromAlpha, fromBeta, "", 409, 1, ""},
+		{"row04", toAlpha, fromAlpha, "", 409, 1, "hub"},
+		{"row05", toAlpha, toAlpha, "restart", 204, 1, "beta"},
+		{"row06", toAlpha, toBeta, "restart", 409, 1, "beta"},
+		{"row07", fromAlpha, fromBeta, "restart", 409, 1, ""},
+		{"row08", toAlpha, fromAlpha, "restart", 409, 1, "hub"},
+		{"row09", toAlpha, toAlpha, "expire", 204, 2, ""},
+		{"row10", toAlpha, toBeta, "expire", 204, 1, "alpha"},
+		{"row11", fromAlpha, fromBeta, "expire", 204, 2, ""},
+		{"row12", toAlpha, fromAlpha, "expire", 204, 1, "alpha"},
+		{"row13", toAlpha, toAlpha, "reseal", 204, 1, ""},
+		{"row14", toAlpha, toAlpha, "file", 204, 0, "beta"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			now := time.Now()
+			f.server.now = func() time.Time { return now }
+			first := f.letter(tc.first.from, tc.first.to, tc.name)
+			f.call(tc.first.from, "POST", "envelopes", first, 204)
+			switch tc.between {
+			case "restart":
+				if err := f.server.Close(); err != nil {
+					t.Fatal(err)
+				}
+				f.open()
+			case "expire":
+				now = now.Add(31 * 24 * time.Hour)
+				if err := f.server.store.sweep(t.Context(), now); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				f.checkQueue(tc.first.to, 1, 0, nil)
+			}
+
+			second := first
+			if tc.first != tc.second || tc.between == "expire" || tc.between == "reseal" {
+				second = f.letter(tc.second.from, tc.second.to, tc.name)
+				if bytes.Equal(second, first) {
+					t.Fatal("expected freshly sealed bytes")
+				}
+			}
+			before := f.postState(tc.first)
+			post := func() {
+				t.Helper()
+				if body := f.call(tc.second.from, "POST", "envelopes", second, tc.status); len(body) != 0 {
+					t.Fatalf("status %d with %d unexpected body bytes", tc.status, len(body))
+				}
+			}
+			post()
+			owner, wire := tc.first, first
+			if tc.between == "expire" {
+				owner, wire = tc.second, second
+			} else {
+				if after := f.postState(owner); after != before {
+					t.Fatalf("post changed store: before %+v, after %+v", before, after)
+				}
+				if tc.status == 409 {
+					f.checkPostOwner(tc.name, owner)
+					post()
+					if after := f.postState(owner); after != before {
+						t.Fatalf("retry changed store: before %+v, after %+v", before, after)
+					}
+				}
+			}
+			f.checkPostOwner(tc.name, owner)
+			if tc.between == "file" {
+				wire = nil
+			}
+			f.checkQueue(owner.to, 0, tc.number, wire)
+			if tc.emptyCity != "" {
+				f.checkQueue(tc.emptyCity, 0, 0, nil)
+			}
+		})
+	}
+}
+
+func TestEveryStoredPostIsReadable(t *testing.T) {
+	routes := []postRoute{{"hub", "alpha"}, {"hub", "beta"}, {"alpha", "hub"}, {"beta", "hub"}}
+	for _, first := range routes {
+		for _, second := range routes {
+			t.Run(first.from+"-to-"+first.to+"/"+second.from+"-to-"+second.to, func(t *testing.T) {
+				f := newFixture(t)
+				wire := f.letter(first.from, first.to, "shared")
+				f.call(first.from, "POST", "envelopes", wire, 204)
+				if first == second {
+					f.call(second.from, "POST", "envelopes", wire, 204)
+				} else {
+					f.call(second.from, "POST", "envelopes", f.letter(second.from, second.to, "shared"), 409)
+				}
+				for _, city := range []string{"hub", "alpha", "beta"} {
+					if city == first.to {
+						f.checkQueue(city, 0, 1, wire)
+					} else {
+						f.checkQueue(city, 0, 0, nil)
+					}
+				}
+			})
+		}
+	}
+}
