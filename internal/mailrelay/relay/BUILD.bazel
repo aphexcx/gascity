@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "relay",
+    srcs = [
+        "server.go",
+        "store.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/mailrelay/relay",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/citywriteauth",
+        "//internal/mailrelay/envelope",
+        "//internal/supervisor",
+        "@org_modernc_sqlite//:sqlite",
+    ],
+)
+
+go_test(
+    name = "relay_test",
+    srcs = [
+        "relay_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":relay"],
+    deps = [
+        "//internal/citywriteauth",
+        "//internal/mailrelay/envelope",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
