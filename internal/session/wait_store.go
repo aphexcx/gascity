@@ -1,39 +1,15 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
-
-// MailWakeEntry records a reminder requested by a recipient's configuration.
-type MailWakeEntry struct {
-	Sender string    `json:"sender"`
-	At     time.Time `json:"at"`
-}
-
-// MailWakeHistory reads the recent senders recorded on this session.
-func (s *Store) MailWakeHistory(string) ([]MailWakeEntry, error) {
-	return nil, nil
-}
-
-// RecordMailWake reserves one reminder against the observed history.
-func (s *Store) RecordMailWake(string, []MailWakeEntry, MailWakeEntry) error {
-	return nil
-}
-
-// MailWakeBlock reports the state that prevents a reminder or a start.
-func MailWakeBlock(Info, bool, bool) string {
-	return ""
-}
-
-// RequestMailWake records an explicit wake request for an eligible sleeper.
-func (s *Store) RequestMailWake(string, time.Time) (bool, error) {
-	return false, nil
-}
 
 // This file extends the session-class domain wrapper (Store) with the durable
 // wait sub-surface. Reads project a wait bead onto WaitInfo (via
@@ -673,4 +649,153 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 		return nil, err
 	}
 	return nudgeIDs, nil
+}
+
+// MailWakeWindow is the sliding window used to retain recipient-requested reminders.
+const MailWakeWindow = 15 * time.Minute
+
+const mailWakeLogKey = "mail_wake_log"
+
+// MailWakeEntry records a reminder requested by a recipient's configuration.
+type MailWakeEntry struct {
+	Sender string    `json:"sender"`
+	At     time.Time `json:"at"`
+}
+
+func decodeMailWakeHistory(raw string) ([]MailWakeEntry, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var entries []MailWakeEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("reading mail wake history: %w", err)
+	}
+	if entries == nil {
+		return nil, errors.New("invalid mail wake history")
+	}
+	for _, entry := range entries {
+		if entry.Sender == "" || entry.At.IsZero() {
+			return nil, errors.New("incomplete mail wake entry")
+		}
+	}
+	return entries, nil
+}
+
+// MailWakeHistory reads the senders recorded on a session.
+func (s *Store) MailWakeHistory(id string) ([]MailWakeEntry, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return nil, err
+	}
+	return decodeMailWakeHistory(b.Metadata[mailWakeLogKey])
+}
+
+// RecordMailWake reserves one reminder against the observed history.
+func (s *Store) RecordMailWake(id string, seen []MailWakeEntry, entry MailWakeEntry) error {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return err
+	}
+	entries, err := decodeMailWakeHistory(b.Metadata[mailWakeLogKey])
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(entries, seen) {
+		return errors.New("mail wake history changed")
+	}
+	if MailWakeBlock(infoFromPersistedBead(b), false, false) != "" {
+		return errors.New("session became ineligible for mail reminders")
+	}
+	cutoff := entry.At.Add(-MailWakeWindow)
+	entries = slices.DeleteFunc(entries, func(old MailWakeEntry) bool { return !old.At.After(cutoff) })
+	raw, err := json.Marshal(append(entries, entry))
+	if err != nil {
+		return err
+	}
+	if writer, ok := beads.ConditionalWriterFor(s.store.Store); ok {
+		patch := map[string]string{mailWakeLogKey: string(raw)}
+		err := writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: patch})
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			return err
+		}
+	}
+	if writer, ok := beads.MetadataCASWriterFor(s.store.Store); ok {
+		swapped, err := writer.CompareAndSetMetadataKey(id, mailWakeLogKey, b.Metadata[mailWakeLogKey], string(raw))
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			if err == nil && !swapped {
+				return errors.New("mail wake history changed")
+			}
+			return err
+		}
+	}
+	return s.store.SetMetadata(id, mailWakeLogKey, string(raw))
+}
+
+// MailWakeBlock reports the state that prevents a reminder or a start.
+func MailWakeBlock(info Info, openWait, starting bool) string {
+	state := ProjectLifecycle(LifecycleInputFromInfo(info)).BaseState
+	switch state {
+	case BaseStateClosed, BaseStateClosing, BaseStateArchived, BaseStateSuspended, BaseStateDrained, BaseStateQuarantined:
+		return string(state)
+	}
+	switch {
+	case info.Closed:
+		return "closed"
+	case info.HeldUntil != "":
+		return "held"
+	case info.QuarantinedUntil != "":
+		return "quarantine"
+	case info.WaitHold != "" || openWait:
+		return "wait"
+	case info.SleepIntent != "":
+		return "sleep-intent"
+	}
+	switch info.SleepReason {
+	case "user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", "drained":
+		return info.SleepReason
+	}
+	if starting {
+		if state != BaseStateAsleep {
+			return "state"
+		}
+		switch SleepReason(info.SleepReason) {
+		case "", SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason:
+		default:
+			return "sleep-reason"
+		}
+	}
+	return ""
+}
+
+// HasOpenMailWakeWait reports whether a session has a wait that prevents a mail wake.
+func (s *Store) HasOpenMailWakeWait(id string) (bool, error) {
+	waits, err := s.WaitsForSession(id)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(waits, func(w WaitInfo) bool { return !IsWaitTerminalState(w.State) }), nil
+}
+
+// RequestMailWake writes only the explicit wake request for an eligible sleeper.
+func (s *Store) RequestMailWake(id string, now time.Time) (bool, error) {
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return false, err
+	}
+	waiting, err := s.HasOpenMailWakeWait(id)
+	if err != nil {
+		return false, err
+	}
+	if MailWakeBlock(infoFromPersistedBead(b), waiting, true) != "" {
+		return false, nil
+	}
+	opts := beads.UpdateOpts{Metadata: RequestExplicitWakePatch("explicit", now)}
+	if writer, ok := beads.ConditionalWriterFor(s.store.Store); ok {
+		err := writer.UpdateIfMatch(id, b.Revision, opts)
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			return err == nil, err
+		}
+	}
+	err = s.store.Update(id, opts)
+	return err == nil, err
 }

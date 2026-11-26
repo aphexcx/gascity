@@ -301,6 +301,21 @@
               "null"
             ]
           },
+          "MailWakeFrom": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "MailWakeStart": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "MaxActiveSessions": {
             "format": "int64",
             "type": [
@@ -567,6 +582,8 @@
           "AppendFragments",
           "Attach",
           "DependsOn",
+          "MailWakeFrom",
+          "MailWakeStart",
           "ResumeCommand",
           "WakeMode",
           "MouseMode",

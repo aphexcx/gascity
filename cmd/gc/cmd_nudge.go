@@ -1609,20 +1609,7 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 }
 
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
-	msg := fmt.Sprintf("You have mail from %s", sender)
-	now := time.Now()
-	// Carry the mail message ID as the nudge's re-validation reference so
-	// blockedQueuedNudgeReason can re-read the message at delivery time and
-	// withdraw the nudge if it was already read or has since been archived
-	// (see gastownhall/gascity#5321). messageID is empty for callers that
-	// have no addressable message (e.g. sendMailNotifyWithProvider's
-	// store-less human-sender path), in which case the nudge carries no
-	// reference and is delivered unconditionally, same as before this fix.
-	opts := queuedNudgeOptionsFromTarget(target)
-	if messageID != "" {
-		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
-	}
-	item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
+	item := mailReminderItem(target, sender, messageID, time.Now())
 	// Session-class store for the observe/handle reads and the last-nudge stamp
 	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
 	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
@@ -1633,41 +1620,18 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
-		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
-				DeliveryID: item.ID,
-				Text:       msg,
-				Delivery:   worker.NudgeDeliveryWaitIdle,
-				Source:     "mail",
-				Wake:       worker.NudgeWakeLiveOnly,
-			})
-			if nudgeErr == nil {
-				// Unconfirmed submit = not live-delivered for this caller
-				// (gp-2io): fall through to the queue like any other error.
-				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+		var landed bool
+		item, landed, err = deliverLiveMailReminder(target, sessStore, sp, item)
+		if err != nil {
+			return err
+		}
+		if landed {
+			var sessFront *session.Store
+			if store != nil {
+				sessFront = sessionFrontDoor(sessStore)
 			}
-			if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
-				telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
-				return nudgeErr
-			}
-			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
-				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
-			}
-			// The submit Enter can be delivered and the composer drained with
-			// only the busy-indicator OBSERVATION timing out. Delivery is
-			// proven either way, so this must not fall through to the queue
-			// path below and duplicate the mail notification.
-			unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
-			if (nudgeErr == nil && result.Landed()) || unobservedButDelivered {
-				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-				var sessFront *session.Store
-				if store != nil {
-					sessFront = sessionFrontDoor(sessStore)
-				}
-				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
-				return nil
-			}
+			stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
+			return nil
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
@@ -1688,6 +1652,50 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		maybeStartNudgePoller(target)
 	}
 	return nil
+}
+
+func mailReminderItem(target nudgeTarget, sender, messageID string, now time.Time) queuedNudge {
+	opts := queuedNudgeOptionsFromTarget(target)
+	// Recheck the referenced message before delivering from the queue.
+	if messageID != "" {
+		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
+	}
+	return newQueuedNudgeWithOptions(target.agentKey(), fmt.Sprintf("You have mail from %s", sender), "mail", now, opts)
+}
+
+func deliverLiveMailReminder(target nudgeTarget, sessStore beads.Store, sp runtime.Provider, item queuedNudge) (queuedNudge, bool, error) {
+	handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
+	if err == nil {
+		result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+			DeliveryID: item.ID,
+			Text:       item.Message,
+			Delivery:   worker.NudgeDeliveryWaitIdle,
+			Source:     "mail",
+			Wake:       worker.NudgeWakeLiveOnly,
+		})
+		if nudgeErr == nil {
+			// Unconfirmed submit = not live-delivered for this caller
+			// falls through to the queue like any other error.
+			nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+		}
+		if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
+			telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
+			return item, false, nudgeErr
+		}
+		if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
+			item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
+		}
+		// The submit Enter can be delivered and the composer drained with
+		// only the busy-indicator OBSERVATION timing out. Delivery is
+		// proven either way, so this must not fall through to the queue
+		// path below and duplicate the mail notification.
+		unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
+		if (nudgeErr == nil && result.Landed()) || unobservedButDelivered {
+			telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+			return item, true, nil
+		}
+	}
+	return item, false, nil
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {

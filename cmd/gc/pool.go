@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -351,6 +352,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		SleepAfterIdle:         src.SleepAfterIdle,
 		SleepAfterIdleSource:   src.SleepAfterIdleSource,
 		AutoReclaimStaleClaims: src.AutoReclaimStaleClaims,
+		MailWakeStart:          src.MailWakeStart,
 		Suspended:              src.Suspended,
 		ResumeCommand:          src.ResumeCommand,
 		WakeMode:               src.WakeMode,
@@ -361,6 +363,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		BindingName:            src.BindingName,
 		PackName:               src.PackName,
 	}
+	dst.MailWakeFrom = slices.Clone(src.MailWakeFrom)
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))
 		copy(dst.DependsOn, src.DependsOn)

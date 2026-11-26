@@ -356,27 +356,9 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					}
 				}
 
-				// Re-qualify depends_on with binding name now that it's stamped.
 				for i := range agents {
-					if agents[i].BindingName == "" || len(agents[i].DependsOn) == 0 {
-						continue
-					}
-					for j, dep := range agents[i].DependsOn {
-						// If dep was already rewritten with dir prefix but
-						// doesn't have the binding, inject it.
-						_, depName := ParseQualifiedName(dep)
-						if !strings.Contains(depName, ".") {
-							// Bare name after dir prefix: inject binding.
-							binding := agents[i].BindingName
-							if agents[i].Dir != "" {
-								agents[i].DependsOn[j] = agents[i].Dir + "/" + binding + "." + depName
-							} else {
-								agents[i].DependsOn[j] = binding + "." + depName
-							}
-						}
-					}
+					qualifyBindingReferences(&agents[i])
 				}
-
 				// Read pack name for provenance.
 				impData, readErr := fs.ReadFile(impPath)
 				if readErr != nil {
@@ -778,22 +760,8 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				namedSessions[i].BindingName = bindingName
 			}
 
-			// Re-qualify depends_on with binding name.
 			for i := range agents {
-				if agents[i].BindingName == "" || len(agents[i].DependsOn) == 0 {
-					continue
-				}
-				for j, dep := range agents[i].DependsOn {
-					_, depName := ParseQualifiedName(dep)
-					if !strings.Contains(depName, ".") {
-						binding := agents[i].BindingName
-						if agents[i].Dir != "" {
-							agents[i].DependsOn[j] = agents[i].Dir + "/" + binding + "." + depName
-						} else {
-							agents[i].DependsOn[j] = binding + "." + depName
-						}
-					}
-				}
+				qualifyBindingReferences(&agents[i])
 			}
 			for i := range commands {
 				if commands[i].BindingName == "" {
@@ -1616,28 +1584,22 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// Rewrite them to include the rig prefix and, for V2 agents, the
 	// binding name of the depending agent (sibling deps share binding).
 	for i := range includedAgents {
-		if len(includedAgents[i].DependsOn) == 0 {
-			continue
+		a := &includedAgents[i]
+		qualify := func(name string) string {
+			if strings.ContainsAny(name, "/.") {
+				return name
+			}
+			if a.BindingName != "" {
+				name = a.BindingName + "." + name
+			}
+			if a.Dir != "" {
+				name = a.Dir + "/" + name
+			}
+			return name
 		}
-		qualified := make([]string, len(includedAgents[i].DependsOn))
-		for j, dep := range includedAgents[i].DependsOn {
-			if strings.Contains(dep, "/") || strings.Contains(dep, ".") {
-				// Already qualified — leave as-is.
-				qualified[j] = dep
-				continue
-			}
-			// Bare dep name: qualify with the same prefix as this agent.
-			// For V2 agents, prepend binding so "db" becomes "gs.db"
-			// (matching sibling agents from the same import).
-			if includedAgents[i].BindingName != "" {
-				dep = includedAgents[i].BindingName + "." + dep
-			}
-			if includedAgents[i].Dir != "" {
-				dep = includedAgents[i].Dir + "/" + dep
-			}
-			qualified[j] = dep
-		}
-		includedAgents[i].DependsOn = qualified
+		a.DependsOn = slices.Clone(a.DependsOn)
+		a.MailWakeFrom = slices.Clone(a.MailWakeFrom)
+		rewriteAgentReferences(a, qualify)
 	}
 
 	// Merge providers: parent wins over included.
@@ -2573,6 +2535,7 @@ func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName str
 			// poison the city-scoped copies filtered afterward and lock the
 			// first rig's prefix onto every later rig.
 			a.DependsOn = append([]string(nil), a.DependsOn...)
+			a.MailWakeFrom = slices.Clone(a.MailWakeFrom)
 			qualifyAgentDependsOnInPlace(&a)
 			expanded = append(expanded, a)
 		}
@@ -2580,14 +2543,42 @@ func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName str
 	return expanded
 }
 
-func qualifyAgentDependsOnInPlace(a *Agent) {
-	if a == nil || len(a.DependsOn) == 0 {
+func rewriteAgentReferences(a *Agent, qualify func(string) string) {
+	for i, name := range a.DependsOn {
+		a.DependsOn[i] = qualify(name)
+	}
+	for i, name := range a.MailWakeFrom {
+		if name != "human" && name != "controller" {
+			a.MailWakeFrom[i] = qualify(name)
+		}
+	}
+}
+
+func qualifyBindingReferences(a *Agent) {
+	if a.BindingName == "" {
 		return
 	}
-	for i, dep := range a.DependsOn {
-		dep = strings.TrimSpace(dep)
+	rewriteAgentReferences(a, func(name string) string {
+		_, local := ParseQualifiedName(name)
+		if strings.Contains(local, ".") {
+			return name
+		}
+		local = a.BindingName + "." + local
+		if a.Dir != "" {
+			return a.Dir + "/" + local
+		}
+		return local
+	})
+}
+
+func qualifyAgentDependsOnInPlace(a *Agent) {
+	if a == nil {
+		return
+	}
+	rewriteAgentReferences(a, func(name string) string {
+		dep := strings.TrimSpace(name)
 		if dep == "" || strings.Contains(dep, "/") {
-			continue
+			return name
 		}
 		binding := strings.TrimSpace(a.BindingName)
 		if !strings.Contains(dep, ".") {
@@ -2595,13 +2586,13 @@ func qualifyAgentDependsOnInPlace(a *Agent) {
 				dep = binding + "." + dep
 			}
 		} else if binding != "" && !strings.HasPrefix(dep, binding+".") {
-			continue
+			return name
 		}
 		if a.Dir != "" {
 			dep = a.Dir + "/" + dep
 		}
-		a.DependsOn[i] = dep
-	}
+		return dep
+	})
 }
 
 func expandCityImportedNamedSessionsForRigs(sessions []NamedSession, rigs []Rig, bindingName string) []NamedSession {
@@ -2834,6 +2825,8 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		AppendFragments:         ov.AppendFragments,
 		Attach:                  ov.Attach,
 		DependsOn:               ov.DependsOn,
+		MailWakeFrom:            ov.MailWakeFrom,
+		MailWakeStart:           ov.MailWakeStart,
 		ResumeCommand:           ov.ResumeCommand,
 		WakeMode:                ov.WakeMode,
 		MouseMode:               ov.MouseMode,

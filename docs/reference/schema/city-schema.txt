@@ -344,6 +344,17 @@
           "type": "array",
           "description": "DependsOn lists agent names that must be awake before this agent wakes.\nUsed for dependency-ordered startup and shutdown. Validated for cycles\nat config load time."
         },
+        "mail_wake_from": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MailWakeFrom lists agents whose local mail requests a reminder. The\nreserved entry human includes local commands sent as human. Defaults to empty."
+        },
+        "mail_wake_start": {
+          "type": "boolean",
+          "description": "MailWakeStart allows listed mail to start an eligible named session\nwhen a managed controller is available. Defaults to false."
+        },
         "resume_command": {
           "type": "string",
           "description": "ResumeCommand is the full shell command to run when resuming this agent.\nSupports {{.SessionKey}} template variable. When set, takes precedence\nover the provider's ResumeFlag/ResumeStyle. Example:\n  \"claude --resume {{.SessionKey}} --dangerously-skip-permissions\""
@@ -681,6 +692,17 @@
           "type": "array",
           "description": "DependsOn overrides the agent's dependency list."
         },
+        "mail_wake_from": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MailWakeFrom overrides the senders whose local mail requests a reminder."
+        },
+        "mail_wake_start": {
+          "type": "boolean",
+          "description": "MailWakeStart overrides whether listed mail may start a named session."
+        },
         "resume_command": {
           "type": "string",
           "description": "ResumeCommand overrides the agent's resume_command template."
@@ -953,6 +975,17 @@
           },
           "type": "array",
           "description": "DependsOn overrides the agent's dependency list."
+        },
+        "mail_wake_from": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MailWakeFrom overrides the senders whose local mail requests a reminder."
+        },
+        "mail_wake_start": {
+          "type": "boolean",
+          "description": "MailWakeStart overrides whether listed mail may start a named session."
         },
         "resume_command": {
           "type": "string",

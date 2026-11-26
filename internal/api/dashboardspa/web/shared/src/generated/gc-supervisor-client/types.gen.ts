@@ -81,6 +81,8 @@ export type AgentPatch = {
     Lifecycle: string | null;
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
+    MailWakeFrom: Array<string> | null;
+    MailWakeStart: boolean | null;
     MaxActiveSessions: number | null;
     MaxSessionAge: string | null;
     MaxSessionAgeJitter: string | null;

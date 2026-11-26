@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -788,9 +789,9 @@ type AgentOverride struct {
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
 	// MailWakeFrom overrides the senders whose local mail requests a reminder.
-	MailWakeFrom []string `toml:"mail_wake_from,omitempty" json:"-" jsonschema:"-"`
+	MailWakeFrom []string `toml:"mail_wake_from,omitempty"`
 	// MailWakeStart overrides whether listed mail may start a named session.
-	MailWakeStart *bool `toml:"mail_wake_start,omitempty" json:"-" jsonschema:"-"`
+	MailWakeStart *bool `toml:"mail_wake_start,omitempty"`
 	// ResumeCommand overrides the agent's resume_command template.
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
@@ -3572,10 +3573,10 @@ type Agent struct {
 	DependsOn []string `toml:"depends_on,omitempty"`
 	// MailWakeFrom lists agents whose local mail requests a reminder. The
 	// reserved entry human includes local commands sent as human. Defaults to empty.
-	MailWakeFrom []string `toml:"mail_wake_from,omitempty" json:"-" jsonschema:"-"`
+	MailWakeFrom []string `toml:"mail_wake_from,omitempty"`
 	// MailWakeStart allows listed mail to start an eligible named session
 	// when a managed controller is available. Defaults to false.
-	MailWakeStart bool `toml:"mail_wake_start,omitempty" json:"-" jsonschema:"-"`
+	MailWakeStart bool `toml:"mail_wake_start,omitempty"`
 	// ResumeCommand is the full shell command to run when resuming this agent.
 	// Supports {{.SessionKey}} template variable. When set, takes precedence
 	// over the provider's ResumeFlag/ResumeStyle. Example:
@@ -3648,6 +3649,7 @@ func (a Agent) Clone() Agent {
 	out.AppendFragments = append([]string(nil), a.AppendFragments...)
 	out.InheritedAppendFragments = append([]string(nil), a.InheritedAppendFragments...)
 	out.DependsOn = append([]string(nil), a.DependsOn...)
+	out.MailWakeFrom = slices.Clone(a.MailWakeFrom)
 	out.SharedSkills = append([]string(nil), a.SharedSkills...)
 	out.SharedMCP = append([]string(nil), a.SharedMCP...)
 	out.Env = deepCopyStringMap(a.Env)
@@ -4390,6 +4392,16 @@ func validateDependsOn(agents []Agent) error {
 
 	// Check all references exist.
 	for _, a := range agents {
+		for _, sender := range a.MailWakeFrom {
+			switch {
+			case sender == "human":
+				continue
+			case sender == a.QualifiedName():
+				return fmt.Errorf("agent %q: mail_wake_from contains a self-reference", sender)
+			case sender == "controller" || !names[sender]:
+				return fmt.Errorf("agent %q: invalid mail_wake_from sender %q", a.QualifiedName(), sender)
+			}
+		}
 		for _, dep := range a.DependsOn {
 			if !names[dep] {
 				return fmt.Errorf("agent %q: depends_on references unknown agent %q", a.QualifiedName(), dep)

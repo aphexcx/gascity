@@ -2694,6 +2694,7 @@ A qualified override is trusted as written.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
+A recipient can use mail_wake_from to request a reminder for listed local senders.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 With --context/--city-url, the message ID and its thread belong to the
@@ -2719,6 +2720,7 @@ Creates a message bead addressed to the recipient. The sender defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
 a recipient turn after sending. In a managed city, it can request a wake for
 a non-running recipient. Unread mail alone does not request a wake.
+A recipient can use mail_wake_from to request a reminder for listed local senders.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.

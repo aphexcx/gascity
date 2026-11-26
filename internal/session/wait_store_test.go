@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"maps"
 	"reflect"
 	"testing"
 	"time"
@@ -124,9 +125,104 @@ func TestRequestMailWakePreservesSession(t *testing.T) {
 				meta[k] = v
 			}
 		}
-		if !reflect.DeepEqual(got.Metadata, meta) {
+		if !maps.Equal(got.Metadata, meta) {
 			t.Errorf("held=%t: metadata=%v, want %v", held, got.Metadata, meta)
 		}
+	}
+}
+
+func TestMailWakeRejectsOtherBeadTypes(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: "task", Metadata: map[string]string{"state": "asleep", "sleep_reason": "idle"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := waitStoreOver(mem)
+	if _, err := store.MailWakeHistory(b.ID); err == nil {
+		t.Error("read mail wake history from a task")
+	}
+	if err := store.RecordMailWake(b.ID, nil, MailWakeEntry{Sender: "human", At: waitStoreNow}); err == nil {
+		t.Error("recorded a reminder on a task")
+	}
+	if asked, err := store.RequestMailWake(b.ID, waitStoreNow); err == nil || asked {
+		t.Error("accepted a task as a sleeping session")
+	}
+	after, err := mem.Get(b.ID)
+	if err != nil || !reflect.DeepEqual(b, after) {
+		t.Fatalf("task changed: after=%v err=%v", after, err)
+	}
+}
+
+// mailWakeValueCASStore models a backend that can fence one metadata key
+// without offering revision-fenced updates of an entire bead.
+type mailWakeValueCASStore struct {
+	beads.Store
+	beads.MetadataCASWriter
+}
+
+func (mailWakeValueCASStore) SetMetadata(string, string, string) error {
+	return errors.New("unconditional metadata write")
+}
+
+type mailWakeWithoutRevisions struct{ *beads.MemStore }
+
+func (mailWakeWithoutRevisions) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return beads.ErrConditionalWriteUnsupported
+}
+
+func TestMailWakeUsesMetadataCAS(t *testing.T) {
+	mem := beads.NewMemStore()
+	for name, backend := range map[string]beads.Store{
+		"metadata writer":       mailWakeValueCASStore{Store: mem, MetadataCASWriter: mem},
+		"unsupported revisions": mailWakeWithoutRevisions{mem},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := backend.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := waitStoreOver(backend)
+			entry := MailWakeEntry{Sender: "human", At: waitStoreNow}
+			if err := store.RecordMailWake(b.ID, nil, entry); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordMailWake(b.ID, nil, entry); err == nil {
+				t.Fatal("accepted a second reservation against the same empty history")
+			}
+		})
+	}
+}
+
+type mailWakeWithoutAtomicWrites struct{ mailWakeWithoutRevisions }
+
+func (mailWakeWithoutAtomicWrites) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	return false, beads.ErrConditionalWriteUnsupported
+}
+
+func TestMailWakeWithoutAtomicWrites(t *testing.T) {
+	mem := beads.NewMemStore()
+	for name, backend := range map[string]beads.Store{
+		"no optional writers": struct{ beads.Store }{mem},
+		"unsupported writers": mailWakeWithoutAtomicWrites{mailWakeWithoutRevisions{mem}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := backend.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": "asleep", "sleep_reason": "idle", "wake_attempts": "2"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := waitStoreOver(backend)
+			entry := MailWakeEntry{Sender: "human", At: waitStoreNow}
+			if err := store.RecordMailWake(b.ID, nil, entry); err != nil {
+				t.Fatalf("record reminder: %v", err)
+			}
+			if asked, err := store.RequestMailWake(b.ID, waitStoreNow); !asked || err != nil {
+				t.Fatalf("request wake: asked=%t err=%v", asked, err)
+			}
+			got, err := backend.Get(b.ID)
+			if err != nil || got.Metadata["wake_request"] != "explicit" || got.Metadata["wake_attempts"] != "2" {
+				t.Fatalf("wake metadata=%v err=%v", got.Metadata, err)
+			}
+		})
 	}
 }
 
