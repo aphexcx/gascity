@@ -787,6 +787,10 @@ type AgentOverride struct {
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
+	// MailWakeFrom overrides the senders whose local mail requests a reminder.
+	MailWakeFrom []string `toml:"mail_wake_from,omitempty" json:"-" jsonschema:"-"`
+	// MailWakeStart overrides whether listed mail may start a named session.
+	MailWakeStart *bool `toml:"mail_wake_start,omitempty" json:"-" jsonschema:"-"`
 	// ResumeCommand overrides the agent's resume_command template.
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
@@ -3566,6 +3570,12 @@ type Agent struct {
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
 	// at config load time.
 	DependsOn []string `toml:"depends_on,omitempty"`
+	// MailWakeFrom lists agents whose local mail requests a reminder. The
+	// reserved entry human includes local commands sent as human. Defaults to empty.
+	MailWakeFrom []string `toml:"mail_wake_from,omitempty" json:"-" jsonschema:"-"`
+	// MailWakeStart allows listed mail to start an eligible named session
+	// when a managed controller is available. Defaults to false.
+	MailWakeStart bool `toml:"mail_wake_start,omitempty" json:"-" jsonschema:"-"`
 	// ResumeCommand is the full shell command to run when resuming this agent.
 	// Supports {{.SessionKey}} template variable. When set, takes precedence
 	// over the provider's ResumeFlag/ResumeStyle. Example:

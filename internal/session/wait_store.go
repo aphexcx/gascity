@@ -9,6 +9,32 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// MailWakeEntry records a reminder requested by a recipient's configuration.
+type MailWakeEntry struct {
+	Sender string    `json:"sender"`
+	At     time.Time `json:"at"`
+}
+
+// MailWakeHistory reads the recent senders recorded on this session.
+func (s *Store) MailWakeHistory(string) ([]MailWakeEntry, error) {
+	return nil, nil
+}
+
+// RecordMailWake reserves one reminder against the observed history.
+func (s *Store) RecordMailWake(string, []MailWakeEntry, MailWakeEntry) error {
+	return nil
+}
+
+// MailWakeBlock reports the state that prevents a reminder or a start.
+func MailWakeBlock(Info, bool, bool) string {
+	return ""
+}
+
+// RequestMailWake records an explicit wake request for an eligible sleeper.
+func (s *Store) RequestMailWake(string, time.Time) (bool, error) {
+	return false, nil
+}
+
 // This file extends the session-class domain wrapper (Store) with the durable
 // wait sub-surface. Reads project a wait bead onto WaitInfo (via
 // WaitInfoFromBead, the codec confined to waits.go); writes speak typed intents

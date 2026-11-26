@@ -428,6 +428,8 @@ schema = 2
 `)
 	writeTestFile(t, filepath.Join(importDir, "agents", "worker"), "agent.toml", `
 depends_on = ["db"]
+mail_wake_from = ["db", "human"]
+mail_wake_start = true
 start_command = "true"
 `)
 	writeTestFile(t, filepath.Join(importDir, "agents", "db"), "agent.toml", `
@@ -449,6 +451,9 @@ start_command = "true"
 	}
 	if got, want := rigWorker.DependsOn, []string{"fixture/core.db"}; len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("rig worker DependsOn = %v, want %v", got, want)
+	}
+	if !rigWorker.MailWakeStart || len(rigWorker.MailWakeFrom) != 2 || rigWorker.MailWakeFrom[0] != rigWorker.DependsOn[0] || rigWorker.MailWakeFrom[1] != "human" {
+		t.Fatalf("rig worker mail wake settings = %v, %v", rigWorker.MailWakeFrom, rigWorker.MailWakeStart)
 	}
 }
 

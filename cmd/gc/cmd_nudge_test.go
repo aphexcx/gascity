@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1561,6 +1562,121 @@ func TestSendMailNotifyWithProviderQueuesWhenSessionSleeping(t *testing.T) {
 	}
 	if !strings.Contains(pending[0].Message, "You have mail from human") {
 		t.Fatalf("message = %q, want mail reminder", pending[0].Message)
+	}
+}
+
+func TestMailNotifySessionMetadata(t *testing.T) {
+	for _, initial := range []string{"suspended", "held", "unmaterialized"} {
+		t.Run(initial, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("GC_CITY", dir)
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			city := `[workspace]
+name = "alpha"
+[[agent]]
+name = "worker"
+provider = "codex"
+start_command = "echo"
+[[named_session]]
+template = "worker"
+`
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(city), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store := openNudgeBeadStore(dir)
+			startSessionResetTestController(t, dir)
+			if !cityUsesManagedReconciler(dir) {
+				t.Fatal("fixture has no managed controller")
+			}
+			oldManaged, oldPoke := nudgeCityUsesManagedReconciler, nudgePokeController
+			nudgeCityUsesManagedReconciler = func(path string) bool { return path == dir }
+			nudgePokeController = func(string) error { return nil }
+			t.Cleanup(func() {
+				nudgeCityUsesManagedReconciler, nudgePokeController = oldManaged, oldPoke
+			})
+			if _, err := resolveSessionID(store, "worker"); !errors.Is(err, session.ErrSessionNotFound) {
+				t.Fatalf("initial lookup = %v, want no record", err)
+			}
+			if initial == "unmaterialized" {
+				t.Log("before: no record")
+			}
+			target, err := resolveNudgeTarget("worker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch initial {
+			case "suspended":
+				err = store.SetMetadataBatch(target.sessionID, map[string]string{
+					"state": "suspended", "suspended_at": "2025-01-01T00:00:00Z", "sleep_reason": "user-hold",
+				})
+			case "held":
+				err = store.SetMetadataBatch(target.sessionID, map[string]string{
+					"state": "asleep", "held_until": "2099-01-01T00:00:00Z", "sleep_reason": "user-hold",
+				})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(target.sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("before managed wake: %v", before.Metadata)
+			if initial == "unmaterialized" {
+				stamp := before.Metadata["pending_create_started_at"]
+				if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+					t.Fatalf("pending_create_started_at = %q: %v", stamp, err)
+				}
+				token := before.Metadata["instance_token"]
+				if token == "" {
+					t.Fatal("missing instance token")
+				}
+				created := map[string]string{
+					"alias": "worker", "command": "echo", "configured_named_identity": "worker",
+					"configured_named_mode": "on_demand", "configured_named_session": "true",
+					"continuation_epoch": "1", "generation": "1", "instance_token": token,
+					"pending_create_claim": "true", "pending_create_started_at": stamp,
+					"provider": "codex", "resume_command": "", "resume_flag": "", "resume_style": "",
+					"session_id_flag": "", "session_name": "worker", "session_name_explicit": "true",
+					"session_origin": "named", "state": "start-pending", "template": "worker", "work_dir": dir,
+				}
+				if !maps.Equal(before.Metadata, created) {
+					t.Fatalf("materialized metadata = %v, want %v", before.Metadata, created)
+				}
+				lifecycle := session.ProjectLifecycle(session.LifecycleInputFromMetadata(before.Status, before.Metadata))
+				if !lifecycle.HasWakeCause(session.WakeCausePendingCreate) || lifecycle.HasWakeCause(session.WakeCauseExplicit) {
+					t.Fatalf("expected a pending create before the explicit mail wake: %+v", lifecycle)
+				}
+			}
+			if err := sendMailNotifyWithWorker(target, store, runtime.NewFake(), "human", ""); err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.Get(target.sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("after managed wake: %v", after.Metadata)
+			stamp := after.Metadata["wake_requested_at"]
+			if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+				t.Fatalf("wake_requested_at = %q: %v", stamp, err)
+			}
+			want := maps.Clone(before.Metadata)
+			maps.Copy(want, map[string]string{
+				"held_until": "", "quarantined_until": "", "wait_hold": "", "sleep_intent": "",
+				"wake_attempts": "0", "wake_refused_event_at": "", "churn_count": "0",
+				"wake_request": "explicit", "wake_requested_at": stamp,
+			})
+			if initial != "unmaterialized" {
+				want["sleep_reason"] = ""
+			}
+			if initial == "suspended" {
+				want["suspended_at"], want["state"], want["slept_at"] = "", "asleep", stamp
+			}
+			if !maps.Equal(after.Metadata, want) {
+				t.Errorf("metadata after wake = %v, want %v", after.Metadata, want)
+			}
+		})
 	}
 }
 

@@ -45,6 +45,119 @@ func recordingWaitStore(t *testing.T, seed ...beads.Bead) (*Store, *beadstest.Re
 
 var waitStoreNow = time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
 
+func TestMailWakeBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value      string
+		blockLive, blockStart bool
+	}{
+		{"hold", "held_until", "yesterday", true, true},
+		{"quarantine", "quarantined_until", "later", true, true},
+		{"wait hold", "wait_hold", "true", true, true},
+		{"pending sleep", "sleep_intent", "idle-stop-pending", true, true},
+		{"attempts", "wake_attempts", "2", false, false},
+		{"refusal stamp", "wake_refused_event_at", "stamp", false, false},
+		{"churn", "churn_count", "3", false, false},
+		{"suspension", "state", "suspended", true, true},
+		{"drain", "state", "drained", true, true},
+		{"archive", "state", "archived", true, true},
+		{"closing", "state", "closing", true, true},
+		{"closed", "state", "closed", true, true},
+		{"active", "state", "active", false, true},
+		{"ordinary", "sleep_reason", "idle", false, false},
+		{"stopped", "sleep_reason", "city-stop", false, true},
+		{"future", "sleep_reason", "new-reason", false, true},
+	} {
+		m := map[string]string{"state": "asleep"}
+		m[tc.key] = tc.value
+		info := infoFromPersistedBead(beads.Bead{Metadata: m})
+		if live, start := MailWakeBlock(info, false, false), MailWakeBlock(info, false, true); (live != "") != tc.blockLive || (start != "") != tc.blockStart {
+			t.Errorf("%s: running block=%q start block=%q", tc.name, live, start)
+		}
+	}
+	for _, reason := range []string{"user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", "drained"} {
+		info := infoFromPersistedBead(beads.Bead{Metadata: map[string]string{"state": "asleep", "sleep_reason": reason}})
+		if MailWakeBlock(info, false, false) == "" {
+			t.Errorf("running recipient with %q was eligible", reason)
+		}
+	}
+	if MailWakeBlock(Info{Closed: true}, false, false) == "" || MailWakeBlock(Info{}, true, false) == "" {
+		t.Error("closed record or open wait was eligible")
+	}
+}
+
+func TestMailWakeClearingKeys(t *testing.T) {
+	// Each key must belong to a tested blocker, a preserved counter, or
+	// a timestamp belonging to the suspended-to-asleep transition.
+	placed := map[string]bool{
+		"held_until": true, "quarantined_until": true, "wait_hold": true, "sleep_intent": true,
+		"wake_attempts": true, "wake_refused_event_at": true, "churn_count": true,
+		"state": true, "suspended_at": true, "slept_at": true, "sleep_reason": true,
+	}
+	for key := range ClearWakeBlockersPatch(StateSuspended, "user-hold", waitStoreNow) {
+		if !placed[key] {
+			t.Errorf("classify %q for recipient-configured mail before accepting a wake", key)
+		}
+	}
+}
+
+func TestRequestMailWakePreservesSession(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		mem := beads.NewMemStore()
+		meta := map[string]string{"state": "asleep", "sleep_reason": "idle", "wake_attempts": "2", "churn_count": "3", "wake_refused_event_at": "before"}
+		if held {
+			meta["held_until"] = "later"
+		}
+		b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		asked, err := waitStoreOver(mem).RequestMailWake(b.ID, waitStoreNow)
+		if err != nil || asked == held {
+			t.Errorf("held=%t: asked=%t err=%v", held, asked, err)
+		}
+		got, err := mem.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !held {
+			for k, v := range RequestExplicitWakePatch("explicit", waitStoreNow) {
+				meta[k] = v
+			}
+		}
+		if !reflect.DeepEqual(got.Metadata, meta) {
+			t.Errorf("held=%t: metadata=%v, want %v", held, got.Metadata, meta)
+		}
+	}
+}
+
+func TestMailWakeHistory(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := waitStoreOver(mem)
+	first := MailWakeEntry{Sender: "one", At: waitStoreNow}
+	second := MailWakeEntry{Sender: "two", At: waitStoreNow.Add(16 * time.Minute)}
+	var seen []MailWakeEntry
+	for _, entry := range []MailWakeEntry{first, second} {
+		if err := store.RecordMailWake(b.ID, seen, entry); err != nil {
+			t.Fatal(err)
+		}
+		seen, err = store.MailWakeHistory(b.ID)
+		if err != nil || len(seen) != 1 || seen[0].Sender != entry.Sender || !seen[0].At.Equal(entry.At) {
+			t.Fatalf("history = %v, %v; want only %v", seen, err, entry)
+		}
+	}
+	if err := store.ApplyPatch(b.ID, ClearWakeBlockersPatch(StateSuspended, "user-hold", waitStoreNow)); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.MailWakeHistory(b.ID)
+	if err != nil || !reflect.DeepEqual(after, seen) {
+		t.Fatalf("explicit wake changed history: %v, %v", after, err)
+	}
+}
+
 func TestClearIdleWaitHoldPreservesOtherIntents(t *testing.T) {
 	for _, tc := range []struct {
 		name, intent string

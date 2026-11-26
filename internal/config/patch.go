@@ -139,6 +139,10 @@ type AgentPatch struct {
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
+	// MailWakeFrom overrides the senders whose local mail requests a reminder.
+	MailWakeFrom []string `toml:"mail_wake_from,omitempty" json:"-" jsonschema:"-"`
+	// MailWakeStart overrides whether listed mail may start a named session.
+	MailWakeStart *bool `toml:"mail_wake_start,omitempty" json:"-" jsonschema:"-"`
 	// ResumeCommand overrides the agent's resume_command template.
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
