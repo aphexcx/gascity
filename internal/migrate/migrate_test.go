@@ -1160,6 +1160,8 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		AppendFragments:        []string{"append1"},
 		Attach:                 &trueVal,
 		DependsOn:              []string{"other-agent"},
+		MailWakeFrom:           []string{"other-agent", "human"},
+		MailWakeStart:          true,
 		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
 		WakeMode:               "fresh",
 		MouseMode:              "on",
@@ -1220,6 +1222,30 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		fname := cfgType.Field(i).Name
 		if cv.Field(i).IsZero() {
 			t.Fatalf("agentConfigFromAgent did not populate field %q", fname)
+		}
+	}
+}
+
+func TestAgentMailWakeSettingsRoundTrip(t *testing.T) {
+	for _, src := range []config.Agent{
+		{},
+		{MailWakeFrom: []string{"other-agent", "human"}},
+		{MailWakeStart: true},
+	} {
+		cfg := agentConfigFromAgent(src)
+		if isZeroAgentConfig(cfg) != (len(src.MailWakeFrom) == 0 && !src.MailWakeStart) {
+			t.Fatalf("incorrect empty check for mail_wake_from=%v, mail_wake_start=%t", src.MailWakeFrom, src.MailWakeStart)
+		}
+		data, err := marshalAgentFile(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got config.Agent
+		if _, err := toml.Decode(string(data), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.MailWakeFrom, src.MailWakeFrom) || got.MailWakeStart != src.MailWakeStart {
+			t.Fatalf("mail wake settings changed during migration: %s", data)
 		}
 	}
 }

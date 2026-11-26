@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -131,8 +132,8 @@ func (p localMailWakePolicy) agent(info session.Info) (config.Agent, bool) {
 		}
 		a, ok := resolveAgentIdentity(p.cfg, name, "")
 		if ok {
-			if a.PoolName != "" {
-				return findAgentByQualified(p.cfg, a.PoolName)
+			if identity := agentutil.RoutedToIdentity(&a); identity != a.QualifiedName() {
+				return findAgentByQualified(p.cfg, identity)
 			}
 			return a, true
 		}
