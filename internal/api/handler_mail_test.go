@@ -1383,6 +1383,10 @@ func TestMailFilingRecovery(t *testing.T) {
 			switch scenario {
 			case "archived":
 				wantInbox = 0
+				stored, err := state.stores["myrig"].Get(first.ID)
+				if err != nil || stored.Status != "closed" {
+					t.Fatalf("archived filing %s: status = %q, err = %v", first.ID, stored.Status, err)
+				}
 			case "unkeyed":
 				wantInbox = 2
 			}
