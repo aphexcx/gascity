@@ -1621,7 +1621,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	}
 	if obs.Running {
 		var landed bool
-		item, landed, err = deliverLiveMailReminder(target, sessStore, sp, item)
+		item, landed, err = deliverLiveMailReminder(context.Background(), target, sessStore, sp, item)
 		if err != nil {
 			return err
 		}
@@ -1663,10 +1663,10 @@ func mailReminderItem(target nudgeTarget, sender, messageID string, now time.Tim
 	return newQueuedNudgeWithOptions(target.agentKey(), fmt.Sprintf("You have mail from %s", sender), "mail", now, opts)
 }
 
-func deliverLiveMailReminder(target nudgeTarget, sessStore beads.Store, sp runtime.Provider, item queuedNudge) (queuedNudge, bool, error) {
+func deliverLiveMailReminder(ctx context.Context, target nudgeTarget, sessStore beads.Store, sp runtime.Provider, item queuedNudge) (queuedNudge, bool, error) {
 	handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 	if err == nil {
-		result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+		result, nudgeErr := handle.Nudge(ctx, worker.NudgeRequest{
 			DeliveryID: item.ID,
 			Text:       item.Message,
 			Delivery:   worker.NudgeDeliveryWaitIdle,
@@ -1677,6 +1677,9 @@ func deliverLiveMailReminder(target nudgeTarget, sessStore beads.Store, sp runti
 			// Unconfirmed submit = not live-delivered for this caller
 			// falls through to the queue like any other error.
 			nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+		}
+		if errors.Is(nudgeErr, errMailReminderWithdrawn) {
+			return item, false, nudgeErr
 		}
 		if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
 			telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)

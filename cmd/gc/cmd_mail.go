@@ -1941,7 +1941,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	rec := openCityRecorder(stderr)
 	var list localMailWake
 	if !notify {
-		list = newLocalMailWake(cityPath, cfg, store, sessStore, sender, senderID, "gc mail send", stderr, time.Now)
+		list = newLocalMailWake(cityPath, cfg, store, sessStore, mp, sender, senderID, "gc mail send", stderr, time.Now)
 	}
 	return doMailSendWithWake(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr, list)
 }
@@ -2470,7 +2470,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 
 	var list localMailWake
 	if !notify {
-		list = newLocalMailWake(cityPath, cfg, store, sessions, sender, senderID, "gc mail reply", stderr, time.Now)
+		list = newLocalMailWake(cityPath, cfg, store, sessions, mp, sender, senderID, "gc mail reply", stderr, time.Now)
 	}
 	code = doMailReplyWithWake(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr, list)
 	if code == 0 && routeWarnings.Len() != 0 {

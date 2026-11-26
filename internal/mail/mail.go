@@ -64,6 +64,9 @@ type Message struct {
 	// FromSessionID is the local route captured by the storing provider.
 	// Session IDs are meaningful only within that store.
 	FromSessionID string `json:"-"`
+	// ToSessionID is the stable local recipient route when the provider
+	// stores one separately from the display address.
+	ToSessionID string `json:"-"`
 }
 
 // ReplySubject derives a non-empty reply subject from the original or the body.

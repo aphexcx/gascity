@@ -198,6 +198,153 @@ template = "reader"
 	}
 }
 
+func TestMailWakeReplyAfterRecipientRename(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reuse=%t", reuse), func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("GC_CITY", dir)
+			t.Setenv("GC_SESSION", "fake")
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_MAIL", "beads")
+			t.Setenv("GC_SESSION_ID", "")
+			t.Setenv("GC_ALIAS", "")
+			t.Setenv("GC_AGENT", "")
+			const cfg = "[workspace]\nname = \"alpha\"\n[[agent]]\nname = \"reader\"\nmail_wake_from = [\"human\"]\nmail_wake_start = true\n[[named_session]]\ntemplate = \"reader\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			startSessionResetTestController(t, dir)
+			store := openNudgeBeadStore(dir).Store
+			target, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"state": "asleep", "sleep_reason": "idle", "session_name": "reader", "alias": "first-name", "template": "reader",
+				"configured_named_session": "true", "configured_named_identity": "reader",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mp := beadmail.New(store)
+			original, err := mp.Send("first-name", "human", "Question", "Please reply")
+			if err != nil || original.FromSessionID != target.ID {
+				t.Fatalf("original sender=%q err=%v", original.FromSessionID, err)
+			}
+			if err := store.SetMetadata(target.ID, "alias", "second-name"); err != nil {
+				t.Fatal(err)
+			}
+			var replacement beads.Bead
+			if reuse {
+				replacement, err = store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"alias": "first-name", "session_name": "another", "template": "reader"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out, diagnostic bytes.Buffer
+			code := cmdMailReplyJSON([]string{original.ID}, "Answer", "Reply", false, true, &out, &diagnostic)
+			var result mailActionResult
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil || code != 0 {
+				t.Fatalf("code=%d err=%v stderr=%q", code, err, diagnostic.String())
+			}
+			reply, err := store.Get(result.ID)
+			if err != nil || reply.Assignee != target.ID {
+				t.Fatalf("stored reply route=%q err=%v", reply.Assignee, err)
+			}
+			history, err := sessionFrontDoor(store).MailWakeHistory(target.ID)
+			if !result.Notified || err != nil || len(history) != 1 {
+				t.Errorf("reply notified=%t history=%v err=%v stderr=%q", result.Notified, history, err, diagnostic.String())
+			}
+			if reuse {
+				after, err := store.Get(replacement.ID)
+				if err != nil || !reflect.DeepEqual(after, replacement) {
+					t.Errorf("new alias holder changed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+type mailReadOnIdle struct {
+	*runtime.Fake
+	read func()
+}
+
+func (p *mailReadOnIdle) WaitForIdle(ctx context.Context, name string, delay time.Duration) error {
+	if err := p.Fake.WaitForIdle(ctx, name, delay); err != nil {
+		return err
+	}
+	p.read()
+	return nil
+}
+
+func TestMailWakeReadDuringLiveWait(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "beads")
+	const city = `
+[workspace]
+name = "alpha"
+[providers.claude]
+base = "builtin:claude"
+[[agent]]
+name = "reader"
+provider = "claude"
+mail_wake_from = ["human"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(city), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openNudgeBeadStore(dir).Store
+	mp := beadmail.New(store)
+	fake := &mailReadOnIdle{Fake: runtime.NewFake()}
+	read := false
+	fake.read = func() {
+		rows, err := store.List(beads.ListQuery{Type: "message", TierMode: beads.TierBoth})
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("mail at idle: count=%d err=%v", len(rows), err)
+		}
+		if err := mp.MarkRead(rows[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		read = true
+	}
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	mgr := newSessionManagerWithConfig(dir, store, fake, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "reader", Title: "reader", Command: "echo", WorkDir: dir, Provider: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+	var out, diagnostic bytes.Buffer
+	code := cmdMailSendJSON([]string{info.ID}, false, false, "human", "", "Update", "Body", "", true, &out, &diagnostic)
+	if code != 0 || !read {
+		t.Fatalf("code=%d read=%t stderr=%q", code, read, diagnostic.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "NudgeNow" {
+			t.Error("submitted a reminder after its mail was read during the idle wait")
+		}
+	}
+	history, err := sessionFrontDoor(store).MailWakeHistory(info.ID)
+	if err != nil || len(history) != 1 {
+		t.Errorf("reservation lost on withdrawal: history=%v err=%v", history, err)
+	}
+	pending, _, _, err := listQueuedNudges(dir, info.SessionName, time.Now())
+	if err != nil || len(pending) != 0 {
+		t.Errorf("queued a withdrawn reminder: pending=%v err=%v", pending, err)
+	}
+}
+
 func TestMailWakeFlagPrecedence(t *testing.T) {
 	for _, flag := range []bool{true, false} {
 		for _, listed := range []bool{true, false} {
@@ -323,7 +470,7 @@ func TestMailWakeBlocksPreserveState(t *testing.T) {
 				}
 				t.Cleanup(func() { buildSessionProviderByName = build })
 				var stderr bytes.Buffer
-				wake := newLocalMailWake(dir, cfg, store, store, "human", "", "gc mail send", &stderr, time.Now)
+				wake := newLocalMailWake(dir, cfg, store, store, beadmail.New(store), "human", "", "gc mail send", &stderr, time.Now)
 				if wake(mail.Message{To: before.ID, ID: "message"}) || strings.Count(stderr.String(), "\n") != 1 {
 					t.Errorf("blocked mail wake: stderr=%q", stderr.String())
 				}
@@ -382,7 +529,7 @@ func TestMailWakeLoop(t *testing.T) {
 			}
 			lastID = m.ID
 			var diagnostic bytes.Buffer
-			wake := newLocalMailWake(dir, cfg, store, store, from, ids[from], "gc mail send", &diagnostic, func() time.Time { return now })
+			wake := newLocalMailWake(dir, cfg, store, store, mp, from, ids[from], "gc mail send", &diagnostic, func() time.Time { return now })
 			result := notifyStoredMail(m, nil, wake, "gc mail send", &diagnostic)
 			return result, diagnostic.String()
 		}
@@ -544,7 +691,7 @@ func TestMailWakeHistoryWriteFailure(t *testing.T) {
 			}
 			mp := beadmail.New(store)
 			var stdout, stderr bytes.Buffer
-			wake := newLocalMailWake(dir, cfg, store, sessions, "human", "", "gc mail send", &stderr, time.Now)
+			wake := newLocalMailWake(dir, cfg, store, sessions, mp, "human", "", "gc mail send", &stderr, time.Now)
 			code := doMailSendWithWake(mp, events.Discard, nil, "human", []string{"reader", "Update"}, nil, "", true, &stdout, &stderr, wake)
 			var result mailActionResult
 			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
@@ -633,7 +780,7 @@ func TestMailWakeDisabled(t *testing.T) {
 				store = counter
 			}
 			var stderr bytes.Buffer
-			callback := newLocalMailWake("", tc.cfg, store, store, "human", "", command, &stderr, time.Now)
+			callback := newLocalMailWake("", tc.cfg, store, store, nil, "human", "", command, &stderr, time.Now)
 			if callback != nil || counter.reads != 0 || stderr.Len() != 0 {
 				t.Fatalf("%s installed a wake or consulted session state with the list unavailable", command)
 			}
@@ -727,7 +874,7 @@ func TestMailWakeSenderIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
-			wake := newLocalMailWake(t.TempDir(), cfg, store, store, tc.sender, tc.resolved, "gc mail send", &stderr, time.Now)
+			wake := newLocalMailWake(t.TempDir(), cfg, store, store, beadmail.New(store), tc.sender, tc.resolved, "gc mail send", &stderr, time.Now)
 			var notified bool
 			if wake != nil {
 				notified = wake(mail.Message{From: tc.sender, FromSessionID: tc.stored, To: reader, ID: "message"})
@@ -789,7 +936,7 @@ func TestMailWakeExistingNamedSession(t *testing.T) {
 			nudgePokeController = func(string) error { pokes++; return nil }
 			t.Cleanup(func() { nudgeCityUsesManagedReconciler, nudgePokeController = managed, poke })
 			var diagnostic bytes.Buffer
-			wake := newLocalMailWake(dir, cfg, store.Store, store.Store, "human", "", "gc mail send", &diagnostic, func() time.Time { return now })
+			wake := newLocalMailWake(dir, cfg, store.Store, store.Store, beadmail.New(store.Store), "human", "", "gc mail send", &diagnostic, func() time.Time { return now })
 			got := notifyStoredMail(mail.Message{ID: "message", From: "human", To: recipient}, nil, wake, "gc mail send", &diagnostic)
 			if got != tc.wantWake || (pokes == 1) != tc.wantWake || strings.Count(diagnostic.String(), "\n") != map[bool]int{true: 0, false: 1}[tc.wantWake] {
 				t.Errorf("notified=%t pokes=%d stderr=%q", got, pokes, diagnostic.String())

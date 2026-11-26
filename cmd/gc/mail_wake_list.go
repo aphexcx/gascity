@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +86,8 @@ func decideMailWake(agent config.Agent, sender mailWakeSender, facts mailWakeFac
 // localMailWake runs after a successful send or reply.
 type localMailWake func(mail.Message) bool
 
+var errMailReminderWithdrawn = errors.New("mail reminder withdrawn")
+
 func notifyStoredMail(message mail.Message, explicit nudgeFunc, list localMailWake, command string, stderr io.Writer) bool {
 	if message.To == "human" {
 		return false
@@ -105,13 +108,14 @@ type localMailWakePolicy struct {
 	work     beads.Store
 	sessions beads.Store
 	front    *session.Store
+	mail     mail.Provider
 }
 
-func newLocalMailWake(cityPath string, cfg *config.City, store, sessions beads.Store, sender, senderID, command string, stderr io.Writer, now func() time.Time) localMailWake {
+func newLocalMailWake(cityPath string, cfg *config.City, store, sessions beads.Store, mp mail.Provider, sender, senderID, command string, stderr io.Writer, now func() time.Time) localMailWake {
 	if cfg == nil || store == nil || sessions == nil || !slices.ContainsFunc(cfg.Agents, func(a config.Agent) bool { return len(a.MailWakeFrom) > 0 }) {
 		return nil
 	}
-	p := localMailWakePolicy{cityPath, cfg, store, sessions, sessionFrontDoor(sessions)}
+	p := localMailWakePolicy{cityPath, cfg, store, sessions, sessionFrontDoor(sessions), mp}
 	return func(message mail.Message) bool {
 		identity := p.sender(sender, senderID, message.FromSessionID)
 		if identity.key == "" || message.To == "human" {
@@ -174,7 +178,11 @@ func (p localMailWakePolicy) sender(address, resolved, stamped string) mailWakeS
 
 func (p localMailWakePolicy) request(message mail.Message, address string, sender mailWakeSender, now time.Time) (bool, string) {
 	city := loadedCityName(p.cfg, p.cityPath)
-	id, err := resolveSessionIDAllowClosedWithConfig(p.cityPath, p.cfg, p.sessions, message.To)
+	id := message.ToSessionID
+	var err error
+	if id == "" {
+		id, err = resolveSessionIDAllowClosedWithConfig(p.cityPath, p.cfg, p.sessions, message.To)
+	}
 	var info session.Info
 	var a config.Agent
 	var facts mailWakeFacts
@@ -289,7 +297,20 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	item := mailReminderItem(target, address, message.ID, now)
 	if action == mailWakeRemind {
 		var landed bool
-		item, landed, err = deliverLiveMailReminder(target, p.sessions, sp, item)
+		ctx := runtime.WithNudgeDeliveryCheck(context.Background(), func() error {
+			_, blocked, err := blockedQueuedMailNudgeReason(p.mail, item)
+			if err != nil {
+				return err
+			}
+			if blocked {
+				return errMailReminderWithdrawn
+			}
+			return nil
+		})
+		item, landed, err = deliverLiveMailReminder(ctx, target, p.sessions, sp, item)
+		if errors.Is(err, errMailReminderWithdrawn) {
+			return false, ""
+		}
 		if err != nil {
 			return false, "delivery"
 		}
