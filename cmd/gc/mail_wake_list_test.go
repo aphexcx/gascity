@@ -105,6 +105,20 @@ func TestMailWakeSendReloadsSettings(t *testing.T) {
 	}
 }
 
+// File-store reloads can represent the same instant with a different location.
+func equalMailWakeRecords(a, b beads.Bead) bool {
+	normalize := func(record beads.Bead) beads.Bead {
+		record.CreatedAt = record.CreatedAt.UTC()
+		record.UpdatedAt = record.UpdatedAt.UTC()
+		if record.DeferUntil != nil {
+			instant := record.DeferUntil.UTC()
+			record.DeferUntil = &instant
+		}
+		return record
+	}
+	return reflect.DeepEqual(normalize(a), normalize(b))
+}
+
 func TestMailWakeOnlyLocalCommands(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GC_CITY", dir)
@@ -171,12 +185,12 @@ template = "reader"
 	if err != nil || len(messages) != 3 || stderr.Len() != 0 {
 		t.Fatalf("messages=%d err=%v stderr=%q", len(messages), err, stderr.String())
 	}
-	if !reflect.DeepEqual(before, records()) {
+	if !maps.EqualFunc(before, records(), equalMailWakeRecords) {
 		t.Fatal("in-process mail changed a session record")
 	}
 	var broadcast bytes.Buffer
 	code := cmdMailSendJSON(nil, false, true, "source", "", "Broadcast", "Update", "", true, &broadcast, &stderr)
-	if code != 0 || !reflect.DeepEqual(before, records()) {
+	if code != 0 || !maps.EqualFunc(before, records(), equalMailWakeRecords) {
 		t.Fatalf("broadcast changed a session or failed: code=%d stdout=%q stderr=%q", code, broadcast.String(), stderr.String())
 	}
 	pending, _, _, err := listQueuedNudges(dir, "reader", time.Now())
@@ -255,7 +269,7 @@ func TestMailWakeReplyAfterRecipientRename(t *testing.T) {
 			}
 			if reuse {
 				after, err := store.Get(replacement.ID)
-				if err != nil || !reflect.DeepEqual(after, replacement) {
+				if err != nil || !equalMailWakeRecords(after, replacement) {
 					t.Errorf("new alias holder changed: %v", err)
 				}
 			}
@@ -542,7 +556,7 @@ func assertMailWakeBlocked(t *testing.T, dir string, cfg *config.City, store bea
 	if asked || pokes != 0 || diagnostic.String() != "gc mail send: "+recipient+": "+reason+"\n" {
 		t.Errorf("asked=%t pokes=%d diagnostic=%q, want one %q diagnostic", asked, pokes, diagnostic.String(), reason)
 	}
-	if after := records(); !reflect.DeepEqual(before, after) {
+	if after := records(); !slices.EqualFunc(before, after, equalMailWakeRecords) {
 		t.Errorf("session records changed (count %d -> %d)", len(before), len(after))
 	}
 	for _, call := range sp.SnapshotCalls() {
@@ -627,7 +641,13 @@ func TestMailWakeSuspensionSources(t *testing.T) {
 				identity := cfg.NamedSessions[0].QualifiedName()
 				runtimeName := config.NamedSessionRuntimeName("alpha", cfg.Workspace, identity)
 				if state != "absent" {
-					mailWakeTestRecord(t, store, identity, runtimeName)
+					record := mailWakeTestRecord(t, store, identity, runtimeName)
+					if source == "rig-template" && state == "sleeping" {
+						// A bare agent name still refers to this record's rig-qualified template.
+						if err := store.SetMetadata(record.ID, "agent_name", "reader"); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
 				if state == "running" {
 					if err := sp.Start(context.Background(), runtimeName, runtime.Config{}); err != nil {

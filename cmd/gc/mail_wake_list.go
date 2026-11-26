@@ -210,7 +210,7 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 		if !slices.Contains(a.MailWakeFrom, sender.agent) {
 			return false, ""
 		}
-		_, closed, lookupErr := session.FindClosedNamedSessionBeadForSessionName(p.sessions, spec.Identity, spec.SessionName)
+		closed, lookupErr := session.HasClosedOrArchivedNamedSession(p.sessions, spec.Identity)
 		if lookupErr != nil {
 			return false, "lookup"
 		}
@@ -222,7 +222,17 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	if !slices.Contains(a.MailWakeFrom, sender.agent) {
 		return false, ""
 	}
-	if a.Suspended {
+	// Generic rig templates share one configured sender-list identity. Bind
+	// the recipient copy to its concrete rig for the controller's predicate.
+	if a.Scope == "rig" && a.Dir == "" {
+		for _, identity := range []string{info.Template, info.ConfiguredNamedIdentity, info.AgentName} {
+			if dir, _ := config.ParseQualifiedName(identity); dir != "" {
+				a.Dir = dir
+				break
+			}
+		}
+	}
+	if isAgentEffectivelySuspendedWith(p.cfg, p.cityPath, &a, loadSuspensionStateBestEffort(p.cityPath)) {
 		return false, "suspended"
 	}
 	var sp runtime.Provider
