@@ -1982,6 +1982,10 @@ export type MailSendInputBody = {
      */
     from?: string;
     /**
+     * Request a recipient turn after delivery. Defaults to false.
+     */
+    notify?: boolean;
+    /**
      * Rig name.
      */
     rig?: string;
@@ -1992,6 +1996,25 @@ export type MailSendInputBody = {
     /**
      * Recipient name.
      */
+    to: string;
+};
+
+export type MailSendResult = {
+    body: string;
+    cc?: Array<string> | null;
+    created_at: string;
+    from: string;
+    id: string;
+    /**
+     * Whether the receiving city accepted the requested turn.
+     */
+    notified?: boolean;
+    priority?: number;
+    read: boolean;
+    reply_to?: string;
+    rig?: string;
+    subject: string;
+    thread_id?: string;
     to: string;
 };
 
@@ -14484,7 +14507,7 @@ export type SendMailResponses = {
     /**
      * Created
      */
-    201: Message;
+    201: MailSendResult;
 };
 
 export type SendMailResponse = SendMailResponses[keyof SendMailResponses];

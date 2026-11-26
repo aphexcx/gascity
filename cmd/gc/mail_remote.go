@@ -105,9 +105,6 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 	if all {
 		return fail("unsupported_remote", "gc mail send: --all is not supported for a remote city (live-session enumeration is local); address one recipient")
 	}
-	if notify {
-		return fail("unsupported_remote", "gc mail send: --notify delivery for a remote city lands separately; send without --notify")
-	}
 	if to != "" {
 		args = append([]string{to}, args...)
 	}
@@ -127,20 +124,46 @@ func cmdMailSendRemote(c *api.Client, target *remoteTarget, args []string, notif
 	if !jsonOut {
 		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
 	}
-	m, err := c.SendMail(api.MailSendRequest{
+	req := api.MailSendRequest{
 		From:    sender,
 		To:      recipient,
 		Subject: derivedSubject,
 		Body:    body,
-	})
+		Notify:  notify,
+	}
+	result, err := c.SendMail(req)
+	if errors.Is(err, api.ErrMailNotifyUnsupported) {
+		fmt.Fprintln(stderr, "gc mail send: peer is too old to request a turn; retrying without --notify") //nolint:errcheck // best-effort stderr
+		req.Notify = false
+		result, err = c.SendMail(req)
+	}
 	if err != nil {
+		if notify && api.IsConnError(err) {
+			return fail("mail_send_failed", "gc mail send: "+err.Error()+". The peer may already have stored the mail.")
+		}
 		return fail("mail_send_failed", "gc mail send: "+err.Error())
 	}
+	m := result.Message
+	accepted := result.Notified != nil && *result.Notified
 	if jsonOut {
 		summary := summarizeMailMessage(m)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)})
+		action := mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1)}
+		if notify {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", struct {
+				mailActionResult
+				Notified bool `json:"notified"`
+			}{action, accepted})
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", action)
 	}
-	fmt.Fprintf(stdout, "Sent message %s to %s (as %s)\n", m.ID, m.To, m.From) //nolint:errcheck // best-effort stdout
+	status := ""
+	if notify {
+		status = "; peer did not accept the turn request"
+		if accepted {
+			status = "; peer accepted the turn request"
+		}
+	}
+	fmt.Fprintf(stdout, "Sent message %s to %s (as %s)%s\n", m.ID, m.To, m.From, status) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -300,7 +323,9 @@ func sendRemoteReply(c *api.Client, target *remoteTarget, rec events.Recorder, i
 		// The original ID belongs to the local store, so it cannot identify
 		// a parent message in the other city.
 		destination = target.CityName
-		reply, err = c.SendMail(api.MailSendRequest{From: sender, To: recipient, Subject: subject, Body: body})
+		var sent api.MailSendResult
+		sent, err = c.SendMail(api.MailSendRequest{From: sender, To: recipient, Subject: subject, Body: body})
+		reply = sent.Message
 	}
 	if err != nil {
 		return mailReplyError("mail_reply_failed", err, jsonOut, stdout, stderr)

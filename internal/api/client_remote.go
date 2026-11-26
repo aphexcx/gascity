@@ -67,6 +67,10 @@ type GrantSource func(GrantBinding) (string, error)
 
 // RemoteOptions configures the transport of a remote-city client.
 type RemoteOptions struct {
+	// RESTTransport supplies an in-process transport when the caller hosts the
+	// HTTP handler. By default remote requests use the configured network transport.
+	RESTTransport http.RoundTripper
+
 	// Token, when non-nil, supplies the Authorization: Bearer <token> credential
 	// (consumed by an edge/proxy; the controller ignores Authorization).
 	Token TokenSource
@@ -248,6 +252,27 @@ func bufferRequestBody(req *http.Request) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+// A mail notification can wait for the recipient's idle boundary for the full
+// response-header budget. That operation uses the existing overall REST
+// deadline, preserving the caller's configured timeout.
+type mailNotifyRequestKey struct{}
+
+type remoteRESTTransport struct {
+	ordinary, notifying *http.Transport
+}
+
+func (rt *remoteRESTTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Context().Value(mailNotifyRequestKey{}) == true {
+		return rt.notifying.RoundTrip(req)
+	}
+	return rt.ordinary.RoundTrip(req)
+}
+
+func (rt *remoteRESTTransport) CloseIdleConnections() {
+	rt.ordinary.CloseIdleConnections()
+	rt.notifying.CloseIdleConnections()
+}
+
 // newRemoteHTTPClients builds the two client shapes from a single TLS/redirect
 // policy: a REST client (bounded overall timeout + tight dial/TLS budgets) and a
 // stream client (no overall timeout; idle-bounded by the caller). Both refuse
@@ -284,9 +309,15 @@ func newRemoteHTTPClients(opts RemoteOptions) (rest, stream *http.Client, err er
 		}
 		return &reauthRoundTripper{base: base, refresh: opts.RefreshToken}
 	}
+	notifying := newTransport()
+	notifying.ResponseHeaderTimeout = 0
+	transport := opts.RESTTransport
+	if transport == nil {
+		transport = &remoteRESTTransport{ordinary: newTransport(), notifying: notifying}
+	}
 	rest = &http.Client{
 		Timeout:       restTimeout,
-		Transport:     wrap(newTransport()),
+		Transport:     wrap(transport),
 		CheckRedirect: remoteCheckRedirect,
 	}
 	stream = &http.Client{

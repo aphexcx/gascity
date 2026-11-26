@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -25,6 +26,7 @@ func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 }
 
 type namedSessionResolveOptions struct {
+	provider            runtime.Provider // receiving city provider, if already open
 	allowClosed         bool
 	materialize         bool
 	materializeMetadata map[string]string
@@ -81,6 +83,7 @@ func resolveConfiguredNamedSessionID(
 	}
 	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
 		materializeMetadata: opts.materializeMetadata,
+		provider:            opts.provider,
 	})
 	return id, true, err
 }

@@ -62,7 +62,20 @@ type MailSendInput struct {
 		To      string `json:"to" doc:"Recipient name." minLength:"1"`
 		Subject string `json:"subject" doc:"Message subject." minLength:"1"`
 		Body    string `json:"body,omitempty" doc:"Message body."`
+		Notify  bool   `json:"notify,omitempty" doc:"Request a recipient turn after delivery. Defaults to false."`
 	}
+}
+
+// MailSendResult is the delivered message and, when requested, the outcome
+// of the receiving city's attempt to notify its recipient.
+type MailSendResult struct {
+	mail.Message
+	Notified *bool `json:"notified,omitempty" doc:"Whether the receiving city accepted the requested turn."`
+}
+
+// MailNotifier requests a turn in the receiving city for an already stored message.
+type MailNotifier interface {
+	NotifyMail(recipient, messageID string) error
 }
 
 // MailReadInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/read.

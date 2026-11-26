@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -376,7 +377,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // humaHandleMailSend is the Huma-typed handler for POST /v0/mail.
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
-func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
+func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[MailSendResult], error) {
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
@@ -394,21 +395,33 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
 	// fires. The helper guarantees the reservation is released on a send error.
 	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
-		func() (mail.Message, error) {
+		func() (MailSendResult, error) {
 			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
 			telemetry.RecordMailOp(ctx, "send", sendErr)
 			if sendErr != nil {
-				return mail.Message{}, apierr.Internal.Msg(sendErr.Error())
+				return MailSendResult{}, apierr.Internal.Msg(sendErr.Error())
 			}
 			sent.Rig = input.Body.Rig
 			s.recordMailEvent(events.MailSent, sent.From, sent.ID, input.Body.Rig, &sent)
-			return sent, nil
+			result := MailSendResult{Message: sent}
+			if input.Body.Notify {
+				accepted := false
+				if notifier, ok := s.state.(MailNotifier); ok && resolved != "human" {
+					if err := notifier.NotifyMail(resolved, sent.ID); err != nil {
+						log.Printf("api: notifying recipient of mail %q: %v", sent.ID, err)
+					} else {
+						accepted = true
+					}
+				}
+				result.Notified = &accepted
+			}
+			return result, nil
 		})
 	if err != nil {
 		return nil, err
 	}
 
-	return &IndexOutput[mail.Message]{
+	return &IndexOutput[MailSendResult]{
 		Index: s.latestIndex(),
 		Body:  msg,
 	}, nil

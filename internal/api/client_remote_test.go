@@ -400,6 +400,40 @@ func TestRemoteClient_RefusesCrossHostRedirect(t *testing.T) {
 	}
 }
 
+// A busy recipient can consume the ordinary response-header deadline waiting
+// for idle. Only notified sends use the full configured REST budget.
+func TestRemoteMailNotifyTransportBudget(t *testing.T) {
+	const budget = 2 * time.Minute
+	client, err := NewRemoteCityScopedClient("http://beta.test", "beta", RemoteOptions{RESTTimeout: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := client.cw.ClientInterface.(*genclient.Client).Client.(*http.Client)
+	transport := httpClient.Transport.(*remoteRESTTransport)
+	if httpClient.Timeout != budget || transport.ordinary.ResponseHeaderTimeout != remoteResponseHeaderTimeout || transport.notifying.ResponseHeaderTimeout != 0 {
+		t.Fatalf("unexpected deadlines: REST %v, ordinary %v, notify %v", httpClient.Timeout, transport.ordinary.ResponseHeaderTimeout, transport.notifying.ResponseHeaderTimeout)
+	}
+	for _, notify := range []bool{false, true} {
+		route := transport.ordinary
+		if notify {
+			route = transport.notifying
+		}
+		called := false
+		route.RegisterProtocol("http", rtFunc(func(*http.Request) (*http.Response, error) {
+			called = true
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", "application/json")
+			rec.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(rec, `{"id":"letter"}`)
+			return rec.Result(), nil
+		}))
+		_, err := client.SendMail(MailSendRequest{To: "worker", Subject: "update", Notify: notify})
+		if err != nil || !called {
+			t.Fatalf("notify=%v used wrong transport: %v", notify, err)
+		}
+	}
+}
+
 // rtFunc adapts a function to an http.RoundTripper for reauth tests.
 type rtFunc func(*http.Request) (*http.Response, error)
 

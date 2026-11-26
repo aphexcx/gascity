@@ -1340,10 +1340,16 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	// store via cliSessionStore (identity today). enqueue (NudgesStore wrap) and
 	// rollback (nudgeFrontDoor) stay nudges.
 	nudges := beads.NudgesStore{Store: store}
+	return enqueueManagedNudgeWithStores(target, nudges, item, func() error {
+		return requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
+	})
+}
+
+func enqueueManagedNudgeWithStores(target nudgeTarget, nudges beads.NudgesStore, item queuedNudge, wake func() error) error {
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return err
 	}
-	if err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+	if err := wake(); err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
@@ -1360,6 +1366,10 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 // nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays on the
 // nudges class.
 func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
+	return requestManagedNudgeWakeWithWithdrawal(target, sessFront, nudgeWithdrawQueuedWaitNudges)
+}
+
+func requestManagedNudgeWakeWithWithdrawal(target nudgeTarget, sessFront *session.Store, withdraw func(string, []string) error) error {
 	if !sessFront.Backed() || target.sessionID == "" {
 		// The item IS enqueued; what did not happen is the wake that gets a
 		// stopped session to drain it. Returning nil silently made those two
@@ -1380,7 +1390,7 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 	}
 	nudgeIDs := res.NudgeIDs
 	if len(nudgeIDs) > 0 {
-		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
+		if err := withdraw(target.cityPath, nudgeIDs); err != nil {
 			if nudgeWarningWriter != nil {
 				fmt.Fprintf(nudgeWarningWriter, "gc session wake: warning: withdrawing queued wait nudges after managed wake: %v\n", err) //nolint:errcheck
 			}
@@ -1612,7 +1622,23 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 }
 
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
-	msg := fmt.Sprintf("You have mail from %s", sender)
+	delivery := mailNotifyDelivery{
+		nudges: beads.NudgesStore{Store: store}, sessions: cliSessionStore(store, target.cfg, target.cityPath),
+		provider: sp, withdraw: nudgeWithdrawQueuedWaitNudges, poke: nudgePokeController,
+	}
+	return delivery.deliver(target, fmt.Sprintf("You have mail from %s", sender), messageID)
+}
+
+type mailNotifyDelivery struct {
+	nudges    beads.NudgesStore
+	sessions  beads.Store
+	provider  runtime.Provider
+	withdraw  func(string, []string) error
+	poke      func(string) error
+	queueOnly bool
+}
+
+func (d mailNotifyDelivery) deliver(target nudgeTarget, msg, messageID string) error {
 	now := time.Now()
 	// Carry the mail message ID as the nudge's re-validation reference so
 	// blockedQueuedNudgeReason can re-read the message at delivery time and
@@ -1626,17 +1652,12 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
 	}
 	item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
-	// Session-class store for the observe/handle reads and the last-nudge stamp
-	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
-	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
-	// -> nil (identity), preserving the store-less WithProvider caller.
-	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
-	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
+	obs, err := workerObserveNudgeTarget(target, d.sessions, d.provider)
 	if err != nil {
 		return err
 	}
-	if obs.Running {
-		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
+	if obs.Running && !d.queueOnly {
+		handle, err := workerHandleForNudgeTarget(target, d.sessions, d.provider)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
 				DeliveryID: item.ID,
@@ -1665,27 +1686,29 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 			if (nudgeErr == nil && result.Landed()) || unobservedButDelivered {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 				var sessFront *session.Store
-				if store != nil {
-					sessFront = sessionFrontDoor(sessStore)
+				if d.sessions != nil {
+					sessFront = sessionFrontDoor(d.sessions)
 				}
 				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
 				return nil
 			}
 		}
 	}
-	if !obs.Running && canRequestManagedNudgeWake(target, store) {
-		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+	if !obs.Running && canRequestManagedNudgeWake(target, d.nudges.Store) {
+		if err := enqueueManagedNudgeWithStores(target, d.nudges, item, func() error {
+			return requestManagedNudgeWakeWithWithdrawal(target, sessionFrontDoor(d.sessions), d.withdraw)
+		}); err != nil {
 			return err
 		}
-		if err := nudgePokeController(target.cityPath); err != nil {
+		if err := d.poke(target.cityPath); err != nil {
 			if nudgeWarningWriter != nil {
 				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
 			}
 		}
 		return nil
 	}
-	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
-		return errors.Join(err, releaseLiveNudgeReservation(target, sp, item.ID))
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, d.nudges, item); err != nil {
+		return errors.Join(err, releaseLiveNudgeReservation(target, d.provider, item.ID))
 	}
 	if obs.Running {
 		maybeStartNudgePoller(target)
@@ -1703,12 +1726,15 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		return nudgeTarget{}, err
 	}
 	store := openNudgeBeadStore(cityPath)
-	if store.Store != nil {
-		// Named-session materialization is a session WRITE, and the follow-up Get
-		// reads the session bead; both route through the session-class store
-		// (identity today) while the raw store remains the nudge-queue currency.
-		sessStore := cliSessionStore(store.Store, cfg, cityPath)
-		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
+	if store.Store == nil {
+		return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	return resolveNudgeTargetInCity(cityPath, cfg, cliSessionStore(store.Store, cfg, cityPath), identifier, nil)
+}
+
+func resolveNudgeTargetInCity(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, sp runtime.Provider) (nudgeTarget, error) {
+	if sessStore != nil {
+		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{materialize: true, provider: sp})
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {

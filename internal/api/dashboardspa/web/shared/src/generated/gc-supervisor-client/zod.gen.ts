@@ -834,9 +834,26 @@ export const zMailReplyInputBody = z.object({
 export const zMailSendInputBody = z.object({
     body: z.string().optional(),
     from: z.string().optional(),
+    notify: z.boolean().optional(),
     rig: z.string().optional(),
     subject: z.string().min(1),
     to: z.string().min(1)
+});
+
+export const zMailSendResult = z.object({
+    body: z.string(),
+    cc: z.array(z.string()).nullish(),
+    created_at: z.iso.datetime(),
+    from: z.string(),
+    id: z.string(),
+    notified: z.boolean().optional(),
+    priority: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    read: z.boolean(),
+    reply_to: z.string().optional(),
+    rig: z.string().optional(),
+    subject: z.string(),
+    thread_id: z.string().optional(),
+    to: z.string()
 });
 
 export const zMaintenanceRunBody = z.object({
@@ -8784,7 +8801,7 @@ export const zSendMailPath = z.object({
 /**
  * Created
  */
-export const zSendMailResponse = zMessage;
+export const zSendMailResponse = zMailSendResult;
 
 export const zGetV0CityByCityNameMailCountPath = z.object({
     cityName: z.string().min(1).regex(/\S/)

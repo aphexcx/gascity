@@ -58,8 +58,11 @@ const cacheReconcileActor = "cache-reconcile"
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu  sync.RWMutex
-	cfg *config.City
+	// Only one remote mail send per session waits for live delivery. Other
+	// concurrent sends persist their notifications in the city's queue.
+	liveMailNotifies sync.Map
+	mu               sync.RWMutex
+	cfg              *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -1507,6 +1510,33 @@ func (cs *controllerState) MailProvider(_ string) mail.Provider {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.cityMailProv
+}
+
+// NotifyMail uses this city's session provider and ledgers to request a turn
+// through the same delivery path as a local mail send.
+func (cs *controllerState) NotifyMail(recipient, messageID string) error {
+	cs.mu.RLock()
+	cityPath, cfg, sp := cs.cityPath, cs.cfg, cs.sp
+	nudges := beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, cs.eventProv)}
+	sessions := resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, cs.eventProv)
+	cs.mu.RUnlock()
+	if nudges.Store == nil || sessions == nil || sp == nil {
+		return fmt.Errorf("mail notification requires session and nudge stores and a session provider")
+	}
+	target, err := resolveNudgeTargetInCity(cityPath, cfg, sessions, recipient, sp)
+	if err != nil {
+		return err
+	}
+	_, busy := cs.liveMailNotifies.LoadOrStore(target.sessionID, struct{}{})
+	if !busy {
+		defer cs.liveMailNotifies.Delete(target.sessionID)
+	}
+	delivery := mailNotifyDelivery{
+		nudges: nudges, sessions: sessions, provider: sp, queueOnly: busy,
+		withdraw: func(path string, ids []string) error { return withdrawQueuedWaitNudgesWithStore(nudges, path, ids) },
+		poke:     func(string) error { cs.Poke(); return nil },
+	}
+	return delivery.deliver(target, "You have new mail", messageID)
 }
 
 // MailProviders returns the city-level mail provider keyed by city name.

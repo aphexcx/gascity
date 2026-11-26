@@ -1524,7 +1524,9 @@ far side knows which city to answer with 'gc --context <city> mail send';
 --from overrides it. The remote city stores an unknown sender literally, but
 if it has a session whose alias equals that string (a rig named after the
 sending city) the message binds to that session — do not name a rig after a
-city that mails you. --all and --notify are refused for a remote city.`,
+city that mails you. Use --notify to ask the receiving city for a recipient
+turn after delivery. An older peer still receives the mail. With --notify,
+--json reports whether the peer accepted the turn request. --all is local only.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
