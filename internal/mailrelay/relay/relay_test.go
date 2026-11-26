@@ -289,6 +289,33 @@ func TestGrantExpiredBeforeStoreAdmission(t *testing.T) {
 	}
 }
 
+func TestStoreFailuresHavePrivateDiagnostics(t *testing.T) {
+	f := newFixture(t)
+	// The signed read succeeds at authentication but fails at queue storage.
+	if _, err := f.server.store.db.Exec("DROP TABLE envelopes"); err != nil {
+		t.Fatal(err)
+	}
+	f.call("hub", "GET", "queue?wait=0s", nil, 500)
+	if log := f.log.buf.String(); !strings.Contains(log, "call=read") || !strings.Contains(log, "error=storage") {
+		t.Fatal("missing queue storage diagnostic")
+	}
+	if _, err := f.server.store.db.Exec("DROP TABLE grants"); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/city/hub/queue?wait=0s"
+	token := f.token("hub", "GET", path, nil)
+	before := f.log.buf.Len()
+	failed := f.request("GET", path, nil, token)
+	line := f.log.buf.String()[before:]
+	if !strings.Contains(line, "call=verify") || !strings.Contains(line, "error=storage") || strings.Contains(line, token) {
+		t.Fatal("missing or unsafe grant storage diagnostic")
+	}
+	unsigned := f.request("GET", path, nil, "")
+	if failed.Code != 401 || failed.Code != unsigned.Code || failed.Body.String() != unsigned.Body.String() {
+		t.Fatal("storage failure disclosed to caller")
+	}
+}
+
 func TestBatchByteBoundAndCursor(t *testing.T) {
 	f := newFixture(t)
 	large := make([]byte, envelope.MaxMailSize)

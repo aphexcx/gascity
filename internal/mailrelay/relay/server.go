@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/mailrelay/envelope"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -135,6 +136,7 @@ type reply struct {
 	status      int
 	body        []byte
 	contentType string
+	diagnostic  string
 }
 
 func status(code int) reply { return reply{status: code} }
@@ -159,7 +161,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = status(http.StatusRequestHeaderFieldsTooLarge)
 	case r.Method == "GET" && r.URL.EscapedPath() == "/healthz":
 		call = "health"
-		result = reply{200, []byte("ok"), "text/plain; charset=utf-8"}
+		result = reply{status: 200, body: []byte("ok"), contentType: "text/plain; charset=utf-8"}
 	case r.ContentLength > envelope.MaxEnvelopeSize:
 		result = status(http.StatusRequestEntityTooLarge)
 	default:
@@ -182,11 +184,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(result.status)
 	if len(result.body) > 0 {
 		if _, err := w.Write(result.body); err != nil {
-			s.logger.Printf("caller=%s call=%s status=%d size=%d write_failed=true", caller, call, result.status, size)
-			return
+			result.diagnostic = "write"
 		}
 	}
-	s.logger.Printf("caller=%s call=%s status=%d size=%d", caller, call, result.status, size)
+	// Only internal category names enter the access log. Driver errors may contain data.
+	if result.diagnostic != "" {
+		s.logger.Printf("caller=%s call=%s status=%d size=%d error=%s", caller, call, result.status, size, result.diagnostic)
+	} else {
+		s.logger.Printf("caller=%s call=%s status=%d size=%d", caller, call, result.status, size)
+	}
 }
 
 func (s *Server) authorize(r *http.Request, body []byte) (string, string, reply) {
@@ -197,8 +203,15 @@ func (s *Server) authorize(r *http.Request, body []byte) (string, string, reply)
 	// Reject escapes, including encoded dots or slashes, before interpreting the route.
 	tail, ok := strings.CutPrefix(req.Path, "/v1/city/")
 	city, route, slash := strings.Cut(tail, "/")
-	if !ok || !slash || strings.ContainsAny(req.Path, "%.") || len(tokens) != 1 || len(tokens[0]) > maxTokenBytes || set.verifier == nil || set.verifier.Verify(tokens[0], req) != nil {
+	if !ok || !slash || strings.ContainsAny(req.Path, "%.") || len(tokens) != 1 || len(tokens[0]) > maxTokenBytes || set.verifier == nil {
 		return "-", "unknown", status(http.StatusUnauthorized)
+	}
+	if err := set.verifier.Verify(tokens[0], req); err != nil {
+		refusal := status(http.StatusUnauthorized)
+		if errors.Is(err, citywriteauth.ErrReplayUnavailable) && !errors.Is(err, citywriteauth.ErrMalformed) {
+			refusal.diagnostic = "storage"
+		}
+		return "-", "verify", refusal
 	}
 	ctx := r.Context()
 	switch {
@@ -239,7 +252,7 @@ func dbReply(err error) reply {
 	case errors.Is(err, sql.ErrNoRows):
 		return status(404)
 	default:
-		return status(500)
+		return reply{status: 500, diagnostic: "storage"}
 	}
 }
 
@@ -280,7 +293,7 @@ func (s *Server) key(ctx context.Context, set *trust, city, peer string) reply {
 	if stmt.Verify(peer, set.keys[peer]) != nil {
 		return status(404)
 	}
-	return reply{200, wire, "application/octet-stream"}
+	return reply{status: 200, body: wire, contentType: "application/octet-stream"}
 }
 
 func readParams(u *url.URL, maxWait time.Duration) (int64, time.Duration, error) {
@@ -348,7 +361,7 @@ func (s *Server) heldRead(ctx context.Context, u *url.URL, city string, key ed25
 			if err != nil {
 				return status(500)
 			}
-			return reply{200, b, "application/json"}
+			return reply{status: 200, body: b, contentType: "application/json"}
 		}
 		select {
 		case <-deadline.C:
