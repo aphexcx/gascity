@@ -19,10 +19,12 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestMailWakePoolSettings(t *testing.T) {
@@ -482,6 +484,157 @@ func TestMailWakeBlocksPreserveState(t *testing.T) {
 				if err != nil || len(items) != 0 {
 					t.Errorf("blocked session reminders=%v err=%v", items, err)
 				}
+			})
+		}
+	}
+}
+
+func mailWakeTestCity() *config.City {
+	return &config.City{
+		Workspace:     config.Workspace{Name: "alpha"},
+		Agents:        []config.Agent{{Name: "reader", Provider: "codex", StartCommand: "echo", MailWakeStart: true, MailWakeFrom: []string{"human"}}},
+		NamedSessions: []config.NamedSession{{Template: "reader"}},
+	}
+}
+
+func mailWakeTestRecord(t *testing.T, store beads.Store, identity, runtimeName string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"configured_named_session": "true", "configured_named_identity": identity,
+			"template": identity, "alias": identity, "session_name": runtimeName,
+			"state": "asleep", "sleep_reason": "idle",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func assertMailWakeBlocked(t *testing.T, dir string, cfg *config.City, store beads.Store, sp *runtime.Fake, recipient, reason string) {
+	t.Helper()
+	t.Setenv("GC_CITY", dir)
+	cfg.Daemon.NudgeDispatcher = "supervisor"
+	managed, poke, build := nudgeCityUsesManagedReconciler, nudgePokeController, buildSessionProviderByName
+	nudgeCityUsesManagedReconciler = func(string) bool { return true }
+	pokes := 0
+	nudgePokeController = func(string) error { pokes++; return nil }
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return sp, nil
+	}
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController, buildSessionProviderByName = managed, poke, build
+	})
+	records := func() []beads.Bead {
+		t.Helper()
+		rows, err := store.List(beads.ListQuery{Type: session.BeadType, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	before := records()
+	var diagnostic bytes.Buffer
+	wake := newLocalMailWake(dir, cfg, store, store, beadmail.New(store), "human", "", "gc mail send", &diagnostic, time.Now)
+	asked := wake(mail.Message{ID: "message", From: "human", To: recipient})
+	if asked || pokes != 0 || diagnostic.String() != "gc mail send: "+recipient+": "+reason+"\n" {
+		t.Errorf("asked=%t pokes=%d diagnostic=%q, want one %q diagnostic", asked, pokes, diagnostic.String(), reason)
+	}
+	if after := records(); !reflect.DeepEqual(before, after) {
+		t.Errorf("session records changed (count %d -> %d)", len(before), len(after))
+	}
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Errorf("delivered reminder through %s", call.Method)
+		}
+	}
+	items, err := store.List(beads.ListQuery{Label: nudgeBeadLabel, TierMode: beads.TierBoth})
+	if err != nil || len(items) != 0 {
+		t.Errorf("queued reminders=%d err=%v", len(items), err)
+	}
+}
+
+func TestMailWakeNamedRecordClosedEveryWay(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	for _, kind := range []string{"plain", "operator", "retired", "swept"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			store := openNudgeBeadStore(dir).Store
+			sp := runtime.NewFake()
+			cfg := mailWakeTestCity()
+			b := mailWakeTestRecord(t, store, "reader", "reader")
+			var err error
+			switch kind {
+			case "operator":
+				err = newSessionManagerWithConfig(dir, store, sp, cfg).Close(b.ID)
+			case "retired":
+				err = sessionFrontDoor(store).ApplyPatch(b.ID, session.RetireNamedSessionPatch(time.Now(), "duplicate-repair", "reader"))
+			default:
+				if kind == "swept" {
+					if err := sessionFrontDoor(store).ApplyPatch(b.ID, session.ClosePatch(time.Now(), "gc_swept")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = store.Close(b.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertMailWakeBlocked(t, dir, cfg, store, sp, "reader", "closed")
+		})
+	}
+}
+
+func TestMailWakeSuspensionSources(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	for _, source := range []string{"city-config", "rig-config", "city-runtime", "rig-runtime", "env", "rig-template"} {
+		for _, state := range []string{"absent", "sleeping", "running"} {
+			t.Run(source+"/"+state, func(t *testing.T) {
+				dir := t.TempDir()
+				store := openNudgeBeadStore(dir).Store
+				sp := runtime.NewFake()
+				cfg := mailWakeTestCity()
+				if strings.HasPrefix(source, "rig-") {
+					cfg.Rigs = []config.Rig{{Name: "demo", Path: dir}}
+					cfg.NamedSessions[0].Dir = "demo"
+					cfg.Agents[0].Dir = "demo"
+				}
+				suspended := true
+				var err error
+				switch source {
+				case "city-config":
+					cfg.Workspace.SuspendedOnStart = true
+				case "rig-template":
+					cfg.Agents[0].Dir = ""
+					cfg.Agents[0].Scope = "rig"
+					fallthrough
+				case "rig-config":
+					cfg.Rigs[0].SuspendedOnStart = true
+				case "city-runtime":
+					err = suspensionstate.SetCitySuspended(fsys.OSFS{}, dir, &suspended)
+				case "rig-runtime":
+					err = suspensionstate.SetRigSuspended(fsys.OSFS{}, dir, "demo", &suspended)
+				case "env":
+					t.Setenv("GC_SUSPENDED", "1")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				identity := cfg.NamedSessions[0].QualifiedName()
+				runtimeName := config.NamedSessionRuntimeName("alpha", cfg.Workspace, identity)
+				if state != "absent" {
+					mailWakeTestRecord(t, store, identity, runtimeName)
+				}
+				if state == "running" {
+					if err := sp.Start(context.Background(), runtimeName, runtime.Config{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				assertMailWakeBlocked(t, dir, cfg, store, sp, identity, "suspended")
 			})
 		}
 	}
