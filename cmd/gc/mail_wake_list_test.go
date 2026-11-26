@@ -641,6 +641,46 @@ func TestMailWakeDisabled(t *testing.T) {
 	}
 }
 
+func TestMailWakeGenericRigSender(t *testing.T) {
+	dir := t.TempDir()
+	const text = `
+[workspace]
+name = "alpha"
+[[rigs]]
+name = "demo"
+path = "."
+[[agent]]
+name = "source"
+scope = "rig"
+[[agent]]
+name = "reader"
+scope = "rig"
+mail_wake_from = ["source"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"template": "demo/source"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := localMailWakePolicy{cfg: cfg, front: sessionFrontDoor(store)}
+	reader, ok := p.agent(session.Info{Template: "demo/reader"})
+	if !ok {
+		t.Fatal("missing rig reader")
+	}
+	identity := p.sender("demo/source", b.ID, "")
+	action, _ := decideMailWake(reader, identity, mailWakeFacts{running: true}, nil, nil, time.Now())
+	if action != mailWakeRemind {
+		t.Fatalf("configured senders %v missed resolved sender %+v", reader.MailWakeFrom, identity)
+	}
+}
+
 func TestMailWakeSenderIdentity(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 	store := beads.NewMemStore()

@@ -211,7 +211,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
-| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. |
+| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. An empty list clears the inherited setting. |
 | `mail_wake_start` | boolean |  |  | MailWakeStart overrides whether listed mail may start a named session. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
@@ -271,7 +271,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `append_fragments` | []string |  |  | AppendFragments overrides the agent's append_fragments list. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
-| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. |
+| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. An empty list clears the inherited setting. |
 | `mail_wake_start` | boolean |  |  | MailWakeStart overrides whether listed mail may start a named session. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |

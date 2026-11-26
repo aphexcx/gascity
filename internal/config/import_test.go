@@ -403,6 +403,63 @@ max_active_sessions = 1
 	}
 }
 
+func TestImportedMailWakeSendersKeepTheirScope(t *testing.T) {
+	for _, binding := range []string{"imports.b", "rigs.imports.b"} {
+		t.Run(binding, func(t *testing.T) {
+			dir := t.TempDir()
+			city, pack := filepath.Join(dir, "city"), filepath.Join(dir, "pack")
+			writeTestFile(t, city, "city.toml", fmt.Sprintf(`
+[workspace]
+name = "example"
+[[rigs]]
+name = "demo"
+path = "/tmp/demo"
+[%s]
+source = "../pack"
+[imports.external]
+source = "../external"
+[[rigs]]
+name = "other"
+path = "/tmp/other"
+[[agent]]
+name = "source"
+dir = "other"
+`, binding))
+			external := filepath.Join(dir, "external")
+			writeTestFile(t, external, "pack.toml", "[pack]\nname = \"external\"\nschema = 2\n")
+			writeTestFile(t, filepath.Join(external, "agents", "writer"), "agent.toml", "scope = \"city\"\nstart_command = \"true\"\n")
+			writeTestFile(t, pack, "pack.toml", "[pack]\nname = \"b\"\nschema = 2\n")
+			for name, scope := range map[string]string{"source": "city", "reader": "rig", "observer": "city"} {
+				data := fmt.Sprintf("scope = %q\nstart_command = \"true\"\n", scope)
+				if name != "source" {
+					data += "mail_wake_from = [\"source\", \"other/source\", \"external.writer\", \"human\"]\n"
+				}
+				writeTestFile(t, filepath.Join(pack, "agents", name), "agent.toml", data)
+			}
+			cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(city, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateAgents(cfg.Agents); err != nil {
+				t.Fatal(err)
+			}
+			got := 0
+			for _, a := range cfg.Agents {
+				if a.QualifiedName() != "demo/b.reader" && a.QualifiedName() != "b.observer" {
+					continue
+				}
+				got++
+				if senders := strings.Join(a.MailWakeFrom, ","); senders != "b.source,other/source,external.writer,human" {
+					t.Errorf("%s admits %s", a.QualifiedName(), senders)
+				}
+			}
+			if got != 2 {
+				t.Fatalf("found %d imported recipients", got)
+			}
+		})
+	}
+}
+
 func TestImport_CityImportRigExpansionRequalifiesDependsOn(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")

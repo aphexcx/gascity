@@ -143,7 +143,8 @@ type AgentPatch struct {
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
 	// MailWakeFrom overrides the senders whose local mail requests a reminder.
-	MailWakeFrom []string `toml:"mail_wake_from,omitempty"`
+	// An empty list clears the inherited setting.
+	MailWakeFrom *[]string `toml:"mail_wake_from,omitempty"`
 	// MailWakeStart overrides whether listed mail may start a named session.
 	MailWakeStart *bool `toml:"mail_wake_start,omitempty"`
 	// ResumeCommand overrides the agent's resume_command template.
@@ -636,7 +637,7 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	// (PreStart, SessionSetup, etc.) but limits composability. A broader
 	// fix would use *[]string or a presence flag across all list fields.
 	if p.MailWakeFrom != nil {
-		a.MailWakeFrom = slices.Clone(p.MailWakeFrom)
+		a.MailWakeFrom = slices.Clone(*p.MailWakeFrom)
 	}
 	if p.MailWakeStart != nil {
 		a.MailWakeStart = *p.MailWakeStart

@@ -1227,6 +1227,29 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 }
 
 func TestAgentMailWakeSettingsRoundTrip(t *testing.T) {
+	for _, file := range []string{"city.toml", "pack.toml"} {
+		t.Run(file, func(t *testing.T) {
+			dir := t.TempDir()
+			const workspace = "[workspace]\nname = \"example\"\n"
+			const agent = "\n[[agent]]\nname = \"reader\"\nmail_wake_from = [\"human\"]\nmail_wake_start = true\n"
+			if file == "city.toml" {
+				writeFile(t, dir, file, workspace+agent)
+			} else {
+				writeFile(t, dir, "city.toml", workspace)
+				writeFile(t, dir, file, "[pack]\nname = \"example\"\n"+agent)
+			}
+			if _, err := Apply(dir, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			var got config.Agent
+			if _, err := toml.DecodeFile(filepath.Join(dir, "agents", "reader", "agent.toml"), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.MailWakeStart || !reflect.DeepEqual(got.MailWakeFrom, []string{"human"}) {
+				t.Errorf("migrated list=%v start=%t", got.MailWakeFrom, got.MailWakeStart)
+			}
+		})
+	}
 	for _, src := range []config.Agent{
 		{},
 		{MailWakeFrom: []string{"other-agent", "human"}},

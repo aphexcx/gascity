@@ -131,11 +131,20 @@ func (p localMailWakePolicy) agent(info session.Info) (config.Agent, bool) {
 			continue
 		}
 		a, ok := resolveAgentIdentity(p.cfg, name, "")
-		if ok {
-			if identity := agentutil.RoutedToIdentity(&a); identity != a.QualifiedName() {
-				return findAgentByQualified(p.cfg, identity)
+		if !ok {
+			continue
+		}
+		identity := agentutil.RoutedToIdentity(&a)
+		for _, configured := range p.cfg.Agents {
+			if configured.QualifiedName() == identity {
+				return configured, true
 			}
-			return a, true
+		}
+		// A generic rig template is stored once in config. Its sessions
+		// carry a rig-qualified identity synthesized by the resolver.
+		_, template := config.ParseQualifiedName(identity)
+		if generic := config.FindAgent(p.cfg, template); generic != nil && generic.Dir == "" && generic.Scope == "rig" {
+			return *generic, true
 		}
 	}
 	return config.Agent{}, false

@@ -612,7 +612,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "MailWakeFrom overrides the senders whose local mail requests a reminder."
+          "description": "MailWakeFrom overrides the senders whose local mail requests a reminder.\nAn empty list clears the inherited setting."
         },
         "mail_wake_start": {
           "type": "boolean",

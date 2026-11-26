@@ -789,7 +789,8 @@ type AgentOverride struct {
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
 	// MailWakeFrom overrides the senders whose local mail requests a reminder.
-	MailWakeFrom []string `toml:"mail_wake_from,omitempty"`
+	// An empty list clears the inherited setting.
+	MailWakeFrom *[]string `toml:"mail_wake_from,omitempty"`
 	// MailWakeStart overrides whether listed mail may start a named session.
 	MailWakeStart *bool `toml:"mail_wake_start,omitempty"`
 	// ResumeCommand overrides the agent's resume_command template.
