@@ -117,6 +117,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	var hoistedNamedSessions []NamedSession
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
+		hoistStart := len(hoistedAgents)
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
 		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
@@ -505,6 +506,8 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		if err := checkPackAgentCollisions(rigAgents, rig.Name); err != nil {
 			return err
 		}
+
+		qualifyImportedMailWakeFrom(rigAgents, hoistedAgents[hoistStart:])
 
 		// Apply or defer per-rig overrides/patches after all packs for this rig.
 		// V2 accepts both "overrides" (V1) and "patches" (V2) TOML keys.
@@ -912,6 +915,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 	}
 
 	allAgents = append(allAgents, allRigAgentsFromCityImports...)
+	qualifyImportedMailWakeFrom(allAgents)
 	allNamedSessions = append(allNamedSessions, allRigNamedSessionsFromCityImports...)
 
 	// Store city pack dirs.
@@ -2580,6 +2584,33 @@ func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName str
 	return expanded
 }
 
+// qualifyImportedMailWakeFrom resolves pack-local senders after the imported
+// agents have their final rig and binding. An explicit identity keeps its scope.
+func qualifyImportedMailWakeFrom(groups ...[]Agent) {
+	names := make(map[string]bool)
+	for _, agents := range groups {
+		for i := range agents {
+			names[agents[i].QualifiedName()] = true
+		}
+	}
+	for _, agents := range groups {
+		for i := range agents {
+			a := &agents[i]
+			a.MailWakeFrom = slices.Clone(a.MailWakeFrom)
+			for j, name := range a.MailWakeFrom {
+				if name == "human" || name == "controller" || strings.ContainsAny(name, "/.") {
+					continue
+				}
+				local := a.BindingPrefix() + name
+				if scoped := a.Dir + "/" + local; a.Dir != "" && (names[scoped] || !names[local]) {
+					local = scoped
+				}
+				a.MailWakeFrom[j] = local
+			}
+		}
+	}
+}
+
 func qualifyAgentDependsOnInPlace(a *Agent) {
 	if a == nil || len(a.DependsOn) == 0 {
 		return
@@ -2834,6 +2865,8 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		AppendFragments:         ov.AppendFragments,
 		Attach:                  ov.Attach,
 		DependsOn:               ov.DependsOn,
+		MailWakeFrom:            ov.MailWakeFrom,
+		MailWakeStart:           ov.MailWakeStart,
 		ResumeCommand:           ov.ResumeCommand,
 		WakeMode:                ov.WakeMode,
 		MouseMode:               ov.MouseMode,

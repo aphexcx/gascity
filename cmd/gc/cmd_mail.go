@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -991,7 +992,7 @@ func sessionMailboxAddresses(b beads.Bead) []string {
 // routing of their own, so a [beads.classes.sessions] relocation reaches mail
 // identity resolution exactly once, at the root that opened the store. Mail
 // *messages* are a different class and travel through mail.Provider, not here.
-func resolveMailIdentityCached(sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
+func resolveMailIdentityCachedID(sessStore beads.Store, identifier string, cache *mailIdentitySessionCache, resolvedID *string) (string, error) {
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
@@ -1016,6 +1017,9 @@ func resolveMailIdentityCached(sessStore beads.Store, identifier string, cache *
 	if address == "" {
 		return "", fmt.Errorf("session %q has no mailbox identity", identifier)
 	}
+	if resolvedID != nil {
+		*resolvedID = sessionID
+	}
 	return address, nil
 }
 
@@ -1024,6 +1028,10 @@ func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, sessStore 
 }
 
 func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
+	return resolveMailIdentityWithConfigCachedID(cityPath, cfg, sessStore, identifier, cache, nil)
+}
+
+func resolveMailIdentityWithConfigCachedID(cityPath string, cfg *config.City, sessStore beads.Store, identifier string, cache *mailIdentitySessionCache, resolvedID *string) (string, error) {
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
@@ -1036,6 +1044,9 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, sess
 			}
 			if address == "" {
 				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
+			}
+			if resolvedID != nil {
+				*resolvedID = sessionID
 			}
 			return address, nil
 		}
@@ -1051,7 +1062,7 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, sess
 	if address, ok := configuredMailboxAddressWithConfig(cityPath, cfg, identifier); ok {
 		return address, nil
 	}
-	return resolveMailIdentityCached(sessStore, identifier, cache)
+	return resolveMailIdentityCachedID(sessStore, identifier, cache, resolvedID)
 }
 
 func resolveMailRecipientIdentity(cityPath string, cfg *config.City, sessStore beads.Store, identifier string) (string, error) {
@@ -1360,9 +1371,13 @@ func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, sessS
 }
 
 func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City, sessStore beads.Store, stderr io.Writer, cmdName string, cache *mailIdentitySessionCache) (string, bool) {
+	return resolveDefaultMailSenderForCommandCachedID(cityPath, cfg, sessStore, stderr, cmdName, cache, nil)
+}
+
+func resolveDefaultMailSenderForCommandCachedID(cityPath string, cfg *config.City, sessStore beads.Store, stderr io.Writer, cmdName string, cache *mailIdentitySessionCache, resolvedID *string) (string, bool) {
 	candidates := defaultMailIdentityCandidates()
 	for _, c := range candidates {
-		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, c, cache)
+		sender, err := resolveMailIdentityWithConfigCachedID(cityPath, cfg, sessStore, c, cache, resolvedID)
 		if err == nil {
 			return sender, true
 		}
@@ -1502,6 +1517,7 @@ Creates a message bead addressed to the recipient. The sender defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
 a recipient turn after sending. In a managed city, it can request a wake for
 a non-running recipient. Unread mail alone does not request a wake.
+A recipient can use mail_wake_from to request a reminder for listed local senders.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -1651,6 +1667,7 @@ A qualified override is trusted as written.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
+A recipient can use mail_wake_from to request a reminder for listed local senders.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 With --context/--city-url, the message ID and its thread belong to the
@@ -1854,11 +1871,12 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 		}
 	}
 
+	var senderID string
 	sender := from
 	if sender == "" {
 		if store != nil {
 			var ok bool
-			sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, sessStore, stderr, "gc mail send", idCache)
+			sender, ok = resolveDefaultMailSenderForCommandCachedID(cityPath, cfg, sessStore, stderr, "gc mail send", idCache, &senderID)
 			if !ok {
 				return 1
 			}
@@ -1866,7 +1884,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 			sender = defaultMailIdentity()
 		}
 	} else if sender != "human" && store != nil {
-		sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, sender, idCache)
+		sender, err = resolveMailIdentityWithConfigCachedID(cityPath, cfg, sessStore, sender, idCache, &senderID)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1921,7 +1939,11 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr)
+	var list localMailWake
+	if !notify {
+		list = newLocalMailWake(cityPath, cfg, store, sessStore, mp, sender, senderID, "gc mail send", stderr, time.Now)
+	}
+	return doMailSendWithWake(mp, rec, validRecipients, sender, args, nf, dedupKey, jsonOut, stdout, stderr, list)
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
@@ -1936,6 +1958,10 @@ func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[strin
 // capability; providers without it fall back to a plain send (fail-open, since
 // a duplicate notification beats a silently dropped one).
 func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer) int {
+	return doMailSendWithWake(mp, rec, validRecipients, sender, args, nudgeFn, dedupKey, jsonOut, stdout, stderr, nil)
+}
+
+func doMailSendWithWake(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, dedupKey string, jsonOut bool, stdout, stderr io.Writer, list localMailWake) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1999,14 +2025,9 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 	}
 
 	// Nudge recipient if requested and recipient is not human.
-	notified := false
-	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to, m.ID); err != nil {
-			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
-			notified = true
-		}
-	}
+	notice := m
+	notice.To = to
+	notified := notifyStoredMail(notice, nudgeFn, list, "gc mail send", stderr)
 	if jsonOut {
 		summary := summarizeMailMessage(m)
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
@@ -2431,8 +2452,9 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		rec := cliFactoryEventsRecorder(cityPath, cfg)
 		return sendRemoteReply(c, target, rec, args[0], recipient, from, mail.ReplySubject(subject, original.Subject, body), body, notify, jsonOut, stdout, stderr)
 	}
+	var senderID string
 	if sender != "human" && sessions != nil {
-		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessions, stderr, "gc mail reply")
+		resolved, ok := resolveDefaultMailSenderForCommandCachedID(cityPath, cfg, sessions, stderr, "gc mail reply", nil, &senderID)
 		if !ok {
 			return 1
 		}
@@ -2446,7 +2468,11 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
 	}
 
-	code = doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
+	var list localMailWake
+	if !notify {
+		list = newLocalMailWake(cityPath, cfg, store, sessions, mp, sender, senderID, "gc mail reply", stderr, time.Now)
+	}
+	code = doMailReplyWithWake(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr, list)
 	if code == 0 && routeWarnings.Len() != 0 {
 		fmt.Fprint(stderr, routeWarnings.String()) //nolint:errcheck // best-effort stderr
 	}
@@ -2459,6 +2485,10 @@ func doMailReply(mp mail.Provider, rec events.Recorder, id, sender, subject, bod
 }
 
 func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject, body string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+	return doMailReplyWithWake(mp, rec, id, sender, subject, body, nudgeFn, jsonOut, stdout, stderr, nil)
+}
+
+func doMailReplyWithWake(mp mail.Provider, rec events.Recorder, id, sender, subject, body string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer, list localMailWake) int {
 	reply, err := mp.Reply(id, sender, subject, body)
 	telemetry.RecordMailOp(context.Background(), "reply", err)
 	if err != nil {
@@ -2476,14 +2506,7 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		fmt.Fprintf(stdout, "Replied to %s — sent message %s to %s\n", id, reply.ID, reply.To) //nolint:errcheck // best-effort stdout
 	}
 
-	notified := false
-	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To, reply.ID); err != nil {
-			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
-			notified = true
-		}
-	}
+	notified := notifyStoredMail(reply, nudgeFn, list, "gc mail reply", stderr)
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})

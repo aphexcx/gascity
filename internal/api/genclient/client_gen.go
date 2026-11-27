@@ -1046,6 +1046,8 @@ type AgentPatch struct {
 	Lifecycle               *string           `json:"Lifecycle"`
 	MCP                     *[]string         `json:"MCP"`
 	MCPAppend               *[]string         `json:"MCPAppend"`
+	MailWakeFrom            *[]string         `json:"MailWakeFrom"`
+	MailWakeStart           *bool             `json:"MailWakeStart"`
 	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
 	MaxSessionAge           *string           `json:"MaxSessionAge"`
 	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`

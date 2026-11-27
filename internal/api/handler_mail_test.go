@@ -14,8 +14,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -402,6 +404,59 @@ func TestMailSendOmittedBodyStaysEmpty(t *testing.T) {
 	}
 	if msg.Body != "" {
 		t.Errorf("Body = %q, want empty (an omitted optional body must not be backfilled)", msg.Body)
+	}
+}
+
+func TestMailSendLeavesRecipientWakeStateAlone(t *testing.T) {
+	state := newFakeState(t)
+	store := beads.NewMemStore()
+	state.cityBeadStore = store
+	state.cityMailProv = beadmail.New(store)
+	state.cfg.Agents = []config.Agent{{Name: "source"}, {Name: "reader", MailWakeFrom: []string{"source"}, MailWakeStart: true}}
+	ids := map[string]string{}
+	for _, name := range []string{"source", "reader"} {
+		record, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"alias": name, "template": name, "session_name": name + "-session", "state": "active",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = record.ID
+	}
+	before, err := store.Get(ids["reader"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+	for _, sender := range []string{"source", "demo/source"} {
+		body, err := json.Marshal(map[string]string{"to": "reader", "from": sender, "subject": "Update"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewReader(body)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("mail send status %d: %s", rec.Code, rec.Body.String())
+		}
+		var message mail.Message
+		if err := json.NewDecoder(rec.Body).Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := state.cityMailProv.Get(message.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sender == "source" && stored.FromSessionID != ids["source"] {
+			t.Fatalf("stored local address stamp = %q, want %q", stored.FromSessionID, ids["source"])
+		}
+		after, err := store.Get(ids["reader"])
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("API send changed recipient: %v, %v", after, err)
+		}
+		pending, err := store.List(beads.ListQuery{Label: "gc:nudge", TierMode: beads.TierBoth})
+		if err != nil || len(pending) != 0 {
+			t.Fatalf("queued reminders = %v, %v", pending, err)
+		}
 	}
 }
 

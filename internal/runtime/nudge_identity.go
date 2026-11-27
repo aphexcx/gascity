@@ -37,6 +37,27 @@ func (e *NudgeRetryOwnerError) Unwrap() error { return e.Cause }
 
 type nudgeIdentityKey struct{}
 
+type nudgeDeliveryCheckKey struct{}
+
+// WithNudgeDeliveryCheck attaches a final eligibility check for live wait-idle
+// delivery. The check runs after waiting, immediately before submission.
+func WithNudgeDeliveryCheck(ctx context.Context, check func() error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, nudgeDeliveryCheckKey{}, check)
+}
+
+// CheckNudgeDelivery runs the caller's optional check at the submission boundary.
+func CheckNudgeDelivery(ctx context.Context) error {
+	if ctx != nil {
+		if check, _ := ctx.Value(nudgeDeliveryCheckKey{}).(func() error); check != nil {
+			return check()
+		}
+	}
+	return nil
+}
+
 // WithNudgeIdentity carries a caller's stable retry identity through session
 // operations. That caller retains ownership of staged input; an unrelated
 // delivery cannot submit it. This metadata is never part of model input.

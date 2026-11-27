@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,6 +106,8 @@ type agentFile struct {
 	AppendFragments        []string                `toml:"append_fragments,omitempty"`
 	Attach                 *bool                   `toml:"attach,omitempty"`
 	DependsOn              []string                `toml:"depends_on,omitempty"`
+	MailWakeFrom           []string                `toml:"mail_wake_from,omitempty"`
+	MailWakeStart          bool                    `toml:"mail_wake_start,omitempty"`
 	ResumeCommand          string                  `toml:"resume_command,omitempty"`
 	WakeMode               string                  `toml:"wake_mode,omitempty"`
 	MouseMode              string                  `toml:"mouse_mode,omitempty"`
@@ -969,6 +972,8 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		AppendFragments:        agent.AppendFragments,
 		Attach:                 agent.Attach,
 		DependsOn:              agent.DependsOn,
+		MailWakeFrom:           slices.Clone(agent.MailWakeFrom),
+		MailWakeStart:          agent.MailWakeStart,
 		ResumeCommand:          agent.ResumeCommand,
 		WakeMode:               agent.WakeMode,
 		MouseMode:              agent.MouseMode,
@@ -1024,6 +1029,8 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		len(cfg.AppendFragments) == 0 &&
 		cfg.Attach == nil &&
 		len(cfg.DependsOn) == 0 &&
+		len(cfg.MailWakeFrom) == 0 &&
+		!cfg.MailWakeStart &&
 		cfg.ResumeCommand == "" &&
 		cfg.WakeMode == "" &&
 		cfg.MouseMode == ""

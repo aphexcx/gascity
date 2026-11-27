@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Patches holds all patch blocks from composition. Patches target existing
 // resources by identity key and modify specific fields. They are applied
@@ -139,6 +142,11 @@ type AgentPatch struct {
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
 	DependsOn []string `toml:"depends_on,omitempty"`
+	// MailWakeFrom overrides the senders whose local mail requests a reminder.
+	// An empty list clears the inherited setting.
+	MailWakeFrom *[]string `toml:"mail_wake_from,omitempty"`
+	// MailWakeStart overrides whether listed mail may start a named session.
+	MailWakeStart *bool `toml:"mail_wake_start,omitempty"`
 	// ResumeCommand overrides the agent's resume_command template.
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
@@ -628,6 +636,12 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	// empty lists). This matches the existing pattern for all list fields
 	// (PreStart, SessionSetup, etc.) but limits composability. A broader
 	// fix would use *[]string or a presence flag across all list fields.
+	if p.MailWakeFrom != nil {
+		a.MailWakeFrom = slices.Clone(*p.MailWakeFrom)
+	}
+	if p.MailWakeStart != nil {
+		a.MailWakeStart = *p.MailWakeStart
+	}
 	if len(p.DependsOn) > 0 {
 		a.DependsOn = append([]string(nil), p.DependsOn...)
 	}

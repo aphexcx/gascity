@@ -835,6 +835,37 @@ func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (In
 	return Info{}, false
 }
 
+// HasClosedOrArchivedNamedSession reports whether any record of the configured
+// identity is closed or archived, including records whose names were released.
+func HasClosedOrArchivedNamedSession(store beads.Store, identity string) (bool, error) {
+	identity = NormalizeNamedSessionTarget(identity)
+	if store == nil || identity == "" {
+		return false, nil
+	}
+	// The issues tier can filter by identity alone, including legacy records
+	// with missing type or labels. Wisp metadata is filtered client-side by
+	// bd, so bound those reads by the two stored session shapes.
+	for _, q := range []beads.ListQuery{
+		{TierMode: beads.TierIssues},
+		{TierMode: beads.TierWisps, Type: BeadType},
+		{TierMode: beads.TierWisps, Label: LabelSession},
+	} {
+		q.Metadata = map[string]string{NamedSessionIdentityMetadata: identity}
+		q.IncludeClosed = true
+		rows, err := store.List(q)
+		if err != nil {
+			return false, fmt.Errorf("listing records for named session %q: %w", identity, err)
+		}
+		for _, b := range rows {
+			switch projectBaseState(b.Status, b.Metadata["state"], b.Metadata["sleep_reason"]) {
+			case BaseStateClosed, BaseStateArchived:
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // FindClosedNamedSessionBead finds the newest closed bead for a named session identity.
 func FindClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool, error) {
 	return FindClosedNamedSessionBeadForSessionName(store, identity, "")

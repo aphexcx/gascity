@@ -36,7 +36,7 @@ with nudge from Tutorial 03:
 | Carrier | A bead in the store | Terminal input |
 | Survives a crash | Yes | No |
 | Subject line | Yes | No |
-| Wakes the recipient | No by itself; `--notify` can request a managed wake | Yes |
+| Wakes the recipient | On request from the sender or the recipient's configuration | Yes |
 | State | Stays unread until processed | Fire-and-forget |
 
 Send mail to the mayor:
@@ -54,6 +54,35 @@ Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that
 request can wake a non-running recipient; an unmanaged city queues the nudge for
 later delivery; without a city store the nudge is skipped.
+
+To request a turn when selected agents send or reply locally, set
+`mail_wake_from` on the receiving agent. It defaults to an empty list. Use
+qualified agent names, as in `depends_on`, or `human` for local commands sent
+as human. The next mail command reads any changes. Processes that can edit
+the city's configuration can change the list. A match identifies the agent
+name used by a local command. Any process inside the city can send under that name.
+
+| Recipient of listed mail | What happens |
+| --- | --- |
+| Human | The mail goes to the inbox. |
+| Closed, closing, or archived | The record keeps its current state. |
+| Held, quarantined, suspended, drained, waiting, or preparing to sleep | The mail stays in the inbox. The block stays in effect, even if the session is still running. |
+| Running and unblocked | An idle session receives a reminder. A busy session receives it when idle if the mail is still unread. |
+| Stopped with `mail_wake_start = false` (the default) | Store the mail and leave the session stopped. |
+| Stopped outside a configured named session | Store the mail and leave the session stopped. |
+| Stopped in an unmanaged city | Store the mail and leave the session stopped. |
+| Stopped with an existing record outside ordinary sleep | Preserve the current state and sleep reason. |
+| Eligible for a start, in ordinary sleep | Queue the reminder and ask the orchestrator to start the session. Ordinary sleep has an empty reason, `idle`, `idle-timeout`, or `no-wake-reason`. |
+| Eligible for a start, with no existing or closed record | Create the named session through its usual start path, record the turn, and queue the reminder. |
+
+A start requires `mail_wake_start = true` on the recipient, a configured
+named session as the target, and a managed orchestrator.
+
+Each sender session can request three reminders per recipient in 15 minutes.
+Sends as `human` share one allowance. During that window, a session's reply
+to the sender that woke it goes to the inbox without requesting another turn.
+In a longer loop the fourth reminder from the same sender is suppressed.
+An explicit `--notify` takes precedence and uses none of this allowance.
 
 Check for unread mail:
 

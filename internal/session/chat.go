@@ -963,6 +963,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		return runtime.NudgeDelivery{}, nil
 	}
 	if transportFromMetadata(b) == "acp" {
+		if err := runtime.CheckNudgeDelivery(ctx); err != nil {
+			return runtime.NudgeDelivery{}, err
+		}
 		return m.nudgeSession(ctx, sessName, message, false)
 	}
 	if providerKind(b) != "claude" {
@@ -974,6 +977,9 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	}
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return runtime.NudgeDelivery{}, nil
+	}
+	if err := runtime.CheckNudgeDelivery(ctx); err != nil {
+		return runtime.NudgeDelivery{}, err
 	}
 	// A send that fails here downgrades to the queue: nil error, and whatever
 	// evidence the runtime produced before failing — zero when nothing

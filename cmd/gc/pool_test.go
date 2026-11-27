@@ -916,6 +916,8 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		PoolName:                     "template/name",
 		ResumeCommand:                "claude --resume {{.SessionKey}} --dangerously",
 		DependsOn:                    []string{"other-agent"},
+		MailWakeFrom:                 []string{"other-agent"},
+		MailWakeStart:                true,
 		WakeMode:                     "fresh",
 		MouseMode:                    "on",
 		TmuxAlias:                    "worker--{{.CityName}}",

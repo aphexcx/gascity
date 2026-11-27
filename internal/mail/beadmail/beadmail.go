@@ -1319,6 +1319,7 @@ func beadToMessage(b beads.Bead) mail.Message {
 		From:          from,
 		FromSessionID: b.Metadata[fromSessionIDMetadataKey],
 		To:            to,
+		ToSessionID:   b.Metadata[toSessionIDMetadataKey],
 		Subject:       b.Title,
 		Body:          b.Description,
 		CreatedAt:     b.CreatedAt,

@@ -489,6 +489,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		ctx = context.Background()
 	}
 	if h.transport == "acp" {
+		if err := runtime.CheckNudgeDelivery(ctx); err != nil {
+			return NudgeResult{}, err
+		}
 		delivery, err := providerNudgeDelivery(h.provider, h.sessionName, runtime.NudgeContent(ctx, req.Text))
 		result := nudgeResultFromDelivery(delivery)
 		if err != nil {
@@ -522,6 +525,9 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 		}
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
+	}
+	if err := runtime.CheckNudgeDelivery(ctx); err != nil {
+		return NudgeResult{}, err
 	}
 	delivery, err := h.nudgeNow(ctx, formatRuntimeWaitIdleReminder(req.Source, req.Text))
 	result := nudgeResultFromDelivery(delivery)
