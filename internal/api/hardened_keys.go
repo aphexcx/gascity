@@ -168,9 +168,9 @@ func (h *HardenedAuth) Run(ctx context.Context) {
 }
 
 // loadKeys reads the directory and returns the write keys: the inline write
-// keys merged with the directory's. Directory keys never verify reads, but a kid
-// names one key on this listener, so a directory kid that is also an inline or
-// primary read kid is still refused.
+// keys merged with the directory's. Directory keys never verify reads, but a
+// directory kid that is also an inline or primary read kid is still refused, as
+// it was when the directory fed the read verifier too.
 func (h *HardenedAuth) loadKeys(boot bool) (map[string]ed25519.PublicKey, error) {
 	var directory map[string]ed25519.PublicKey
 	if dir := h.config.Hardened.TrustedKeysDir; dir != "" {

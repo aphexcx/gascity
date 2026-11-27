@@ -229,7 +229,9 @@ func TestHardenedDirectoryKeyReadRefusedOnEveryRoute(t *testing.T) {
 }
 
 // A2: the listener's own inline read key reads every per-city read route: the
-// read gate admits the grant and the answer is the handler's own.
+// read gate admits the grant and the answer is the handler's own. No per-city
+// read handler answers 401 or 403 to an admitted read, so either status fails.
+// Status 0 is a stream the handler held open after admission.
 func TestHardenedInlineReadKeyReadsEveryRoute(t *testing.T) {
 	keys := newDirectoryReadKeys(t)
 	h, sm := newDirectoryListener(t, keys, true)
@@ -239,8 +241,8 @@ func TestHardenedInlineReadKeyReadsEveryRoute(t *testing.T) {
 		status, body := probeRead(h, signedRead(t, route, keys.readPriv, inlineReadKid, fmt.Sprintf("a2-%d", i)))
 		gate := isReadGateRejection(status, body) || isReadGateMissingGrant(status, body)
 		t.Logf("a2 %s %s -> %d read-gate=%t", route.method, route.pattern, status, gate)
-		if gate {
-			t.Errorf("%s %s: inline read key refused by the read gate: %d %q", route.method, route.pattern, status, body)
+		if gate || status == http.StatusUnauthorized || status == http.StatusForbidden {
+			t.Errorf("%s %s: inline read key refused: %d %q", route.method, route.pattern, status, body)
 		}
 	}
 }

@@ -194,10 +194,10 @@ grant record survives every reload.
 The inline `write_auth_verify_key` list is merged with the directory; the
 inline `read_auth_verify_key` list alone verifies reads. A directory kid that
 also appears in either inline list, or in the primary listener's write or read
-key list, is an error, so one kid never names two keys on one listener. Inline
-hardened read and write keys may share kids, but a kid cannot also appear in the
-primary listener's key list for the same audience. Inline lists and directory
-settings are read at startup; only directory contents reload.
+key list, is an error. Inline hardened read and write keys may share kids, but a
+kid cannot also appear in the primary listener's key list for the same audience.
+Inline lists and directory settings are read at startup; only directory contents
+reload.
 
 | Condition | Result |
 |---|---|

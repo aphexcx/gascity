@@ -282,6 +282,19 @@ func TestHardenedKeysTimerDisabledAndInlineMerge(t *testing.T) {
 	if got := hardenedRead(t, h, priv, "inline", "inline-read"); got != 200 {
 		t.Fatalf("inline read key refused: %d", got)
 	}
+	// The inline read key keeps its single use across a reload, and its verifier
+	// still refuses the write audience.
+	if err := h.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardenedRead(t, h, priv, "inline", "inline-read"); got != 403 {
+		t.Fatalf("inline read grant replayed after reload: %d", got)
+	}
+	write := readGrant(time.Now(), "acme", "GET", "/v0/city/acme/beads", "", "inline-write-aud")
+	write.Kid, write.Aud = "inline", writeAuthAudience
+	if _, err := h.current.Load().read.Verify(mintToken(t, priv, write), citywriteauth.Expect{City: write.City, ReqDigest: write.Req}); !errors.Is(err, citywriteauth.ErrAudience) {
+		t.Fatalf("read verifier on a write-audience grant: %v", err)
+	}
 	before := h.current.Load()
 	writeTrustedKey(t, dir, "local", pub)
 	if err := h.Reload(); err == nil || !strings.Contains(err.Error(), "local") {

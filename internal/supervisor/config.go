@@ -108,8 +108,9 @@ type HardenedListener struct {
 	// every per-city read is refused. Each regular file contains one
 	// standard-base64 32-byte Ed25519 public key; a trailing newline and lines
 	// starting with # are allowed. World-writable directories/files and symlink
-	// files are refused. Inline write keys are merged; a kid that is also an
-	// inline or primary key's kid is an error. Empty disables directory loading.
+	// files are refused. Inline write keys are merged; a directory kid that is
+	// also an inline or primary key's kid is an error. Empty disables directory
+	// loading.
 	// At boot malformed files are reported and valid files load; at least one
 	// write key is required. A failed reload retains the previous complete set.
 	// Add a file to register a city, remove it to revoke; run gc supervisor reload
