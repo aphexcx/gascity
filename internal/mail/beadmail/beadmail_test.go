@@ -2924,6 +2924,26 @@ func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]
 
 // --- SendDeduped (mail.DedupSender capability) ---
 
+func TestFilingAndNotificationKeysAreIndependent(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	const key = "shared-key"
+	filed, err := p.SendFiling("sender", "recipient", "subject", "body", key, "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice, suppressed, err := p.SendDeduped("sender", "recipient", "subject", "body", key)
+	if err != nil || suppressed || notice.ID == filed.ID {
+		t.Fatalf("notification = %q, filed = %q, suppressed = %t, err = %v", notice.ID, filed.ID, suppressed, err)
+	}
+	if err := store.Delete(filed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := p.LookupFiling(key, "hash"); err != nil || found {
+		t.Fatalf("filing found after deletion = %t, err = %v", found, err)
+	}
+}
+
 func TestSendDedupedSuppressesWhileLiveCopyExists(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)

@@ -1231,6 +1231,8 @@ export const zAgentPatch = z.object({
     Lifecycle: z.string().nullable(),
     MCP: z.array(z.string()).nullable(),
     MCPAppend: z.array(z.string()).nullable(),
+    MailWakeFrom: z.array(z.string()).nullable(),
+    MailWakeStart: z.boolean().nullable(),
     MaxActiveSessions: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     MaxSessionAge: z.string().nullable(),
     MaxSessionAgeJitter: z.string().nullable(),

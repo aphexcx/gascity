@@ -49,7 +49,14 @@ def run(command, cwd, allowed=(0,)):
         except ProcessLookupError:
             pass
         output, _ = process.communicate()
-        raise InventoryError(f"{shlex.join(command)} interrupted or timed out after {timeout}s\n{output}") from None
+        try:
+            load = f"{os.getloadavg()[0]:.2f}"
+        except OSError:
+            load = "unknown"
+        raise InventoryError(
+            f"{shlex.join(command)} interrupted or timed out after {timeout}s "
+            f"(1-minute load: {load}, setting: GC_CHECK_INVENTORIES_TIMEOUT)\n{output}"
+        ) from None
     result = subprocess.CompletedProcess(command, process.returncode, output)
     if result.returncode not in allowed:
         raise InventoryError(

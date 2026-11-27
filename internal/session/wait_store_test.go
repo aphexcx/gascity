@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"maps"
 	"reflect"
 	"testing"
 	"time"
@@ -44,6 +45,214 @@ func recordingWaitStore(t *testing.T, seed ...beads.Bead) (*Store, *beadstest.Re
 }
 
 var waitStoreNow = time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+
+func TestMailWakeBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value      string
+		blockLive, blockStart bool
+	}{
+		{"hold", "held_until", "yesterday", true, true},
+		{"quarantine", "quarantined_until", "later", true, true},
+		{"wait hold", "wait_hold", "true", true, true},
+		{"pending sleep", "sleep_intent", "idle-stop-pending", true, true},
+		{"attempts", "wake_attempts", "2", false, false},
+		{"refusal stamp", "wake_refused_event_at", "stamp", false, false},
+		{"churn", "churn_count", "3", false, false},
+		{"suspension", "state", "suspended", true, true},
+		{"drain", "state", "drained", true, true},
+		{"archive", "state", "archived", true, true},
+		{"closing", "state", "closing", true, true},
+		{"closed", "state", "closed", true, true},
+		{"active", "state", "active", false, true},
+		{"ordinary", "sleep_reason", "idle", false, false},
+		{"stopped", "sleep_reason", "city-stop", false, true},
+		{"future", "sleep_reason", "new-reason", false, true},
+	} {
+		m := map[string]string{"state": "asleep"}
+		m[tc.key] = tc.value
+		info := infoFromPersistedBead(beads.Bead{Metadata: m})
+		if live, start := MailWakeBlock(info, false, false), MailWakeBlock(info, false, true); (live != "") != tc.blockLive || (start != "") != tc.blockStart {
+			t.Errorf("%s: running block=%q start block=%q", tc.name, live, start)
+		}
+	}
+	for _, reason := range []string{"user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", "drained"} {
+		info := infoFromPersistedBead(beads.Bead{Metadata: map[string]string{"state": "asleep", "sleep_reason": reason}})
+		if MailWakeBlock(info, false, false) == "" {
+			t.Errorf("running recipient with %q was eligible", reason)
+		}
+	}
+	if MailWakeBlock(Info{Closed: true}, false, false) == "" || MailWakeBlock(Info{}, true, false) == "" {
+		t.Error("closed record or open wait was eligible")
+	}
+}
+
+func TestMailWakeClearingKeys(t *testing.T) {
+	// Each key must belong to a tested blocker, a preserved counter, or
+	// a timestamp belonging to the suspended-to-asleep transition.
+	placed := map[string]bool{
+		"held_until": true, "quarantined_until": true, "wait_hold": true, "sleep_intent": true,
+		"wake_attempts": true, "wake_refused_event_at": true, "churn_count": true,
+		"state": true, "suspended_at": true, "slept_at": true, "sleep_reason": true,
+	}
+	for key := range ClearWakeBlockersPatch(StateSuspended, "user-hold", waitStoreNow) {
+		if !placed[key] {
+			t.Errorf("classify %q for recipient-configured mail before accepting a wake", key)
+		}
+	}
+}
+
+func TestRequestMailWakePreservesSession(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		mem := beads.NewMemStore()
+		meta := map[string]string{"state": "asleep", "sleep_reason": "idle", "wake_attempts": "2", "churn_count": "3", "wake_refused_event_at": "before"}
+		if held {
+			meta["held_until"] = "later"
+		}
+		b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		asked, err := waitStoreOver(mem).RequestMailWake(b.ID, waitStoreNow)
+		if err != nil || asked == held {
+			t.Errorf("held=%t: asked=%t err=%v", held, asked, err)
+		}
+		got, err := mem.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !held {
+			for k, v := range RequestExplicitWakePatch("explicit", waitStoreNow) {
+				meta[k] = v
+			}
+		}
+		if !maps.Equal(got.Metadata, meta) {
+			t.Errorf("held=%t: metadata=%v, want %v", held, got.Metadata, meta)
+		}
+	}
+}
+
+func TestMailWakeRejectsOtherBeadTypes(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: "task", Metadata: map[string]string{"state": "asleep", "sleep_reason": "idle"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := waitStoreOver(mem)
+	if _, err := store.MailWakeHistory(b.ID); err == nil {
+		t.Error("read mail wake history from a task")
+	}
+	if err := store.RecordMailWake(b.ID, nil, MailWakeEntry{Sender: "human", At: waitStoreNow}); err == nil {
+		t.Error("recorded a reminder on a task")
+	}
+	if asked, err := store.RequestMailWake(b.ID, waitStoreNow); err == nil || asked {
+		t.Error("accepted a task as a sleeping session")
+	}
+	after, err := mem.Get(b.ID)
+	if err != nil || !reflect.DeepEqual(b, after) {
+		t.Fatalf("task changed: after=%v err=%v", after, err)
+	}
+}
+
+// mailWakeValueCASStore models a backend that can fence one metadata key
+// without offering revision-fenced updates of an entire bead.
+type mailWakeValueCASStore struct {
+	beads.Store
+	beads.MetadataCASWriter
+}
+
+func (mailWakeValueCASStore) SetMetadata(string, string, string) error {
+	return errors.New("unconditional metadata write")
+}
+
+type mailWakeWithoutRevisions struct{ *beads.MemStore }
+
+func (mailWakeWithoutRevisions) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return beads.ErrConditionalWriteUnsupported
+}
+
+func TestMailWakeUsesMetadataCAS(t *testing.T) {
+	mem := beads.NewMemStore()
+	for name, backend := range map[string]beads.Store{
+		"metadata writer":       mailWakeValueCASStore{Store: mem, MetadataCASWriter: mem},
+		"unsupported revisions": mailWakeWithoutRevisions{mem},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := backend.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := waitStoreOver(backend)
+			entry := MailWakeEntry{Sender: "human", At: waitStoreNow}
+			if err := store.RecordMailWake(b.ID, nil, entry); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RecordMailWake(b.ID, nil, entry); err == nil {
+				t.Fatal("accepted a second reservation against the same empty history")
+			}
+		})
+	}
+}
+
+type mailWakeWithoutAtomicWrites struct{ mailWakeWithoutRevisions }
+
+func (mailWakeWithoutAtomicWrites) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	return false, beads.ErrConditionalWriteUnsupported
+}
+
+func TestMailWakeWithoutAtomicWrites(t *testing.T) {
+	mem := beads.NewMemStore()
+	for name, backend := range map[string]beads.Store{
+		"no optional writers": struct{ beads.Store }{mem},
+		"unsupported writers": mailWakeWithoutAtomicWrites{mailWakeWithoutRevisions{mem}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := backend.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": "asleep", "sleep_reason": "idle", "wake_attempts": "2"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := waitStoreOver(backend)
+			entry := MailWakeEntry{Sender: "human", At: waitStoreNow}
+			if err := store.RecordMailWake(b.ID, nil, entry); err != nil {
+				t.Fatalf("record reminder: %v", err)
+			}
+			if asked, err := store.RequestMailWake(b.ID, waitStoreNow); !asked || err != nil {
+				t.Fatalf("request wake: asked=%t err=%v", asked, err)
+			}
+			got, err := backend.Get(b.ID)
+			if err != nil || got.Metadata["wake_request"] != "explicit" || got.Metadata["wake_attempts"] != "2" {
+				t.Fatalf("wake metadata=%v err=%v", got.Metadata, err)
+			}
+		})
+	}
+}
+
+func TestMailWakeHistory(t *testing.T) {
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := waitStoreOver(mem)
+	first := MailWakeEntry{Sender: "one", At: waitStoreNow}
+	second := MailWakeEntry{Sender: "two", At: waitStoreNow.Add(16 * time.Minute)}
+	var seen []MailWakeEntry
+	for _, entry := range []MailWakeEntry{first, second} {
+		if err := store.RecordMailWake(b.ID, seen, entry); err != nil {
+			t.Fatal(err)
+		}
+		seen, err = store.MailWakeHistory(b.ID)
+		if err != nil || len(seen) != 1 || seen[0].Sender != entry.Sender || !seen[0].At.Equal(entry.At) {
+			t.Fatalf("history = %v, %v; want only %v", seen, err, entry)
+		}
+	}
+	if err := store.ApplyPatch(b.ID, ClearWakeBlockersPatch(StateSuspended, "user-hold", waitStoreNow)); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.MailWakeHistory(b.ID)
+	if err != nil || !reflect.DeepEqual(after, seen) {
+		t.Fatalf("explicit wake changed history: %v, %v", after, err)
+	}
+}
 
 func TestClearIdleWaitHoldPreservesOtherIntents(t *testing.T) {
 	for _, tc := range []struct {

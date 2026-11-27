@@ -13,6 +13,81 @@ func ptrStr(s string) *string { return &s }
 func ptrBool(b bool) *bool    { return &b }
 func ptrInt(n int) *int       { return &n }
 
+func TestMailWakeEmptyOverrideSurvivesConfigSave(t *testing.T) {
+	const source = `
+[[patches.agent]]
+name = "reader"
+mail_wake_from = []
+[[rigs]]
+name = "demo"
+[[rigs.overrides]]
+agent = "reader"
+mail_wake_from = []
+`
+	var city City
+	if _, err := toml.Decode(source, &city); err != nil {
+		t.Fatal(err)
+	}
+	data, err := city.MarshalForWrite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved City
+	if _, err := toml.Decode(string(data), &saved); err != nil {
+		t.Fatal(err)
+	}
+	for name, patch := range map[string]AgentPatch{
+		"patch": saved.Patches.Agents[0], "override": *saved.Rigs[0].Overrides[0].toAgentPatch(),
+	} {
+		a := Agent{MailWakeFrom: []string{"human"}}
+		applyAgentPatchFields(&a, &patch)
+		if len(a.MailWakeFrom) != 0 {
+			t.Errorf("%s restored inherited senders after config save: %v", name, a.MailWakeFrom)
+		}
+	}
+}
+
+func TestMailWakeSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Agent)
+	}{
+		{"patch", func(a *Agent) {
+			applyAgentPatchFields(a, &AgentPatch{MailWakeFrom: &[]string{"source", "human"}, MailWakeStart: ptrBool(true)})
+		}},
+		{"rig override", func(a *Agent) {
+			applyAgentOverride(a, &AgentOverride{MailWakeFrom: &[]string{"source", "human"}, MailWakeStart: ptrBool(true)})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Agent{Name: "reader"}
+			tc.apply(&a)
+			if !a.MailWakeStart || strings.Join(a.MailWakeFrom, ",") != "source,human" {
+				t.Fatalf("mail wake settings = %v, %v", a.MailWakeFrom, a.MailWakeStart)
+			}
+			clone := a.Clone()
+			clone.MailWakeFrom[0] = "changed"
+			if a.MailWakeFrom[0] != "source" {
+				t.Fatal("clone shares sender list")
+			}
+			applyAgentPatchFields(&a, &AgentPatch{MailWakeFrom: &[]string{}, MailWakeStart: ptrBool(false)})
+			if len(a.MailWakeFrom) != 0 || a.MailWakeStart {
+				t.Fatal("explicit empty list and false must disable both settings")
+			}
+		})
+	}
+	for _, entry := range []string{"missing", "controller", "reader"} {
+		agents := []Agent{{Name: "reader", MailWakeFrom: []string{entry}}}
+		if err := ValidateAgents(agents); err == nil {
+			t.Errorf("accepted invalid mail_wake_from entry %q", entry)
+		}
+	}
+	agents := []Agent{{Name: "reader", MailWakeFrom: []string{"source", "human"}}, {Name: "source", MailWakeFrom: []string{"reader"}}}
+	if err := ValidateAgents(agents); err != nil {
+		t.Fatalf("mutual mail lists: %v", err)
+	}
+}
+
 func TestApplyPatches_AgentSuspend(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{

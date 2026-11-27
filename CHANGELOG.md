@@ -12,6 +12,10 @@ during the gf-9x2 rebuild onto v1.5.0 (one block per commit, in pick order).
 
 ### Added
 
+- Agents can set `mail_wake_from` to request reminders for local mail from
+  selected senders. Set `mail_wake_start` to let those reminders start an
+  eligible named session in a managed city. Both settings default to off.
+
 - External-message adapters can register `envelope_format: "short"` for
   compact reminder headers and message/thread labels. Omitted, empty, and
   `"long"` keep the existing output; unknown formats are rejected.

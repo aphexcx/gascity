@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1622,11 +1623,99 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 }
 
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
-	delivery := mailNotifyDelivery{
-		nudges: beads.NudgesStore{Store: store}, sessions: cliSessionStore(store, target.cfg, target.cityPath),
-		provider: sp, withdraw: nudgeWithdrawQueuedWaitNudges, poke: nudgePokeController,
+	item := mailReminderItem(target, sender, messageID, time.Now())
+	// Session-class store for the observe/handle reads and the last-nudge stamp
+	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
+	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
+	// -> nil (identity), preserving the store-less WithProvider caller.
+	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
+	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
+	if err != nil {
+		return err
 	}
-	return delivery.deliver(target, fmt.Sprintf("You have mail from %s", sender), messageID)
+	if obs.Running {
+		var landed bool
+		item, landed, err = deliverLiveMailReminder(context.Background(), target, sessStore, sp, item)
+		if err != nil {
+			return err
+		}
+		if landed {
+			var sessFront *session.Store
+			if store != nil {
+				sessFront = sessionFrontDoor(sessStore)
+			}
+			stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
+			return nil
+		}
+	}
+	if !obs.Running && canRequestManagedNudgeWake(target, store) {
+		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+			return err
+		}
+		if err := nudgePokeController(target.cityPath); err != nil {
+			if nudgeWarningWriter != nil {
+				fmt.Fprintf(nudgeWarningWriter, "gc mail notify: warning: poke failed after managed wake: %v\n", err) //nolint:errcheck
+			}
+		}
+		return nil
+	}
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
+		return errors.Join(err, releaseLiveNudgeReservation(target, sp, item.ID))
+	}
+	if obs.Running {
+		maybeStartNudgePoller(target)
+	}
+	return nil
+}
+
+// NotifyListedMail applies the receiving agent's wake policy before an
+// explicit request can materialize a named session. A recipient without a
+// sender list uses the ordinary explicit notification path.
+func (cs *controllerState) NotifyListedMail(message mail.Message) (listed, notified bool) {
+	cs.mu.RLock()
+	cfg, cityPath, work, mp, sp := cs.cfg, cs.cityPath, cs.cityBeadStore, cs.cityMailProv, cs.sp
+	cs.mu.RUnlock()
+	if message.To == "human" || cfg == nil || !slices.ContainsFunc(cfg.Agents, func(a config.Agent) bool { return len(a.MailWakeFrom) > 0 }) {
+		return false, false
+	}
+	sessions := cs.SessionsBeadStore().Store
+	if sessions == nil {
+		return true, false
+	}
+	policy := localMailWakePolicy{cityPath, cfg, work, sessions, sessionFrontDoor(sessions), mp}
+	id := message.ToSessionID
+	var err error
+	if id == "" {
+		id, err = resolveSessionIDAllowClosedWithConfig(cityPath, cfg, sessions, message.To)
+	}
+	var recipient config.Agent
+	switch {
+	case err == nil:
+		info, lookupErr := policy.front.Get(id)
+		if lookupErr != nil {
+			return true, false
+		}
+		recipient, _ = policy.agent(info)
+	case errors.Is(err, session.ErrSessionNotFound):
+		spec, found, lookupErr := findNamedSessionSpecForTarget(cfg, loadedCityName(cfg, cityPath), message.To)
+		if lookupErr != nil {
+			return true, false
+		}
+		if found && spec.Agent != nil {
+			recipient = *spec.Agent
+		}
+	default:
+		return true, false
+	}
+	if len(recipient.MailWakeFrom) == 0 {
+		return false, false
+	}
+	sender := policy.sender(message.From, "", message.FromSessionID)
+	if sender.key == "" {
+		return true, false
+	}
+	asked, _ := policy.request(message, message.From, sender, time.Now().UTC(), sp)
+	return true, asked
 }
 
 type mailNotifyDelivery struct {
@@ -1657,41 +1746,18 @@ func (d mailNotifyDelivery) deliver(target nudgeTarget, msg, messageID string) e
 		return err
 	}
 	if obs.Running && !d.queueOnly {
-		handle, err := workerHandleForNudgeTarget(target, d.sessions, d.provider)
-		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
-				DeliveryID: item.ID,
-				Text:       msg,
-				Delivery:   worker.NudgeDeliveryWaitIdle,
-				Source:     "mail",
-				Wake:       worker.NudgeWakeLiveOnly,
-			})
-			if nudgeErr == nil {
-				// Unconfirmed submit = not live-delivered for this caller
-				// (gp-2io): fall through to the queue like any other error.
-				nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+		var landed bool
+		item, landed, err = deliverLiveMailReminder(context.Background(), target, d.sessions, d.provider, item)
+		if err != nil {
+			return err
+		}
+		if landed {
+			var sessFront *session.Store
+			if d.sessions != nil {
+				sessFront = sessionFrontDoor(d.sessions)
 			}
-			if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
-				telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
-				return nudgeErr
-			}
-			if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
-				item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
-			}
-			// The submit Enter can be delivered and the composer drained with
-			// only the busy-indicator OBSERVATION timing out. Delivery is
-			// proven either way, so this must not fall through to the queue
-			// path below and duplicate the mail notification.
-			unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
-			if (nudgeErr == nil && result.Landed()) || unobservedButDelivered {
-				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-				var sessFront *session.Store
-				if d.sessions != nil {
-					sessFront = sessionFrontDoor(d.sessions)
-				}
-				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
-				return nil
-			}
+			stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
+			return nil
 		}
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, d.nudges.Store) {
@@ -1714,6 +1780,53 @@ func (d mailNotifyDelivery) deliver(target nudgeTarget, msg, messageID string) e
 		maybeStartNudgePoller(target)
 	}
 	return nil
+}
+
+func mailReminderItem(target nudgeTarget, sender, messageID string, now time.Time) queuedNudge {
+	opts := queuedNudgeOptionsFromTarget(target)
+	// Recheck the referenced message before delivering from the queue.
+	if messageID != "" {
+		opts.Reference = &nudgeReference{Kind: "mail", ID: messageID}
+	}
+	return newQueuedNudgeWithOptions(target.agentKey(), fmt.Sprintf("You have mail from %s", sender), "mail", now, opts)
+}
+
+func deliverLiveMailReminder(ctx context.Context, target nudgeTarget, sessStore beads.Store, sp runtime.Provider, item queuedNudge) (queuedNudge, bool, error) {
+	handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
+	if err == nil {
+		result, nudgeErr := handle.Nudge(ctx, worker.NudgeRequest{
+			DeliveryID: item.ID,
+			Text:       item.Message,
+			Delivery:   worker.NudgeDeliveryWaitIdle,
+			Source:     "mail",
+			Wake:       worker.NudgeWakeLiveOnly,
+		})
+		if nudgeErr == nil {
+			// Unconfirmed submit = not live-delivered for this caller
+			// falls through to the queue like any other error.
+			nudgeErr = result.UnconfirmedSubmitError(target.agentKey())
+		}
+		if errors.Is(nudgeErr, errMailReminderWithdrawn) {
+			return item, false, nudgeErr
+		}
+		if errors.Is(nudgeErr, runtime.ErrNudgeDraftOwnershipLost) {
+			telemetry.RecordNudge(context.Background(), target.agentKey(), nudgeErr)
+			return item, false, nudgeErr
+		}
+		if errors.Is(nudgeErr, runtime.ErrNudgeSubmitUnconfirmed) {
+			item, _ = failedQueuedNudge(item, nudgeErr, time.Now())
+		}
+		// The submit Enter can be delivered and the composer drained with
+		// only the busy-indicator OBSERVATION timing out. Delivery is
+		// proven either way, so this must not fall through to the queue
+		// path below and duplicate the mail notification.
+		unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
+		if (nudgeErr == nil && result.Landed()) || unobservedButDelivered {
+			telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+			return item, true, nil
+		}
+	}
+	return item, false, nil
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {

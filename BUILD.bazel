@@ -201,6 +201,7 @@ filegroup(
     srcs = [
         "//cmd:bazel_repo_srcs",
         "//cmd/gc:bazel_repo_srcs",
+        "//cmd/gc-mail-relay:bazel_repo_srcs",
         "//cmd/gc-write-mint:bazel_repo_srcs",
         "//cmd/gen-client:bazel_repo_srcs",
         "//cmd/gen-command-census:bazel_repo_srcs",
@@ -294,6 +295,7 @@ filegroup(
         "//internal/mail/exec:bazel_repo_srcs",
         "//internal/mail/mailtest:bazel_repo_srcs",
         "//internal/mailrelay/envelope:bazel_repo_srcs",
+        "//internal/mailrelay/relay:bazel_repo_srcs",
         "//internal/materialize:bazel_repo_srcs",
         "//internal/migrate:bazel_repo_srcs",
         "//internal/modelwindow:bazel_repo_srcs",

@@ -152,6 +152,52 @@ func TestFindNamedSessionConflict_SelectsLiveNonCanonicalConflict(t *testing.T) 
 	}
 }
 
+func TestHasClosedOrArchivedNamedSession(t *testing.T) {
+	store := &listCountingStore{MemStore: beads.NewMemStore()}
+	for _, tc := range []struct {
+		identity, state  string
+		close, ephemeral bool
+	}{
+		{"closed", "asleep", true, false},
+		{"retired", "archived", false, false},
+		{"legacy", "closed", false, true},
+		{"live", "asleep", false, false},
+	} {
+		b, err := store.Create(beads.Bead{Type: BeadType, Ephemeral: tc.ephemeral, Metadata: map[string]string{
+			NamedSessionIdentityMetadata: tc.identity, "state": tc.state, "continuity_eligible": "false",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.close {
+			if err := store.Close(b.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, err := store.Create(beads.Bead{
+		Type: "gc:session", Labels: []string{LabelSession}, Ephemeral: true,
+		Metadata: map[string]string{NamedSessionIdentityMetadata: "label-only", "state": "archived"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for identity, want := range map[string]bool{"closed": true, "retired": true, "legacy": true, "label-only": true, "live": false, "missing": false} {
+		if got, err := HasClosedOrArchivedNamedSession(store, identity); err != nil || got != want {
+			t.Errorf("lookup(%q) = %t, %v; want %t", identity, got, err, want)
+		}
+	}
+	for _, q := range store.queries {
+		if q.TierMode != beads.TierIssues && q.Type == "" && q.Label == "" {
+			t.Fatalf("wisp lookup lacks a session type or label filter: %+v", q)
+		}
+	}
+	cause := errors.New("list failed")
+	if found, err := HasClosedOrArchivedNamedSession(&erroringStore{listQueryErr: cause}, "live"); found || !errors.Is(err, cause) {
+		t.Errorf("failed lookup = %t, %v; want false and the list error", found, err)
+	}
+}
+
 func TestFindClosedNamedSessionBeadForSessionName_PrefersMatchingCanonicalCandidate(t *testing.T) {
 	store := beads.NewMemStore()
 	retired, err := store.Create(beads.Bead{

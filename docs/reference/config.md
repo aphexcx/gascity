@@ -136,6 +136,8 @@ Agent defines a configured agent in the city.
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialization vs which are the city-wide set.  Pointer tri-state:   nil   -&gt; inherit: inject when the agent has a vendor sink   *true -&gt; explicitly inject (equivalent to the default)   *false -&gt; disable; the template is responsible for rendering             any skill guidance itself |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
+| `mail_wake_from` | []string |  |  | MailWakeFrom lists agents whose local mail requests a reminder. The reserved entry human includes local commands sent as human. Defaults to empty. |
+| `mail_wake_start` | boolean |  |  | MailWakeStart allows listed mail to start an eligible named session when a managed controller is available. Defaults to false. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode controls whether tmux mouse mode is preserved for this agent. "on" leaves the session's mouse setting alone for human-attached sessions; "off" or empty preserves the SDK's default mouse-off startup behavior for headless sessions. Enum: `on`, `off` |
@@ -209,6 +211,8 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `mcp_append` | []string |  |  | MCPAppend is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
+| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. An empty list clears the inherited setting. |
+| `mail_wake_start` | boolean |  |  | MailWakeStart overrides whether listed mail may start a named session. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |
@@ -267,6 +271,8 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `append_fragments` | []string |  |  | AppendFragments overrides the agent's append_fragments list. |
 | `attach` | boolean |  |  | Attach overrides the agent's attach setting. |
 | `depends_on` | []string |  |  | DependsOn overrides the agent's dependency list. |
+| `mail_wake_from` | []string |  |  | MailWakeFrom overrides the senders whose local mail requests a reminder. An empty list clears the inherited setting. |
+| `mail_wake_start` | boolean |  |  | MailWakeStart overrides whether listed mail may start a named session. |
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |

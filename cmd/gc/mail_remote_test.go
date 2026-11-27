@@ -749,6 +749,64 @@ func TestRemoteMailNotifyIdleRecipient(t *testing.T) {
 	}
 }
 
+func TestRemoteMailNotifyRespectsRecipientList(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	seedLocalCity(t)
+	cfg := mailWakeTestCity()
+	cfg.Workspace.Name = "beta"
+	cfg.Daemon.NudgeDispatcher = "supervisor"
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	state := &controllerState{
+		cityName: "beta", cityPath: t.TempDir(), cfg: cfg, sp: sp,
+		cityBeadStore: store, cityMailProv: mail.NewFake(), eventProv: events.NewFake(),
+	}
+	mux := api.NewSupervisorMux(&singleCityStateResolver{state}, nil, false, "test", "", time.Now())
+	client := inProcessMailClient(t, mux.WithAllowedHosts([]string{"beta.test"}).Handler())
+	result, err := client.SendMail(api.MailSendRequest{To: "reader", From: "alpha/worker", Subject: "update", Notify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Notified == nil || *result.Notified {
+		t.Fatalf("unlisted sender requested a turn: %+v", result)
+	}
+	if _, err := state.cityMailProv.Get(result.ID); err != nil {
+		t.Fatalf("stored message: %v", err)
+	}
+	records, err := store.List(beads.ListQuery{Type: session.BeadType, TierMode: beads.TierBoth})
+	if err != nil || len(records) != 0 {
+		t.Fatalf("unlisted sender materialized a recipient: %v, %v", records, err)
+	}
+
+	// The request runs inside the receiving controller. Only its provider
+	// knows that this recipient is already running.
+	t.Setenv("GC_SESSION", "fake")
+	mgr := newSessionManagerWithConfig(state.cityPath, store, sp, cfg)
+	reader, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "reader", Title: "Reader", Command: "claude", WorkDir: state.cityPath, Provider: "claude",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background(), reader.ID, "", runtime.Config{WorkDir: state.cityPath}); err != nil {
+		t.Fatal(err)
+	}
+	sp.WaitForIdleErrors[reader.SessionName] = nil
+	result, err = client.SendMail(api.MailSendRequest{To: reader.ID, From: "human", Subject: "follow-up", Notify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := sessionFrontDoor(store).MailWakeHistory(reader.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Notified == nil || !*result.Notified || len(history) != 1 || history[0].Sender != "human" {
+		t.Fatalf("listed sender: notified=%v, recipient wake history=%+v", result.Notified != nil && *result.Notified, history)
+	}
+}
+
 func TestRemoteMailNotifyMaterializesInReceivingCity(t *testing.T) {
 	clearGCEnv(t)
 	clearInheritedCityRoutingEnv(t)
