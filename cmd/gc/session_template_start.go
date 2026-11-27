@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -19,6 +20,7 @@ import (
 var errTemplateTargetNotFound = errors.New("template target not found")
 
 type ensureSessionForTemplateOptions struct {
+	provider            runtime.Provider // optional provider for named session materialization
 	forceFresh          bool
 	materializeMetadata map[string]string
 }
@@ -119,9 +121,12 @@ func materializeSessionForTemplateWithOptions(
 			return "", err
 		}
 		sessionTransport := config.ResolveSessionCreateTransport(spec.Agent.Session, resolved)
-		sp, err := newSessionProvider()
-		if err != nil {
-			return "", err
+		sp := opts.provider
+		if sp == nil {
+			sp, err = newSessionProvider()
+			if err != nil {
+				return "", err
+			}
 		}
 		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
 			return "", err

@@ -407,6 +407,109 @@ func TestMailSendOmittedBodyStaysEmpty(t *testing.T) {
 	}
 }
 
+type recordingMailNotifyState struct {
+	*fakeState
+	notify func(recipient, messageID string) error
+}
+
+func (s *recordingMailNotifyState) NotifyMail(recipient, messageID string) error {
+	return s.notify(recipient, messageID)
+}
+
+func TestMailSendNotify(t *testing.T) {
+	for _, tc := range []struct {
+		name, to, extra string
+		fail, wantCall  bool
+		status          int
+	}{
+		{"accepted", "worker", `, "notify":true`, false, true, 201},
+		{"notify fails", "worker", `, "notify":true`, true, true, 201},
+		{"old sender", "worker", "", false, false, 201},
+		{"human", "human", `, "notify":true`, false, false, 201},
+		{"unknown recipient", "absent", `, "notify":true`, false, false, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &recordingMailNotifyState{fakeState: newFakeState(t)}
+			var calls int
+			var notifiedID string
+			state.notify = func(recipient, id string) error {
+				calls++
+				notifiedID = id
+				msg, err := state.cityMailProv.Get(id)
+				if err != nil || msg.From != "alpha/worker" || recipient != "myrig/worker" || msg.To != recipient {
+					t.Fatalf("notify before delivery or wrong address: %q, %q, %+v, %v", msg.From, recipient, msg, err)
+				}
+				if tc.fail {
+					return fmt.Errorf("turn request failed")
+				}
+				return nil
+			}
+			h := newTestCityHandler(t, state)
+			var previous string
+			for attempt := 0; attempt < 2; attempt++ {
+				req := newPostRequest(cityURL(state, "/mail"), strings.NewReader(fmt.Sprintf(`{"from":"alpha/worker","to":%q,"subject":"update"%s}`, tc.to, tc.extra)))
+				req.Header.Set("Idempotency-Key", "send-once")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != tc.status {
+					t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+				}
+				if attempt > 0 && previous != rec.Body.String() {
+					t.Fatalf("replay changed response: %s", rec.Body.String())
+				}
+				previous = rec.Body.String()
+				if rec.Code != http.StatusCreated {
+					continue
+				}
+				var result struct {
+					mail.Message
+					Notified *bool `json:"notified"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if tc.extra == "" {
+					legacy, err := json.Marshal(result.Message)
+					if err != nil || string(legacy) != strings.TrimSpace(previous) {
+						t.Fatalf("old sender response: %s, want %s", previous, legacy)
+					}
+				} else if result.Notified == nil || *result.Notified != (tc.wantCall && !tc.fail) {
+					t.Fatalf("wrong notification result: %s", previous)
+				}
+				if tc.wantCall && (result.ID == "" || notifiedID != result.ID) {
+					t.Fatalf("notified %q, sent %q", notifiedID, result.ID)
+				}
+			}
+			if tc.wantCall && calls != 1 || !tc.wantCall && calls != 0 {
+				t.Errorf("notify calls = %d", calls)
+			}
+		})
+	}
+}
+
+// Unknown request fields are rejected before the send handler runs. This pins
+// the old peer response that permits one retry without notify.
+func TestMailSendRejectsUnknownPropertyBeforeDelivery(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), strings.NewReader(`{"to":"human","subject":"update","future_field":true}`)))
+	var problem genclient.ErrorModel
+	if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusUnprocessableEntity || problem.Errors == nil || len(*problem.Errors) != 1 {
+		t.Fatalf("unexpected validation response: %d %s", rec.Code, rec.Body.String())
+	}
+	detail := (*problem.Errors)[0]
+	if detail.Location == nil || *detail.Location != "body.future_field" || detail.Message == nil || *detail.Message != "unexpected property" {
+		t.Fatalf("detail: %+v", detail)
+	}
+	if inbox, err := state.cityMailProv.Inbox("human"); err != nil || len(inbox) != 0 {
+		t.Fatalf("mail after rejection: %+v, %v", inbox, err)
+	}
+}
+
 func TestMailSendLeavesRecipientWakeStateAlone(t *testing.T) {
 	state := newFakeState(t)
 	store := beads.NewMemStore()

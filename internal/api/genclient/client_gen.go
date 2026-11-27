@@ -2712,6 +2712,9 @@ type MailSendInputBody struct {
 	// From Sender name.
 	From *string `json:"from,omitempty"`
 
+	// Notify Request a recipient turn after delivery. Defaults to false.
+	Notify *bool `json:"notify,omitempty"`
+
 	// Rig Rig name.
 	Rig *string `json:"rig,omitempty"`
 
@@ -2720,6 +2723,25 @@ type MailSendInputBody struct {
 
 	// To Recipient name.
 	To string `json:"to"`
+}
+
+// MailSendResult defines model for MailSendResult.
+type MailSendResult struct {
+	Body      string    `json:"body"`
+	Cc        *[]string `json:"cc,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	From      string    `json:"from"`
+	Id        string    `json:"id"`
+
+	// Notified Whether the receiving city accepted the requested turn.
+	Notified *bool   `json:"notified,omitempty"`
+	Priority *int64  `json:"priority,omitempty"`
+	Read     bool    `json:"read"`
+	ReplyTo  *string `json:"reply_to,omitempty"`
+	Rig      *string `json:"rig,omitempty"`
+	Subject  string  `json:"subject"`
+	ThreadId *string `json:"thread_id,omitempty"`
+	To       string  `json:"to"`
 }
 
 // MaintenanceRunBody defines model for MaintenanceRunBody.
@@ -36506,7 +36528,7 @@ func (r GetV0CityByCityNameMailResponse) StatusCode() int {
 type SendMailResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
-	JSON201                   *Message
+	JSON201                   *MailSendResult
 	ApplicationproblemJSON400 *ErrorModel
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
@@ -45371,7 +45393,7 @@ func ParseSendMailResponse(rsp *http.Response) (*SendMailResponse, error) {
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest Message
+		var dest MailSendResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

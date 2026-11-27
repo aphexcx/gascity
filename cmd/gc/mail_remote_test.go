@@ -556,7 +556,6 @@ func TestCmdMailSendRemote_RefusesLocalOnlyModes(t *testing.T) {
 		want        string
 	}{
 		{"all", false, true, []string{"body"}, "--all"},
-		{"notify", true, false, []string{"mayor", "body"}, "--notify"},
 		{"no-recipient", false, false, nil, "missing recipient"},
 		{"no-body", false, false, []string{"mayor"}, "usage"},
 		{"blank-body", false, false, []string{"mayor", "\n\t "}, "usage"},
@@ -570,7 +569,7 @@ func TestCmdMailSendRemote_RefusesLocalOnlyModes(t *testing.T) {
 			}
 		})
 	}
-	// Reply refuses --notify the same way.
+	// Remote replies still refuse --notify.
 	var out, errb bytes.Buffer
 	if code := cmdMailReplyRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mc-1"}, "", "b", true, false, &out, &errb); code == 0 || !strings.Contains(errb.String(), "--notify") {
 		t.Errorf("reply --notify: exit=%d stderr=%q", code, errb.String())
@@ -660,6 +659,241 @@ func TestCmdMailSendRemote_FlagsAndJSON(t *testing.T) {
 	}
 	if strings.Contains(errb.String(), "target:") {
 		t.Errorf("json mode leaked the human target echo: %q", errb.String())
+	}
+}
+
+type mailHandlerTransport struct{ handler http.Handler }
+
+func (tr mailHandlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.handler.ServeHTTP(rec, req)
+	return rec.Result(), nil
+}
+
+func inProcessMailClient(t *testing.T, handler http.Handler) *api.Client {
+	t.Helper()
+	client, err := api.NewRemoteCityScopedClient("http://beta.test", "beta", api.RemoteOptions{RESTTransport: mailHandlerTransport{handler}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+// Exercise the real receiving controller with a separate ambient sender city.
+func TestRemoteMailNotifyIdleRecipient(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	seedLocalCity(t)
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "beta"}}
+	cfg.Daemon.NudgeDispatcher = "supervisor"
+	mgr := newSessionManagerWithConfig(dir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+	state := &controllerState{cityName: "beta", cityPath: dir, cfg: cfg, sp: sp, cityBeadStore: store, cityMailProv: mail.NewFake(), eventProv: events.NewFake()}
+	mux := api.NewSupervisorMux(&singleCityStateResolver{state}, nil, false, "test", "", time.Now())
+	client := inProcessMailClient(t, mux.WithAllowedHosts([]string{"beta.test"}).Handler())
+	var out, stderr bytes.Buffer
+	target := &remoteTarget{BaseURL: "http://beta.test", CityName: "beta", Source: remoteSourceURLFlag}
+	if code := cmdMailSendRemote(client, target, []string{info.ID, "update"}, true, false, "alpha/worker", "", "", "", true, &out, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s %s", code, &out, &stderr)
+	}
+	var result mailActionResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil || !result.Notified {
+		t.Fatalf("result %s: %v", &out, err)
+	}
+	msg, err := state.cityMailProv.Get(result.ID)
+	if err != nil || msg.From != "alpha/worker" {
+		t.Fatalf("stored mail %+v, %v", msg, err)
+	}
+	var deliveries int
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "NudgeNow" {
+			deliveries++
+			if !strings.Contains(call.Message, "[mail] You have new mail") || strings.Contains(call.Message, msg.From) {
+				t.Errorf("unexpected runtime reminder %q", call.Message)
+			}
+		}
+	}
+	if deliveries != 1 {
+		t.Errorf("live notifications = %d", deliveries)
+	}
+
+	// Hold the same live-delivery slot as a first send waiting for idle.
+	// A second send receives its own durable, read-before-delivery reference.
+	if _, occupied := state.liveMailNotifies.LoadOrStore(info.ID, struct{}{}); occupied {
+		t.Fatal("live delivery slot leaked")
+	}
+	defer state.liveMailNotifies.Delete(info.ID)
+	second, err := client.SendMail(api.MailSendRequest{To: info.ID, Subject: "another update", Notify: true})
+	if err != nil || second.Notified == nil || !*second.Notified {
+		t.Fatalf("overlapping send: %+v, %v", second, err)
+	}
+	pending, _, _, err := listQueuedNudges(dir, info.ID, time.Now())
+	if err != nil || len(pending) != 1 || pending[0].Reference == nil || pending[0].Reference.ID != second.ID {
+		t.Fatalf("queued reminder for %q: %+v, %v", second.ID, pending, err)
+	}
+	if got := sp.CountCalls("NudgeNow", info.SessionName); got != 1 {
+		t.Errorf("overlapping send made a second live delivery: %d", got)
+	}
+}
+
+func TestRemoteMailNotifyRespectsRecipientList(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	seedLocalCity(t)
+	cfg := mailWakeTestCity()
+	cfg.Workspace.Name = "beta"
+	cfg.Daemon.NudgeDispatcher = "supervisor"
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	state := &controllerState{
+		cityName: "beta", cityPath: t.TempDir(), cfg: cfg, sp: sp,
+		cityBeadStore: store, cityMailProv: mail.NewFake(), eventProv: events.NewFake(),
+	}
+	mux := api.NewSupervisorMux(&singleCityStateResolver{state}, nil, false, "test", "", time.Now())
+	client := inProcessMailClient(t, mux.WithAllowedHosts([]string{"beta.test"}).Handler())
+	result, err := client.SendMail(api.MailSendRequest{To: "reader", From: "alpha/worker", Subject: "update", Notify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Notified == nil || *result.Notified {
+		t.Fatalf("unlisted sender requested a turn: %+v", result)
+	}
+	if _, err := state.cityMailProv.Get(result.ID); err != nil {
+		t.Fatalf("stored message: %v", err)
+	}
+	records, err := store.List(beads.ListQuery{Type: session.BeadType, TierMode: beads.TierBoth})
+	if err != nil || len(records) != 0 {
+		t.Fatalf("unlisted sender materialized a recipient: %v, %v", records, err)
+	}
+
+	// The request runs inside the receiving controller. Only its provider
+	// knows that this recipient is already running.
+	t.Setenv("GC_SESSION", "fake")
+	mgr := newSessionManagerWithConfig(state.cityPath, store, sp, cfg)
+	reader, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "reader", Title: "Reader", Command: "claude", WorkDir: state.cityPath, Provider: "claude",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background(), reader.ID, "", runtime.Config{WorkDir: state.cityPath}); err != nil {
+		t.Fatal(err)
+	}
+	sp.WaitForIdleErrors[reader.SessionName] = nil
+	result, err = client.SendMail(api.MailSendRequest{To: reader.ID, From: "human", Subject: "follow-up", Notify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := sessionFrontDoor(store).MailWakeHistory(reader.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Notified == nil || !*result.Notified || len(history) != 1 || history[0].Sender != "human" {
+		t.Fatalf("listed sender: notified=%v, recipient wake history=%+v", result.Notified != nil && *result.Notified, history)
+	}
+}
+
+func TestRemoteMailNotifyMaterializesInReceivingCity(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	seedLocalCity(t)
+	t.Setenv("GC_SESSION", "absent-provider")
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "beta"},
+		Agents:        []config.Agent{{Name: "worker", Provider: "codex", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker"}},
+	}
+	target, err := resolveNudgeTargetInCity(dir, cfg, store, "worker", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.cityPath != dir || target.sessionID == "" || !sp.IsRunning(target.sessionName) {
+		t.Fatalf("named recipient was not started on its city's provider: %q, %q", target.cityPath, target.sessionName)
+	}
+}
+
+func TestCmdMailSendRemoteNotify(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		status                 int
+		response               string
+		wantAttempts, wantExit int
+		wantNotified           bool
+	}{
+		{"accepted", 201, `{"id":"letter","notified":true}`, 1, 0, true},
+		{"declined", 201, `{"id":"letter","notified":false}`, 1, 0, false},
+		{"ignores field", 201, `{"id":"letter"}`, 1, 0, false},
+		{"old peer", 422, `{"errors":[{"location":"body.notify","message":"unexpected property"}]}`, 2, 0, false},
+		{"other validation error", 422, `{"errors":[{"location":"body.to","message":"unexpected property"}]}`, 1, 1, false},
+		{"unknown recipient", 400, `{"detail":"unknown recipient"}`, 1, 1, false},
+		{"server error", 500, `{"detail":"send failed"}`, 1, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := 0
+			client := inProcessMailClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				var req struct {
+					Notify            *bool
+					To, From, Subject string
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+				}
+				if req.To != "worker" || req.From != "alpha/worker" || req.Subject != "update" {
+					t.Errorf("wrong mail: %+v", req)
+				}
+				if attempts == 1 && (req.Notify == nil || !*req.Notify) || attempts > 1 && req.Notify != nil {
+					t.Errorf("wrong notify field on attempt %d: %+v", attempts, req.Notify)
+				}
+				status, body := tc.status, tc.response
+				if attempts == 2 {
+					status, body = http.StatusCreated, `{"id":"letter"}`
+				}
+				contentType := "application/json"
+				if status >= 400 {
+					contentType = "application/problem+json"
+				}
+				w.Header().Set("Content-Type", contentType)
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, body)
+			}))
+			var out, stderr bytes.Buffer
+			code := cmdMailSendRemote(client, &remoteTarget{BaseURL: "http://beta.test", CityName: "beta"}, []string{"worker", "update"}, true, false, "alpha/worker", "", "", "", true, &out, &stderr)
+			if code != tc.wantExit || attempts != tc.wantAttempts {
+				t.Fatalf("exit %d, attempts %d, stdout %s, stderr %s", code, attempts, &out, &stderr)
+			}
+			if code != 0 {
+				return
+			}
+			var result struct {
+				ID       string
+				Notified *bool
+			}
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.ID != "letter" || result.Notified == nil || *result.Notified != tc.wantNotified {
+				t.Fatalf("result: %s (%v)", &out, err)
+			}
+			if tc.wantAttempts == 2 && !strings.Contains(stderr.String(), "too old") {
+				t.Errorf("expected compatibility notice: %s", &stderr)
+			}
+		})
 	}
 }
 

@@ -1313,34 +1313,56 @@ type MailSendRequest struct {
 	To      string // recipient (server-side resolution)
 	Subject string // required by the API (minLength 1)
 	Body    string
+	Notify  bool // ask the receiving city for a turn after the mail is stored
 }
+
+// ErrMailNotifyUnsupported means the peer rejected the optional notify field before delivery.
+var ErrMailNotifyUnsupported = errors.New("peer does not support mail notify")
 
 // SendMail creates a message via POST /v0/city/{cityName}/mail. It is a
 // mutation: on a remote client it carries the city-write grant the transport
 // mints per request; on a local client the CSRF header alone applies.
-func (c *Client) SendMail(req MailSendRequest) (mail.Message, error) {
+func (c *Client) SendMail(req MailSendRequest) (MailSendResult, error) {
 	if err := c.requireCityScope(); err != nil {
-		return mail.Message{}, err
+		return MailSendResult{}, err
 	}
 	body := genclient.SendMailJSONRequestBody{To: req.To, Subject: req.Subject}
 	setStrPtr(&body.Rig, req.Rig)
 	setStrPtr(&body.From, req.From)
 	setStrPtr(&body.Body, req.Body)
+	ctx := context.Background()
+	if req.Notify {
+		ctx = context.WithValue(ctx, mailNotifyRequestKey{}, true)
+		body.Notify = &req.Notify
+	}
 	params := &genclient.SendMailParams{XGCRequest: "true"}
-	resp, err := c.cw.SendMailWithResponse(context.Background(), c.cityName, params, body)
+	resp, err := c.cw.SendMailWithResponse(ctx, c.cityName, params, body)
 	if err != nil {
-		return mail.Message{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		return MailSendResult{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
 	if resp == nil {
-		return mail.Message{}, &connError{err: fmt.Errorf("nil response")}
+		return MailSendResult{}, &connError{err: fmt.Errorf("nil response")}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return mail.Message{}, err
+	problem := pdOf(resp)
+	if req.Notify && resp.StatusCode() == http.StatusUnprocessableEntity && problem != nil && problem.Errors != nil && len(*problem.Errors) == 1 {
+		detail := (*problem.Errors)[0]
+		if detail.Location != nil && *detail.Location == "body.notify" && detail.Message != nil && *detail.Message == "unexpected property" {
+			return MailSendResult{}, ErrMailNotifyUnsupported
+		}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), problem); err != nil {
+		return MailSendResult{}, err
 	}
 	if resp.JSON201 == nil {
-		return mail.Message{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+		return MailSendResult{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	return mailMessageFromGen(*resp.JSON201), nil
+	sent := resp.JSON201
+	message := mailMessageFromGen(genclient.Message{
+		Id: sent.Id, From: sent.From, To: sent.To, Subject: sent.Subject, Body: sent.Body,
+		CreatedAt: sent.CreatedAt, Read: sent.Read, ThreadId: sent.ThreadId, ReplyTo: sent.ReplyTo,
+		Priority: sent.Priority, Cc: sent.Cc, Rig: sent.Rig,
+	})
+	return MailSendResult{Message: message, Notified: sent.Notified}, nil
 }
 
 // MailReplyRequest carries the parameters of a mail reply for Client.ReplyMail.

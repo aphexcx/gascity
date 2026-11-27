@@ -308,13 +308,20 @@ gc --context b mail send mayor -s "hello from A" -m "…"
 gc --context a mail send mayor -s "Re: hello from A" -m "…"
 ```
 
-The sender defaults to `<local city>/<identity>` (`--from` overrides it); `--all`
-and `--notify` are refused for a remote city. On B, a bare `gc mail reply <id>`
+The sender defaults to `<local city>/<identity>`. Use `--from` to override it.
+Broadcasts with `--all` are local only. On B, a bare `gc mail reply <id>`
 answers A through B's context whose `city` is `a`. With no such context, or
 with two, it exits 1 and names the `gc --context <city> mail send` form. The
 From alone picks the city, so the answer goes to the city the From names,
 which may not be the city the mail came from.
-`gc --context <peer> mail send` makes exactly one request:
+
+To request a recipient turn, run `gc mail send --context b worker "Update" --notify --json`.
+The receiving city stores the mail, then handles the request as it would for a local
+send. The response reports `notified: true` when the peer accepts the request.
+A declined request leaves the mail in the inbox. If an older peer rejects the
+`notify` field, the sender retries once without it and reports `notified: false`.
+
+A send without `--notify` makes exactly one request:
 `POST /v0/city/{peer}/mail`. It performs no city lookup, version request, session
 resolution, or follow-up read, so the existing `grant_command` works with both
 keys enabled. The context currently supplies write grants only. A plain remote

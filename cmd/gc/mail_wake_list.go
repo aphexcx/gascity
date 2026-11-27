@@ -121,7 +121,7 @@ func newLocalMailWake(cityPath string, cfg *config.City, store, sessions beads.S
 		if identity.key == "" || message.To == "human" {
 			return false
 		}
-		asked, reason := p.request(message, sender, identity, now().UTC())
+		asked, reason := p.request(message, sender, identity, now().UTC(), nil)
 		if reason != "" {
 			fmt.Fprintf(stderr, "%s: %s: %s\n", command, message.To, reason) //nolint:errcheck // best-effort stderr
 		}
@@ -176,7 +176,7 @@ func (p localMailWakePolicy) sender(address, resolved, stamped string) mailWakeS
 	return mailWakeSender{a.QualifiedName(), id}
 }
 
-func (p localMailWakePolicy) request(message mail.Message, address string, sender mailWakeSender, now time.Time) (bool, string) {
+func (p localMailWakePolicy) request(message mail.Message, address string, sender mailWakeSender, now time.Time, sp runtime.Provider) (bool, string) {
 	city := loadedCityName(p.cfg, p.cityPath)
 	id := message.ToSessionID
 	var err error
@@ -235,7 +235,6 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	if isAgentEffectivelySuspendedWith(p.cfg, p.cityPath, &a, loadSuspensionStateBestEffort(p.cityPath)) {
 		return false, "suspended"
 	}
-	var sp runtime.Provider
 	var target nudgeTarget
 	if facts.recipientID != "" {
 		wait, waitErr := p.front.HasOpenMailWakeWait(id)
@@ -246,10 +245,12 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 			return false, block
 		}
 		target = resolveNudgeTargetFromSessionInfo(p.cityPath, p.cfg, info)
-		ctx := sessionProviderContextForCity(p.cfg, p.cityPath, os.Getenv("GC_SESSION"))
-		sp, err = newSessionProviderFromContext(ctx, newSessionBeadSnapshotFromInfos([]session.Info{info}))
-		if err != nil {
-			return false, "provider"
+		if sp == nil {
+			ctx := sessionProviderContextForCity(p.cfg, p.cityPath, os.Getenv("GC_SESSION"))
+			sp, err = newSessionProviderFromContext(ctx, newSessionBeadSnapshotFromInfos([]session.Info{info}))
+			if err != nil {
+				return false, "provider"
+			}
 		}
 		obs, observeErr := workerObserveNudgeTarget(target, p.sessions, sp)
 		if observeErr != nil {

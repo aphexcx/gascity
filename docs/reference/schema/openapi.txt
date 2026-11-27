@@ -5075,6 +5075,10 @@
             "description": "Sender name.",
             "type": "string"
           },
+          "notify": {
+            "description": "Request a recipient turn after delivery. Defaults to false.",
+            "type": "boolean"
+          },
           "rig": {
             "description": "Rig name.",
             "type": "string"
@@ -5093,6 +5097,69 @@
         "required": [
           "to",
           "subject"
+        ],
+        "type": "object"
+      },
+      "MailSendResult": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "cc": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "notified": {
+            "description": "Whether the receiving city accepted the requested turn.",
+            "type": "boolean"
+          },
+          "priority": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "read": {
+            "type": "boolean"
+          },
+          "reply_to": {
+            "type": "string"
+          },
+          "rig": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "to",
+          "subject",
+          "body",
+          "created_at",
+          "read"
         ],
         "type": "object"
       },
@@ -37957,7 +38024,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Message"
+                  "$ref": "#/components/schemas/MailSendResult"
                 }
               }
             },
