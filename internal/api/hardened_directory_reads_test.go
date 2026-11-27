@@ -144,15 +144,17 @@ func (p *probeWriter) Write(b []byte) (int, error) {
 	return p.body.Write(b)
 }
 
-func (p *probeWriter) Flush() {}
+// Flush commits the implicit 200 of a stream that flushes its headers before
+// its first event, so an admitted stream answers at once.
+func (p *probeWriter) Flush() { p.WriteHeader(http.StatusOK) }
 
 const readProbeBound = 3 * time.Second
 
 // probeRead serves one read and returns the status and body the listener gave.
-// The request is canceled once a status is out, and the probe stops waiting
-// after readProbeBound, so an admitted stream can never hold the test open.
-// Status 0 means no status within the bound: the gate answers at once, so an
-// unanswered read was admitted to a handler.
+// The request is canceled once a status is out (a stream's included), and the
+// probe stops waiting after readProbeBound, a safety bound only, so a stuck
+// handler can never hold the test open. Status 0 means no status within the
+// bound, which every caller treats as a failure.
 func probeRead(h http.Handler, r *http.Request) (int, string) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -200,7 +202,7 @@ func isReadGateMissingGrant(status int, body string) bool {
 	return status == problemReadAuthMissingGrant.status && body == string(problemReadAuthMissingGrant.body)
 }
 
-// A1: a read grant signed by a directory key is refused by the read gate on
+// A read grant signed by a directory key is refused by the read gate on
 // every per-city read route, with and without an inline read key on the
 // listener.
 func TestHardenedDirectoryKeyReadRefusedOnEveryRoute(t *testing.T) {
@@ -215,11 +217,11 @@ func TestHardenedDirectoryKeyReadRefusedOnEveryRoute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, sm := newDirectoryListener(t, keys, tc.inlineRead)
 			routes := perCityReadRoutes(t, sm)
-			t.Logf("a1 %s: %d read routes", tc.name, len(routes))
+			t.Logf("directory-key-read %s: %d read routes", tc.name, len(routes))
 			for i, route := range routes {
-				status, body := probeRead(h, signedRead(t, route, keys.dirPriv, directoryKid, fmt.Sprintf("a1-%s-%d", tc.name, i)))
+				status, body := probeRead(h, signedRead(t, route, keys.dirPriv, directoryKid, fmt.Sprintf("dir-%s-%d", tc.name, i)))
 				refused := isReadGateRejection(status, body)
-				t.Logf("a1 %s %s %s -> %d read-gate-403=%t", tc.name, route.method, route.pattern, status, refused)
+				t.Logf("directory-key-read %s %s %s -> %d read-gate-403=%t", tc.name, route.method, route.pattern, status, refused)
 				if !refused {
 					t.Errorf("%s %s (%s): directory key read answered %d %q, want the read gate's 403", route.method, route.pattern, tc.name, status, body)
 				}
@@ -228,20 +230,20 @@ func TestHardenedDirectoryKeyReadRefusedOnEveryRoute(t *testing.T) {
 	}
 }
 
-// A2: the listener's own inline read key reads every per-city read route: the
-// read gate admits the grant and the answer is the handler's own. No per-city
-// read handler answers 401 or 403 to an admitted read, so either status fails.
-// Status 0 is a stream the handler held open after admission.
+// The listener's own inline read key reads every per-city read route: the read
+// gate admits the grant and the answer is the handler's own. No per-city read
+// handler answers 401 or 403 to an admitted read, so either status fails, as
+// does no answer at all.
 func TestHardenedInlineReadKeyReadsEveryRoute(t *testing.T) {
 	keys := newDirectoryReadKeys(t)
 	h, sm := newDirectoryListener(t, keys, true)
 	routes := perCityReadRoutes(t, sm)
-	t.Logf("a2: %d read routes", len(routes))
+	t.Logf("inline-key-read: %d read routes", len(routes))
 	for i, route := range routes {
-		status, body := probeRead(h, signedRead(t, route, keys.readPriv, inlineReadKid, fmt.Sprintf("a2-%d", i)))
+		status, body := probeRead(h, signedRead(t, route, keys.readPriv, inlineReadKid, fmt.Sprintf("inline-%d", i)))
 		gate := isReadGateRejection(status, body) || isReadGateMissingGrant(status, body)
-		t.Logf("a2 %s %s -> %d read-gate=%t", route.method, route.pattern, status, gate)
-		if gate || status == http.StatusUnauthorized || status == http.StatusForbidden {
+		t.Logf("inline-key-read %s %s -> %d read-gate=%t", route.method, route.pattern, status, gate)
+		if gate || status == 0 || status == http.StatusUnauthorized || status == http.StatusForbidden {
 			t.Errorf("%s %s: inline read key refused: %d %q", route.method, route.pattern, status, body)
 		}
 	}
@@ -272,11 +274,18 @@ func serveDirectoryWrite(t *testing.T, h http.Handler, path string, body []byte,
 	return w.Code, w.Body.String()
 }
 
-// assertReadsClosed checks K3 on a hardened listener with a directory and no
-// inline read key: per-city reads are refused by the read gate (unsigned 401,
-// signed by any directory key 403), other reads by the scope guard, /health and
-// /v0/cities stay public, and the primary listener (no read gate) is unchanged.
-func assertReadsClosed(t *testing.T, stage string, h *HardenedAuth, sm *SupervisorMux, signers map[string]ed25519.PrivateKey) {
+// primaryReader is the primary listener's own read key, when it has one.
+type primaryReader struct {
+	kid  string
+	priv ed25519.PrivateKey
+}
+
+// assertReadsClosed checks a hardened listener with a directory and no inline
+// read key: per-city reads are refused by the read gate (unsigned 401, signed by
+// any directory key or by the primary's read key 403), other reads by the scope
+// guard, /health and /v0/cities stay public, and the primary listener answers
+// as it did: open with no read gate (primary nil), gated by its own key otherwise.
+func assertReadsClosed(t *testing.T, stage string, h *HardenedAuth, sm *SupervisorMux, signers map[string]ed25519.PrivateKey, primary *primaryReader) {
 	t.Helper()
 	const path = "/v0/city/" + directoryProbeCity + "/beads"
 	if status, body := serveHardenedRead(t, h, path, nil, "", ""); !isReadGateMissingGrant(status, body) {
@@ -295,23 +304,38 @@ func assertReadsClosed(t *testing.T, stage string, h *HardenedAuth, sm *Supervis
 			t.Errorf("%s: public %s = %d %q", stage, public, status, body)
 		}
 	}
-	if status, body := serveHardenedRead(t, sm.Handler(), path, nil, "", ""); status != http.StatusOK {
-		t.Errorf("%s: primary per-city read = %d %q, want 200 (no primary read gate)", stage, status, body)
+	if primary == nil {
+		if status, body := serveHardenedRead(t, sm.Handler(), path, nil, "", ""); status != http.StatusOK {
+			t.Errorf("%s: primary per-city read = %d %q, want 200 (no primary read gate)", stage, status, body)
+		}
+		return
+	}
+	if status, body := serveHardenedRead(t, h, path, primary.priv, primary.kid, stage+"-primary-on-hardened"); !isReadGateRejection(status, body) {
+		t.Errorf("%s: read signed by the primary's read key on the hardened listener = %d %q, want the read gate's 403", stage, status, body)
+	}
+	if status, body := serveHardenedRead(t, sm.Handler(), path, nil, "", ""); !isReadGateMissingGrant(status, body) {
+		t.Errorf("%s: unsigned primary per-city read = %d %q, want the primary read gate's 401", stage, status, body)
+	}
+	if status, body := serveHardenedRead(t, sm.Handler(), path, primary.priv, primary.kid, stage+"-primary"); status != http.StatusOK {
+		t.Errorf("%s: primary read signed by its own key = %d %q, want 200", stage, status, body)
 	}
 }
 
-// A3 (K3): a listener with a directory and no inline read key refuses every
-// per-city read and never takes the primary's open read posture: at boot, after
-// a reload that added a key, after a reload that left the directory empty, and
-// after a failed reload. A start with an empty directory and an inline write
-// key comes up the same way.
+// A listener with a directory and no inline read key refuses every per-city
+// read and never takes the primary's read posture, open or keyed: at boot,
+// after a reload that added a key, after a reload that left the directory
+// empty, and after a failed reload. A start with an empty directory and an
+// inline write key comes up the same way.
 func TestHardenedDirectoryWithoutReadKeyClosesReads(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		bootDirectory bool
+		keyedPrimary  bool
 	}{
-		{"directory-key-at-boot", true},
-		{"empty-directory-inline-write-key", false},
+		{"directory-key-at-boot", true, false},
+		{"empty-directory-inline-write-key", false, false},
+		{"directory-key-at-boot-keyed-primary", true, true},
+		{"empty-directory-keyed-primary", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			keys := newDirectoryReadKeys(t)
@@ -326,14 +350,23 @@ func TestHardenedDirectoryWithoutReadKeyClosesReads(t *testing.T) {
 				cfg.Hardened.WriteAuthVerifyKey = "inline-write:" + base64.StdEncoding.EncodeToString(inlinePub)
 			}
 			sm := newTestSupervisorMux(t, map[string]*fakeState{directoryProbeCity: newFakeState(t)}).WithAnyHostAllowed()
-			if sm.readAuth != nil {
-				t.Fatal("the primary must have no read gate for this test")
+			var primary *primaryReader
+			if tc.keyedPrimary {
+				pub, priv := mustKeypair(t)
+				primary = &primaryReader{kid: "primary-read", priv: priv}
+				cfg.ReadAuthVerifyKey = primary.kid + ":" + base64.StdEncoding.EncodeToString(pub)
+				if err := InstallReadAuth(sm, cfg.ReadAuthVerifyKey, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if (sm.readAuth != nil) != tc.keyedPrimary {
+				t.Fatalf("primary read gate installed = %t, want %t", sm.readAuth != nil, tc.keyedPrimary)
 			}
 			h, err := NewHardenedAuth(sm, cfg, t.Logf)
 			if err != nil {
 				t.Fatalf("a directory with no inline read key must start: %v", err)
 			}
-			assertReadsClosed(t, "boot", h, sm, signers)
+			assertReadsClosed(t, "boot", h, sm, signers, primary)
 
 			gammaPub, gammaPriv := mustKeypair(t)
 			writeTrustedKey(t, dir, "gamma", gammaPub)
@@ -341,7 +374,7 @@ func TestHardenedDirectoryWithoutReadKeyClosesReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			signers["gamma"] = gammaPriv
-			assertReadsClosed(t, "reload-added", h, sm, signers)
+			assertReadsClosed(t, "reload-added", h, sm, signers, primary)
 			if status, body := serveDirectoryWrite(t, h, "/v0/city/"+directoryProbeCity+"/mail", []byte(`{"from":"gamma/mayor","to":"worker","subject":"added"}`), gammaPriv, "gamma", "gamma-write"); status != http.StatusCreated {
 				t.Fatalf("added key's write = %d %q, want 201", status, body)
 			}
@@ -354,7 +387,7 @@ func TestHardenedDirectoryWithoutReadKeyClosesReads(t *testing.T) {
 			if err := h.Reload(); err != nil {
 				t.Fatal(err)
 			}
-			assertReadsClosed(t, "reload-emptied", h, sm, signers)
+			assertReadsClosed(t, "reload-emptied", h, sm, signers, primary)
 
 			if err := os.WriteFile(filepath.Join(dir, "bad.pub"), []byte("malformed"), 0o600); err != nil {
 				t.Fatal(err)
@@ -366,19 +399,19 @@ func TestHardenedDirectoryWithoutReadKeyClosesReads(t *testing.T) {
 			if h.current.Load() != before {
 				t.Fatal("failed reload replaced the active snapshot")
 			}
-			assertReadsClosed(t, "reload-failed", h, sm, signers)
+			assertReadsClosed(t, "reload-failed", h, sm, signers, primary)
 		})
 	}
 }
 
-// A4 (K1, K4): a registered city's key still sends mail through the hardened
+// A registered city's key still sends mail through the hardened
 // listener; the mail is read with the listener's own read key; the sender's
 // key cannot read the mailbox it wrote to.
 func TestHardenedDirectoryKeySendsMailButCannotReadIt(t *testing.T) {
 	keys := newDirectoryReadKeys(t)
 	h, _ := newDirectoryListener(t, keys, true)
 	const mailPath = "/v0/city/" + directoryProbeCity + "/mail"
-	status, body := serveDirectoryWrite(t, h, mailPath, []byte(`{"from":"beta/mayor","to":"worker","subject":"from beta","body":"hello"}`), keys.dirPriv, directoryKid, "a4-send")
+	status, body := serveDirectoryWrite(t, h, mailPath, []byte(`{"from":"beta/mayor","to":"worker","subject":"from beta","body":"hello"}`), keys.dirPriv, directoryKid, "send")
 	if status != http.StatusCreated {
 		t.Fatalf("directory key mail POST = %d %q, want 201", status, body)
 	}
@@ -392,16 +425,16 @@ func TestHardenedDirectoryKeySendsMailButCannotReadIt(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w.Code, w.Body.String()
 	}
-	status, body = readInbox(keys.readPriv, inlineReadKid, "a4-inline-read")
+	status, body = readInbox(keys.readPriv, inlineReadKid, "inline-inbox-read")
 	if status != http.StatusOK || !strings.Contains(body, `"subject":"from beta"`) || !strings.Contains(body, `"from":"beta/mayor"`) {
 		t.Fatalf("inline read key inbox read = %d %q, want 200 with the sent mail", status, body)
 	}
-	if status, body = readInbox(keys.dirPriv, directoryKid, "a4-directory-read"); !isReadGateRejection(status, body) {
+	if status, body = readInbox(keys.dirPriv, directoryKid, "directory-inbox-read"); !isReadGateRejection(status, body) {
 		t.Fatalf("directory key inbox read = %d %q, want the read gate's 403", status, body)
 	}
 }
 
-// A8 (K7): read_auth_required with an inline read key starts as before; with a
+// read_auth_required with an inline read key starts as before; with a
 // directory and no inline read key it starts with reads closed; with neither it
 // refuses the start.
 func TestHardenedReadAuthRequiredWithDirectory(t *testing.T) {
@@ -421,7 +454,7 @@ func TestHardenedReadAuthRequiredWithDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status, body := serveHardenedRead(t, h, path, keys.readPriv, inlineReadKid, "a8-inline"); status != http.StatusOK {
+		if status, body := serveHardenedRead(t, h, path, keys.readPriv, inlineReadKid, "required-inline"); status != http.StatusOK {
 			t.Fatalf("inline read key read = %d %q", status, body)
 		}
 		if status, body := serveHardenedRead(t, h, path, nil, "", ""); !isReadGateMissingGrant(status, body) {
@@ -438,7 +471,7 @@ func TestHardenedReadAuthRequiredWithDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("required with a directory must start: %v", err)
 		}
-		assertReadsClosed(t, "required", h, sm, map[string]ed25519.PrivateKey{directoryKid: keys.dirPriv})
+		assertReadsClosed(t, "required", h, sm, map[string]ed25519.PrivateKey{directoryKid: keys.dirPriv}, nil)
 	})
 	t.Run("neither", func(t *testing.T) {
 		_, err := NewHardenedAuth(newMux(), supervisor.Section{Hardened: supervisor.HardenedListener{
