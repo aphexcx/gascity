@@ -18,6 +18,9 @@ var ErrAlreadyArchived = errors.New("already archived")
 // ErrNotFound is returned when a message ID does not exist.
 var ErrNotFound = errors.New("message not found")
 
+// ErrFilingMismatch indicates reuse of a filing key with a different request.
+var ErrFilingMismatch = errors.New("mail filing key reused with different request body")
+
 const (
 	// AutoHandoffLabel marks mail created by gc handoff --auto for provider
 	// context-cycle delivery.
@@ -139,6 +142,14 @@ type DedupSender interface {
 	// otherwise the newly created message, stamped with key under
 	// [DedupKeyMetadataKey].
 	SendDeduped(from, to, subject, body, key string) (msg Message, suppressed bool, err error)
+}
+
+// FilingProvider persists a city API filing's key and request hash on the
+// message itself. Lookup includes archived messages. The caller serializes
+// lookup and creation across API processes serving the city.
+type FilingProvider interface {
+	LookupFiling(key, bodyHash string) (Message, bool, error)
+	SendFiling(from, to, subject, body, key, bodyHash string) (Message, error)
 }
 
 // Provider is the internal interface for mail backends and the canonical

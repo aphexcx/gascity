@@ -27,15 +27,18 @@ type agentBuildParams struct {
 	// value maps confirmed ticket IDs to their successfully read store refs.
 	cityPoolRigDemand map[string]map[string]string
 
-	city            *config.City
-	cityName        string
-	cityPath        string
-	workspace       *config.Workspace
-	agents          []config.Agent
-	providers       map[string]config.ProviderSpec
-	lookPath        config.LookPathFunc
-	fs              fsys.FS
-	readOnly        bool // resolve existing templates without materializing hooks/settings
+	city      *config.City
+	cityName  string
+	cityPath  string
+	workspace *config.Workspace
+	agents    []config.Agent
+	providers map[string]config.ProviderSpec
+	lookPath  config.LookPathFunc
+	fs        fsys.FS
+	readOnly  bool // resolve existing templates without materializing hooks/settings
+	// passthrough overrides only process inheritance for direct CLI starts.
+	// Nil preserves the reconciler's ambient environment sweep.
+	passthrough     map[string]string
 	sp              runtime.Provider
 	rigs            []config.Rig
 	sessionTemplate string

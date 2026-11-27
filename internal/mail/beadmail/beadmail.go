@@ -34,6 +34,11 @@ const (
 	// single confined spelling of the message-bead class marker.
 	messageBeadType = "message"
 
+	// A separate metadata field keeps CLI notification streams independent
+	// even for older clients that query only mail.dedup_key.
+	filingKey      = "mail.filing_key"
+	filingBodyHash = "mail.filing_body_hash"
+
 	cachedSessionBeadRefreshInterval = 30 * time.Second
 )
 
@@ -216,13 +221,7 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	if to == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
 	}
-	existing, err := p.store.List(beads.ListQuery{
-		Type:     messageBeadType,
-		Status:   "open",
-		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
-		TierMode: beads.TierBoth,
-		Live:     true,
-	})
+	existing, err := p.messagesWithKey(mail.DedupKeyMetadataKey, key, false)
 	if err != nil {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
 	}
@@ -237,6 +236,48 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 		return mail.Message{}, false, err
 	}
 	return msg, false, nil
+}
+
+// CLI dedup matches open notifications for a mailbox. City API filing keys
+// also match archived messages and survive until the message is purged.
+func (p *Provider) messagesWithKey(field, key string, includeClosed bool) ([]beads.Bead, error) {
+	q := beads.ListQuery{
+		Type:          messageBeadType,
+		Metadata:      map[string]string{field: key},
+		TierMode:      beads.TierBoth,
+		Live:          true,
+		IncludeClosed: includeClosed,
+	}
+	if !includeClosed {
+		q.Status = "open"
+	}
+	return p.store.List(q)
+}
+
+// LookupFiling returns the original filing, including after archive.
+func (p *Provider) LookupFiling(key, bodyHash string) (mail.Message, bool, error) {
+	entries, err := p.messagesWithKey(filingKey, key, true)
+	if err != nil {
+		return mail.Message{}, false, fmt.Errorf("looking up mail filing: %w", err)
+	}
+	if len(entries) == 0 {
+		return mail.Message{}, false, nil
+	}
+	if entries[0].Metadata[filingBodyHash] != bodyHash {
+		return mail.Message{}, false, mail.ErrFilingMismatch
+	}
+	return beadToMessage(entries[0]), true, nil
+}
+
+// SendFiling creates the message and its replay metadata in one store write.
+func (p *Provider) SendFiling(from, to, subject, body, key, bodyHash string) (mail.Message, error) {
+	if to == "" || key == "" || bodyHash == "" {
+		return mail.Message{}, fmt.Errorf("beadmail filing: recipient, key and request hash are required")
+	}
+	return p.sendWithExtraMetadata(from, to, subject, body, map[string]string{
+		filingKey:      key,
+		filingBodyHash: bodyHash,
+	})
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
