@@ -79,12 +79,15 @@ type Section struct {
 // grant-gated listener. Enabled when Port > 0. A write key from WriteAuthVerifyKey
 // or TrustedKeysDir is REQUIRED — there is no unverified acknowledgement knob
 // because its whole purpose is to require grants; a hardened port without a key
-// is a boot error (fail closed). ReadAuthVerifyKey optionally gives this listener
-// its own read gate, as does TrustedKeysDir: city GET/HEAD requests require a
-// signed city read grant. Only /health and /v0/cities remain public; other reads
-// outside the per-city API are refused. Without either setting, the primary's
-// read posture is inherited and startup warns about the unauthenticated read
-// plane. The primary listener is never changed by these fields.
+// is a boot error (fail closed). ReadAuthVerifyKey gives this listener its own
+// read gate: city GET/HEAD requests require a read grant signed by one of its
+// keys. TrustedKeysDir trusts registered cities' keys for write grants only;
+// with a directory and no ReadAuthVerifyKey, every city GET/HEAD request is
+// refused. With either setting, only /health and /v0/cities remain public; other
+// reads outside the per-city API are refused. Without either setting, the
+// primary's read posture is inherited and startup warns about the
+// unauthenticated read plane. The primary listener is never changed by these
+// fields.
 type HardenedListener struct {
 	Bind               string `toml:"bind,omitempty"`
 	Port               int    `toml:"port,omitempty"`
@@ -99,11 +102,14 @@ type HardenedListener struct {
 	// ReadAuthRequired refuses startup before either listener binds when the
 	// hardened read key and trusted_keys_dir are empty. A configured key always gates reads.
 	ReadAuthRequired bool `toml:"read_auth_required,omitempty"`
-	// TrustedKeysDir supplies both hardened verifiers with one <kid>.pub file
-	// per trusted city. Each regular file contains one standard-base64 32-byte
-	// Ed25519 public key; a trailing newline and lines starting with # are allowed.
-	// World-writable directories/files and symlink files are refused. Inline keys
-	// are merged; a duplicate kid is an error. Empty disables directory loading.
+	// TrustedKeysDir supplies the hardened write verifier with one <kid>.pub
+	// file per registered city: a directory key verifies write grants only, never
+	// a read grant. Reads need ReadAuthVerifyKey; with a directory and no read key,
+	// every per-city read is refused. Each regular file contains one
+	// standard-base64 32-byte Ed25519 public key; a trailing newline and lines
+	// starting with # are allowed. World-writable directories/files and symlink
+	// files are refused. Inline write keys are merged; a kid that is also an
+	// inline or primary key's kid is an error. Empty disables directory loading.
 	// At boot malformed files are reported and valid files load; at least one
 	// write key is required. A failed reload retains the previous complete set.
 	// Add a file to register a city, remove it to revoke; run gc supervisor reload

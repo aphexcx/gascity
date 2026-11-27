@@ -357,6 +357,7 @@ go_test(
         "handler_waits_partial_test.go",
         "handler_webhook_test.go",
         "hangbudget_test.go",
+        "hardened_directory_reads_test.go",
         "hardened_keys_test.go",
         "huma_handlers_mail_telemetry_test.go",
         "huma_handlers_run_cancel_test.go",

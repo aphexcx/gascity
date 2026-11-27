@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -587,10 +589,11 @@ func TestCmdMailSendRemote_PostsAndRenders(t *testing.T) {
 	seedLocalCity(t)
 
 	var gotPath, gotReq, gotMethod string
-	var requests []string
+	var requests, grants []string
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		grants = append(grants, r.Header.Get("X-GC-City-Write"))
 		gotPath, gotReq, gotMethod = r.URL.Path, r.Header.Get("X-GC-Request"), r.Method
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &gotBody)
@@ -626,6 +629,33 @@ func TestCmdMailSendRemote_PostsAndRenders(t *testing.T) {
 	if !strings.Contains(errb.String(), "target:") || !strings.Contains(errb.String(), "mc @") {
 		t.Errorf("remote send did not echo the resolved target: %q", errb.String())
 	}
+
+	// A city's registered key is for sending: with a grant_command the same send
+	// makes exactly one request, the mail POST carrying the minted write grant,
+	// and no read (no GET, no HEAD) that a hardened peer would refuse.
+	t.Run("write-grant-source-makes-no-read", func(t *testing.T) {
+		token := base64.RawURLEncoding.EncodeToString([]byte(`{"aud":"gc-city-write"}`)) + "." +
+			base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, ed25519.SignatureSize))
+		var out, errb bytes.Buffer
+		if code := doContextAdd(clientcontext.Context{Name: "peer-signed", URL: srv.URL, City: "mc", GrantCommand: "printf '%s' '" + token + "'"}, &out, &errb); code != 0 {
+			t.Fatalf("seed signed peer context: %s", &errb)
+		}
+		requests, grants = nil, nil
+		out.Reset()
+		errb.Reset()
+		if code := run([]string{"--context", "peer-signed", "mail", "send", "mayor", "round trip"}, &out, &errb); code != 0 {
+			t.Fatalf("exit %d; stderr=%q", code, errb.String())
+		}
+		t.Logf("gc --context peer-signed mail send requests: %v (write grant attached: %v)", requests, len(grants) == 1 && grants[0] == token)
+		for _, req := range requests {
+			if strings.HasPrefix(req, http.MethodGet+" ") || strings.HasPrefix(req, http.MethodHead+" ") {
+				t.Errorf("remote mail send made a read: %s", req)
+			}
+		}
+		if len(requests) != 1 || requests[0] != "POST /v0/city/mc/mail" || len(grants) != 1 || grants[0] != token {
+			t.Fatalf("remote mail send requests = %v, want exactly one POST /v0/city/mc/mail carrying the write grant", requests)
+		}
+	})
 }
 
 // --to / -s / -m and --from are honored; --json emits the local mail.send shape
