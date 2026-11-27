@@ -2,15 +2,19 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -377,32 +381,14 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
-	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
-	if resolveErr != nil {
-		if errors.Is(resolveErr, errMailNoBeadStore) {
-			return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
-		}
-		return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
-	}
-
 	mp := s.findMailProvider(input.Body.Rig)
 	if mp == nil {
 		return nil, apierr.InvalidRequest.Msg("no mail provider available")
 	}
 
-	// Idempotency: send at most once per Idempotency-Key. On replay the closure
-	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
-	// fires. The helper guarantees the reservation is released on a send error.
 	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
 		func() (mail.Message, error) {
-			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
-			telemetry.RecordMailOp(ctx, "send", sendErr)
-			if sendErr != nil {
-				return mail.Message{}, apierr.Internal.Msg(sendErr.Error())
-			}
-			sent.Rig = input.Body.Rig
-			s.recordMailEvent(events.MailSent, sent.From, sent.ID, input.Body.Rig, &sent)
-			return sent, nil
+			return s.fileMail(ctx, mp, input)
 		})
 	if err != nil {
 		return nil, err
@@ -412,6 +398,60 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 		Index: s.latestIndex(),
 		Body:  msg,
 	}, nil
+}
+
+func (s *Server) fileMail(ctx context.Context, mp mail.Provider, input *MailSendInput) (mail.Message, error) {
+	send := func(create func(from, to, subject, body string) (mail.Message, error)) (mail.Message, error) {
+		to, err := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
+		if err != nil {
+			return mail.Message{}, apierr.InvalidRequest.Msg(err.Error())
+		}
+		msg, err := create(input.Body.From, to, input.Body.Subject, input.Body.Body)
+		telemetry.RecordMailOp(ctx, "send", err)
+		if err != nil {
+			return mail.Message{}, apierr.Internal.Msg(err.Error())
+		}
+		msg.Rig = input.Body.Rig
+		s.recordMailEvent(events.MailSent, msg.From, msg.ID, msg.Rig, &msg)
+		return msg, nil
+	}
+	key := input.IdempotencyKey
+	if key == "" {
+		return send(mp.Send)
+	}
+	filer, ok := mp.(mail.FilingProvider)
+	if !ok {
+		return mail.Message{}, apierr.NotImplemented.Msg("mail provider does not support durable keyed filings")
+	}
+	bodyHash := hashBody(input.Body)
+	// Separate API processes can miss their caches together. Directory locks
+	// serialize probe + create across them. Bucket by key so unrelated sends
+	// can proceed concurrently without leaving a directory for every filing.
+	digest := sha256.Sum256([]byte(key))
+	dir := filepath.Join(citylayout.RuntimeDataDir(s.state.CityPath()), "mail-filing", fmt.Sprintf("%02x", digest[0]))
+	var msg mail.Message
+	err := runtime.WithProviderStateDirLock(dir, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stored, found, err := filer.LookupFiling(key, bodyHash)
+		if errors.Is(err, mail.ErrFilingMismatch) {
+			return apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with different request body")
+		}
+		if err != nil {
+			return apierr.Internal.Msg(err.Error())
+		}
+		if found {
+			msg = stored
+			msg.Rig = input.Body.Rig
+			return nil
+		}
+		msg, err = send(func(from, to, subject, body string) (mail.Message, error) {
+			return filer.SendFiling(from, to, subject, body, key, bodyHash)
+		})
+		return err
+	})
+	return msg, err
 }
 
 // humaHandleMailCount is the Huma-typed handler for GET /v0/mail/count.

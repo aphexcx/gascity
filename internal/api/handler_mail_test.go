@@ -1317,6 +1317,157 @@ func TestMailThreadIncludesRig(t *testing.T) {
 	}
 }
 
+func postFiling(h http.Handler, url, key, payload string) *httptest.ResponseRecorder {
+	req := newPostRequest(url, strings.NewReader(payload))
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func filedMessage(t *testing.T, rec *httptest.ResponseRecorder) mail.Message {
+	t.Helper()
+	var msg mail.Message
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("filing status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&msg); err != nil || msg.ID == "" || msg.To == "" {
+		t.Fatalf("invalid filing receipt %+v: %v", msg, err)
+	}
+	return msg
+}
+
+// Shift the isolated server's deadlines back by elapsed so the real cache
+// lookup sees the same entries it would see that much later.
+func ageFilingCache(srv *Server, elapsed time.Duration) {
+	srv.idem.mu.Lock()
+	defer srv.idem.mu.Unlock()
+	for key, entry := range srv.idem.entries {
+		entry.expiresAt = entry.expiresAt.Add(-elapsed)
+		srv.idem.entries[key] = entry
+	}
+}
+
+func TestMailFilingRecovery(t *testing.T) {
+	const payload = `{"from":"sender","to":"worker","subject":"subject","body":"body"}`
+	for _, scenario := range []string{"immediate", "expired", "restart", "archived", "unkeyed"} {
+		t.Run(scenario, func(t *testing.T) {
+			state := newFakeState(t)
+			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
+			url := cityURL(state, "/mail")
+			key := "envelope-1"
+			if scenario == "unkeyed" {
+				key = ""
+			}
+			first := filedMessage(t, postFiling(h, url, key, payload))
+			switch scenario {
+			case "expired":
+				ageFilingCache(srv, 31*time.Minute)
+			case "archived":
+				if err := state.cityMailProv.Archive(first.ID); err != nil {
+					t.Fatal(err)
+				}
+				fallthrough
+			case "restart":
+				h = newTestCityHandler(t, state)
+			}
+			second := filedMessage(t, postFiling(h, url, key, payload))
+			inbox, err := state.cityMailProv.Inbox(first.To)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantInbox := 1
+			switch scenario {
+			case "archived":
+				wantInbox = 0
+				stored, err := state.stores["myrig"].Get(first.ID)
+				if err != nil || stored.Status != "closed" {
+					t.Fatalf("archived filing %s: status = %q, err = %v", first.ID, stored.Status, err)
+				}
+			case "unkeyed":
+				wantInbox = 2
+			}
+			if (first.ID == second.ID) != (key != "") || len(inbox) != wantInbox {
+				t.Fatalf("first id = %s, replay id = %s, inbox = %d (want %d)", first.ID, second.ID, len(inbox), wantInbox)
+			}
+		})
+	}
+}
+
+func TestMailFilingMismatch(t *testing.T) {
+	const payload = `{"from":"sender","to":"worker","subject":"subject","body":"text"}`
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	url := cityURL(state, "/mail")
+	first := filedMessage(t, postFiling(h, url, "key", payload))
+	for _, elapsed := range []time.Duration{0, 31 * time.Minute} {
+		ageFilingCache(srv, elapsed)
+		for _, field := range []string{"sender", "worker", "subject", "text"} {
+			changed := strings.Replace(payload, `:"`+field+`"`, `:"human"`, 1)
+			rec := postFiling(h, url, "key", changed)
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "idempotency_mismatch") {
+				t.Errorf("after %s, changed %s: status = %d, body = %s", elapsed, field, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	inbox, err := state.cityMailProv.Inbox(first.To)
+	if err != nil || len(inbox) != 1 || inbox[0].ID != first.ID {
+		t.Fatalf("original filing: inbox = %+v, err = %v", inbox, err)
+	}
+}
+
+func TestMailFilingRace(t *testing.T) {
+	const payload = `{"to":"worker","subject":"subject"}`
+	state := newFakeState(t)
+	handlers := []http.Handler{newTestCityHandler(t, state), newTestCityHandler(t, state)}
+	url := cityURL(state, "/mail")
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, 16)
+	for i := range cap(results) {
+		go func() {
+			<-start
+			results <- postFiling(handlers[i%len(handlers)], url, "shared-key", payload)
+		}()
+	}
+	close(start)
+	var first mail.Message
+	for range cap(results) {
+		rec := <-results
+		if rec.Code == http.StatusConflict {
+			continue // a reservation in this server's cache is pending
+		}
+		msg := filedMessage(t, rec)
+		if first.ID != "" && first.ID != msg.ID {
+			t.Errorf("different successful receipts %s and %s", first.ID, msg.ID)
+		}
+		first = msg
+	}
+	inbox, err := state.cityMailProv.Inbox(first.To)
+	if err != nil || first.ID == "" || len(inbox) != 1 || inbox[0].ID != first.ID {
+		t.Fatalf("receipt = %+v, inbox = %+v, err = %v", first, inbox, err)
+	}
+}
+
+func TestMailFilingUnsupportedProvider(t *testing.T) {
+	state := newFakeState(t)
+	state.cityMailProv = mail.NewFake()
+	h := newTestCityHandler(t, state)
+	url := cityURL(state, "/mail")
+	const body = `{"to":"human","subject":"subject"}`
+	if rec := postFiling(h, url, "key", body); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("keyed status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	filedMessage(t, postFiling(h, url, "", body))
+	inbox, err := state.cityMailProv.Inbox("human")
+	if err != nil || len(inbox) != 1 {
+		t.Fatalf("inbox = %+v, err = %v", inbox, err)
+	}
+}
+
 func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
