@@ -115,6 +115,24 @@ class BuildInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(check.InventoryError, "timed out after 1s"):
                 check.run([check.sys.executable, "-c", "import time; time.sleep(3)"], Path.cwd())
 
+    def test_timeout_reports_one_minute_load_and_setting(self):
+        for load, expected in (((12.34, 5.67, 8.90), "12.34"), (OSError("unavailable"), "unknown")):
+            with self.subTest(expected=expected):
+                process = mock.Mock(pid=123)
+                process.communicate.side_effect = [subprocess.TimeoutExpired("go", 1), ("partial output", None)]
+                with (
+                    mock.patch.dict(os.environ, GC_CHECK_INVENTORIES_TIMEOUT="1"),
+                    mock.patch.object(check.subprocess, "Popen", return_value=process),
+                    mock.patch.object(check.os, "killpg"),
+                    mock.patch.object(check.os, "getloadavg", side_effect=[load]),
+                    self.assertRaises(check.InventoryError) as raised,
+                ):
+                    check.run(["go", "list"], Path.cwd())
+                self.assertIn("go list interrupted or timed out after 1s", str(raised.exception))
+                self.assertIn(f"1-minute load: {expected}", str(raised.exception))
+                self.assertIn("GC_CHECK_INVENTORIES_TIMEOUT", str(raised.exception))
+                self.assertTrue(str(raised.exception).endswith("\npartial output"))
+
     def test_invalid_timeout(self):
         for value in ("abc", "0"):
             with self.subTest(value=value), mock.patch.dict(os.environ, GC_CHECK_INVENTORIES_TIMEOUT=value):
@@ -178,7 +196,7 @@ class HookInventoryTests(unittest.TestCase):
                 self.command(["git", "add", name])
                 result = self.hook("pre-commit")
                 self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
-                self.assertEqual((self.root / "make.calls").read_text().splitlines(), ["--no-print-directory check-inventories"])
+                self.assertEqual((self.root / "make.calls").read_text().splitlines(), ["--no-print-directory check-inventories GC_CHECK_INVENTORIES_TIMEOUT=300"])
                 (self.root / "make.calls").unlink()
                 self.command(["git", "rm", "--cached", name])
 
