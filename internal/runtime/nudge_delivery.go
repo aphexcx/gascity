@@ -57,7 +57,7 @@ const (
 // ([NudgeDelivery]) must never derive "nothing landed" from it; see
 // [NudgeDelivery.UnconfirmedSubmitError] for the one place the translation
 // is made.
-var ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+var ErrNudgeSubmitUnconfirmed = errors.New("nudge: payload delivered to tmux but submit not confirmed")
 
 // ErrNudgeDraftUnowned means a preserved draft lacks evidence tying it to the
 // pending payload. A queue must bound these deferrals and surface exhaustion.

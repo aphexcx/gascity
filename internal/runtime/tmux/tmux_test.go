@@ -3065,7 +3065,7 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines, tt.sent, DefaultReadyPromptPrefix)
 			if got != tt.want {
 				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}

@@ -28,6 +28,7 @@ func buildFeedbackSurveyAgent(t *testing.T, dir, name string) string {
 	prog := `package main
 import ("bufio";"fmt";"os")
 func main(){
+	fmt.Print("\x1b[?1049h")
 	fmt.Println("⏺ Done — pushed the branch and replied on the PR.")
 	fmt.Println()
 	fmt.Println("● How is Claude doing this session? (optional)")
@@ -40,6 +41,7 @@ func main(){
 
 	dismissed := false
 	pendingZero := false
+	var draft []byte
 	r := bufio.NewReader(os.Stdin)
 	for {
 		b, err := r.ReadByte()
@@ -53,8 +55,9 @@ func main(){
 			case '\r', '\n':
 				if pendingZero {
 					dismissed = true
-					fmt.Println()
+					fmt.Print("\x1b[2J\x1b[H")
 					fmt.Println("SURVEY_DISMISSED")
+					fmt.Print("❯ ")
 				}
 				pendingZero = false
 			}
@@ -62,9 +65,13 @@ func main(){
 		}
 		if b == '\r' || b == '\n' {
 			fmt.Println()
+			fmt.Println(string(draft))
+			draft = nil
 			fmt.Println("esc to interrupt")
+			fmt.Print("❯ ")
 			continue
 		}
+		draft = append(draft, b)
 		_, _ = os.Stdout.Write([]byte{b})
 	}
 }
@@ -96,7 +103,7 @@ func TestNudgeSessionDismissesFeedbackSurveyBeforeDelivering(t *testing.T) {
 	sessionName := fmt.Sprintf("gt-test-feedback-survey-%d", time.Now().UnixNano()%100000)
 
 	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, "stty -icanon -echo && exec "+shellQuote(fake), map[string]string{
 		"GC_PROVIDER": "claude",
 	}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
@@ -121,7 +128,8 @@ func TestNudgeSessionDismissesFeedbackSurveyBeforeDelivering(t *testing.T) {
 	}
 
 	if err := tm.NudgeSession(sessionName, "feedback-nudge-message"); err != nil {
-		t.Fatalf("NudgeSession: %v", err)
+		out, captureErr := tm.CapturePaneWithAttributes(sessionName, 120)
+		t.Fatalf("NudgeSession: %v; pane (%v):\n%q", err, captureErr, out)
 	}
 
 	out, err := tm.CapturePaneAll(sessionName)

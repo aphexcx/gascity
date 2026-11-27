@@ -1,12 +1,15 @@
 package tmux
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -124,30 +127,56 @@ func normalizedNudgeDigest(message string) string {
 	return runtime.NudgePayloadDigest(strings.TrimSpace(message))
 }
 
+// waitForNudgeDraftRendering leaves a third of the remaining lock budget for
+// confirmation and I/O. Codex also needs time for its slower staged retries.
+func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix string, lockDeadline time.Time, stagedRetries bool) (bool, error) {
+	ctx, cancel := context.WithDeadline(context.Background(), lockDeadline)
+	defer cancel()
+	remaining := time.Until(lockDeadline)
+	if stagedRetries {
+		remaining -= submitDraftRecoverySends * (submitDraftRecoveryBackoff + nudgeSubmitKeySettle)
+	}
+	budget := min(20*time.Second, remaining/3*2)
+	if budget <= 0 {
+		return t.recordNudgeDraftRendering(ctx, target, message, prefix)
+	}
+	ctx, stop := context.WithTimeout(ctx, budget)
+	defer stop()
+	for {
+		recorded, err := t.recordNudgeDraftRendering(ctx, target, message, prefix)
+		if recorded || errors.Is(err, ErrNudgeDraftDeferred) {
+			return recorded, err
+		}
+		select {
+		case <-ctx.Done():
+			return false, err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
 // recordNudgeDraftRendering binds recovery to what the completed paste actually
 // displayed. An opaque placeholder needs its counter as well as its line count.
-func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, error) {
-	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, prefix string) (bool, error) {
+	shape, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
 		return false, err
 	}
 	parts := strings.Split(strings.TrimSpace(shape), ":")
 	digest := runtime.NudgePayloadDigest(message)
 	if len(parts) != 5 || parts[0] != digest {
-		return false, fmt.Errorf("paste shape changed before rendering observation")
+		return false, fmt.Errorf("%w: paste shape changed before rendering observation", ErrNudgeDraftDeferred)
 	}
-	if parts[4] != "" {
-		return true, nil
-	}
-	payload, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+	payload, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
 		return false, err
 	}
 	payload = strings.TrimSpace(payload)
-	if payload != digest && payload != "pending:"+digest {
-		return false, fmt.Errorf("paste ownership changed before rendering observation")
+	attachedStage := payload == "attached:"+digest
+	if !attachedStage && payload != digest && payload != "pending:"+digest {
+		return false, fmt.Errorf("%w: paste ownership changed before rendering observation", ErrNudgeDraftDeferred)
 	}
-	content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
+	content, err := t.runCtx(ctx, "capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
 		return false, err
 	}
@@ -156,8 +185,11 @@ func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, 
 		return false, nil
 	}
 	collapsed := collapsedNudgeDraftMatches(draft, message)
+	if strings.TrimSpace(prefix) == "›" {
+		collapsed = draft == fmt.Sprintf("[Pasted Content %d chars]", utf8.RuneCountInString(message))
+	}
 	if !collapsed && !nudgeDraftMatches(draft, message, 0) {
-		widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
+		widthText, err := t.runCtx(ctx, "display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 		if err != nil {
 			return false, fmt.Errorf("reading pasted composer width: %w", err)
 		}
@@ -169,13 +201,18 @@ func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, 
 			return false, fmt.Errorf("pasted composer does not match the payload")
 		}
 	}
+	if attachedStage {
+		// Only this fresh call may use this observation. An attached pane
+		// must never acquire a reusable rendering mark.
+		return true, nil
+	}
 	if !collapsed {
 		// Inline recovery compares this slot to the normalized rendering,
 		// including its observed wrap boundaries, rather than the payload.
 		parts[3] = normalizedNudgeDigest(draft)
 	}
 	parts[4] = runtime.NudgePayloadDigest(draft)
-	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
+	out, err := t.runCtx(ctx, "if-shell", "-F", "-t", exactPaneTarget(target),
 		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}}", nudgeDraftShapeOption, strings.TrimSpace(shape), nudgeDraftPayloadOption, payload),
 		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}),
 		"display-message -p draft-ownership-changed")
@@ -183,7 +220,7 @@ func (t *Tmux) recordNudgeDraftRendering(target, message, prefix string) (bool, 
 		return false, err
 	}
 	if strings.TrimSpace(out) != "" {
-		return false, fmt.Errorf("paste ownership changed during rendering observation")
+		return false, fmt.Errorf("%w: paste ownership changed during rendering observation", ErrNudgeDraftDeferred)
 	}
 	return true, nil
 }

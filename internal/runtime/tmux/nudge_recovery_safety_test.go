@@ -1214,3 +1214,98 @@ func TestNudgeUnverifiedClearsConsumedPasteProvenance(t *testing.T) {
 		}
 	})
 }
+
+func TestNudgeWaitsForPasteRendering(t *testing.T) {
+	const message = "one\ntwo\nthree"
+	const placeholder = "[Pasted text #1 +2 lines]"
+	for _, tt := range []struct {
+		name        string
+		delay       time.Duration
+		rendered    string
+		busyOnEnter bool
+	}{
+		{"empty until timeout", 0, "", false},
+		{"late collapsed paste", 3 * time.Second, placeholder, true},
+		{"inline paste drains without busy", 0, message, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				const lockTimeout = 10 * time.Second
+				tm.cfg.NudgeLockTimeout = lockTimeout
+				var pasted time.Time
+				visible := false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					if !pasted.IsZero() && !visible && tt.rendered != "" && time.Since(pasted) >= tt.delay {
+						pane.draft, visible = tt.rendered, true
+					}
+					before := pane.enters
+					output, err := pane.exec(args)
+					if pane.enters != before && !visible {
+						t.Fatalf("Enter before the paste rendered, %s after paste", time.Since(pasted))
+					}
+					return output, err
+				}}
+				pane.afterEnter = func() { pane.busy = tt.busyOnEnter }
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", func(_, text string, _ time.Duration) (int, error) {
+					pasted = time.Now()
+					return len(text), nil
+				})
+				if !d.Delivered || d.Bytes != len(message) {
+					t.Fatalf("paste receipt = %+v, err = %v", d, err)
+				}
+				if tt.rendered == "" {
+					if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters != 0 ||
+						pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(message) || time.Since(pasted) >= lockTimeout {
+						t.Fatalf("unseen paste: %+v err=%v Enters=%d options=%v elapsed=%v", d, err, pane.enters, pane.options, time.Since(pasted))
+					}
+					return
+				}
+				if d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{tt.rendered}) || pane.options[nudgeDraftPayloadOption] != "" {
+					t.Fatalf("rendered paste: %+v err=%v submitted=%q options=%v", d, err, pane.submitted, pane.options)
+				}
+				if (tt.busyOnEnter && err != nil) || (!tt.busyOnEnter && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)) {
+					t.Fatalf("busy on Enter=%v, err=%v", tt.busyOnEnter, err)
+				}
+			})
+		})
+	}
+}
+
+func TestNudgeRenderAndCodexRecoveryShareLockBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, p := newRecoveryPane(t)
+		p.loseEnter = true
+		start := time.Now()
+		message := strings.Repeat("x", 1600)
+		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+				return "GC_PROVIDER=codex", nil
+			}
+			if time.Since(start) >= 19*time.Second {
+				p.draft = "[Pasted Content 1600 chars]"
+			}
+			out, err := p.exec(args)
+			return strings.ReplaceAll(out, "❯ ", "› "), err
+		}}
+		d, err := tm.nudgeSessionDeliveryWith(t.Name(), message, func(_, text string, _ time.Duration) (int, error) {
+			return len(text), nil
+		})
+		if err != nil || !d.Landed() || d.Submit != runtime.NudgeSubmitUnconfirmed || time.Since(start) >= tm.cfg.NudgeLockTimeout {
+			t.Fatalf("delivery=%+v err=%v elapsed=%v lock timeout=%v", d, err, time.Since(start), tm.cfg.NudgeLockTimeout)
+		}
+	})
+}
+
+func TestNudgeKeepsWrappedPasteWhenEnterIsLost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, p := newRecoveryPane(t)
+		p.loseEnter, p.width = true, 30
+		message := strings.Repeat("a", 28) + strings.Repeat("b", 28)
+		rendered := message[:28] + "\n" + message[28:]
+		d, err := tm.nudgeSessionDeliveryWith(t.Name(), message, p.paste(rendered))
+		if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || p.enters == 0 || p.options[nudgeDraftPayloadOption] == "" {
+			t.Fatalf("delivery=%+v err=%v Enters=%d options=%v", d, err, p.enters, p.options)
+		}
+	})
+}
