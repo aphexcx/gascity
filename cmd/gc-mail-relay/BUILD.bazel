@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "gc-mail-relay_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/cmd/gc-mail-relay",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/mailrelay/relay",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_binary(
+    name = "gc-mail-relay",
+    embed = [":gc-mail-relay_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "gc-mail-relay_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":gc-mail-relay_lib"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
