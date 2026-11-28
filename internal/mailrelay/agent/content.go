@@ -2,6 +2,7 @@ package agent
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/mailrelay/envelope"
 )
@@ -24,6 +25,13 @@ var (
 	ruleSubjectLong  = contentRule{"subject-over-500-bytes", "the subject is over 500 bytes"}
 )
 
+// The city's API carries the mail as JSON, which would change a subject or
+// body that is not UTF-8 from what the sender signed.
+var (
+	ruleSubjectText = contentRule{"subject-not-utf8", "the subject is not valid UTF-8"}
+	ruleBodyText    = contentRule{"body-not-utf8", "the body is not valid UTF-8"}
+)
+
 // The sender's name is printed wherever the mail is listed, so it must be
 // text and not a command to a terminal.
 var ruleSenderControl = contentRule{"sender-control-character", "the sender name holds a control character"}
@@ -38,6 +46,10 @@ func unfitText(m envelope.Mail) (contentRule, bool) {
 		return ruleSubjectDash, true
 	case len(m.Subject) > maxSubjectBytes:
 		return ruleSubjectLong, true
+	case !utf8.ValidString(m.Subject):
+		return ruleSubjectText, true
+	case !utf8.ValidString(m.Body):
+		return ruleBodyText, true
 	case strings.ContainsFunc(m.From, controlCharacter):
 		return ruleSenderControl, true
 	}
