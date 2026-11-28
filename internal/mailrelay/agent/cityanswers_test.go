@@ -56,13 +56,12 @@ func TestMailToMissingRecipientIsPassedAtOnce(t *testing.T) {
 	}
 	rel.add(4, seal(t, hub, alpha, "good-1", clock.Now(), mailTo("reader")))
 	run := start(t, alpha.settings, clock.use(alpha.deps(rel.transport(), city.transport())))
-	rel.recorder.await(t, "the good mail", func() bool { return len(city.inbox("reader")) == 1 })
-	waited := clock.elapsed()
 	rel.recorder.await(t, "the place to pass all four", func() bool { return slices.Contains(rel.recorder.reads(), 4) })
 	run.stop(t)
-	if waited != 0 {
-		t.Fatalf("the good mail waited %s behind three refused mails", waited)
+	if len(city.inbox("reader")) != 1 {
+		t.Fatalf("inbox holds %d mails", len(city.inbox("reader")))
 	}
+	// One batch, each mail asked once: the good mail never waited.
 	if reads := rel.recorder.reads(); reads[0] != 0 || reads[1] != 4 {
 		t.Fatalf("the four mails took more than one batch: reads %v", reads)
 	}

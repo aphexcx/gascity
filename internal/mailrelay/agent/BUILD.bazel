@@ -30,6 +30,7 @@ go_library(
 go_test(
     name = "agent_test",
     srcs = [
+        "asks_test.go",
         "cityanswers_test.go",
         "content_test.go",
         "e2e_test.go",

@@ -26,6 +26,9 @@ const (
 	// an earlier read for this city, as it does for a while after a
 	// connection died without closing.
 	busyWait = time.Second
+	// askFloor is the least time between two asks of the relay, so a relay
+	// that answers at once, empty or not, is not asked again at once.
+	askFloor = time.Second
 )
 
 // Deps are the agent's ways out of its process. Nil fields take defaults:
@@ -257,7 +260,14 @@ func (r *receiver) publish(ctx context.Context) error {
 // only past a delivery that is filed, passed or dropped.
 func (r *receiver) loop(ctx context.Context) {
 	var relayWait, apiWait, pinsWait backoff
+	var lastAsk time.Time
 	for ctx.Err() == nil {
+		if !lastAsk.IsZero() {
+			if wait := askFloor - r.d.Now().Sub(lastAsk); wait > 0 && r.d.Sleep(ctx, wait) != nil {
+				return
+			}
+		}
+		lastAsk = r.d.Now()
 		batch, out := r.ask(ctx)
 		switch out.kind {
 		case outcomeStopped:
