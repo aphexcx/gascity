@@ -431,11 +431,12 @@ func TestRegistryPinnedKeyWins(t *testing.T) {
 	}
 
 	// A pin removed while the registry is down uncovers nothing from the last
-	// good copy, and the hub is never taken from the registry.
+	// good copy, and the hub is never taken from the registry. A pin leaves at
+	// the second read that misses it.
 	reg.reply(503, "")
 	f.unpin("alpha")
 	f.unpin("hub")
-	tick(t, f.server, 1)
+	tick(t, f.server, 2)
 	for _, city := range []string{"alpha", "hub"} {
 		f.readSigned(city, city, 401)
 		f.readSigned(city, "beta", 401)
@@ -462,7 +463,7 @@ func TestRegistryPinnedKeyWins(t *testing.T) {
 	// Unpinned again while the registry is still down, beta's old registry
 	// key does not come back.
 	f.unpin("beta")
-	tick(t, f.server, 1)
+	tick(t, f.server, 2)
 	f.readSigned("beta", "beta", 401)
 	f.readSigned("beta", "listed", 401)
 }
@@ -655,6 +656,124 @@ func TestSingleUseSurvivesRegistrySwap(t *testing.T) {
 			t.Fatalf("%s: grant used before the swap got %d after it, want 401", city, w.Code)
 		}
 	}
+}
+
+func (f *fixture) writePin(city, key string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.cfg.KeysDir, city+".pub"), []byte(key), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// tickLog runs one reload interval and returns what it logged, before any
+// request of the test adds its own line.
+func (f *fixture) tickLog() string {
+	f.t.Helper()
+	start := f.logLen()
+	tick(f.t, f.server, 1)
+	return f.logFrom(start)
+}
+
+// notWhole is the line a pass writes when its read of the pinned keys is not
+// whole.
+func notWhole(reason string) string {
+	return `trusted key reload failed; keeping the whole key set, no trust decision this interval reason="` + reason + `"`
+}
+
+// In a pass whose read of the pinned keys is not whole, the relay makes no
+// trust decision: a city whose pin arrives in that pass is not taken from the
+// registry. The next whole read puts the pin in force and drops the registry
+// row for that city.
+func TestPinReadNotWholeMakesNoTrustDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		breakPins    func(*fixture) (repair func())
+	}{
+		{"a key file invalid", "trust directory contains 1 invalid key files", func(f *fixture) func() {
+			f.writePin("broken", "invalid")
+			return func() { f.unpin("broken") }
+		}},
+		{"the directory unreadable", "keys directory could not be read", func(f *fixture) func() {
+			moved := f.cfg.KeysDir + ".moved"
+			if err := os.Rename(f.cfg.KeysDir, moved); err != nil {
+				f.t.Fatal(err)
+			}
+			return func() {
+				if err := os.Rename(moved, f.cfg.KeysDir); err != nil {
+					f.t.Fatal(err)
+				}
+			}
+		}},
+		{"a verifier that cannot be built", "verifier refused the pinned keys", func(f *fixture) func() {
+			// The loader takes this name as a key id; the relay's id rule does not.
+			f.writePin("Gamma", publicKey(f.sign["beta"]))
+			return func() { f.unpin("Gamma") }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := relayFixture(t, "hub")
+			reg := newStandIn(t)
+			reg.reply(200, list(f.entry("beta", "beta")))
+			f.cfg.RegistryURL = registryAddress
+			f.cfg.RegistryTransport = reg
+			f.open()
+			before := f.keysInForce()
+
+			// alpha's pin file arrives while the read is not whole, and the
+			// registry lists alpha under beta's key.
+			f.addKey("alpha")
+			repair := tc.breakPins(f)
+			reg.reply(200, list(f.entry("beta", "beta"), f.entry("alpha", "beta")))
+			line := f.tickLog()
+			f.readSigned("alpha", "beta", 401)
+			f.readSigned("alpha", "alpha", 401)
+			f.readSigned("beta", "beta", 200)
+			if after := f.keysInForce(); !maps.Equal(before, after) {
+				t.Fatalf("a pass whose pin read is not whole changed the key set: before %v, after %v", before, after)
+			}
+			oneLine(t, line, notWhole(tc.reason))
+
+			repair()
+			line = f.tickLog()
+			f.readSigned("alpha", "alpha", 200)
+			f.readSigned("alpha", "beta", 401)
+			oneLine(t, line, "registry copy good entries=2 pinned=1 added=0 removed=0 changed=0")
+		})
+	}
+}
+
+// A pin file absent at one read, as while it is being replaced, keeps the
+// whole key set, so the registry's key for that city does not sign in. A pin
+// still absent at the next read is gone: that read is whole, and the copy in
+// the same interval may list the city.
+func TestPinAbsentForOneReloadKeepsTheKeySet(t *testing.T) {
+	f, reg := registryFixture(t, nil)
+	reg.reply(200, list(f.entry("beta", "beta"), f.entry("alpha", "beta")))
+	tick(t, f.server, 1)
+	pin, err := os.ReadFile(filepath.Join(f.cfg.KeysDir, "alpha.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.unpin("alpha")
+	line := f.tickLog()
+	f.readSigned("alpha", "beta", 401)
+	f.readSigned("alpha", "alpha", 200)
+	oneLine(t, line, notWhole("1 pinned key files missing since the last good read"))
+
+	f.writePin("alpha", string(pin))
+	line = f.tickLog()
+	f.readSigned("alpha", "alpha", 200)
+	f.readSigned("alpha", "beta", 401)
+	oneLine(t, line, "registry copy good entries=2 pinned=1 added=0 removed=0 changed=0")
+
+	f.unpin("alpha")
+	tick(t, f.server, 1)
+	f.readSigned("alpha", "alpha", 200)
+	line = f.tickLog()
+	f.readSigned("alpha", "alpha", 401)
+	f.readSigned("alpha", "beta", 200)
+	oneLine(t, line, "registry copy good entries=2 pinned=0 added=1 removed=0 changed=0")
 }
 
 // A key statement stored under a city's old signing key never blocks the

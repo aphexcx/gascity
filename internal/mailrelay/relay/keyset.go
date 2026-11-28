@@ -28,19 +28,35 @@ type keysDirectory string
 func (dir keysDirectory) read(context.Context) (cityKeys, error) {
 	keys, refused, err := supervisor.LoadTrustedKeys(string(dir))
 	if err != nil {
-		return nil, fmt.Errorf("read trusted keys: %w", err)
+		return nil, &pinReadError{reason: "keys directory could not be read", err: fmt.Errorf("read trusted keys: %w", err)}
 	}
 	if len(refused) > 0 {
-		return nil, fmt.Errorf("trust directory contains %d invalid key files", len(refused))
+		return nil, &pinReadError{reason: fmt.Sprintf("trust directory contains %d invalid key files", len(refused))}
 	}
 	return keys, nil
 }
 
-// swapKeys swaps in the key set built from the pinned and registry keys, as one
-// whole, for every request that follows. A pinned key wins over a registry key
-// for the same city. Every verifier shares the store's record of spent grants,
-// so a grant used before a swap stays spent after it. The caller holds keyMu.
-func (s *Server) swapKeys(pinned, registry cityKeys) error {
+// pinReadError says why a read of the pinned keys is not whole. Its reason is
+// a fixed phrase that may be logged; err, when set, carries the detail.
+type pinReadError struct {
+	reason string
+	err    error
+}
+
+func (e *pinReadError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return e.reason
+}
+
+func (e *pinReadError) Unwrap() error { return e.err }
+
+// keySet builds the key set from the pinned and registry keys, as one whole.
+// A pinned key wins over a registry key for the same city. Every verifier
+// shares the store's record of spent grants, so a grant used before a swap
+// stays spent after it.
+func (s *Server) keySet(pinned, registry cityKeys) (*trust, error) {
 	keys := make(cityKeys, len(pinned)+len(registry))
 	maps.Copy(keys, registry)
 	maps.Copy(keys, pinned)
@@ -48,13 +64,18 @@ func (s *Server) swapKeys(pinned, registry cityKeys) error {
 	if len(keys) > 0 {
 		v, err := envelope.NewGrantVerifier(keys, s.store)
 		if err != nil {
-			return fmt.Errorf("build grant verifier: %w", err)
+			return nil, fmt.Errorf("build grant verifier: %w", err)
 		}
 		set.verifier = v
 	}
+	return set, nil
+}
+
+// swapKeys swaps in set, built from pinned and registry, for every request
+// that follows. The caller holds keyMu.
+func (s *Server) swapKeys(set *trust, pinned, registry cityKeys) {
 	s.trusted.Store(set)
 	s.pinned, s.fromRegistry = pinned, registry
-	return nil
 }
 
 // unpinned returns the listed keys of cities that are neither pinned nor the
@@ -74,7 +95,8 @@ func (s *Server) unpinned(listed, pinned cityKeys) (cityKeys, int) {
 // are allowed, changes nothing. Either way it logs one line, never a key.
 // Registry keys are kept without the cities they lost to a pin, so removing a
 // pin uncovers nothing from an old copy: the city comes from the registry only
-// through a newer good copy, normally the one in the same interval.
+// through a newer good copy, normally the one in the interval whose whole read
+// shows the pin gone.
 func (s *Server) copyRegistry(ctx context.Context) {
 	if s.registry == nil {
 		return
@@ -94,10 +116,12 @@ func (s *Server) copyRegistry(ctx context.Context) {
 	}
 	next, leftOut := s.unpinned(listed, s.pinned)
 	added, removed, changed := countChanges(s.fromRegistry, next)
-	if err := s.swapKeys(s.pinned, next); err != nil {
+	set, err := s.keySet(s.pinned, next)
+	if err != nil {
 		s.logBadCopy(&copyError{reason: "verifier refused the key set", entries: len(listed)})
 		return
 	}
+	s.swapKeys(set, s.pinned, next)
 	s.logger.Printf("registry copy good entries=%d pinned=%d added=%d removed=%d changed=%d", len(listed), leftOut, added, removed, changed)
 }
 

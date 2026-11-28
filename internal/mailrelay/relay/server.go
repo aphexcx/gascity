@@ -72,11 +72,14 @@ type Server struct {
 
 	// keyMu serializes rebuilds of the key set. pinned and fromRegistry are
 	// the keys from each source that the published set was built from.
+	// lastRead is the pinned keys of the last good read of the keys
+	// directory, whole or not.
 	keyMu        sync.Mutex
 	pins         keySource
 	registry     keySource // nil when no registry address is set
 	pinned       cityKeys
 	fromRegistry cityKeys
+	lastRead     cityKeys
 }
 
 // Open validates settings, opens the durable store and loads the initial
@@ -119,8 +122,13 @@ func Open(cfg Config, out io.Writer) (*Server, error) {
 // Close releases the store.
 func (s *Server) Close() error { return s.store.db.Close() }
 
-// reloadKeys re-reads the pinned keys and publishes them with the registry
-// keys in force, less any city that is now pinned.
+// reloadKeys re-reads the pinned keys and, when the read is whole, publishes
+// them with the registry keys in force, less any city that is now pinned. A
+// read is good when every key file is taken and the keys build a verifier; it
+// is whole when it is good and no pin of the last good read is missing. A read
+// that is not whole changes nothing, so a pin in force stays in force until a
+// whole read shows it gone: a pin file absent at one read, as while it is
+// replaced, is still in force, and it leaves at the next read that misses it.
 func (s *Server) reloadKeys() error {
 	s.keyMu.Lock()
 	defer s.keyMu.Unlock()
@@ -129,17 +137,44 @@ func (s *Server) reloadKeys() error {
 		return err
 	}
 	registry, _ := s.unpinned(s.fromRegistry, pinned)
-	return s.swapKeys(pinned, registry)
+	set, err := s.keySet(pinned, registry)
+	if err != nil {
+		return &pinReadError{reason: "verifier refused the pinned keys", err: err}
+	}
+	missing := 0
+	for city := range s.lastRead {
+		if pinned[city] == nil {
+			missing++
+		}
+	}
+	s.lastRead = pinned
+	if missing > 0 {
+		return &pinReadError{reason: fmt.Sprintf("%d pinned key files missing since the last good read", missing)}
+	}
+	s.swapKeys(set, pinned, registry)
+	return nil
 }
 
-func (s *Server) refreshKeys() {
-	if err := s.reloadKeys(); err != nil {
-		s.logger.Print("trusted key reload failed; retaining last good key set")
+// refreshKeys re-reads the pinned keys and reports whether the read was whole.
+// A read that is not whole keeps the whole key set, pinned and registry keys
+// alike, and writes one line.
+func (s *Server) refreshKeys() bool {
+	err := s.reloadKeys()
+	if err == nil {
+		return true
 	}
+	reason := "pinned keys could not be read"
+	var notWhole *pinReadError
+	if errors.As(err, &notWhole) {
+		reason = notWhole.reason
+	}
+	s.logger.Printf("trusted key reload failed; keeping the whole key set, no trust decision this interval reason=%q", reason)
+	return false
 }
 
 // Maintain re-reads the pinned keys, copies the registry when an address is
-// set, and removes expired records, until ctx ends.
+// set and the pinned keys read whole, and removes expired records, until ctx
+// ends.
 func (s *Server) Maintain(ctx context.Context) {
 	reload := time.NewTicker(s.config.ReloadInterval)
 	sweep := time.NewTicker(time.Minute)
@@ -149,15 +184,16 @@ func (s *Server) Maintain(ctx context.Context) {
 }
 
 // maintain does Maintain's work on the given clock. Each reload tick re-reads
-// the pinned keys and then copies the registry.
+// the pinned keys and, only when that read is whole, copies the registry.
 func (s *Server) maintain(ctx context.Context, reload, sweep <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-reload:
-			s.refreshKeys()
-			s.copyRegistry(ctx)
+			if s.refreshKeys() {
+				s.copyRegistry(ctx)
+			}
 		case <-sweep:
 			if err := s.store.sweep(ctx, s.now()); err != nil && ctx.Err() == nil {
 				s.logger.Print("store sweep failed")
