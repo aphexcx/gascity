@@ -129,7 +129,7 @@ func normalizedNudgeDigest(message string) string {
 
 // waitForNudgeDraftRendering leaves a third of the remaining lock budget for
 // confirmation and I/O. Codex also needs time for its slower staged retries.
-func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix string, lockDeadline time.Time, stagedRetries bool) (bool, error) {
+func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix, footer string, lockDeadline time.Time, stagedRetries bool) (string, error) {
 	ctx, cancel := context.WithDeadline(context.Background(), lockDeadline)
 	defer cancel()
 	remaining := time.Until(lockDeadline)
@@ -138,18 +138,18 @@ func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix string, lockDe
 	}
 	budget := min(20*time.Second, remaining/3*2)
 	if budget <= 0 {
-		return t.recordNudgeDraftRendering(ctx, target, message, prefix)
+		return t.recordNudgeDraftRendering(ctx, target, message, prefix, footer)
 	}
 	ctx, stop := context.WithTimeout(ctx, budget)
 	defer stop()
 	for {
-		recorded, err := t.recordNudgeDraftRendering(ctx, target, message, prefix)
-		if recorded || errors.Is(err, ErrNudgeDraftDeferred) {
+		recorded, err := t.recordNudgeDraftRendering(ctx, target, message, prefix, footer)
+		if recorded != "" || errors.Is(err, ErrNudgeDraftDeferred) {
 			return recorded, err
 		}
 		select {
 		case <-ctx.Done():
-			return false, err
+			return "", err
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
@@ -157,54 +157,62 @@ func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix string, lockDe
 
 // recordNudgeDraftRendering binds recovery to what the completed paste actually
 // displayed. An opaque placeholder needs its counter as well as its line count.
-func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, prefix string) (bool, error) {
+func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, prefix, footer string) (string, error) {
 	shape, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	parts := strings.Split(strings.TrimSpace(shape), ":")
 	digest := runtime.NudgePayloadDigest(message)
 	if len(parts) != 5 || parts[0] != digest {
-		return false, fmt.Errorf("%w: paste shape changed before rendering observation", ErrNudgeDraftDeferred)
+		return "", fmt.Errorf("%w: paste shape changed before rendering observation", ErrNudgeDraftDeferred)
 	}
 	payload, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	payload = strings.TrimSpace(payload)
 	attachedStage := payload == "attached:"+digest
 	if !attachedStage && payload != digest && payload != "pending:"+digest {
-		return false, fmt.Errorf("%w: paste ownership changed before rendering observation", ErrNudgeDraftDeferred)
+		return "", fmt.Errorf("%w: paste ownership changed before rendering observation", ErrNudgeDraftDeferred)
 	}
 	content, err := t.runCtx(ctx, "capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	draft, literal, observed := nudgeComposerViews(content, prefix)
+	if !observed && footer != "" {
+		// The empty composer established this footer before we pasted. It
+		// must still be a separate, identical row below the input.
+		text := strings.TrimRight(runtime.ComposerInputText(content), " \t\r\n")
+		if input, ok := strings.CutSuffix(text, footer); ok {
+			draft, literal, observed = nudgeComposerViews(input, prefix)
+		}
+	}
 	if !observed || draft == "" {
-		return false, nil
+		return "", nil
 	}
 	collapsed := collapsedNudgeDraftMatches(draft, message)
 	if strings.TrimSpace(prefix) == "›" {
 		collapsed = draft == fmt.Sprintf("[Pasted Content %d chars]", utf8.RuneCountInString(message))
 	}
-	if !collapsed && !nudgeCapturedDraftMatches(draft, literal, message, 0) {
+	if !collapsed && !nudgeCapturedDraftMatches(draft, literal, message, prefix, 0) {
 		widthText, err := t.runCtx(ctx, "display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 		if err != nil {
-			return false, fmt.Errorf("reading pasted composer width: %w", err)
+			return "", fmt.Errorf("reading pasted composer width: %w", err)
 		}
 		width, err := strconv.Atoi(strings.TrimSpace(widthText))
 		if err != nil || width <= 2 {
-			return false, fmt.Errorf("invalid pasted composer width %q", widthText)
+			return "", fmt.Errorf("invalid pasted composer width %q", widthText)
 		}
-		if !nudgeCapturedDraftMatches(draft, literal, message, width-2) {
-			return false, fmt.Errorf("pasted composer does not match the payload")
+		if !nudgeCapturedDraftMatches(draft, literal, message, prefix, width-2) {
+			return "", fmt.Errorf("pasted composer does not match the payload")
 		}
 	}
 	if attachedStage {
 		// Only this fresh call may use this observation. An attached pane
 		// must never acquire a reusable rendering mark.
-		return true, nil
+		return draft, nil
 	}
 	if !collapsed {
 		// Inline recovery compares this slot to the normalized rendering,
@@ -217,12 +225,12 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}),
 		"display-message -p draft-ownership-changed")
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if strings.TrimSpace(out) != "" {
-		return false, fmt.Errorf("%w: paste ownership changed during rendering observation", ErrNudgeDraftDeferred)
+		return "", fmt.Errorf("%w: paste ownership changed during rendering observation", ErrNudgeDraftDeferred)
 	}
-	return true, nil
+	return draft, nil
 }
 
 func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {
@@ -339,8 +347,8 @@ func nudgeComposerViews(content, prefix string) (draft, literal string, observed
 	return strings.Join(rows, "\n"), literal, observed
 }
 
-func nudgeCapturedDraftMatches(draft, literal, message string, width int) bool {
-	return nudgeDraftMatches(draft, message, width) || (literal != draft && nudgeDraftMatches(literal, message, width))
+func nudgeCapturedDraftMatches(draft, literal, message, prefix string, width int) bool {
+	return nudgeDraftMatches(draft, message, width) || matchNudgeRows(literal, message, width, runewidth.StringWidth(prefix))
 }
 
 func literalNudgeComposer(content, prefix string) (string, bool) {
@@ -456,6 +464,10 @@ func literalNudgeComposer(content, prefix string) (string, bool) {
 // and cursor margins need not be reconstructed. Explicit newlines and interior
 // whitespace remain significant. A nonpositive width requires an exact match.
 func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
+	return matchNudgeRows(draft, message, wrapWidth, -1)
+}
+
+func matchNudgeRows(draft, message string, wrapWidth, inputColumn int) bool {
 	message = strings.TrimSpace(message)
 	if draft == message {
 		return true
@@ -474,6 +486,11 @@ func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 			if strings.HasPrefix(message[pos:], row) {
 				next[pos+len(row)] = true
 			}
+			if inputColumn >= 0 {
+				if n, ok := renderedNudgeRow(row, message[pos:], inputColumn); ok {
+					next[pos+n] = true
+				}
+			}
 		}
 		for pos := range positions {
 			switch {
@@ -491,6 +508,30 @@ func nudgeDraftMatches(draft, message string, wrapWidth int) bool {
 		positions = next
 	}
 	return positions[len(message)]
+}
+
+// renderedNudgeRow accounts for terminal tab stops and end-of-row padding.
+// A painted row must still contain every space the payload explicitly sent.
+func renderedNudgeRow(row, message string, column int) (int, bool) {
+	consumed := 0
+	for row != "" {
+		source := message[consumed:]
+		if source == "" || source[0] == '\n' {
+			return consumed, strings.Trim(row, " ") == ""
+		}
+		ch, size := utf8.DecodeRuneInString(source)
+		painted := source[:size]
+		if ch == '\t' {
+			painted = strings.Repeat(" ", 8-column%8)
+		}
+		var ok bool
+		if row, ok = strings.CutPrefix(row, painted); !ok {
+			return 0, false
+		}
+		column += runewidth.StringWidth(painted)
+		consumed += size
+	}
+	return consumed, true
 }
 
 var claudeCollapsedPaste = regexp.MustCompile(`^\[Pasted text #[1-9][0-9]*(?: \+([1-9][0-9]*) lines)?\]$`)

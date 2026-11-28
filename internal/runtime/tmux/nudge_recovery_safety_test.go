@@ -1218,12 +1218,14 @@ func TestNudgeUnverifiedClearsConsumedPasteProvenance(t *testing.T) {
 func TestNudgeWaitsForPasteRendering(t *testing.T) {
 	t.Run("inline whitespace survives composer extraction", func(t *testing.T) {
 		for _, tc := range []struct {
-			name, message string
-			boxed         bool
+			name, message, rendered string
+			boxed                   bool
 		}{
-			{"trailing spaces on prompt and continuation", "one  \ntwo  \nthree", false},
-			{"nonbreaking space after prompt", "one\u00a0copy", false},
-			{"indented boxed continuation", "one\n    two", true},
+			{"trailing spaces on prompt and continuation", "one  \ntwo  \nthree", "", false},
+			{"nonbreaking space after prompt", "one\u00a0copy", "", false},
+			{"indented boxed continuation", "one\n    two", "", true},
+			{"terminal tab stop", "one\tcopy", "one   copy", false},
+			{"terminal line padding", "one  \ntwo", "one     \ntwo", false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
@@ -1236,14 +1238,46 @@ func TestNudgeWaitsForPasteRendering(t *testing.T) {
 							return pane.exec(args)
 						}}
 					}
-					d, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, pane.paste(""))
-					if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{tc.message}) {
+					d, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, pane.paste(tc.rendered))
+					want := tc.rendered
+					if want == "" {
+						want = tc.message
+					}
+					if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{want}) {
 						t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
 					}
 				})
 			})
 		}
 	})
+	for _, footer := range []string{"  ? for shortcuts", "  gpt-5.5 low"} {
+		t.Run(footer, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+						return "GC_PROVIDER=codex", nil
+					}
+					result, err := pane.exec(args)
+					if strings.Contains(result, "❯ ") {
+						input := pane.draft
+						if input == "" {
+							input = "\x1b[2mExplain this codebase\x1b[22m"
+						}
+						result = strings.Replace(result, pane.render(), "› "+input+"\n\n"+footer, 1)
+						if pane.busy {
+							result = "esc to interrupt\n" + result
+						}
+					}
+					return result, err
+				}}
+				d, err := tm.nudgeSessionDeliveryWith(t.Name(), "hello", pane.paste(""))
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{"hello"}) {
+					t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+				}
+			})
+		})
+	}
 	const message = "one\ntwo\nthree"
 	const placeholder = "[Pasted text #1 +2 lines]"
 	for _, tt := range []struct {
