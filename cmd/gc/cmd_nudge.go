@@ -1683,6 +1683,7 @@ func (cs *controllerState) NotifyListedMail(message mail.Message, originKid stri
 	host := mailWakeHost{
 		provider: sp,
 		nudges:   beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, cs.eventProv)},
+		reserve:  &cs.mailWakeReserve,
 	}
 	cs.mu.RUnlock()
 	if message.To == "human" || cfg == nil || !slices.ContainsFunc(cfg.Agents, func(a config.Agent) bool { return len(a.MailWakeFrom) > 0 }) {
@@ -1720,7 +1721,13 @@ func (cs *controllerState) NotifyListedMail(message mail.Message, originKid stri
 	if len(recipient.MailWakeFrom) == 0 {
 		return false, false
 	}
-	if originKid == "" {
+	peer := config.MailWakePeer(originKid)
+	if originKid == "" || !slices.Contains(recipient.MailWakeFrom, peer) {
+		return true, false
+	}
+	// The listed path runs on what this controller holds, never on a
+	// provider or a store built from the process environment.
+	if host.provider == nil || host.nudges.Store == nil {
 		return true, false
 	}
 	if err == nil {
@@ -1732,7 +1739,6 @@ func (cs *controllerState) NotifyListedMail(message mail.Message, originKid stri
 		}
 		host.queueOnly = busy
 	}
-	peer := config.MailWakePeer(originKid)
 	asked, _ := policy.request(message, peer, mailWakeSender{peer, peer}, time.Now().UTC(), host)
 	return true, asked
 }

@@ -61,8 +61,12 @@ type controllerState struct {
 	// Only one remote mail send per session waits for live delivery. Other
 	// concurrent sends persist their notifications in the city's queue.
 	liveMailNotifies sync.Map
-	mu               sync.RWMutex
-	cfg              *config.City
+	// Listed mail that arrives through the API counts its wake budget one
+	// request at a time, so the budget holds on a session store that cannot
+	// fence a write.
+	mailWakeReserve sync.Mutex
+	mu              sync.RWMutex
+	cfg             *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads

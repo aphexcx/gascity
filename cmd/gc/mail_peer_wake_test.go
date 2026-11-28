@@ -35,9 +35,10 @@ type peerMailAnswer struct {
 	notified bool
 }
 
-// peerMailPost sends one mail to city beta. With a private key the request
-// carries a write grant signed under kid; without one it carries no grant.
-func peerMailPost(t *testing.T, h http.Handler, priv ed25519.PrivateKey, kid, to, from string) peerMailAnswer {
+// peerMailRequest builds one mail POST to city beta. With a private key the
+// request carries a write grant signed under kid; without one it carries no
+// grant.
+func peerMailRequest(t *testing.T, priv ed25519.PrivateKey, kid, to, from string) *http.Request {
 	t.Helper()
 	const path = "/v0/city/beta/mail"
 	body, err := json.Marshal(api.MailSendRequest{To: to, From: from, Subject: "update", Notify: true})
@@ -60,20 +61,38 @@ func peerMailPost(t *testing.T, h http.Handler, priv ed25519.PrivateKey, kid, to
 		}
 		r.Header.Set("X-GC-City-Write", base64.RawURLEncoding.EncodeToString(payload)+"."+base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, payload)))
 	}
+	return r
+}
+
+// servePeerMail runs one request and reads the answer. It never fails the
+// test itself, so a test may call it from its own goroutines.
+func servePeerMail(h http.Handler, r *http.Request) (peerMailAnswer, error) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	answer := peerMailAnswer{status: w.Code}
 	if w.Code != http.StatusCreated {
-		return answer
+		return answer, nil
 	}
 	var out struct {
 		ID       string `json:"id"`
 		Notified *bool  `json:"notified"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out.ID == "" || out.Notified == nil {
-		t.Fatalf("mail answer %s: %v", w.Body.String(), err)
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		return answer, fmt.Errorf("mail answer %s: %w", w.Body.String(), err)
+	}
+	if out.ID == "" || out.Notified == nil {
+		return answer, fmt.Errorf("mail answer %s has no id or no notified result", w.Body.String())
 	}
 	answer.id, answer.notified = out.ID, *out.Notified
+	return answer, nil
+}
+
+func peerMailPost(t *testing.T, h http.Handler, priv ed25519.PrivateKey, kid, to, from string) peerMailAnswer {
+	t.Helper()
+	answer, err := servePeerMail(h, peerMailRequest(t, priv, kid, to, from))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return answer
 }
 
@@ -419,5 +438,37 @@ func TestPeerCityRevokedKeyIsRefused(t *testing.T) {
 	}
 	if typed, history := c.typed(reader), c.history(reader.ID); len(typed) != 1 || len(history) != 1 {
 		t.Errorf("after the revocation: typed %q, history %q", typed, history)
+	}
+}
+
+// A rig name is free text, so a local agent's qualified name can start like a
+// peer entry. Such an agent is never a wake sender: a peer entry is matched by
+// a verified key alone.
+func TestPeerCityEntryIsNotMatchedByLocalAgentNamedLikePeer(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "beta"},
+		Rigs:      []config.Rig{{Name: "city:x", Path: t.TempDir()}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "city:x"},
+			{Name: "plain"},
+			{Name: "reader", MailWakeFrom: []string{"city:x/worker", "plain"}},
+		},
+	}
+	record := func(template string) string {
+		b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"template": template, "agent_name": template, "state": "asleep", "session_name": "s-" + template,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.ID
+	}
+	policy := localMailWakePolicy{cfg: cfg, front: sessionFrontDoor(store)}
+	if sender := policy.sender("plain", record("plain"), ""); sender.agent != "plain" {
+		t.Fatalf("an ordinary local agent resolved to %+v", sender)
+	}
+	if sender := policy.sender("city:x/worker", record("city:x/worker"), ""); sender != (mailWakeSender{}) {
+		t.Errorf("a local agent named like a peer entry became the wake sender %+v", sender)
 	}
 }

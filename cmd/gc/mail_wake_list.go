@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -89,12 +90,14 @@ const mailWakeRecordAttempts = 5
 
 // mailWakeHost is what a receiving controller already holds for a turn
 // request that arrived through its API: its open session provider, the nudge
-// store its storage routes resolve to, and whether another live delivery to
-// the same recipient is in flight. A local command passes the zero value,
-// opens its own provider and queues through its own store.
+// store its storage routes resolve to, the lock under which it reads the wake
+// history, decides and records, and whether another live delivery to the
+// same recipient is in flight. A local command passes the zero value, opens
+// its own provider, queues through its own store and takes no lock.
 type mailWakeHost struct {
 	provider  runtime.Provider
 	nudges    beads.NudgesStore
+	reserve   sync.Locker
 	queueOnly bool
 }
 
@@ -186,6 +189,11 @@ func (p localMailWakePolicy) sender(address, resolved, stamped string) mailWakeS
 	}
 	a, ok := p.agent(info)
 	if !ok {
+		return mailWakeSender{}
+	}
+	// A rig name is free text, so a qualified name can start like a peer
+	// entry. Only a verified key is a peer city: such an agent sends no wake.
+	if _, peer := config.MailWakePeerKid(a.QualifiedName()); peer {
 		return mailWakeSender{}
 	}
 	return mailWakeSender{a.QualifiedName(), id}
@@ -282,6 +290,14 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	if action == mailWakeNone {
 		return false, reason
 	}
+	// Reading the history, deciding and recording are one step for the
+	// requests of one controller. The lock is released before any delivery.
+	reserved := func() {}
+	if host.reserve != nil {
+		host.reserve.Lock()
+		reserved = sync.OnceFunc(host.reserve.Unlock)
+	}
+	defer reserved()
 	var incoming, outgoing []session.MailWakeEntry
 	if id != "" {
 		incoming, err = p.front.MailWakeHistory(id)
@@ -337,6 +353,7 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 			return created, reason
 		}
 	}
+	reserved()
 	item := mailReminderItem(target, address, message.ID, now)
 	if action == mailWakeRemind && !host.queueOnly {
 		var landed bool
