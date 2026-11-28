@@ -88,40 +88,28 @@ func TestNudgeDeliveryAlreadyBusyIsUnverified(t *testing.T) {
 	for _, toolBoundary := range []bool{false, true} {
 		t.Run(strconv.FormatBool(toolBoundary), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
-				pasted, enters, clears := 0, 0, 0
-				tm := NewTmux()
+				tm, pane := newRecoveryPane(t)
+				pane.busy = true
+				pasted, clears := 0, 0
 				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
-					switch {
-					case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
-						return "GC_PROVIDER=claude", nil
-					case slices.Contains(args, "capture-pane"):
-						if toolBoundary && pasted > enters {
-							return "❯ ", nil
-						}
-						return "esc to interrupt\n❯ ", nil
-					case slices.Contains(args, "send-keys"):
-						if slices.Contains(args, "Enter") {
-							enters++
-						}
-						if slices.Contains(args, "C-u") {
-							clears++
-						}
+					if slices.Contains(args, "C-u") {
+						clears++
 					}
-					return "", nil
+					return pane.exec(args)
 				}}
 				receipts := collectReceipts(tm)
 				for i := 0; i < 3; i++ {
 					message := "busy-input-" + strconv.Itoa(i)
 					delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), message, func(_, text string, _ time.Duration) (int, error) {
 						pasted++
+						pane.draft, pane.busy = text, !toolBoundary
 						return len(text), nil
 					})
 					if err != nil || !delivery.Delivered || delivery.Submit != runtime.NudgeSubmitUnverified {
 						t.Errorf("delivery %d = %+v, %v; want landed/unverified", i, delivery, err)
 					}
 				}
-				if pasted != 3 || enters != 3 || clears != 0 {
+				if enters := pane.enters; pasted != 3 || enters != 3 || clears != 0 {
 					t.Errorf("pastes=%d enters=%d clears=%d; want 3/3/0", pasted, enters, clears)
 				}
 				for _, receipt := range receipts() {
@@ -344,31 +332,20 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 		})
 	}
 	synctest.Test(t, func(t *testing.T) {
-		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
-		tm := NewTmux()
-		draft := ""
-		pastes, enters, clears := 0, 0, 0
+		tm, pane := newRecoveryPane(t)
+		pane.busy, pane.loseEnter = true, true
+		pastes, clears := 0, 0
 		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
-			switch {
-			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
-				return "GC_PROVIDER=claude", nil
-			case slices.Contains(args, "capture-pane"):
-				return "esc to interrupt\n❯ " + draft, nil
-			case slices.Contains(args, "send-keys"):
-				if slices.Contains(args, "C-u") {
-					clears++
-					draft = ""
-				}
-				if slices.Contains(args, "Enter") {
-					enters++
-				}
+			if slices.Contains(args, "C-u") {
+				clears++
+				pane.draft = ""
 			}
-			return "", nil
+			return pane.exec(args)
 		}}
 		for i := 0; i < 3; i++ {
 			delivery, err := tm.nudgeSessionDeliveryWith(t.Name(), "input-"+strconv.Itoa(i), func(_, text string, _ time.Duration) (int, error) {
 				pastes++
-				draft += text
+				pane.draft += text
 				return len(text), nil
 			})
 			if i == 0 {
@@ -382,7 +359,7 @@ func TestNudgeDeliveryPreservesUncertainDraft(t *testing.T) {
 				t.Errorf("unverified input licensed a replay: %v", err)
 			}
 		}
-		if draft != "input-0" || pastes != 1 || enters != 1 || clears != 0 {
+		if draft, enters := pane.draft, pane.enters; draft != "input-0" || pastes != 1 || enters != 1 || clears != 0 {
 			t.Errorf("draft=%q pastes=%d enters=%d clears=%d; uncertain input must survive exactly once", draft, pastes, enters, clears)
 		}
 	})
@@ -539,30 +516,30 @@ func TestNudgeDeliveryRetriesPreservedDraftWithoutRepaste(t *testing.T) {
 
 func TestStartupNudgeRetriesComposerRead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		t.Cleanup(func() { sessionNudgeLocks.Delete(t.Name()) })
 		const message = "deliver startup exactly once"
-		tm := NewTmux()
-		captures, pastes, enters := 0, 0, 0
-		busy := false
+		tm, p := newRecoveryPane(t)
+		captures, pastes := 0, 0
 		tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+			out, err := p.exec(args)
 			switch {
 			case slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER":
 				return "GC_PROVIDER=codex", nil
-			case slices.Contains(args, "capture-pane"):
+			case strings.Contains(out, "❯ "):
 				captures++
 				if captures == 1 {
 					return "OpenAI Codex\nConnecting...", nil
 				}
-				pane := "› \x1b[2mExplain this codebase\x1b[22m\n\n  gpt-5.5 low · /tmp/probe"
-				if busy {
+				draft := p.draft
+				if draft == "" {
+					draft = "\x1b[2mExplain this codebase\x1b[22m"
+				}
+				pane := "› " + draft + "\n\n  gpt-5.5 low · /tmp/probe"
+				if p.busy {
 					pane = "• Working (0s • esc to interrupt)\n" + pane
 				}
 				return pane, nil
-			case slices.Contains(args, "send-keys") && slices.Contains(args, "Enter"):
-				enters++
-				busy = true
 			}
-			return "", nil
+			return out, err
 		}}
 		receipts := collectReceipts(tm)
 		// Activity from another startup source is not evidence that a deferred
@@ -574,6 +551,7 @@ func TestStartupNudgeRetriesComposerRead(t *testing.T) {
 				if text != message {
 					t.Fatalf("pasted %q, want %q", text, message)
 				}
+				p.draft = text
 				return len(text), nil
 			})
 			if err == nil {
@@ -585,7 +563,7 @@ func TestStartupNudgeRetriesComposerRead(t *testing.T) {
 		if err := doStartSession(context.Background(), ops, t.Name(), cfg, DefaultConfig().SetupTimeout); err != nil {
 			t.Fatal(err)
 		}
-		if pastes != 1 || enters != 1 {
+		if enters := p.enters; pastes != 1 || enters != 1 {
 			t.Fatalf("pastes=%d enters=%d, want exactly one delivered startup nudge", pastes, enters)
 		}
 		got := receipts()
@@ -862,31 +840,9 @@ func TestNudgeDeliveredVouchesForARealDelivery(t *testing.T) {
 // The composer starts empty and retains the pasted message. No busy marker is
 // rendered, so the submit stays unconfirmed and later calls retry the draft.
 func claudeNeverBusyExecutor(message string) *fakeExecutor {
-	draft := ""
-	return &fakeExecutor{fn: func(args []string) (string, error) {
-		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
-			return "GC_PROVIDER=claude", nil
-		}
-		if slices.Contains(args, "paste-buffer") {
-			draft += message
-		}
-		if slices.Contains(args, "display-message") && slices.Contains(args, "#{pane_id}") {
-			return "%0", nil
-		}
-		if slices.Contains(args, "display-message") && slices.Contains(args, "#{session_attached}") {
-			return "0", nil
-		}
-		if slices.Contains(args, "show-hooks") {
-			return args[len(args)-1] + `[0] set-option -p -t "%0" @gc-nudge-draft-payload ''`, nil
-		}
-		if slices.Contains(args, "show-options") && slices.Contains(args, nudgeDraftPayloadOption) {
-			return runtime.NudgePayloadDigest(message), nil
-		}
-		if slices.Contains(args, "capture-pane") || (slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "capture-pane ")) {
-			return "────\n❯ " + strings.ReplaceAll(draft, "\n", "\n  ") + "\n────", nil
-		}
-		return "", nil
-	}}
+	pane := &recoveryPane{options: map[string]string{}, loseEnter: true}
+	pane.onPaste = func() { pane.draft += message }
+	return &fakeExecutor{fn: pane.exec}
 }
 
 // TestNudgeDeliveredVouchesForAPasteWhoseSubmitWasNeverConfirmed is the
@@ -963,18 +919,13 @@ func TestNudgeKeepsUnconfirmedSubmitErrorForRetryingCallers(t *testing.T) {
 // bracketed paste lands but where tmux refuses every submit Enter afterwards
 // (a client that detached between the paste and the submit does this). The
 // payload is in the pane; only the submit is unaccounted for.
-func claudeEnterRefusedExecutor() *fakeExecutor {
+func claudeEnterRefusedExecutor(message string) *fakeExecutor {
+	pane := claudeNeverBusyExecutor(message)
 	return &fakeExecutor{fn: func(args []string) (string, error) {
-		if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
-			return "GC_PROVIDER=claude", nil
-		}
-		if slices.Contains(args, "send-keys") && args[len(args)-1] == "Enter" {
+		if slices.Contains(args, "if-shell") && strings.HasPrefix(args[len(args)-2], "send-keys ") && strings.HasSuffix(args[len(args)-2], " Enter") {
 			return "", errors.New("no current client")
 		}
-		if slices.Contains(args, "capture-pane") {
-			return "❯ ", nil
-		}
-		return "", nil
+		return pane.fn(args)
 	}}
 }
 
@@ -987,7 +938,7 @@ func TestNudgeDeliveredVouchesForAPasteWhoseSubmitEnterWasRefused(t *testing.T) 
 	const message = "post-paste enter refusal"
 
 	p := NewProviderWithConfig(DefaultConfig())
-	p.tm.exec = claudeEnterRefusedExecutor()
+	p.tm.exec = claudeEnterRefusedExecutor(message)
 	p.tm.cfg.NudgeIdleTimeout = 0
 	p.tm.cfg.DebounceMs = 0
 	receipts := collectReceipts(p.tm)

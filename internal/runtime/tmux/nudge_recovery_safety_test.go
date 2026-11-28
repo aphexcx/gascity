@@ -208,6 +208,34 @@ func TestNudgeRecoveryRequiresExactObservedPlaceholder(t *testing.T) {
 }
 
 func TestNudgeRecoveryInlineAndPending(t *testing.T) {
+	t.Run("observed boxed indentation survives recovery reads", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, pane := newRecoveryPane(t)
+			tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+				out, err := pane.exec(args)
+				if out == pane.render() && pane.draft != "" {
+					out = "╭────╮\n│ ❯ " + strings.ReplaceAll(pane.draft, "\n", " │\n│   ") + " │\n╰────╯"
+				}
+				return out, err
+			}}
+			const message = "one\n    two"
+			pane.loseEnter = true
+			d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "", pane.paste(""))
+			if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed {
+				t.Fatalf("staging: delivery=%+v err=%v", d, err)
+			}
+			pane.agePaste(t, time.Minute)
+			pane.options[recoveredNudgeOption("owner")] = "pending:" + runtime.NudgePayloadDigest(message)
+			if status, err := tm.recoveredNudgeStatus(t.Name(), "%0", "owner"); err != nil || status != "" {
+				t.Errorf("pending receipt rejected the unchanged paste: %q, %v", status, err)
+			}
+			pane.loseEnter = false
+			d, err = tm.nudgeSessionDeliveryWith(t.Name(), "next", pane.paste(""))
+			if err != nil || !d.Landed() || !slices.Equal(pane.submitted, []string{message, "next"}) {
+				t.Fatalf("aged recovery: delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+			}
+		})
+	})
 	for _, transient := range []string{"late rendering", "capture failure"} {
 		t.Run(transient, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -1211,6 +1239,213 @@ func TestNudgeUnverifiedClearsConsumedPasteProvenance(t *testing.T) {
 		}
 		if p.options[nudgeDraftPayloadOption] != "" {
 			t.Fatalf("consumed paste retained provenance: %v", p.options)
+		}
+	})
+}
+
+func TestNudgeWaitsForPasteRendering(t *testing.T) {
+	t.Run("busy startup cannot confirm an unseen paste", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, pane := newRecoveryPane(t)
+			pane.busy = true
+			err := sendStartupNudgeWithRetry(t.Context(), func() error {
+				return tm.nudgeStartupSession(t.Name(), "startup prompt", "startup")
+			}, time.Sleep, func() (bool, error) { return pane.busy, nil })
+			if !errors.Is(err, ErrNudgeDraftDeferred) || pane.enters != 0 {
+				t.Fatalf("unseen startup paste: err=%v Enters=%d", err, pane.enters)
+			}
+		})
+	})
+	t.Run("inline whitespace survives composer extraction", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, message, rendered string
+			boxed                   bool
+		}{
+			{"trailing spaces on prompt and continuation", "one  \ntwo  \nthree", "", false},
+			{"nonbreaking space after prompt", "one\u00a0copy", "", false},
+			{"indented boxed continuation", "one\n    two", "", true},
+			{"terminal tab stop", "one\tcopy", "one   copy", false},
+			{"terminal line padding", "one  \ntwo", "one     \ntwo", false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, pane := newRecoveryPane(t)
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						if slices.Contains(args, "show-environment") && args[len(args)-1] == sessionReadyPromptEnvKey {
+							return "GC_READY_PROMPT_PREFIX=❯", nil
+						}
+						if tc.boxed && slices.Contains(args, "capture-pane") && pane.draft != "" {
+							return "╭────╮\n│ ❯ " + strings.ReplaceAll(pane.draft, "\n", " │\n│   ") + " │\n╰────╯", nil
+						}
+						return pane.exec(args)
+					}}
+					d, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, pane.paste(tc.rendered))
+					want := tc.rendered
+					if want == "" {
+						want = tc.message
+					}
+					if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{want}) {
+						t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+					}
+				})
+			})
+		}
+	})
+	for _, sample := range []struct {
+		name, message string
+		missingFooter bool
+	}{
+		{"single line", "hello", false},
+		{"interior blank row", "one\n\ntwo", false},
+		{"last input row resembles footer", "one\n\n────", false},
+		{"missing boundary", "one\n\n────", true},
+	} {
+		t.Run("claude/"+sample.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					result, err := pane.exec(args)
+					if result == pane.render() {
+						input := strings.ReplaceAll(pane.draft, "\n", "\n  ")
+						if input == "" {
+							input = "\x1b[2mExplain this codebase\x1b[22m"
+						}
+						result = "❯ " + input
+						if pane.draft == "" || !sample.missingFooter {
+							result += "\n────"
+						}
+						if pane.busy {
+							result = "esc to interrupt\n" + result
+						}
+					}
+					return result, err
+				}}
+				d, err := tm.nudgeSessionDeliveryWith(t.Name(), sample.message, pane.paste(""))
+				if sample.missingFooter {
+					if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters != 0 ||
+						pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(sample.message) {
+						t.Fatalf("missing boundary: delivery=%+v err=%v enters=%d", d, err, pane.enters)
+					}
+					return
+				}
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{sample.message}) {
+					t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+				}
+			})
+		})
+	}
+	const message = "one\ntwo\nthree"
+	const placeholder = "[Pasted text #1 +2 lines]"
+	for _, tt := range []struct {
+		name        string
+		delay       time.Duration
+		rendered    string
+		busyOnEnter bool
+	}{
+		{"empty until timeout", 0, "", false},
+		{"late collapsed paste", 3 * time.Second, placeholder, true},
+		{"inline paste drains without busy", 0, message, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				const lockTimeout = 10 * time.Second
+				tm.cfg.NudgeLockTimeout = lockTimeout
+				var pasted time.Time
+				visible := false
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					if !pasted.IsZero() && !visible && tt.rendered != "" && time.Since(pasted) >= tt.delay {
+						pane.draft, visible = tt.rendered, true
+					}
+					before := pane.enters
+					output, err := pane.exec(args)
+					if pane.enters != before && !visible {
+						t.Fatalf("Enter before the paste rendered, %s after paste", time.Since(pasted))
+					}
+					return output, err
+				}}
+				pane.afterEnter = func() { pane.busy = tt.busyOnEnter }
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", func(_, text string, _ time.Duration) (int, error) {
+					pasted = time.Now()
+					return len(text), nil
+				})
+				if !d.Delivered || d.Bytes != len(message) {
+					t.Fatalf("paste receipt = %+v, err = %v", d, err)
+				}
+				if tt.rendered == "" {
+					if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters != 0 ||
+						pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(message) || time.Since(pasted) >= lockTimeout {
+						t.Fatalf("unseen paste: %+v err=%v Enters=%d options=%v elapsed=%v", d, err, pane.enters, pane.options, time.Since(pasted))
+					}
+					return
+				}
+				if d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{tt.rendered}) || pane.options[nudgeDraftPayloadOption] != "" {
+					t.Fatalf("rendered paste: %+v err=%v submitted=%q options=%v", d, err, pane.submitted, pane.options)
+				}
+				if (tt.busyOnEnter && err != nil) || (!tt.busyOnEnter && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)) {
+					t.Fatalf("busy on Enter=%v, err=%v", tt.busyOnEnter, err)
+				}
+			})
+		})
+	}
+}
+
+func TestNudgeCodexCapturedComposers(t *testing.T) {
+	// Both frames are from Codex CLI 0.170.0. Text is width-preserving filler.
+	// The private pane also supplied its populated frame. The running pane
+	// was captured read-only, so only its prompt text is replaced on paste.
+	const suggestion = "\x1b[1m›\x1b[0m \x1b[2mxxx xxxxx xx xx xxxxxxxx"
+	const privateFooter = "  xxxxxxxxxxxxx xxxxx · xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  "
+	privateIdle := suggestion + "\n\x1b[0m                          \n" + privateFooter +
+		"\n  \x1b[1m←\x1b[0m xxx xxxxxx · \x1b[1mx\x1b[0m xxx xxxxxxxxx                       ⚠ x xxxxxxx · \x1b[1mxx\x1b[0m xx xxxx"
+	privateDraft := "\x1b[1m›\x1b[0m example input           \n                          \n" + privateFooter +
+		"\n                                                       ⚠ x xxxxxxx · \x1b[1mxx\x1b[0m xx xxxx"
+	liveFooter := "\n\x1b[0m \n  \x1b[38;2;246;226;183mxxxxxxxxxxxxx xxxxx\x1b[39m · \x1b[38;2;171;223;167mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x1b[39m  " +
+		"\n  \x1b[38;2;171;223;167mxxxxxxxxxxxxxxx\x1b[39m · \x1b[38;2;137;180;250mxxx xx xxxxxxx xxxxx\x1b[39m                                        " +
+		"\n  \x1b[1m←\x1b[0m xxx xxxxxx · \x1b[1mx\x1b[0m xxx xxxxxxxxx                      ⚠ \x1b[38;2;196;167;103mx xxxxxxxx\x1b[39m · \x1b[1mxx\x1b[0m xx xxxx"
+	for _, tc := range []struct{ name, idle, draft string }{
+		{"private", privateIdle, privateDraft},
+		{"running", suggestion + liveFooter, "\x1b[1m›\x1b[0m example input" + liveFooter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+					if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+						return "GC_PROVIDER=codex", nil
+					}
+					out, err := pane.exec(args)
+					if out == pane.render() {
+						out = tc.idle
+						if pane.draft != "" {
+							out = tc.draft
+						}
+						if pane.busy {
+							out = "• Working (0s • esc to interrupt)\n" + out
+						}
+					}
+					return out, err
+				}}
+				const message = "example input"
+				d, err := tm.nudgeSessionDeliveryWith(t.Name(), message, pane.paste(""))
+				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pane.enters != 1 ||
+					!slices.Equal(pane.submitted, []string{message}) {
+					t.Fatalf("delivery=%+v err=%v Enters=%d submissions=%q", d, err, pane.enters, pane.submitted)
+				}
+			})
+		})
+	}
+}
+
+func TestNudgeKeepsWrappedPasteWhenEnterIsLost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, p := newRecoveryPane(t)
+		p.loseEnter, p.width = true, 30
+		message := strings.Repeat("a", 28) + strings.Repeat("b", 28)
+		rendered := message[:28] + "\n" + message[28:]
+		d, err := tm.nudgeSessionDeliveryWith(t.Name(), message, p.paste(rendered))
+		if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || p.enters == 0 || p.options[nudgeDraftPayloadOption] == "" {
+			t.Fatalf("delivery=%+v err=%v Enters=%d options=%v", d, err, p.enters, p.options)
 		}
 	})
 }

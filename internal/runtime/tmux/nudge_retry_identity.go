@@ -102,7 +102,8 @@ func (t *Tmux) recoveredNudgeStatus(session, target, id string) (runtime.NudgeSu
 		if err != nil {
 			return "", fmt.Errorf("observing pending recovery: %w", err)
 		}
-		draft, observed := nudgeComposer(content, t.resolveIdlePromptPrefix(session))
+		reading := readNudgeComposer(content, t.resolveIdlePromptPrefix(session), t.submitVerifyFamily(target) == "claude")
+		draft, observed := reading.draft, reading.observed
 		if !observed {
 			return "", fmt.Errorf("%w: pending recovery composer is unreadable", ErrNudgeDraftDeferred)
 		}

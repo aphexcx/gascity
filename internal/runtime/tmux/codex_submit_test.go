@@ -140,9 +140,9 @@ func nudgeSessionSource(t *testing.T) string {
 	}
 	body := string(src)
 	// The delivery body accepts identity and an injected paste function.
-	start := strings.Index(body, "func (t *Tmux) nudgeSessionDeliveryWithIdentity(")
+	start := strings.Index(body, "func (t *Tmux) deliverNudge(")
 	if start < 0 {
-		t.Fatal("nudgeSessionDeliveryWithIdentity (NudgeSession's body) not found in tmux.go")
+		t.Fatal("deliverNudge (NudgeSession's body) not found in tmux.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\nfunc ")

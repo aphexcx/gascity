@@ -44,7 +44,7 @@ func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 // recoverEarlierNudgePaste submits a proven earlier paste once its age and retry
 // reservation permit recovery. Activity with the paste still visible is a hold,
 // not an acknowledgement, and recoverStagedDraft checks before every Enter.
-func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message, requestedID string) (bool, time.Time, error) {
+func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, message, requestedID string, read func(string) composerReading) (bool, time.Time, error) {
 	stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: reading paste ownership: %w", ErrNudgeDraftDeferred, err)
@@ -114,12 +114,12 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, prefix, message,
 			return paneSubmitObservation{}, err
 		}
 		content := strings.Join(lines, "\n")
-		current, ok := nudgeComposer(content, prefix)
-		if !ok || (current != "" && current != draft) {
+		current := read(content)
+		if !current.observed || (current.draft != "" && current.draft != draft) {
 			observeErr = fmt.Errorf("composer changed during owned paste recovery")
 			return paneSubmitObservation{}, observeErr
 		}
-		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current != ""}, nil
+		return paneSubmitObservation{busy: paneContainsBusyIndicator(strings.Split(runtime.RenderPeek(content).Output, "\n")), drafted: current.draft != ""}, nil
 	}
 	send := func() error {
 		if _, _, err := t.nudgeDraftIdentity(session, target, digest); err != nil {
