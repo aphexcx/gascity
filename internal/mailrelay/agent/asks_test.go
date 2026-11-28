@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,6 +83,39 @@ func TestKeyStatementIsPublishedAgain(t *testing.T) {
 		run.stop(t)
 		assertPublishedAfter(t, rel.recorder.all(), func(r recorded) bool { return r.method == http.MethodGet })
 	})
+}
+
+// A relay that refuses the statement put again does not stop the run: mail
+// is still read and filed, and the put is tried again later.
+func TestRefusedKeyStatementPutAgainKeepsTheRunGoing(t *testing.T) {
+	hub, alpha := pair(t)
+	rel := newScriptedRelay()
+	city := newCityAPI(t, "alpha", "reader")
+	var puts, gets atomic.Int32
+	relayTransport := rel.recorder.wrap(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPut && puts.Add(1) > 1:
+			return problem(r, http.StatusForbidden, "forbidden"), nil
+		case r.Method == http.MethodGet && gets.Add(1) == 1:
+			return problem(r, http.StatusServiceUnavailable, "unavailable"), nil
+		}
+		return handlerTransport{rel}.RoundTrip(r)
+	}))
+	rel.add(1, seal(t, hub, alpha, "m-1", time.Now(), letter("reader")))
+	run := start(t, alpha.settings, alpha.deps(relayTransport, city.transport()))
+	rel.recorder.await(t, "the mail, or the run's end", func() bool {
+		return len(city.inbox("reader")) == 1 || len(alpha.log.lines("stop ")) > 0
+	})
+	if lines := alpha.log.lines("stop "); len(lines) != 0 {
+		t.Fatalf("the run ended: %q", lines)
+	}
+	run.stop(t)
+	if n := len(city.inbox("reader")); n != 1 {
+		t.Fatalf("filed %d mails", n)
+	}
+	if len(alpha.log.lines("publish-failed status=403")) == 0 {
+		t.Fatalf("no refused put logged: %q", alpha.log.String())
+	}
 }
 
 // assertPublishedAfter checks that a key statement was put after the first

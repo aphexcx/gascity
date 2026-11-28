@@ -176,9 +176,9 @@ func Run(ctx context.Context, s Settings, d Deps) (err error) {
 	if err := r.publish(ctx); err != nil {
 		return err
 	}
-	err = r.loop(ctx)
+	r.loop(ctx)
 	r.log.printf("stop place=%d", r.in.place)
-	return err
+	return nil
 }
 
 // loadPeers reads the pinned signing keys of the cities this city may mail.
@@ -256,36 +256,59 @@ func (r *receiver) publish(ctx context.Context) error {
 	}
 }
 
+// republish puts the newest key statement on the relay once more, after a
+// sign that the relay lost its store, and reports whether the relay took it.
+// Unlike at start, a refusal does not stop the run: the relay took this
+// statement before, mail can still be read meanwhile, and the put is tried
+// again with the back-off.
+func (r *receiver) republish(ctx context.Context) bool {
+	code, err := r.relay.publish(ctx, r.ring.newestWire)
+	switch {
+	case err == nil && code == http.StatusNoContent:
+		r.log.printf("published key-id=%s issued=%d", r.ring.newest.KeyID, r.ring.newest.Issued)
+		return true
+	case ctx.Err() != nil:
+		return false
+	case err != nil:
+		r.log.printf("publish-failed reason=%s", transportReason(ctx, err))
+	default:
+		r.log.printf("publish-failed status=%d", code)
+	}
+	r.status.degrade("relay: key statement not published")
+	return false
+}
+
 // loop asks, handles each delivery in order, and asks again. The place moves
-// only past a delivery that is filed, passed or dropped. It returns an error
-// only when the relay refuses this city's key statement.
-func (r *receiver) loop(ctx context.Context) error {
-	var relayWait, apiWait, pinsWait backoff
-	var lastAsk time.Time
+// only past a delivery that is filed, passed or dropped.
+func (r *receiver) loop(ctx context.Context) {
+	var relayWait, apiWait, pinsWait, publishWait backoff
+	var lastAsk, publishAt time.Time
 	// A relay that lost its store lost this city's key statement with it,
 	// and a failed read or a place above its counter is how that shows. The
 	// statement is put again before the next ask, or senders are refused.
 	republish := false
 	for ctx.Err() == nil {
-		if republish {
-			if err := r.publish(ctx); err != nil {
-				return err
+		if republish && !r.d.Now().Before(publishAt) {
+			if r.republish(ctx) {
+				republish = false
+				publishWait.reset()
+			} else {
+				publishAt = r.d.Now().Add(publishWait.step())
 			}
-			republish = false
 		}
 		if !lastAsk.IsZero() {
 			if wait := askFloor - r.d.Now().Sub(lastAsk); wait > 0 && r.d.Sleep(ctx, wait) != nil {
-				return nil
+				return
 			}
 		}
 		lastAsk = r.d.Now()
 		batch, out := r.ask(ctx)
 		switch out.kind {
 		case outcomeStopped:
-			return nil
+			return
 		case outcomeBusy:
 			if r.d.Sleep(ctx, busyWait) != nil {
-				return nil
+				return
 			}
 			continue
 		case outcomeError:
@@ -310,14 +333,14 @@ func (r *receiver) loop(ctx context.Context) error {
 			r.status.degrade("relay: last read " + out.kind)
 			republish = true
 			if r.d.Sleep(ctx, relayWait.step()) != nil {
-				return nil
+				return
 			}
 			continue
 		}
 		relayWait.reset()
 		if !r.readPins() {
 			if r.d.Sleep(ctx, pinsWait.step()) != nil {
-				return nil
+				return
 			}
 			continue
 		}
@@ -329,14 +352,14 @@ func (r *receiver) loop(ctx context.Context) error {
 				r.log.printf("state-failed number=%d error=%q", dl.Number, err.Error())
 				r.status.degrade("state: " + err.Error())
 				if r.d.Sleep(ctx, apiWait.step()) != nil {
-					return nil
+					return
 				}
 				handled = false
 				break
 			}
 			if !done {
 				if ctx.Err() == nil && r.d.Sleep(ctx, apiWait.step()) != nil {
-					return nil
+					return
 				}
 				handled = false
 				break
@@ -347,7 +370,6 @@ func (r *receiver) loop(ctx context.Context) error {
 			r.status.degrade("")
 		}
 	}
-	return nil
 }
 
 // ask makes one held read from the place and logs one line for it.
