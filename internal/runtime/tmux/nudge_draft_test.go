@@ -4,6 +4,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestNudgeDraftOwnershipHookPrecedesUserHooks(t *testing.T) {
@@ -164,5 +168,161 @@ func TestNudgeComposer(t *testing.T) {
 				t.Fatalf("composer=(%q, %v), want (%q, %v)", got, observed, tt.want, tt.observed)
 			}
 		})
+	}
+}
+
+// TestNudgeSubmitsPastedTabOnce covers each way a Claude pane can show a tab:
+// Claude Code 2.1.332 replaces every pasted tab with four spaces, and a
+// program that writes the tab byte leaves tmux to keep it or to paint spaces
+// to the next terminal tab stop. The input starts at column 2. A row boundary
+// in a narrow pane stands for one space, as it does for a typed space.
+func TestNudgeSubmitsPastedTabOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, message, rendered string
+		width                   int
+	}{
+		{"four spaces at column 5", "one\tcopy", "one    copy", 0},
+		{"four spaces at column 9", "see the\tfile", "see the    file", 0},
+		{"four spaces on a second row", "run this:\nmake\ttest", "run this:\nmake    test", 0},
+		{"four spaces for two tabs", "one\tcopy\tx", "one    copy    x", 0},
+		{"four spaces split by a wrap", strings.Repeat("a", 20) + "\tB", strings.Repeat("a", 20) + "\n   B", 24},
+		{"four spaces before a padded word wrap", "one\tcopy longword", "one    copy   \nlongword", 16},
+		{"four spaces after leading spaces", "  one\tcopy", "  one    copy", 0},
+		{"four spaces after a joined emoji", "a\U0001F469\u200d\U0001F4BB\tcopy", "a\U0001F469\u200d\U0001F4BB    copy", 0},
+		{"tab stop at column 5", "one\tcopy", "one   copy", 0},
+		{"tab stop at column 9", "see the\tfile", "see the       file", 0},
+		{"tab stop on a second row", "run this:\nmake\ttest", "run this:\nmake  test", 0},
+		{"tab stops for two tabs", "one\tcopy\tx", "one   copy    x", 0},
+		{"tab byte", "one\tcopy", "one\tcopy", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				assertTabNudgeSubmittedOnce(t, tc.message, tc.rendered, "", tc.width)
+			})
+		})
+	}
+}
+
+// TestClaudePastedTabMatchesLikeFourTypedSpaces pins the class: where Claude
+// Code shows a pasted tab as four spaces, a Claude composer matches the tabbed
+// payload exactly where it matches the payload with four typed spaces, on
+// every comparison path and at every width the callers use.
+func TestClaudePastedTabMatchesLikeFourTypedSpaces(t *testing.T) {
+	for _, tc := range []struct {
+		name, message, rows string
+		width               int
+		want                bool
+	}{
+		{"one row", "one\tcopy", "one    copy", 0, true},
+		{"one row in a wide pane", "one\tcopy", "one    copy", 118, true},
+		{"second row", "run this:\nmake\ttest", "run this:\n  make    test", 0, true},
+		{"word wrap", "one\tcopy longword", "one    copy\n  longword", 14, true},
+		{"padded word wrap", "one\tcopy longword", "one    copy   \n  longword", 14, true},
+		{"wrap inside the spaces", strings.Repeat("a", 20) + "\tB", strings.Repeat("a", 20) + "\n     B", 22, true},
+		{"padding before an explicit newline", "one\t\ntwo", "one          \n  two", 118, true},
+		{"five spaces", "one\tcopy", "one     copy", 118, false},
+		{"padded wrap needs a width", "one\tcopy longword", "one    copy   \n  longword", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reading := readNudgeComposer("────\n❯ "+tc.rows+"\n────", "❯", true)
+			typed := strings.ReplaceAll(tc.message, "\t", "    ")
+			if got := reading.matches(typed, tc.width); got != tc.want {
+				t.Fatalf("four typed spaces: matches(%q, %d)=%v, want %v", typed, tc.width, got, tc.want)
+			}
+			if got := reading.matches(tc.message, tc.width); got != tc.want {
+				t.Fatalf("pasted tab: matches(%q, %d)=%v, want %v like four typed spaces", tc.message, tc.width, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNudgeHoldsDraftThatMisrendersPastedTab keeps Enter back when the
+// composer shows neither Claude Code's four spaces nor the terminal tab stop
+// for every tab of the payload.
+func TestNudgeHoldsDraftThatMisrendersPastedTab(t *testing.T) {
+	for _, tc := range []struct{ name, message, rendered string }{
+		{"five spaces", "one\tcopy", "one     copy"},
+		{"two spaces", "one\tcopy", "one  copy"},
+		{"truncated after four spaces", "one\tcopy", "one    cop"},
+		{"four spaces, then a tab stop", "one\tcopy\tx", "one    copy   x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newClaudeTabPane(t, "")
+				d, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, pane.paste(tc.rendered))
+				if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters != 0 || len(pane.submitted) != 0 {
+					t.Fatalf("delivery=%+v err=%v Enters=%d submitted=%q", d, err, pane.enters, pane.submitted)
+				}
+			})
+		})
+	}
+}
+
+// TestNudgeSubmitsCapturedClaudeCodeTabRow holds the composer Claude Code
+// 2.1.332 showed on tmux 3.7b after a bracketed paste of message, with no
+// Enter sent: a nonbreaking space follows the prompt glyph, and four spaces
+// stand where the payload has a tab (gf-hvm9 step 1).
+func TestNudgeSubmitsCapturedClaudeCodeTabRow(t *testing.T) {
+	const message = "tab test, reply with the one word OK: A\tB"
+	const rendered = "tab test, reply with the one word OK: A    B"
+	frame := strings.Repeat("─", 160)
+	synctest.Test(t, func(t *testing.T) {
+		assertTabNudgeSubmittedOnce(t, message, rendered, frame+"\n❯\u00a0"+rendered+"\n"+frame, 160)
+	})
+}
+
+// TestNudgeRetrySubmitsPastedTabDraftOnce resumes a four-space draft whose
+// first Enter was lost: the retry compares the composer to the payload again
+// and must submit the draft without a second paste.
+func TestNudgeRetrySubmitsPastedTabDraftOnce(t *testing.T) {
+	const message, rendered = "one\tcopy", "one    copy"
+	synctest.Test(t, func(t *testing.T) {
+		tm, pane := newClaudeTabPane(t, "")
+		pastes := 0
+		paste := func(target, text string, delay time.Duration) (int, error) {
+			pastes++
+			return pane.paste(rendered)(target, text, delay)
+		}
+		pane.loseEnter = true
+		if d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", paste); err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters == 0 {
+			t.Fatalf("lost Enter: delivery=%+v err=%v Enters=%d", d, err, pane.enters)
+		}
+		pane.loseEnter = false
+		d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), message, "owner", paste)
+		if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 1 || !slices.Equal(pane.submitted, []string{rendered}) {
+			t.Fatalf("retry: delivery=%+v err=%v pastes=%d submitted=%q", d, err, pastes, pane.submitted)
+		}
+	})
+}
+
+// newClaudeTabPane is a Claude pane whose prompt prefix reads back from tmux
+// without its trailing space. A nonempty screen is the whole capture the pane
+// returns while a paste is in its composer.
+func newClaudeTabPane(t *testing.T, screen string) (*Tmux, *recoveryPane) {
+	t.Helper()
+	tm, pane := newRecoveryPane(t)
+	tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+		if slices.Contains(args, "show-environment") && args[len(args)-1] == sessionReadyPromptEnvKey {
+			return sessionReadyPromptEnvKey + "=❯", nil
+		}
+		out, err := pane.exec(args)
+		if screen != "" && pane.draft != "" && out == pane.render() {
+			out = screen
+		}
+		return out, err
+	}}
+	return tm, pane
+}
+
+// assertTabNudgeSubmittedOnce nudges a Claude pane whose composer shows
+// rendered once the paste lands, and expects one Enter and one submission. A
+// zero width keeps the pane's default width.
+func assertTabNudgeSubmittedOnce(t *testing.T, message, rendered, screen string, width int) {
+	t.Helper()
+	tm, pane := newClaudeTabPane(t, screen)
+	pane.width = width
+	d, err := tm.nudgeSessionDeliveryWith(t.Name(), message, pane.paste(rendered))
+	if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || pane.enters != 1 || !slices.Equal(pane.submitted, []string{rendered}) {
+		t.Fatalf("delivery=%+v err=%v Enters=%d submitted=%q", d, err, pane.enters, pane.submitted)
 	}
 }
