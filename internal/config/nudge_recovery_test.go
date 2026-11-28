@@ -32,3 +32,28 @@ func TestSessionOwnPasteRecoveryConfiguration(t *testing.T) {
 		cfg.Session.NudgeReservationAge = "10m"
 	}
 }
+
+func TestSessionNudgeUnseenPasteAgeConfiguration(t *testing.T) {
+	var cfg City
+	if got := cfg.Session.NudgeUnseenPasteAgeDuration(); got != 5*time.Minute {
+		t.Fatalf("default unseen paste age = %s, want 5m", got)
+	}
+	if _, err := toml.Decode("[session]\nnudge_unseen_paste_age = '90s'\n", &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Session.NudgeUnseenPasteAgeDuration(); got != 90*time.Second {
+		t.Fatalf("override ignored: %s", got)
+	}
+	if warnings := ValidateDurations(&cfg, "city.toml"); len(warnings) != 0 {
+		t.Fatalf("valid unseen paste age rejected: %v", warnings)
+	}
+	for _, invalid := range []string{"bad", "0s", "-1s"} {
+		cfg.Session.NudgeUnseenPasteAge = invalid
+		if len(ValidateDurations(&cfg, "city.toml")) == 0 {
+			t.Fatalf("invalid unseen paste age %q accepted", invalid)
+		}
+		if got := cfg.Session.NudgeUnseenPasteAgeDuration(); got != 5*time.Minute {
+			t.Fatalf("invalid unseen paste age %q read as %s, want the 5m the runtime applies", invalid, got)
+		}
+	}
+}

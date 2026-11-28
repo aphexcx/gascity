@@ -130,6 +130,9 @@ type Config struct {
 	NudgeOwnPasteAge time.Duration
 	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
 	NudgeReservationAge time.Duration
+	// NudgeUnseenPasteAge is how long an empty composer, with no client
+	// attached, holds delivery for a full paste it never showed.
+	NudgeUnseenPasteAge time.Duration
 	// NudgeReservationInvalidated checks pending cancellation before retry
 	// staging, recovery, or cleanup. Errors preserve input and cleanup intent;
 	// nil means no external ledger.
@@ -172,6 +175,7 @@ func DefaultConfig() Config {
 		NudgeIdleTimeout:    30 * time.Second,
 		NudgeOwnPasteAge:    15 * time.Second,
 		NudgeReservationAge: 10 * time.Minute,
+		NudgeUnseenPasteAge: 5 * time.Minute,
 		DebounceMs:          500,
 		DisplayMs:           5000,
 	}
@@ -2974,7 +2978,7 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
-			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, message, deliveryID, read)
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, message, deliveryID, waitForRender, read)
 			if !since.IsZero() {
 				heldState, heldSince = "own_paste", since
 			}
@@ -3030,7 +3034,8 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft rendering: %w", deferred, err)
 				}
-				if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); !owned {
+				shape = strings.TrimSpace(shape)
+				if _, owned := ownedPasteShape(strings.TrimSpace(stored), shape, draft); !owned || strings.HasSuffix(shape, ":") {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: placeholder differs from the observed paste", deferred)
 				}
 			}
@@ -3064,10 +3069,16 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 				heldState = "own_paste"
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: draft belongs to another retry owner", ErrNudgeDraftDeferred)
 			}
-		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
-			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		if draft == "" {
+			if waitForRender {
+				if held, err := t.holdForUnseenNudgePaste(target, time.Now()); err != nil {
+					return runtime.NudgeDelivery{Held: held}, err
+				}
+			}
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+			}
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
 				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
 			}

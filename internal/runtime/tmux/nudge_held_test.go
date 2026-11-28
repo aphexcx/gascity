@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -215,12 +216,18 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 
 func TestOwnedPasteShape(t *testing.T) {
 	digest := runtime.NudgePayloadDigest("one\ntwo\nthree")
-	shape := digest + ":1700000000000:2:" + digest + ":" + runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")
+	staged := digest + ":1700000000000:2:" + digest + ":"
+	shape := staged + runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")
 	for _, tc := range []struct {
 		name, stored, shape, draft string
 		want                       bool
 	}{
 		{"owned", digest, shape, "[Pasted text #12 +2 lines]", true},
+		{"late rendering", digest, staged, "[Pasted text #12 +2 lines]", true},
+		{"late wrong count", digest, staged, "[Pasted text #12 +3 lines]", false},
+		{"late two placeholders", digest, staged, "[Pasted text #12 +2 lines]\n[Pasted text #13]", false},
+		{"late attached", "attached:" + digest, staged, "[Pasted text #12 +2 lines]", false},
+		{"late inline", digest, staged, "one\ntwo\nthree", false},
 		{"wrong count", digest, shape, "[Pasted text #12 +3 lines]", false},
 		{"no provenance", "", shape, "[Pasted text #12 +2 lines]", false},
 		{"pending observed", "pending:" + digest, shape, "[Pasted text #12 +2 lines]", true},
@@ -241,6 +248,217 @@ func TestOwnedPasteShape(t *testing.T) {
 			}
 		})
 	}
+	t.Run("record rendering before retry", checkRecoveryBindsLatePlaceholder)
+	t.Run("unseen paste age limit", checkUnseenPasteAgeLimit)
+	t.Run("unseen paste retirement guards", checkUnseenPasteRetirementGuards)
+	t.Run("empty composer before late render", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, pane := newRecoveryPane(t)
+			const first = "one\ntwo\nthree"
+			receipt, err := tm.nudgeSessionDeliveryWith(t.Name(), first, func(_, text string, _ time.Duration) (int, error) {
+				return len(text), nil
+			})
+			if err != nil || receipt.Submit != runtime.NudgeSubmitUnconfirmed {
+				t.Fatalf("unseen first paste: %+v, %v", receipt, err)
+			}
+			shape := pane.options[nudgeDraftShapeOption]
+			for _, next := range []string{first, "next"} {
+				_, err := tm.nudgeSessionDeliveryWith(t.Name(), next, func(_, _ string, _ time.Duration) (int, error) {
+					t.Fatal("second paste before the first rendered")
+					return 0, nil
+				})
+				if !errors.Is(err, runtime.ErrNudgeDraftUnmatched) {
+					t.Fatalf("expected a queue hold for the unrendered paste, got %v", err)
+				}
+				if !errors.Is(err, ErrNudgeDraftDeferred) || pane.enters != 0 ||
+					pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(first) || pane.options[nudgeDraftShapeOption] != shape {
+					t.Fatalf("lost pending rendering: options=%v enters=%d err=%v", pane.options, pane.enters, err)
+				}
+			}
+		})
+	})
+}
+
+// An accepted paste that Claude never shows holds an empty composer for a
+// bounded time. Every held attempt carries a hold receipt, nothing is pasted
+// twice, and at the limit the mark is retired and the queue is delivered again.
+func checkUnseenPasteAgeLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, pane := newRecoveryPane(t)
+		limit := DefaultConfig().NudgeUnseenPasteAge
+		if limit != 5*time.Minute {
+			t.Fatalf("default unseen paste age = %s, want 5m", limit)
+		}
+		const first, second, third = "one\ntwo\nthree", "four\nfive\nsix", "seven"
+		accepted := func(_, text string, _ time.Duration) (int, error) { return len(text), nil }
+		refused := func(_, _ string, _ time.Duration) (int, error) {
+			t.Fatal("pasted again while the earlier paste could still render")
+			return 0, nil
+		}
+		receipt, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), first, "queue-A", accepted)
+		if err != nil || receipt.Submit != runtime.NudgeSubmitUnconfirmed {
+			t.Fatalf("unseen first paste: %+v, %v", receipt, err)
+		}
+		mark, shape := pane.options[nudgeDraftPayloadOption], pane.options[nudgeDraftShapeOption]
+		if mark != runtime.NudgePayloadDigest(first) || !strings.HasSuffix(shape, ":") {
+			t.Fatalf("unseen paste left no mark: payload=%q shape=%q", mark, shape)
+		}
+
+		// The clock starts at the first read of the empty composer, not at the paste.
+		held := func(since time.Time) *runtime.NudgeHeld {
+			t.Helper()
+			var last *runtime.NudgeHeld
+			for _, next := range [][2]string{{first, "queue-A"}, {second, "queue-B"}} {
+				d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), next[0], next[1], refused)
+				if !errors.Is(err, ErrNudgeDraftDeferred) || !errors.Is(err, runtime.ErrNudgeDraftUnmatched) || !errors.Is(err, runtime.ErrNudgePasteUnseen) {
+					t.Fatalf("want a hold on the unseen paste, got %v", err)
+				}
+				if d.Landed() || d.Held == nil || d.Held.State != "own_paste" || (!since.IsZero() && !d.Held.Since.Equal(since)) {
+					t.Fatalf("hold receipt = %+v (landed=%t), want own_paste since %s", d.Held, d.Landed(), since)
+				}
+				if pane.enters != 0 || pane.options[nudgeDraftPayloadOption] != mark || pane.options[nudgeDraftShapeOption] != shape {
+					t.Fatalf("hold touched the pane: enters=%d options=%v", pane.enters, pane.options)
+				}
+				last, since = d.Held, d.Held.Since
+			}
+			return last
+		}
+		before := time.Now()
+		if seen := held(time.Time{}); seen.Since.Before(before) || seen.AgeMS > time.Second.Milliseconds() {
+			t.Fatalf("first sighting = %+v, want it at the first held attempt (%s)", seen, before)
+		}
+		for _, age := range []time.Duration{time.Minute, limit / 2, limit - time.Second} {
+			since := pane.ageHold(t, age)
+			if got := held(since); got.AgeMS < age.Milliseconds() || got.AgeMS >= limit.Milliseconds() {
+				t.Fatalf("hold aged %s reported %+v", age, got)
+			}
+		}
+		pane.ageHold(t, limit)
+
+		// At the limit the mark is retired and the held item is pasted once.
+		pastes := 0
+		shown := func(rendered string) func(string, string, time.Duration) (int, error) {
+			paste := pane.paste(rendered)
+			return func(target, text string, timeout time.Duration) (int, error) {
+				pastes++
+				return paste(target, text, timeout)
+			}
+		}
+		d, err := tm.nudgeSessionDeliveryWithIdentity(t.Name(), first, "queue-A", shown("[Pasted text #1 +2 lines]"))
+		if err != nil || !d.Landed() || d.Held != nil || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 1 {
+			t.Fatalf("held item after the limit: delivery=%+v err=%v pastes=%d", d, err, pastes)
+		}
+		pane.busy = false
+		d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), second, "queue-B", shown("[Pasted text #2 +2 lines]"))
+		if err != nil || !d.Landed() || d.Submit != runtime.NudgeSubmitConfirmed || pastes != 2 {
+			t.Fatalf("item behind the held one: delivery=%+v err=%v pastes=%d", d, err, pastes)
+		}
+		if want := []string{"[Pasted text #1 +2 lines]", "[Pasted text #2 +2 lines]"}; !slices.Equal(pane.submitted, want) {
+			t.Fatalf("submitted %q, want each item exactly once: %q", pane.submitted, want)
+		}
+
+		// The lost paste shows up after its mark was retired. It is a draft
+		// without provenance: held, never submitted.
+		pane.busy, pane.draft = false, "[Pasted text #3 +2 lines]"
+		enters := pane.enters
+		d, err = tm.nudgeSessionDeliveryWithIdentity(t.Name(), third, "queue-C", refused)
+		if !errors.Is(err, ErrNudgeDraftDeferred) || !errors.Is(err, runtime.ErrNudgeDraftUnowned) || errors.Is(err, runtime.ErrNudgePasteUnseen) {
+			t.Fatalf("late paste after retirement: want an unowned draft hold, got %v", err)
+		}
+		if d.Landed() || d.Held == nil || d.Held.State != "unowned_draft" || pane.enters != enters || pane.draft != "[Pasted text #3 +2 lines]" {
+			t.Fatalf("late paste after retirement: delivery=%+v enters=%d (was %d) draft=%q", d, pane.enters, enters, pane.draft)
+		}
+	})
+}
+
+// The limit runs only while no client is attached, and a mark that changed
+// under the check is left alone.
+func checkUnseenPasteRetirementGuards(t *testing.T) {
+	for _, tc := range []string{"client attached", "mark replaced"} {
+		t.Run(tc, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tm, pane := newRecoveryPane(t)
+				const first = "one\ntwo\nthree"
+				if _, err := tm.nudgeSessionDeliveryWith(t.Name(), first, func(_, text string, _ time.Duration) (int, error) { return len(text), nil }); err != nil {
+					t.Fatal(err)
+				}
+				refused := func(_, _ string, _ time.Duration) (int, error) {
+					t.Fatal("pasted while the unseen mark still stood")
+					return 0, nil
+				}
+				if _, err := tm.nudgeSessionDeliveryWith(t.Name(), "next", refused); !errors.Is(err, runtime.ErrNudgePasteUnseen) {
+					t.Fatalf("first sighting: %v", err)
+				}
+				pane.ageHold(t, 2*DefaultConfig().NudgeUnseenPasteAge)
+				mark := pane.options[nudgeDraftPayloadOption]
+				if tc == "client attached" {
+					pane.attached = true
+				} else {
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						if command := strings.Join(args, " "); slices.Contains(args, "if-shell") && strings.Contains(command, "session_attached") && strings.Contains(command, nudgeDraftShapeOption) {
+							pane.agePaste(t, time.Second) // another paste restaged the mark after it was read
+						}
+						return pane.exec(args)
+					}}
+				}
+				d, err := tm.nudgeSessionDeliveryWith(t.Name(), "next", refused)
+				if !errors.Is(err, runtime.ErrNudgePasteUnseen) || d.Held == nil || pane.enters != 0 {
+					t.Fatalf("retired without proof: delivery=%+v err=%v enters=%d", d, err, pane.enters)
+				}
+				if pane.options[nudgeDraftPayloadOption] != mark {
+					t.Fatalf("mark retired without proof: %q", pane.options[nudgeDraftPayloadOption])
+				}
+			})
+		})
+	}
+}
+
+// ageHold moves the recorded first sighting of the current hold into the past.
+func (p *recoveryPane) ageHold(t *testing.T, age time.Duration) time.Time {
+	t.Helper()
+	parts := strings.Split(p.options[nudgeHeldOption], ":")
+	if len(parts) != 3 {
+		t.Fatalf("cannot age an unrecorded hold: %q", p.options[nudgeHeldOption])
+	}
+	since := time.Now().Add(-age).Truncate(time.Millisecond)
+	parts[2] = strconv.FormatInt(since.UnixMilli(), 10)
+	p.options[nudgeHeldOption] = strings.Join(parts, ":")
+	return since
+}
+
+func checkRecoveryBindsLatePlaceholder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, pane := newRecoveryPane(t)
+		const message = "one\ntwo\nthree"
+		digest := runtime.NudgePayloadDigest(message)
+		staged := fmt.Sprintf("%s:%d:2:%s:", digest, time.Now().UnixMilli(), digest)
+		pane.options[nudgeDraftPayloadOption] = digest
+		pane.options[nudgeDraftShapeOption] = staged
+		pane.options[nudgeDraftIdentityOption] = digest + ":"
+		pane.draft = "[Pasted text #1 +2 lines]"
+		recoverPaste := func() (bool, error) {
+			read := func(content string) composerReading {
+				return readNudgeComposer(content, DefaultReadyPromptPrefix, true)
+			}
+			owned, _, err := tm.recoverEarlierNudgePaste(t.Name(), "%0", pane.draft, "new message", "", true, read)
+			return owned, err
+		}
+		if recovered, err := recoverPaste(); recovered || !errors.Is(err, ErrNudgeDraftDeferred) || pane.enters != 0 {
+			t.Fatalf("young paste: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+		if got := pane.options[nudgeDraftShapeOption]; got != staged+runtime.NudgePayloadDigest(pane.draft) {
+			t.Fatalf("late rendering not recorded: %q", got)
+		}
+		pane.agePaste(t, time.Minute)
+		pane.draft = "[Pasted text #2 +2 lines]"
+		if recovered, err := recoverPaste(); recovered || err != nil || pane.enters != 0 {
+			t.Fatalf("changed placeholder: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+		pane.draft = "[Pasted text #1 +2 lines]"
+		if recovered, err := recoverPaste(); !recovered || err != nil || pane.enters != 1 {
+			t.Fatalf("confirmed late paste: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+	})
 }
 
 func TestNudgeHeldAgeAndStateChangeLogging(t *testing.T) {

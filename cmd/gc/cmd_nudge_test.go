@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -4847,6 +4848,27 @@ func TestRecordQueuedNudgeFailureRequeuesClaimedNudge(t *testing.T) {
 }
 
 func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
+	t.Run("older bounded hold keeps its original queue lifetime", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("GC_BEADS", "file")
+		now := time.Now().UTC()
+		item := newQueuedNudge("worker", "waiting reminder", now.Add(-time.Hour))
+		originalExpiry := item.ExpiresAt
+		item.Attempts = 3
+		item.LastAttemptAt = now.Add(-10 * time.Minute)
+		item.ExpiresAt = item.LastAttemptAt.Add(time.Minute)
+		item.LastError = fmt.Sprintf("%v; after 3 attempts; resolve the preserved pane input before retrying", runtime.ErrNudgeDraftUnowned)
+		if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+			state.Pending = []queuedNudge{item}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		pending, _, dead, err := listQueuedNudges(dir, "worker", now)
+		if err != nil || len(dead) != 0 || len(pending) != 1 || !originalExpiry.Equal(pending[0].ExpiresAt) {
+			t.Fatalf("pending=%+v dead=%+v err=%v", pending, dead, err)
+		}
+	})
 	checkNotification := func(t *testing.T) func(queuedNudge) {
 		t.Helper()
 		var warnings bytes.Buffer
@@ -4862,9 +4884,6 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 			t.Helper()
 			if len(notifications) != 1 || strings.Count(warnings.String(), "dead-lettered") != 1 {
 				t.Fatalf("want one terminal notification: mails=%d warnings=%q", len(notifications), warnings.String())
-			}
-			if strings.Contains(item.LastError, "preserved pane input") && !strings.Contains(warnings.String(), "automatic hold expires at") {
-				t.Fatalf("bounded hold warning missing: %q", warnings.String())
 			}
 			notified := <-notifications
 			_, body := nudgeDeadLetterMail(notified)
@@ -4899,6 +4918,10 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 	})
 	for _, cause := range []error{context.DeadlineExceeded, errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned), errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)} {
 		t.Run(cause.Error(), func(t *testing.T) {
+			if isNudgeDraftHold(cause) {
+				checkQueuedDraftHold(t, cause, 5*time.Second)
+				return
+			}
 			check := checkNotification(t)
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
@@ -4930,9 +4953,6 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 				t.Fatalf("attempts = %d, want %d", dead[0].Attempts, defaultQueuedNudgeMaxAttempts)
 			}
 			wantReason := cause.Error()
-			if errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched) {
-				wantReason += "; after 5 attempts; resolve the preserved pane input before retrying"
-			}
 			if dead[0].LastError != wantReason {
 				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, wantReason)
 			}
@@ -4940,38 +4960,485 @@ func TestQueuedNudgeFailureMovesToDeadLetter(t *testing.T) {
 		})
 	}
 	for _, draftCause := range []error{runtime.ErrNudgeDraftUnowned, runtime.ErrNudgeDraftUnmatched} {
-		t.Run(draftCause.Error()+" expires with a visible reason even without five retries", func(t *testing.T) {
-			check := checkNotification(t)
-			t.Setenv("GC_BEADS", "file")
-			dir := t.TempDir()
-			now := time.Now()
-			item := newQueuedNudge("worker", "preserved reminder", now)
-			if err := enqueueQueuedNudge(dir, item); err != nil {
-				t.Fatal(err)
-			}
-			cause := errors.Join(tmux.ErrNudgeDraftDeferred, draftCause)
-			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now); err != nil {
-				t.Fatal(err)
-			}
-			// A subsequent persisted retry must not extend the first hold.
-			if err := recordQueuedNudgeFailure(dir, []string{item.ID}, cause, now.Add(15*time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			pending, _, _, err := listQueuedNudges(dir, "worker", now.Add(59*time.Second))
-			if err != nil || len(pending) != 1 || !pending[0].ExpiresAt.Equal(now.Add(time.Minute)) {
-				t.Fatalf("pending=%+v err=%v, want hold bounded at one minute", pending, err)
-			}
-			pending, inFlight, dead, err := listQueuedNudges(dir, "worker", now.Add(time.Minute))
-			if err != nil || len(pending) != 0 || len(inFlight) != 0 || len(dead) != 1 {
-				t.Fatalf("pending=%+v inFlight=%+v dead=%+v err=%v", pending, inFlight, dead, err)
-			}
-			wantReason := cause.Error() + "; after 2 attempts; resolve the preserved pane input before retrying"
-			if dead[0].LastError != wantReason {
-				t.Fatalf("terminal reason = %q, want %q", dead[0].LastError, wantReason)
-			}
-			check(dead[0])
+		t.Run(draftCause.Error()+" survives a minute without exhausting retries", func(t *testing.T) {
+			checkQueuedDraftHold(t, draftCause, 30*time.Second)
 		})
 	}
+}
+
+func checkQueuedDraftHold(t *testing.T, cause error, interval time.Duration) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION", "fake")
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname='hold-test'\n[beads]\nprovider='file'\n[session]\npark_alert_to='operator'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+	sessionBead, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "template": "worker", "continuation_epoch": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-2 * time.Minute)
+	opts := queuedNudgeOptions{SessionID: sessionBead.ID, SessionName: "worker", ContinuationEpoch: "1"}
+	var ids []string
+	target := nudgeTarget{cityPath: dir, sessionName: "worker", sessionID: sessionBead.ID, continuationEpoch: "1"}
+	for i := range 5 {
+		fence := opts
+		switch i {
+		case 0:
+			fence.ContinuationEpoch = "previous"
+		case 1:
+			fence = queuedNudgeOptions{}
+		}
+		item := newQueuedNudgeWithOptions("worker", "queued reminder", "session", now, fence)
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, item.ID)
+	}
+	mailbox := beadmail.New(store)
+	for elapsed := time.Duration(0); elapsed <= time.Minute+interval; elapsed += interval {
+		// Exercise separately persisted items, including several attempts
+		// at the same threshold. All five share one session notice.
+		for _, id := range ids {
+			if _, err := recordQueuedNudgeFailureForTarget(target, beads.NudgesStore{Store: store}, []string{id}, errors.Join(tmux.ErrNudgeDraftDeferred, cause), now.Add(elapsed)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		letters, err := mailbox.Inbox("operator")
+		want := 0
+		if elapsed >= time.Minute {
+			want = 1
+		}
+		if err != nil || len(letters) != want || (want == 1 && !strings.Contains(letters[0].Subject, "HOLD")) {
+			t.Fatalf("at %s: letters=%+v err=%v", elapsed, letters, err)
+		}
+	}
+	var out, diag bytes.Buffer
+	if code := cmdNudgeStatus([]string{sessionBead.ID}, true, &out, &diag); code != 0 {
+		t.Fatalf("status: %d %s", code, &diag)
+	}
+	var status nudgeStatusJSON
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.DraftHold == nil || !status.DraftHold.Since.Equal(now) || status.Counts != (nudgeStatusCounts{Pending: 5}) {
+		t.Fatalf("held session status: %s", &out)
+	}
+	// A crash can lose the local receipt even if the recipient has
+	// already archived the notice. Retry the same episode in both states.
+	for _, want := range []int{1, 0} {
+		if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+			hold := state.DraftHolds[target.sessionName]
+			hold.NotifiedAt = time.Time{}
+			state.DraftHolds[target.sessionName] = hold
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := recordQueuedNudgeFailureForTarget(target, beads.NudgesStore{Store: store}, ids, cause, now.Add(2*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		letters, err := mailbox.Inbox("operator")
+		if err != nil || len(letters) != want {
+			t.Fatalf("retried notice: want %d live, got %+v, err=%v", want, letters, err)
+		}
+		if want == 1 {
+			if err := mailbox.Archive(letters[0].ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, item := range status.Pending {
+		if !item.ExpiresAt.Equal(now.Add(defaultQueuedNudgeTTL)) {
+			t.Fatalf("hold changed item expiry: %s", item.ExpiresAt)
+		}
+	}
+	if err := ackQueuedNudgesWithOutcome(dir, ids[:1], "injected_unobserved", "", "provider-nudge-return"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.DraftHolds) != 0 || len(state.Pending) != 4 {
+		t.Fatalf("a proven submit must resolve the hold: holds=%+v pending=%d err=%v", state.DraftHolds, len(state.Pending), err)
+	}
+}
+
+// Two live sessions match one selector. The first claims an unfenced item and
+// its composer refuses it. Recording that hold leaves the item's routing as it
+// was, so the other session can still take the item.
+func TestDraftHoldKeepsItemRouting(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-1": {}, "gc-2": {}}
+	}
+	item := newQueuedNudge("worker", "shared reminder", time.Now().Add(-time.Minute))
+	if item.SessionID != "" || item.ContinuationEpoch != "" {
+		t.Fatalf("fixture must be unfenced: %+v", item)
+	}
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatal(err)
+	}
+	first := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-1", continuationEpoch: "1", sessionName: "worker-1"}
+	second := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-2", continuationEpoch: "1", sessionName: "worker-2"}
+	routing := func() (string, *nudgeQueueState) {
+		t.Helper()
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, saved := range append(append([]queuedNudge(nil), state.Pending...), state.InFlight...) {
+			if saved.ID == item.ID {
+				fields, err := json.Marshal([]string{saved.Agent, saved.SessionID, saved.SessionName, saved.ContinuationEpoch})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(fields), &state
+			}
+		}
+		t.Fatalf("item %s left the queue: %+v", item.ID, state)
+		return "", nil
+	}
+
+	now := time.Now()
+	claimed, err := claimDueQueuedNudgesForTarget(dir, first, now)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("first session claim = %+v, err=%v", claimed, err)
+	}
+	before, _ := routing()
+	cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	if _, err := recordQueuedNudgeFailureForTarget(first, beads.NudgesStore{}, []string{item.ID}, cause, now); err != nil {
+		t.Fatal(err)
+	}
+	after, state := routing()
+	if after != before {
+		t.Fatalf("recording a hold rewrote the item's routing:\n before %s\n after  %s", before, after)
+	}
+	if want := `["worker","","worker-1",""]`; after != want {
+		t.Fatalf("saved routing = %s, want the unfenced item with only its claim label: %s", after, want)
+	}
+	hold, ok := state.DraftHolds["worker-1"]
+	if !ok || hold.SessionID != "gc-1" || hold.ContinuationEpoch != "1" || len(hold.Items) != 1 || hold.Items[0] != item.ID {
+		t.Fatalf("hold must name the session that read the composer and the held item: %+v", state.DraftHolds)
+	}
+	if got := draftHoldForTarget(state, first, state.Pending); got == nil {
+		t.Fatal("the refusing session's status lost its hold")
+	}
+	if got := draftHoldForTarget(state, second, state.Pending); got != nil {
+		t.Fatalf("the other session's status shows a hold it never met: %+v", got)
+	}
+
+	retry := now.Add(defaultQueuedNudgeRetryDelay + time.Second)
+	claimed, err = claimDueQueuedNudgesForTarget(dir, second, retry)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("the other session could not take the held item: claimed=%+v err=%v", claimed, err)
+	}
+	if deliverable, rejected := splitQueuedNudgesForTarget(second, claimed); len(deliverable) != 1 || len(rejected) != 0 {
+		t.Fatalf("the other session rejected the held item: deliverable=%+v rejected=%+v", deliverable, rejected)
+	}
+	if err := ackQueuedNudges(dir, []string{item.ID}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := nudgequeue.LoadState(dir)
+	if err != nil || len(final.Pending)+len(final.InFlight) != 0 || len(final.DraftHolds) != 0 {
+		t.Fatalf("after the other session delivered it: state=%+v err=%v", final, err)
+	}
+}
+
+// A superseded item keeps its own fence when the successor's composer refuses
+// it. The hold still lasts while the item waits and ends on its proven submit.
+func TestDraftHoldOutlivesItemsWithAnotherFence(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return map[string]struct{}{"gc-new": {}} }
+	item := newQueuedNudgeWithOptions("worker", "predecessor reminder", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "gc-old", ContinuationEpoch: "1"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatal(err)
+	}
+	successor := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-new", continuationEpoch: "2", sessionName: "worker"}
+	cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	now := time.Now()
+	var since time.Time
+	for attempt := range 3 {
+		at := now.Add(time.Duration(attempt) * (defaultQueuedNudgeRetryDelay + time.Second))
+		claimed, err := claimDueQueuedNudgesForTarget(dir, successor, at)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("attempt %d: claimed=%+v err=%v", attempt, claimed, err)
+		}
+		if _, err := recordQueuedNudgeFailureForTarget(successor, beads.NudgesStore{}, []string{item.ID}, cause, at); err != nil {
+			t.Fatal(err)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil || len(state.Pending) != 1 || state.Pending[0].SessionID != "gc-old" || state.Pending[0].ContinuationEpoch != "1" {
+			t.Fatalf("attempt %d: the item's own fence changed: %+v err=%v", attempt, state.Pending, err)
+		}
+		hold, ok := state.DraftHolds["worker"]
+		if !ok || hold.SessionID != "gc-new" {
+			t.Fatalf("attempt %d: hold lost between refusals: %+v", attempt, state.DraftHolds)
+		}
+		if attempt == 0 {
+			since = hold.Since
+		} else if !hold.Since.Equal(since) {
+			t.Fatalf("attempt %d: hold restarted at %s, want one episode since %s", attempt, hold.Since, since)
+		}
+	}
+	if _, err := claimDueQueuedNudgesForTarget(dir, successor, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ackQueuedNudges(dir, []string{item.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := nudgequeue.LoadState(dir); err != nil || len(state.DraftHolds) != 0 {
+		t.Fatalf("a proven submit must end the hold: %+v err=%v", state.DraftHolds, err)
+	}
+}
+
+// One draft holds one session. The held batch leaves the queue undelivered
+// while another item waits behind it: the hold and its one notice stand.
+func TestDraftHoldOutlivesItsHeldBatch(t *testing.T) {
+	dir, store, target := newDraftHoldNoticeCity(t, "")
+	mailbox := beadmail.New(store)
+	start := time.Now().UTC().Add(-time.Hour)
+	unowned := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	enqueue := func(message string) string {
+		t.Helper()
+		item := newQueuedNudgeWithOptions("worker", message, "session", start, queuedNudgeOptions{SessionID: target.sessionID, SessionName: "worker", ContinuationEpoch: "1"})
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatal(err)
+		}
+		return item.ID
+	}
+	refuse := func(id string, after time.Duration) {
+		t.Helper()
+		if _, err := recordQueuedNudgeFailureForTarget(target, beads.NudgesStore{Store: store}, []string{id}, unowned, start.Add(after)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices := func() int {
+		t.Helper()
+		letters, err := mailbox.Inbox("operator")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(letters)
+	}
+	held, behind := enqueue("held reminder"), enqueue("waiting reminder")
+	refuse(held, 0)
+	refuse(held, time.Minute)
+	if got := notices(); got != 1 {
+		t.Fatalf("notices after the delay = %d, want 1", got)
+	}
+	// The held item is withdrawn. The other item was never attempted.
+	if err := ackQueuedNudgesWithOutcome(dir, []string{held}, "failed", "withdrawn", "delivery-withdrawn"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Pending) != 1 || state.Pending[0].ID != behind {
+		t.Fatalf("queue after the withdrawal: %+v err=%v", state.Pending, err)
+	}
+	if hold, ok := state.DraftHolds["worker"]; !ok || !hold.Since.Equal(start) || hold.NotifiedAt.IsZero() {
+		t.Fatalf("the hold ended with its held batch while an item still waits: %+v", state.DraftHolds)
+	}
+	for _, after := range []time.Duration{2 * time.Minute, 4 * time.Minute, time.Hour} {
+		refuse(behind, after)
+	}
+	state, err = nudgequeue.LoadState(dir)
+	if err != nil || !state.DraftHolds["worker"].Since.Equal(start) || len(state.DraftHolds["worker"].Items) != 1 {
+		t.Fatalf("one draft must stay one hold: %+v err=%v", state.DraftHolds, err)
+	}
+	if got := notices(); got != 1 {
+		t.Fatalf("one draft, one session, never emptied: notices = %d, want 1", got)
+	}
+
+	// A hold saved without its item list is kept while its session's item waits.
+	if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+		hold := state.DraftHolds["worker"]
+		hold.Items = nil
+		state.DraftHolds["worker"] = hold
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err = nudgequeue.LoadState(dir); err != nil || !state.DraftHolds["worker"].Since.Equal(start) {
+		t.Fatalf("a hold without an item list was dropped: %+v err=%v", state.DraftHolds, err)
+	}
+	status, err := readNudgeStatus(dir, target, start, clock.Real{})
+	if err != nil || status.DraftHold == nil {
+		t.Fatalf("status lost the hold: %+v err=%v", status.DraftHold, err)
+	}
+}
+
+func newDraftHoldNoticeCity(t *testing.T, sessionConfig string) (string, beads.Store, nudgeTarget) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION", "fake")
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname='hold-test'\n[beads]\nprovider='file'\n[session]\npark_alert_to='operator'\n"+sessionConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+	sessionBead, err := store.Create(beads.Bead{
+		Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "template": "worker", "continuation_epoch": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, store, nudgeTarget{cityPath: dir, sessionName: "worker", sessionID: sessionBead.ID, continuationEpoch: "1"}
+}
+
+const (
+	draftHoldNoticeDraftText = "Queued nudges for worker are waiting on preserved composer input. Inspect the draft and resolve it to resume delivery. Do not press Enter by hand on gc's own stuck paste: gc cannot see that submit and delivers a second copy once the box empties, so clear the box instead and gc delivers the held nudges itself. Run gc nudge status worker --json to see the queue."
+	draftHoldNoticeEmptyText = "Queued nudges for worker are waiting on an empty composer: the box is empty, and gc's last paste was accepted by the terminal but never shown. There is no draft to resolve. The hold ends by itself once the box has stayed empty with no client attached for 7m0s (session.nudge_unseen_paste_age); gc then treats that paste as lost and delivers the queue again. Run gc nudge status worker --json to see the queue."
+)
+
+// The hold notice says what is in the box. A hold on an empty box and a hold
+// on a draft each send their own text, once.
+func TestDraftHoldNoticeSaysWhatIsThere(t *testing.T) {
+	unseen := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, runtime.ErrNudgePasteUnseen)
+	unowned := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	type fixture struct {
+		dir     string
+		store   beads.Store
+		target  nudgeTarget
+		mailbox *beadmail.Provider
+		start   time.Time
+	}
+	setup := func(t *testing.T) fixture {
+		dir, store, target := newDraftHoldNoticeCity(t, "nudge_unseen_paste_age='7m'\n")
+		return fixture{dir, store, target, beadmail.New(store), time.Now().UTC().Add(-time.Hour)}
+	}
+	enqueue := func(t *testing.T, f fixture, message string) string {
+		t.Helper()
+		item := newQueuedNudgeWithOptions("worker", message, "session", f.start, queuedNudgeOptions{SessionID: f.target.sessionID, SessionName: "worker", ContinuationEpoch: "1"})
+		if err := enqueueQueuedNudge(f.dir, item); err != nil {
+			t.Fatal(err)
+		}
+		return item.ID
+	}
+	refuse := func(t *testing.T, f fixture, cause error, after time.Duration, ids ...string) {
+		t.Helper()
+		if _, err := recordQueuedNudgeFailureForTarget(f.target, beads.NudgesStore{Store: f.store}, ids, cause, f.start.Add(after)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bodies := func(t *testing.T, f fixture) []string {
+		t.Helper()
+		letters, err := f.mailbox.Inbox("operator")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, letter := range letters {
+			if letter.Subject != "NUDGE HOLD: worker" {
+				t.Fatalf("unexpected subject %q", letter.Subject)
+			}
+			got = append(got, letter.Body)
+		}
+		return got
+	}
+	holdStatus := func(t *testing.T, f fixture) *nudgequeue.DraftHold {
+		t.Helper()
+		status, err := readNudgeStatus(f.dir, f.target, f.start, clock.Real{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return status.DraftHold
+	}
+
+	t.Run("a draft in the box", func(t *testing.T) {
+		f := setup(t)
+		id := enqueue(t, f, "held reminder")
+		refuse(t, f, unowned, 0, id)
+		if got := bodies(t, f); len(got) != 0 {
+			t.Fatalf("notice before the delay: %q", got)
+		}
+		for _, after := range []time.Duration{time.Minute, 2 * time.Minute, time.Hour} {
+			refuse(t, f, unowned, after, id)
+		}
+		if got := bodies(t, f); len(got) != 1 || got[0] != draftHoldNoticeDraftText {
+			t.Fatalf("draft hold notice = %q\nwant one: %q", got, draftHoldNoticeDraftText)
+		}
+		if hold := holdStatus(t, f); hold == nil || hold.PasteUnseen {
+			t.Fatalf("status of a draft hold: %+v", hold)
+		}
+	})
+
+	t.Run("an empty box, then the lost paste shows up after delivery resumed", func(t *testing.T) {
+		f := setup(t)
+		held, behind := enqueue(t, f, "held reminder"), enqueue(t, f, "next reminder")
+		refuse(t, f, unseen, 0, held, behind)
+		if got := bodies(t, f); len(got) != 0 {
+			t.Fatalf("notice before the delay: %q", got)
+		}
+		for _, after := range []time.Duration{time.Minute, 2 * time.Minute, 6 * time.Minute} {
+			refuse(t, f, unseen, after, held, behind)
+		}
+		if got := bodies(t, f); len(got) != 1 || got[0] != draftHoldNoticeEmptyText {
+			t.Fatalf("empty-box hold notice = %q\nwant one: %q", got, draftHoldNoticeEmptyText)
+		}
+		if hold := holdStatus(t, f); hold == nil || !hold.PasteUnseen || !hold.Since.Equal(f.start) {
+			t.Fatalf("status of an empty-box hold: %+v", hold)
+		}
+		// The runtime retired the mark at its limit and delivered both items.
+		for _, id := range []string{held, behind} {
+			if err := ackQueuedNudges(f.dir, []string{id}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if state, err := nudgequeue.LoadState(f.dir); err != nil || len(state.DraftHolds) != 0 || len(state.Pending) != 0 {
+			t.Fatalf("delivery must end the empty-box hold: %+v err=%v", state, err)
+		}
+		// The lost paste now shows up: an unowned draft, an ordinary hold.
+		later := enqueue(t, f, "later reminder")
+		for _, after := range []time.Duration{10 * time.Minute, 11 * time.Minute, 12 * time.Minute, time.Hour} {
+			refuse(t, f, unowned, after, later)
+		}
+		got := bodies(t, f)
+		if len(got) != 2 || strings.Count(strings.Join(got, "\n"), draftHoldNoticeDraftText) != 1 || strings.Count(strings.Join(got, "\n"), draftHoldNoticeEmptyText) != 1 {
+			t.Fatalf("want the earlier empty-box notice and exactly one draft notice, got %q", got)
+		}
+	})
+
+	t.Run("an empty box, then a draft with no delivery between", func(t *testing.T) {
+		f := setup(t)
+		id := enqueue(t, f, "held reminder")
+		refuse(t, f, unseen, 0, id)
+		refuse(t, f, unseen, time.Minute, id)
+		refuse(t, f, unowned, 2*time.Minute, id)
+		if got := bodies(t, f); len(got) != 1 || got[0] != draftHoldNoticeEmptyText {
+			t.Fatalf("the draft hold is a new episode with its own delay: %q", got)
+		}
+		if hold := holdStatus(t, f); hold == nil || hold.PasteUnseen || !hold.Since.Equal(f.start.Add(2*time.Minute)) {
+			t.Fatalf("status after the box filled: %+v", hold)
+		}
+		refuse(t, f, unowned, 3*time.Minute, id)
+		refuse(t, f, unowned, 4*time.Minute, id)
+		got := bodies(t, f)
+		if len(got) != 2 || strings.Count(strings.Join(got, "\n"), draftHoldNoticeDraftText) != 1 {
+			t.Fatalf("want one notice for each hold, got %q", got)
+		}
+	})
 }
 
 func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {

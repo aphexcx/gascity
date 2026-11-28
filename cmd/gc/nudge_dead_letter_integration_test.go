@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -32,7 +33,7 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 	guard := tmuxtest.NewGuard(t)
 	dir := t.TempDir()
 	t.Setenv("GC_CITY", dir)
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"nudge-proof\"\n[beads]\nprovider = \"file\"\n[session]\npark_alert_to = \"operator\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"nudge-proof\"\n[beads]\nprovider = \"file\"\n[session]\npark_alert_to = \"operator\"\nnudge_hold_notice_delay = \"1ns\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openCityStoreAt(dir)
@@ -76,6 +77,10 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 
 	provider := tmux.NewProviderWithConfig(tmuxConfig)
 	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: "worker", sessionID: sessionBead.ID, continuationEpoch: "1"}
+	target.cfg, err = loadCityConfigWithoutBuiltinPackRefresh(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	item := newQueuedNudgeWithOptions("worker", "recover this founder line", "session", time.Now(), queuedNudgeOptions{SessionID: sessionBead.ID, ContinuationEpoch: "1"})
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, item); err != nil {
 		t.Fatal(err)
@@ -98,8 +103,31 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 	}
 	mailbox := beadmail.New(store)
 	letters, err := mailbox.Inbox("operator")
-	if err != nil || len(letters) != 1 || !strings.Contains(letters[0].Body, "gc nudge replay "+item.ID) {
-		t.Fatalf("dead-letter mail: %+v err=%v", letters, err)
+	if err != nil || len(letters) != 1 || !strings.Contains(letters[0].Subject, "NUDGE HOLD") {
+		t.Fatalf("hold mail: %+v err=%v", letters, err)
+	}
+	var held, diagnostics bytes.Buffer
+	if code := cmdNudgeStatus([]string{sessionBead.ID}, true, &held, &diagnostics); code != 0 {
+		t.Fatalf("status: %d %s", code, &diagnostics)
+	}
+	var status nudgeStatusJSON
+	if err := json.Unmarshal(held.Bytes(), &status); err != nil || status.DraftHold == nil || status.Counts != (nudgeStatusCounts{Pending: 1}) ||
+		!status.Pending[0].ExpiresAt.Equal(item.ExpiresAt) || !strings.Contains(capture(), "[Pasted Content") {
+		t.Fatalf("held draft: %s err=%v", &held, err)
+	}
+	// Reach a genuine terminal failure before exercising doctor and replay.
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		s.Pending[0].ExpiresAt = time.Now().Add(-time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, dead, err := listQueuedNudges(dir, "worker", time.Now()); err != nil || len(dead) != 1 {
+		t.Fatalf("expiry: dead=%v err=%v", dead, err)
+	}
+	letters, err = mailbox.Inbox("operator")
+	if err != nil || len(letters) != 2 || !strings.Contains(letters[0].Body+letters[1].Body, "gc nudge replay "+item.ID) {
+		t.Fatalf("expiry mail: %+v err=%v", letters, err)
 	}
 	row := doctor.NewNudgeDeadLettersCheck().Run(&doctor.CheckContext{CityPath: dir})
 	if row.Status != doctor.StatusWarning || !strings.Contains(strings.Join(row.Details, "\n"), item.ID) {
@@ -158,7 +186,7 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		t.Fatalf("expected exactly one submit: %s err=%v", log, err)
 	}
 	letters, err = mailbox.Inbox("operator")
-	if err != nil || len(letters) != 1 {
+	if err != nil || len(letters) != 2 {
 		t.Fatalf("repeat notification: %+v err=%v", letters, err)
 	}
 	t.Logf("gc nudge replay %s => %s; TUI accepted exactly once; original retained dead", item.ID, replayID)
@@ -185,8 +213,8 @@ func TestNudgeDeadLetterReplayTmux(t *testing.T) {
 		}
 	}
 	letters, err = mailbox.Inbox("operator")
-	if err != nil || len(letters) != 2 {
-		t.Fatalf("expected original failure and one cap-loss mail: %+v err=%v", letters, err)
+	if err != nil || len(letters) != 3 {
+		t.Fatalf("expected one hold, original failure and one cap-loss mail: %+v err=%v", letters, err)
 	}
 	lossLetters := 0
 	for _, letter := range letters {

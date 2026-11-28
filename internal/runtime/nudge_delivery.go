@@ -67,6 +67,12 @@ var ErrNudgeDraftUnowned = errors.New("nudge: draft has no matching paste proven
 // cannot be matched to the payload. Preserve the input and bound queue retries.
 var ErrNudgeDraftUnmatched = errors.New("nudge: owned draft does not match the pending payload")
 
+// ErrNudgePasteUnseen marks a hold on an empty composer: the terminal accepted
+// an earlier paste in full and the composer never showed it. It accompanies
+// ErrNudgeDraftUnmatched. The runtime ends this hold itself once the composer
+// has stayed empty, with no client attached, for its configured limit.
+var ErrNudgePasteUnseen = errors.New("nudge: earlier paste accepted but never shown")
+
 // ErrNudgeDraftOwnershipLost is a terminal delivery failure: the prior paste
 // lost ownership before acceptance was established. Preserve it; never replay.
 var ErrNudgeDraftOwnershipLost = errors.New("nudge: draft ownership lost before acceptance; preserved input requires attention, automatic replay stopped")

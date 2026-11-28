@@ -1621,6 +1621,14 @@ type SessionConfig struct {
 	// sender's submit window. Queued retries retain ownership until released
 	// or nudge_reservation_age expires.
 	NudgeOwnPasteAge string `toml:"nudge_own_paste_age,omitempty" jsonschema:"default=15s"`
+	// NudgeHoldNoticeDelay sets how long a session may retain unowned input
+	// before the queue sends a hold notice to ParkAlertTo.
+	NudgeHoldNoticeDelay string `toml:"nudge_hold_notice_delay,omitempty" jsonschema:"default=1m"`
+	// NudgeUnseenPasteAge bounds the hold on an empty composer after the
+	// terminal accepted a Claude paste that was never shown. Once the composer
+	// has stayed empty that long with no client attached, the paste is treated
+	// as lost and delivery resumes. Defaults to "5m".
+	NudgeUnseenPasteAge string `toml:"nudge_unseen_paste_age,omitempty" jsonschema:"default=5m"`
 	// NudgeReservationAge bounds a retry caller's exclusive ownership of its
 	// paste, measured from the paste time. Defaults to "10m". A dead, expired,
 	// dropped or withdrawn queue item releases ownership immediately; this
@@ -1747,6 +1755,22 @@ func (s *SessionConfig) NudgeLockTimeoutDuration() time.Duration {
 // NudgeOwnPasteAgeDuration returns the owned-paste recovery age, defaulting to 15s.
 func (s *SessionConfig) NudgeOwnPasteAgeDuration() time.Duration {
 	return durationOr(s.NudgeOwnPasteAge, 15*time.Second)
+}
+
+// NudgeHoldNoticeDelayDuration returns the interval before a draft hold is reported.
+func (s *SessionConfig) NudgeHoldNoticeDelayDuration() time.Duration {
+	return durationOr(s.NudgeHoldNoticeDelay, time.Minute)
+}
+
+// NudgeUnseenPasteAgeDuration returns the limit on an empty-composer hold for
+// an accepted, never-shown paste. Unset, unparseable and non-positive values
+// yield the 5m default, the limit the runtime applies in those cases.
+func (s *SessionConfig) NudgeUnseenPasteAgeDuration() time.Duration {
+	const limit = 5 * time.Minute
+	if d := durationOr(s.NudgeUnseenPasteAge, limit); d > 0 {
+		return d
+	}
+	return limit
 }
 
 // NudgeReservationAgeDuration returns the retry reservation bound, defaulting to 10m.

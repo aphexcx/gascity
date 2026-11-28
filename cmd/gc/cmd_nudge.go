@@ -156,16 +156,17 @@ type nudgeTarget struct {
 }
 
 type nudgeStatusJSON struct {
-	SchemaVersion string            `json:"schema_version"`
-	Command       string            `json:"command"`
-	CityPath      string            `json:"city_path"`
-	Agent         string            `json:"agent"`
-	Session       string            `json:"session"`
-	SessionID     string            `json:"session_id,omitempty"`
-	Counts        nudgeStatusCounts `json:"counts"`
-	Pending       []queuedNudge     `json:"pending"`
-	InFlight      []queuedNudge     `json:"in_flight"`
-	Dead          []queuedNudge     `json:"dead"`
+	SchemaVersion string                `json:"schema_version"`
+	Command       string                `json:"command"`
+	CityPath      string                `json:"city_path"`
+	Agent         string                `json:"agent"`
+	Session       string                `json:"session"`
+	SessionID     string                `json:"session_id,omitempty"`
+	Counts        nudgeStatusCounts     `json:"counts"`
+	Pending       []queuedNudge         `json:"pending"`
+	InFlight      []queuedNudge         `json:"in_flight"`
+	Dead          []queuedNudge         `json:"dead"`
+	DraftHold     *nudgequeue.DraftHold `json:"draft_hold,omitempty"`
 
 	// DispatchSkips is the dispatch tick's running, city-wide (not
 	// agent-scoped) count of silent skips by reason, since the queue state
@@ -401,21 +402,14 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	queue, err := readNudgeStatus(target.cityPath, target, time.Now(), clock.Real{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	// City-wide (not agent-scoped) skip-reason totals from the supervisor
-	// dispatch tick, read directly off the persisted queue state — a raw
-	// read so this doesn't re-run the maintenance sweep listQueuedNudgesForTarget
-	// above already ran. Best-effort: a load failure here must not fail the
-	// whole status command over a diagnostics-only field.
-	var dispatchSkips map[string]int64
-	if qs, qsErr := nudgequeue.LoadState(target.cityPath); qsErr == nil {
-		dispatchSkips = qs.DispatchSkips
-	}
+	pending, inFlight, dead := queue.Pending, queue.InFlight, queue.Dead
+	dispatchSkips := queue.DispatchSkips
 
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, nudgeStatusJSON{
@@ -433,6 +427,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 			Pending:       nonNilQueuedNudges(pending),
 			InFlight:      nonNilQueuedNudges(inFlight),
 			Dead:          nonNilQueuedNudges(dead),
+			DraftHold:     queue.DraftHold,
 			DispatchSkips: dispatchSkips,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc nudge status: writing JSON: %v\n", err) //nolint:errcheck
@@ -2100,7 +2095,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
 			return true, errors.Join(bookkeepErr, ackErr)
 		}
-		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
+		if _, recErr := recordQueuedNudgeFailureForTarget(target, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)
 		}
 		if errors.Is(err, tmux.ErrNudgeDraftDeferred) {
@@ -2850,11 +2845,14 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 // a controlled clock instead of real wall-clock time, which otherwise races
 // against this pass's own file I/O under -race.
 func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now time.Time, clk clock.Clock) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	status, err := readNudgeStatus(cityPath, target, now, clk)
+	return status.Pending, status.InFlight, status.Dead, err
+}
+
+func readNudgeStatus(cityPath string, target nudgeTarget, now time.Time, clk clock.Clock) (nudgeStatusJSON, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
-	var pending []queuedNudge
-	var inFlight []queuedNudge
-	var dead []queuedNudge
+	var status nudgeStatusJSON
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
@@ -2867,24 +2865,49 @@ func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now
 		if err := pruneDeadQueuedNudgesWithClock(cityPath, state, front, now, deadline, clk); err != nil {
 			return err
 		}
+		status.DispatchSkips = state.DispatchSkips
 		for _, item := range state.Pending {
 			if target.matchesQueueAgent(item.Agent) {
-				pending = append(pending, item)
+				status.Pending = append(status.Pending, item)
 			}
 		}
 		for _, item := range state.InFlight {
 			if target.matchesQueueAgent(item.Agent) {
-				inFlight = append(inFlight, item)
+				status.InFlight = append(status.InFlight, item)
 			}
 		}
+		status.DraftHold = draftHoldForTarget(state, target, status.Pending, status.InFlight)
 		for _, item := range state.Dead {
 			if target.matchesQueueAgent(item.Agent) {
-				dead = append(dead, item)
+				status.Dead = append(status.Dead, item)
 			}
 		}
 		return nil
 	})
-	return pending, inFlight, dead, err
+	return status, err
+}
+
+// draftHoldForTarget finds the hold of this target's session that one of the
+// listed items waits on. A hold belongs to the session that read the composer,
+// so an item's own routing fields do not have to name that session.
+func draftHoldForTarget(state *nudgeQueueState, target nudgeTarget, queues ...[]queuedNudge) *nudgequeue.DraftHold {
+	keys := make([]string, 0, len(state.DraftHolds))
+	for key := range state.DraftHolds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		hold := state.DraftHolds[key]
+		if (target.sessionName != "" && key != target.sessionName) || !hold.MatchesSession(target.sessionID, target.continuationEpoch) {
+			continue
+		}
+		for _, queue := range queues {
+			if slices.ContainsFunc(queue, func(item queuedNudge) bool { return hold.Covers(key, item) }) {
+				return &hold
+			}
+		}
+	}
+	return nil
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
@@ -3101,6 +3124,13 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		}
 		state.InFlight = inFlight
 		for _, item := range terminal {
+			if outcome == "injected" || outcome == "injected_unobserved" {
+				// The claim labels an item with the session that delivers it.
+				key := item.DraftHoldKey()
+				if h, ok := state.DraftHolds[key]; ok && h.Covers(key, item) {
+					delete(state.DraftHolds, key)
+				}
+			}
 			// terminal items come from a non-empty Pending/InFlight, so the
 			// store is already open; ensureOpen is idempotent and just returns
 			// the cached handle here.
@@ -3169,6 +3199,11 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 // per-ID outcomes from this slice for exactly that reason;
 // recordQueuedNudgeFailureWithStore discards it.
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
+	return recordQueuedNudgeFailureForTarget(nudgeTarget{cityPath: cityPath}, store, ids, cause, now)
+}
+
+func recordQueuedNudgeFailureForTarget(target nudgeTarget, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
+	cityPath := target.cityPath
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -3190,11 +3225,10 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		want[id] = true
 	}
 	var deadLettered []queuedNudge
-	var boundedDeferred []queuedNudge
-	boundedDraft := errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched)
+	var notices []draftHoldNotice
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
-		boundedDeferred = boundedDeferred[:0]
+		notices = notices[:0]
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
@@ -3237,25 +3271,36 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 			requeued = append(requeued, updated)
 		}
 		state.InFlight = inFlight
-		state.Pending = append(state.Pending, requeued...)
 		state.Dead = append(state.Dead, dead...)
-		if boundedDraft {
+		if isNudgeDraftHold(cause) {
+			noticeDelay := time.Minute
+			if target.cfg != nil {
+				noticeDelay = target.cfg.Session.NudgeHoldNoticeDelayDuration()
+			}
+			unseen := errors.Is(cause, runtime.ErrNudgePasteUnseen)
 			for _, item := range requeued {
-				if item.Attempts == 1 {
-					boundedDeferred = append(boundedDeferred, item)
+				// Claim can admit an unfenced item or rebind a superseded generation.
+				// The hold names the session that read the composer. The queued
+				// item keeps its own routing, so any session it matches can claim it.
+				observer := item
+				if target.sessionID != "" {
+					observer.SessionID = target.sessionID
+					observer.ContinuationEpoch = target.continuationEpoch
+				}
+				if target.sessionName != "" {
+					observer.SessionName = target.sessionName
+				}
+				if notice := reserveDraftHoldNotice(state, observer, unseen, now, noticeDelay); notice != nil {
+					notices = append(notices, *notice)
 				}
 			}
 		}
+		state.Pending = append(state.Pending, requeued...)
 		sortQueuedNudges(state)
 		return nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	for _, item := range boundedDeferred {
-		if nudgeWarningWriter != nil {
-			fmt.Fprintf(nudgeWarningWriter, "gc nudge: action required: nudge %q for %q cannot verify the preserved pane input: %v; resolve it before retrying; automatic hold expires at %s or after %d attempts\n", item.ID, item.Agent, cause, item.ExpiresAt.Format(time.RFC3339), defaultQueuedNudgeMaxAttempts) //nolint:errcheck
-		}
 	}
 	// Mark backing beads terminal outside the queue lock, best-effort. The
 	// dead-letter transition above is authoritative; a failed bead write must
@@ -3268,7 +3313,15 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
 		}
 	}
-	return deadLettered, nil
+	var noticeErr error
+	for _, notice := range notices {
+		noticeErr = errors.Join(noticeErr, notice.deliver(cityPath, now))
+	}
+	return deadLettered, noticeErr
+}
+
+func isNudgeDraftHold(cause error) bool {
+	return errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched)
 }
 
 func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudge, bool) {
@@ -3280,25 +3333,15 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	if item.FirstAttemptAt.IsZero() && item.LastAttemptAt.IsZero() && item.Attempts == 0 && !errors.Is(cause, errNudgeSessionFenceMismatch) {
 		item.FirstAttemptAt = now.UTC()
 	}
-	// Known different input retains its batch identity without spending an
-	// attempt. Missing ownership or unmatched owned input has a bounded hold:
-	// five attempts and at most one minute until expiry, whichever comes first,
-	// with the draft untouched.
-	boundedDraft := errors.Is(cause, runtime.ErrNudgeDraftUnowned) || errors.Is(cause, runtime.ErrNudgeDraftUnmatched)
-	if boundedDraft {
-		limit := now.Add(time.Duration(defaultQueuedNudgeMaxAttempts-1) * defaultQueuedNudgeRetryDelay).UTC()
-		if item.ExpiresAt.IsZero() || item.ExpiresAt.After(limit) {
-			item.ExpiresAt = limit
-		}
+	held := isNudgeDraftHold(cause)
+	if held {
+		item.DraftHoldAttempts++
 	}
-	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || boundedDraft {
+	if !errors.Is(cause, tmux.ErrNudgeDraftDeferred) || held {
 		item.Attempts++
 		item.LastAttemptAt = now.UTC()
 	}
 	item.LastError = cause.Error()
-	if boundedDraft {
-		item.LastError = fmt.Sprintf("%v; after %d attempts; resolve the preserved pane input before retrying", cause, item.Attempts)
-	}
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
 	if errors.Is(cause, errNudgeManualDrop) {
@@ -3311,7 +3354,7 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 		item.DeadAt = now.UTC()
 		return item, true
 	}
-	if item.Attempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
+	if item.Attempts-item.DraftHoldAttempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
 		item.DeadAt = now.UTC()
 		return item, true
 	}

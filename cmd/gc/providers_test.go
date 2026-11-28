@@ -37,6 +37,15 @@ func TestTmuxConfigFromSessionDefaultsSocketToCityName(t *testing.T) {
 	}
 }
 
+func TestTmuxConfigFromSessionWiresUnseenPasteAge(t *testing.T) {
+	if got := tmuxConfigFromSession(config.SessionConfig{}, "city", "").NudgeUnseenPasteAge; got != 5*time.Minute {
+		t.Fatalf("default unseen paste age not wired: %s", got)
+	}
+	if got := tmuxConfigFromSession(config.SessionConfig{NudgeUnseenPasteAge: "90s"}, "city", "").NudgeUnseenPasteAge; got != 90*time.Second {
+		t.Fatalf("unseen paste age override not wired: %s", got)
+	}
+}
+
 func TestTmuxConfigFromSessionPreservesExplicitSocket(t *testing.T) {
 	sc := config.SessionConfig{Socket: "custom-socket"}
 
