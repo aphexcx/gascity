@@ -339,7 +339,22 @@ type composerReading struct {
 	observed       bool
 }
 
+// claudePastedTab is how Claude Code shows each pasted tab: its prompt input
+// replaces every tab with four spaces, whatever the column.
+const claudePastedTab = "    "
+
+// matches reports whether the composer shows message. A Claude reading also
+// accepts each tab shown as Claude Code's four spaces, wherever those spaces
+// typed would match.
 func (r composerReading) matches(message string, width int) bool {
+	return r.shows(message, width) ||
+		(r.inputColumn >= 0 && strings.Contains(message, "\t") &&
+			r.shows(strings.ReplaceAll(message, "\t", claudePastedTab), width))
+}
+
+// shows compares the trimmed rows and, for a Claude reading, the literal rows
+// with their terminal tab stops and end-of-row padding.
+func (r composerReading) shows(message string, width int) bool {
 	return nudgeDraftMatches(r.draft, message, width) ||
 		(r.inputColumn >= 0 && matchNudgeRows(r.literal, message, width, r.inputColumn))
 }
