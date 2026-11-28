@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -11,8 +12,12 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -329,27 +334,129 @@ func sendNudgeDeadLetterMail(cityPath string, item queuedNudge, log io.Writer, l
 	if lookupErr != nil {
 		fmt.Fprintf(log, "gc nudge: dead-letter item %q: %v; using session.park_alert_to=%q\n", item.ID, lookupErr, to) //nolint:errcheck
 	}
+	subject, body := nudgeDeadLetterMail(item)
+	if lost {
+		subject, body = nudgeDeadLetterLossMail(item)
+	}
+	return sendNudgeQueueMail(cityPath, cfg, to, subject, body, "")
+}
+
+func sendNudgeQueueMail(cityPath string, cfg *config.City, to, subject, body, dedupKey string) error {
 	name := os.Getenv("GC_MAIL")
 	if name == "" {
 		name = mailProviderNameForCity(cityPath)
 	}
 	var workStore, msgStore, sessStore beads.Store
 	if !strings.HasPrefix(name, "exec:") && name != "fake" && name != "fail" {
+		var err error
 		workStore, err = openCityStoreAt(cityPath)
 		if err != nil {
-			return fmt.Errorf("opening dead-letter mail store: %w", err)
+			return fmt.Errorf("opening nudge mail store: %w", err)
 		}
 		defer closeBeadStoreHandle(workStore) //nolint:errcheck // send result remains authoritative
 		msgStore = resolveMailMessagesStore(cliStorageRoutes(cityPath), workStore, cfg, cityPath, nil)
 		sessStore = cliSessionStore(workStore, cfg, cityPath)
 	}
 	mailer := newMailProviderNamedWithSessionStore(cityPath, name, msgStore, sessStore, false)
-	subject, body := nudgeDeadLetterMail(item)
-	if lost {
-		subject, body = nudgeDeadLetterLossMail(item)
+	if filer, ok := mailer.(mail.FilingProvider); ok && dedupKey != "" {
+		// A dispatcher can exit after delivery, before saving the receipt.
+		// Filing lookup also finds a notice its recipient already archived.
+		bucket := sha256.Sum256([]byte(dedupKey))
+		dir := citylayout.RuntimePath(cityPath, "nudges", "hold-notices", fmt.Sprintf("%02x", bucket[0]))
+		bodyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
+		return runtime.WithProviderStateDirLock(dir, func() error {
+			if _, found, err := filer.LookupFiling(dedupKey, bodyHash); err != nil || found {
+				return err
+			}
+			_, err := filer.SendFiling("nudge-dispatcher", to, subject, body, dedupKey, bodyHash)
+			return err
+		})
 	}
-	_, err = mailer.Send("nudge-dispatcher", to, subject, body)
+	if sender, ok := mailer.(mail.DedupSender); ok && dedupKey != "" {
+		_, _, err := sender.SendDeduped("nudge-dispatcher", to, subject, body, dedupKey)
+		return err
+	}
+	_, err := mailer.Send("nudge-dispatcher", to, subject, body)
 	return err
+}
+
+type draftHoldNotice struct {
+	key  string
+	hold nudgequeue.DraftHold
+}
+
+// Reserve the session notice under the queue lock. The lease lets another
+// poller retry if this one exits before the mail provider returns.
+func reserveDraftHoldNotice(state *nudgeQueueState, item queuedNudge, now time.Time, delay time.Duration) *draftHoldNotice {
+	key := item.DraftHoldKey()
+	if state.DraftHolds == nil {
+		state.DraftHolds = make(map[string]nudgequeue.DraftHold)
+	}
+	hold, ok := state.DraftHolds[key]
+	if !ok || !hold.MatchesSession(item.SessionID, item.ContinuationEpoch) {
+		hold = nudgequeue.DraftHold{Since: now.UTC(), SessionID: item.SessionID, ContinuationEpoch: item.ContinuationEpoch}
+		state.DraftHolds[key] = hold
+	}
+	if !hold.NotifiedAt.IsZero() || now.Before(hold.Since.Add(delay)) || now.Before(hold.NotifyLease) {
+		return nil
+	}
+	hold.NotifyLease = now.UTC().Add(defaultQueuedNudgeClaimTTL)
+	state.DraftHolds[key] = hold
+	return &draftHoldNotice{key, hold}
+}
+
+func (notice draftHoldNotice) deliver(cityPath string, now time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nudgeDeadLetterMailBudget)
+	defer cancel()
+	select {
+	case nudgeDeadLetterMailSlots <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for draft hold mail slot: %w", ctx.Err())
+	}
+	result := make(chan error, 1)
+	go func() {
+		defer func() { <-nudgeDeadLetterMailSlots }()
+		result <- notice.send(cityPath, now)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("draft hold mail for %q still pending: %w", notice.key, ctx.Err())
+	}
+}
+
+func (notice draftHoldNotice) send(cityPath string, now time.Time) error {
+	key := notice.key
+	cfg, sendErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if sendErr == nil {
+		to := strings.TrimSpace(cfg.Session.ParkAlertTo)
+		if to == "" {
+			sendErr = errors.New("session.park_alert_to is unset")
+		} else {
+			resolveRigPaths(cityPath, cfg.Rigs)
+			subject := "NUDGE HOLD: " + key
+			body := fmt.Sprintf("Queued nudges for %s are waiting on preserved composer input. Inspect the draft and resolve it to resume delivery. Run gc nudge status %s --json to see the queue.", key, key)
+			dedupKey := fmt.Sprintf("nudge-hold/%s/%s/%s/%d", key, notice.hold.SessionID, notice.hold.ContinuationEpoch, notice.hold.Since.UnixNano())
+			sendErr = sendNudgeQueueMail(cityPath, cfg, to, subject, body, dedupKey)
+		}
+	}
+	saveErr := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
+		hold, ok := state.DraftHolds[key]
+		if !ok || hold != notice.hold {
+			return nil
+		}
+		hold.NotifyLease = time.Time{}
+		if sendErr == nil {
+			hold.NotifiedAt = now.UTC()
+		}
+		state.DraftHolds[key] = hold
+		return nil
+	})
+	if err := errors.Join(sendErr, saveErr); err != nil {
+		return fmt.Errorf("sending draft hold notice for %q: %w", key, err)
+	}
+	return nil
 }
 
 func nudgeDeadLetterMail(item queuedNudge) (subject, body string) {

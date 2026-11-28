@@ -215,12 +215,18 @@ func TestNudgeRecoversEarlierOpaquePaste(t *testing.T) {
 
 func TestOwnedPasteShape(t *testing.T) {
 	digest := runtime.NudgePayloadDigest("one\ntwo\nthree")
-	shape := digest + ":1700000000000:2:" + digest + ":" + runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")
+	staged := digest + ":1700000000000:2:" + digest + ":"
+	shape := staged + runtime.NudgePayloadDigest("[Pasted text #12 +2 lines]")
 	for _, tc := range []struct {
 		name, stored, shape, draft string
 		want                       bool
 	}{
 		{"owned", digest, shape, "[Pasted text #12 +2 lines]", true},
+		{"late rendering", digest, staged, "[Pasted text #12 +2 lines]", true},
+		{"late wrong count", digest, staged, "[Pasted text #12 +3 lines]", false},
+		{"late two placeholders", digest, staged, "[Pasted text #12 +2 lines]\n[Pasted text #13]", false},
+		{"late attached", "attached:" + digest, staged, "[Pasted text #12 +2 lines]", false},
+		{"late inline", digest, staged, "one\ntwo\nthree", false},
 		{"wrong count", digest, shape, "[Pasted text #12 +3 lines]", false},
 		{"no provenance", "", shape, "[Pasted text #12 +2 lines]", false},
 		{"pending observed", "pending:" + digest, shape, "[Pasted text #12 +2 lines]", true},
@@ -241,6 +247,68 @@ func TestOwnedPasteShape(t *testing.T) {
 			}
 		})
 	}
+	t.Run("record rendering before retry", checkRecoveryBindsLatePlaceholder)
+	t.Run("empty composer before late render", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			tm, pane := newRecoveryPane(t)
+			const first = "one\ntwo\nthree"
+			receipt, err := tm.nudgeSessionDeliveryWith(t.Name(), first, func(_, text string, _ time.Duration) (int, error) {
+				return len(text), nil
+			})
+			if err != nil || receipt.Submit != runtime.NudgeSubmitUnconfirmed {
+				t.Fatalf("unseen first paste: %+v, %v", receipt, err)
+			}
+			shape := pane.options[nudgeDraftShapeOption]
+			for _, next := range []string{first, "next"} {
+				_, err := tm.nudgeSessionDeliveryWith(t.Name(), next, func(_, _ string, _ time.Duration) (int, error) {
+					t.Fatal("second paste before the first rendered")
+					return 0, nil
+				})
+				if !errors.Is(err, runtime.ErrNudgeDraftUnmatched) {
+					t.Fatalf("expected a queue hold for the unrendered paste, got %v", err)
+				}
+				if !errors.Is(err, ErrNudgeDraftDeferred) || pane.enters != 0 ||
+					pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(first) || pane.options[nudgeDraftShapeOption] != shape {
+					t.Fatalf("lost pending rendering: options=%v enters=%d err=%v", pane.options, pane.enters, err)
+				}
+			}
+		})
+	})
+}
+
+func checkRecoveryBindsLatePlaceholder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tm, pane := newRecoveryPane(t)
+		const message = "one\ntwo\nthree"
+		digest := runtime.NudgePayloadDigest(message)
+		staged := fmt.Sprintf("%s:%d:2:%s:", digest, time.Now().UnixMilli(), digest)
+		pane.options[nudgeDraftPayloadOption] = digest
+		pane.options[nudgeDraftShapeOption] = staged
+		pane.options[nudgeDraftIdentityOption] = digest + ":"
+		pane.draft = "[Pasted text #1 +2 lines]"
+		recoverPaste := func() (bool, error) {
+			read := func(content string) composerReading {
+				return readNudgeComposer(content, DefaultReadyPromptPrefix, true)
+			}
+			owned, _, err := tm.recoverEarlierNudgePaste(t.Name(), "%0", pane.draft, "new message", "", true, read)
+			return owned, err
+		}
+		if recovered, err := recoverPaste(); recovered || !errors.Is(err, ErrNudgeDraftDeferred) || pane.enters != 0 {
+			t.Fatalf("young paste: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+		if got := pane.options[nudgeDraftShapeOption]; got != staged+runtime.NudgePayloadDigest(pane.draft) {
+			t.Fatalf("late rendering not recorded: %q", got)
+		}
+		pane.agePaste(t, time.Minute)
+		pane.draft = "[Pasted text #2 +2 lines]"
+		if recovered, err := recoverPaste(); recovered || err != nil || pane.enters != 0 {
+			t.Fatalf("changed placeholder: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+		pane.draft = "[Pasted text #1 +2 lines]"
+		if recovered, err := recoverPaste(); !recovered || err != nil || pane.enters != 1 {
+			t.Fatalf("confirmed late paste: recovered=%t enters=%d err=%v", recovered, pane.enters, err)
+		}
+	})
 }
 
 func TestNudgeHeldAgeAndStateChangeLogging(t *testing.T) {

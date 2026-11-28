@@ -50,6 +50,7 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
+	DraftHoldAttempts int        `json:"draft_hold_attempts,omitempty"`
 	FirstAttemptAt    time.Time  `json:"first_attempt_at,omitempty"`
 	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
@@ -102,8 +103,37 @@ type Tombstone struct {
 	RepairedAt     time.Time  `json:"repaired_at,omitempty"`
 }
 
+// DraftHold records the current preserved-input episode for a session.
+type DraftHold struct {
+	SessionID         string    `json:"session_id,omitempty"`
+	ContinuationEpoch string    `json:"continuation_epoch,omitempty"`
+	Since             time.Time `json:"since"`
+	NotifiedAt        time.Time `json:"notified_at,omitzero"`
+	NotifyLease       time.Time `json:"notify_lease,omitzero"`
+}
+
+// MatchesSession checks the available generation fence. Unfenced legacy
+// items inherit the hold of the runtime session that actually claimed them.
+func (h DraftHold) MatchesSession(id, epoch string) bool {
+	return (id == "" || h.SessionID == "" || h.SessionID == id) &&
+		(epoch == "" || h.ContinuationEpoch == "" || h.ContinuationEpoch == epoch)
+}
+
+// DraftHoldKey groups claimed items by the pane's session, including unfenced
+// items addressed by alias. Older items can lack a runtime session name.
+func (item Item) DraftHoldKey() string {
+	if item.SessionName != "" {
+		return item.SessionName
+	}
+	if item.SessionID != "" {
+		return item.SessionID
+	}
+	return item.Agent
+}
+
 // State is the persisted nudge queue snapshot.
 type State struct {
+	DraftHolds            map[string]DraftHold `json:"draft_holds,omitempty"`
 	Pending               []Item               `json:"pending,omitempty"`
 	InFlight              []Item               `json:"in_flight,omitempty"`
 	Dead                  []Item               `json:"dead,omitempty"`
@@ -398,6 +428,22 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 		return err
 	}
 	recordEndedReservations(&state, previous)
+	if len(state.DraftHolds) != 0 {
+		live := make(map[string]bool)
+		for _, items := range [][]Item{state.Pending, state.InFlight} {
+			for _, item := range items {
+				key := item.DraftHoldKey()
+				if h, ok := state.DraftHolds[key]; ok && h.MatchesSession(item.SessionID, item.ContinuationEpoch) {
+					live[key] = true
+				}
+			}
+		}
+		for key := range state.DraftHolds {
+			if !live[key] {
+				delete(state.DraftHolds, key)
+			}
+		}
+	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal nudge queue: %w", err)
@@ -423,6 +469,18 @@ func LoadState(cityPath string) (State, error) {
 	var state State
 	if err := json.Unmarshal(data, &state); err != nil {
 		return State{}, fmt.Errorf("parse nudge queue: %w", err)
+	}
+	for _, items := range [][]Item{state.Pending, state.InFlight} {
+		for i := range items {
+			item := &items[i]
+			// Older queues shortened the lifetime on a preserved-draft retry.
+			// Only the live queues carry forward that attempt and its original TTL.
+			if item.DraftHoldAttempts == 0 && item.Attempts > 0 && !item.CreatedAt.IsZero() &&
+				strings.HasSuffix(item.LastError, fmt.Sprintf("; after %d attempts; resolve the preserved pane input before retrying", item.Attempts)) {
+				item.DraftHoldAttempts = 1                          // only the last attempt is known to have been a hold
+				item.ExpiresAt = item.CreatedAt.Add(24 * time.Hour) // original TTL of these legacy records
+			}
+		}
 	}
 	SortState(&state)
 	return state, nil

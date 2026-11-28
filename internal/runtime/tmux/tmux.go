@@ -2974,7 +2974,7 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
-			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, message, deliveryID, read)
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, message, deliveryID, waitForRender, read)
 			if !since.IsZero() {
 				heldState, heldSince = "own_paste", since
 			}
@@ -3030,7 +3030,8 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading draft rendering: %w", deferred, err)
 				}
-				if _, owned := ownedPasteShape(strings.TrimSpace(stored), strings.TrimSpace(shape), draft); !owned {
+				shape = strings.TrimSpace(shape)
+				if _, owned := ownedPasteShape(strings.TrimSpace(stored), shape, draft); !owned || strings.HasSuffix(shape, ":") {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: placeholder differs from the observed paste", deferred)
 				}
 			}
@@ -3064,10 +3065,16 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 				heldState = "own_paste"
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: draft belongs to another retry owner", ErrNudgeDraftDeferred)
 			}
-		} else if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
-			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		if draft == "" {
+			if waitForRender {
+				if err := t.checkUnrenderedNudgePaste(target); err != nil {
+					return runtime.NudgeDelivery{}, err
+				}
+			}
+			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {
+				return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
+			}
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
 				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
 			}

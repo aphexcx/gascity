@@ -210,17 +210,24 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 		parts[3] = normalizedNudgeDigest(draft)
 	}
 	parts[4] = runtime.NudgePayloadDigest(draft)
-	out, err := t.runCtx(ctx, "if-shell", "-F", "-t", exactPaneTarget(target),
-		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}}", nudgeDraftShapeOption, strings.TrimSpace(shape), nudgeDraftPayloadOption, payload),
-		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, strings.Join(parts, ":")}),
-		"display-message -p draft-ownership-changed")
-	if err != nil {
+	if err := t.saveNudgeDraftShape(ctx, target, strings.TrimSpace(shape), payload, strings.Join(parts, ":")); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(out) != "" {
-		return "", fmt.Errorf("%w: paste ownership changed during rendering observation", ErrNudgeDraftDeferred)
-	}
 	return draft, nil
+}
+
+func (t *Tmux) saveNudgeDraftShape(ctx context.Context, target, shape, payload, updated string) error {
+	out, err := t.runCtx(ctx, "if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}}", nudgeDraftShapeOption, shape, nudgeDraftPayloadOption, payload),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftShapeOption, updated}),
+		"display-message -p draft-ownership-changed")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("%w: paste ownership changed during rendering observation", ErrNudgeDraftDeferred)
+	}
+	return nil
 }
 
 func (t *Tmux) clearNudgeDraftProvenance(target, digest string) error {
@@ -548,6 +555,10 @@ var claudeCollapsedPaste = regexp.MustCompile(`^\[Pasted text #[1-9][0-9]*(?: \+
 // collapsedNudgeDraftMatches checks the renderer's line-count evidence only;
 // callers still need full-paste provenance and uninterrupted detached ownership.
 func collapsedNudgeDraftMatches(draft, message string) bool {
+	return collapsedPasteHasLines(draft, strings.Count(message, "\n"))
+}
+
+func collapsedPasteHasLines(draft string, want int) bool {
 	match := claudeCollapsedPaste.FindStringSubmatch(draft)
 	if match == nil {
 		return false
@@ -560,7 +571,7 @@ func collapsedNudgeDraftMatches(draft, message string) bool {
 			return false
 		}
 	}
-	return lines == strings.Count(message, "\n")
+	return lines == want
 }
 
 func codexComposerFooter(line string) bool {

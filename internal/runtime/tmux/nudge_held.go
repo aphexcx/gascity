@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -16,12 +17,34 @@ const (
 	nudgeHeldOption       = "@gc-nudge-held"
 )
 
-// ownedPasteShape requires a pane digest and a rendering observed after the full
-// paste. Legacy line counts cannot establish which opaque paste is in the pane.
+// An empty composer cannot retire the mark left by a full, unseen Claude paste.
+// The next caller can only distinguish it from a consumed paste after it renders.
+func (t *Tmux) checkUnrenderedNudgePaste(target string) error {
+	payload, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
+	if err != nil {
+		return fmt.Errorf("%w: checking unrendered paste ownership: %w", ErrNudgeDraftDeferred, err)
+	}
+	digest := strings.TrimSpace(payload)
+	if len(digest) != len(runtime.NudgePayloadDigest("")) {
+		return nil
+	}
+	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
+	if err != nil {
+		return fmt.Errorf("%w: checking unrendered paste shape: %w", ErrNudgeDraftDeferred, err)
+	}
+	if parts := strings.Split(strings.TrimSpace(shape), ":"); len(parts) == 5 && parts[0] == digest && parts[4] == "" {
+		return fmt.Errorf("%w: %w: waiting for earlier paste to render", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)
+	}
+	return nil
+}
+
+// ownedPasteShape checks the recorded rendering. Until the first observation,
+// only a confirmed full paste and a single placeholder of its staged count match.
 func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 	parts := strings.Split(shape, ":")
+	pending := strings.HasPrefix(stored, "pending:")
 	stored = strings.TrimPrefix(stored, "pending:")
-	if len(parts) != 5 || parts[0] != stored || len(stored) != len(runtime.NudgePayloadDigest("")) || parts[4] == "" {
+	if len(parts) != 5 || parts[0] != stored || len(stored) != len(runtime.NudgePayloadDigest("")) {
 		return time.Time{}, false
 	}
 	if _, err := strconv.ParseUint(stored, 16, 64); err != nil {
@@ -35,6 +58,10 @@ func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 	if err != nil || lines < 0 {
 		return time.Time{}, false
 	}
+	if parts[4] == "" {
+		_, digestErr := strconv.ParseUint(parts[3], 16, 64)
+		return time.UnixMilli(at), !pending && len(parts[3]) == len(stored) && digestErr == nil && collapsedPasteHasLines(draft, lines)
+	}
 	if strings.Contains(draft, "[Pasted text #") {
 		return time.UnixMilli(at), claudeCollapsedPaste.MatchString(draft) && runtime.NudgePayloadDigest(draft) == parts[4]
 	}
@@ -44,7 +71,7 @@ func ownedPasteShape(stored, shape, draft string) (time.Time, bool) {
 // recoverEarlierNudgePaste submits a proven earlier paste once its age and retry
 // reservation permit recovery. Activity with the paste still visible is a hold,
 // not an acknowledgement, and recoverStagedDraft checks before every Enter.
-func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, message, requestedID string, read func(string) composerReading) (bool, time.Time, error) {
+func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, message, requestedID string, claude bool, read func(string) composerReading) (bool, time.Time, error) {
 	stored, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: reading paste ownership: %w", ErrNudgeDraftDeferred, err)
@@ -54,7 +81,8 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, message, request
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("%w: reading paste shape: %w", ErrNudgeDraftDeferred, err)
 	}
-	since, owned := ownedPasteShape(stored, strings.TrimSpace(shape), draft)
+	shape = strings.TrimSpace(shape)
+	since, owned := ownedPasteShape(stored, shape, draft)
 	if !owned {
 		return false, time.Time{}, nil
 	}
@@ -75,6 +103,23 @@ func (t *Tmux) recoverEarlierNudgePaste(session, target, draft, message, request
 	}
 	if !known {
 		return false, since, fmt.Errorf("%w: earlier paste has another or unknown retry owner", ErrNudgeDraftDeferred)
+	}
+	if strings.HasSuffix(shape, ":") {
+		if !claude {
+			return false, time.Time{}, nil
+		}
+		// The initial composer read preceded the mark reads. Confirm that
+		// rendering under the detached ownership guard before binding it.
+		lines, err := t.captureOwnedNudgeDraftInput(target, digest, true)
+		if err != nil {
+			return false, time.Time{}, fmt.Errorf("%w: observing late paste: %w", ErrNudgeDraftDeferred, err)
+		}
+		if current := read(strings.Join(lines, "\n")); !current.observed || current.draft != draft {
+			return false, time.Time{}, fmt.Errorf("%w: %w: late paste rendering changed", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)
+		}
+		if err := t.saveNudgeDraftShape(context.Background(), target, shape, stored, shape+runtime.NudgePayloadDigest(draft)); err != nil {
+			return false, time.Time{}, fmt.Errorf("%w: recording late paste rendering: %w", ErrNudgeDraftDeferred, err)
+		}
 	}
 	if strings.HasPrefix(stored, "pending:") {
 		if err := t.confirmNudgeDraftDigest(target, digest); err != nil {
