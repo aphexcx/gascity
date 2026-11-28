@@ -176,9 +176,9 @@ func Run(ctx context.Context, s Settings, d Deps) (err error) {
 	if err := r.publish(ctx); err != nil {
 		return err
 	}
-	r.loop(ctx)
+	err = r.loop(ctx)
 	r.log.printf("stop place=%d", r.in.place)
-	return nil
+	return err
 }
 
 // loadPeers reads the pinned signing keys of the cities this city may mail.
@@ -257,24 +257,35 @@ func (r *receiver) publish(ctx context.Context) error {
 }
 
 // loop asks, handles each delivery in order, and asks again. The place moves
-// only past a delivery that is filed, passed or dropped.
-func (r *receiver) loop(ctx context.Context) {
+// only past a delivery that is filed, passed or dropped. It returns an error
+// only when the relay refuses this city's key statement.
+func (r *receiver) loop(ctx context.Context) error {
 	var relayWait, apiWait, pinsWait backoff
 	var lastAsk time.Time
+	// A relay that lost its store lost this city's key statement with it,
+	// and a failed read or a place above its counter is how that shows. The
+	// statement is put again before the next ask, or senders are refused.
+	republish := false
 	for ctx.Err() == nil {
+		if republish {
+			if err := r.publish(ctx); err != nil {
+				return err
+			}
+			republish = false
+		}
 		if !lastAsk.IsZero() {
 			if wait := askFloor - r.d.Now().Sub(lastAsk); wait > 0 && r.d.Sleep(ctx, wait) != nil {
-				return
+				return nil
 			}
 		}
 		lastAsk = r.d.Now()
 		batch, out := r.ask(ctx)
 		switch out.kind {
 		case outcomeStopped:
-			return
+			return nil
 		case outcomeBusy:
 			if r.d.Sleep(ctx, busyWait) != nil {
-				return
+				return nil
 			}
 			continue
 		case outcomeError:
@@ -290,21 +301,23 @@ func (r *receiver) loop(ctx context.Context) {
 				} else {
 					r.log.printf("place-reset from=%d status=%d", from, out.status)
 					r.status.update(func(s *Status) { s.Place = 0 })
+					republish = true
 					continue
 				}
 			}
 			fallthrough
 		case outcomeCut:
 			r.status.degrade("relay: last read " + out.kind)
+			republish = true
 			if r.d.Sleep(ctx, relayWait.step()) != nil {
-				return
+				return nil
 			}
 			continue
 		}
 		relayWait.reset()
 		if !r.readPins() {
 			if r.d.Sleep(ctx, pinsWait.step()) != nil {
-				return
+				return nil
 			}
 			continue
 		}
@@ -316,14 +329,14 @@ func (r *receiver) loop(ctx context.Context) {
 				r.log.printf("state-failed number=%d error=%q", dl.Number, err.Error())
 				r.status.degrade("state: " + err.Error())
 				if r.d.Sleep(ctx, apiWait.step()) != nil {
-					return
+					return nil
 				}
 				handled = false
 				break
 			}
 			if !done {
 				if ctx.Err() == nil && r.d.Sleep(ctx, apiWait.step()) != nil {
-					return
+					return nil
 				}
 				handled = false
 				break
@@ -334,6 +347,7 @@ func (r *receiver) loop(ctx context.Context) {
 			r.status.degrade("")
 		}
 	}
+	return nil
 }
 
 // ask makes one held read from the place and logs one line for it.
