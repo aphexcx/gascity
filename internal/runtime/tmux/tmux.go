@@ -2952,7 +2952,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		if hasStagedMarker {
 			prefix = stagedMarker.promptPrefix
 		}
-		draft, observed := nudgeComposer(content, prefix)
+		draft, literal, observed := nudgeComposerViews(content, prefix)
 		heldDraft = draft
 		if !observed {
 			heldState = "unreadable_composer"
@@ -2977,7 +2977,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("reading composer after recovery: %w", err)
 				}
-				draft, observed = nudgeComposer(content, prefix)
+				draft, literal, observed = nudgeComposerViews(content, prefix)
 				heldDraft = draft
 				if !observed {
 					heldState = "unreadable_composer"
@@ -3025,7 +3025,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			if strings.TrimSpace(attached) != "0" {
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
 			}
-			if !collapsed && !nudgeDraftMatches(draft, message, 0) {
+			if !collapsed && !nudgeCapturedDraftMatches(draft, literal, message, 0) {
 				widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
@@ -3034,7 +3034,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if err != nil || width <= 2 {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
 				}
-				if !nudgeDraftMatches(draft, message, width-2) {
+				if !nudgeCapturedDraftMatches(draft, literal, message, width-2) {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
 				}
 			}
@@ -4995,34 +4995,6 @@ func paneShowsDrainedComposer(lines []string, sent, prefix string) bool {
 	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
 	row := firstNonEmptyLine(content)
 	return row == "" || draft == "" || (!strings.Contains(row, draft) && !strings.HasPrefix(draft, row))
-}
-
-// lastComposerRemainder returns the text after the ready-prompt prefix on the
-// LAST captured line that matches it -- the live composer, since any earlier
-// match is a scrollback transcript entry -- and whether any line matched at
-// all. Mirrors matchesPromptPrefix's normalization (NBSP folding, box-border
-// stripping) so a line it would call a match also yields a remainder here.
-func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
-	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
-	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
-
-	var remainder string
-	var observed bool
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
-		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
-			switch {
-			case strings.HasPrefix(cand, normalizedPrefix):
-				remainder, observed = cand[len(normalizedPrefix):], true
-			case prefixTrimmed != "" && cand == prefixTrimmed:
-				remainder, observed = "", true
-			default:
-				continue
-			}
-			break
-		}
-	}
-	return remainder, observed
 }
 
 // firstNonEmptyLine returns the first line of s (split on "\n") that is not

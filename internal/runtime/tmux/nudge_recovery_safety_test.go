@@ -1216,6 +1216,34 @@ func TestNudgeUnverifiedClearsConsumedPasteProvenance(t *testing.T) {
 }
 
 func TestNudgeWaitsForPasteRendering(t *testing.T) {
+	t.Run("inline whitespace survives composer extraction", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, message string
+			boxed         bool
+		}{
+			{"trailing spaces on prompt and continuation", "one  \ntwo  \nthree", false},
+			{"nonbreaking space after prompt", "one\u00a0copy", false},
+			{"indented boxed continuation", "one\n    two", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, pane := newRecoveryPane(t)
+					if tc.boxed {
+						tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+							if slices.Contains(args, "capture-pane") && pane.draft != "" {
+								return "╭────╮\n│ ❯ " + strings.ReplaceAll(pane.draft, "\n", " │\n│   ") + " │\n╰────╯", nil
+							}
+							return pane.exec(args)
+						}}
+					}
+					d, err := tm.nudgeSessionDeliveryWith(t.Name(), tc.message, pane.paste(""))
+					if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{tc.message}) {
+						t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+					}
+				})
+			})
+		}
+	})
 	const message = "one\ntwo\nthree"
 	const placeholder = "[Pasted text #1 +2 lines]"
 	for _, tt := range []struct {
