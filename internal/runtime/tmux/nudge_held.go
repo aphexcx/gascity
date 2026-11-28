@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 const (
@@ -17,25 +18,56 @@ const (
 	nudgeHeldOption       = "@gc-nudge-held"
 )
 
-// An empty composer cannot retire the mark left by a full, unseen Claude paste.
-// The next caller can only distinguish it from a consumed paste after it renders.
-func (t *Tmux) checkUnrenderedNudgePaste(target string) error {
+// holdForUnseenNudgePaste holds delivery to an empty composer while the mark of
+// a full paste that Claude never showed still stands: until that paste renders,
+// an empty composer cannot tell a late paste from a lost one. The hold is
+// bounded. Once the composer has been read empty for NudgeUnseenPasteAge with
+// no client attached, the mark is retired, the paste counts as lost, and the
+// caller delivers. A nil receipt with a nil error means no such hold applies.
+func (t *Tmux) holdForUnseenNudgePaste(target string, now time.Time) (*runtime.NudgeHeld, error) {
 	payload, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
-		return fmt.Errorf("%w: checking unrendered paste ownership: %w", ErrNudgeDraftDeferred, err)
+		return nil, fmt.Errorf("%w: checking unrendered paste ownership: %w", ErrNudgeDraftDeferred, err)
 	}
 	digest := strings.TrimSpace(payload)
 	if len(digest) != len(runtime.NudgePayloadDigest("")) {
-		return nil
+		return nil, nil
 	}
 	shape, err := t.run("show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
-		return fmt.Errorf("%w: checking unrendered paste shape: %w", ErrNudgeDraftDeferred, err)
+		return nil, fmt.Errorf("%w: checking unrendered paste shape: %w", ErrNudgeDraftDeferred, err)
 	}
-	if parts := strings.Split(strings.TrimSpace(shape), ":"); len(parts) == 5 && parts[0] == digest && parts[4] == "" {
-		return fmt.Errorf("%w: %w: waiting for earlier paste to render", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched)
+	shape = strings.TrimSpace(shape)
+	if parts := strings.Split(shape, ":"); len(parts) != 5 || parts[0] != digest || parts[4] != "" {
+		return nil, nil
 	}
-	return nil
+	waiting := fmt.Errorf("%w: %w: %w: waiting for earlier paste to render", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, runtime.ErrNudgePasteUnseen)
+	// The shape carries this paste's digest and time, so the recorded first
+	// sighting of the empty composer belongs to this paste alone.
+	held, err := t.nudgeHeldReceipt(target, shape, "own_paste", time.Time{}, now)
+	if err != nil {
+		return held, errors.Join(waiting, err)
+	}
+	limit := t.cfg.NudgeUnseenPasteAge
+	if limit <= 0 {
+		limit = DefaultConfig().NudgeUnseenPasteAge
+	}
+	if time.Duration(held.AgeMS)*time.Millisecond < limit {
+		return held, waiting
+	}
+	// Retire only the mark that was read, and only while no client is attached.
+	out, err := t.run("if-shell", "-F", "-t", exactPaneTarget(target),
+		fmt.Sprintf("#{&&:#{==:#{%s},%s},#{&&:#{==:#{%s},%s},#{==:#{session_attached},0}}}", nudgeDraftPayloadOption, digest, nudgeDraftShapeOption, shape),
+		shellquote.Join([]string{"set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""}),
+		"display-message -p draft-ownership-changed")
+	if err != nil {
+		return held, errors.Join(waiting, fmt.Errorf("retiring unseen paste: %w", err))
+	}
+	if strings.TrimSpace(out) != "" {
+		return held, waiting
+	}
+	log.Printf("nudge: paste never shown, composer empty since %s; treating it as lost and resuming delivery target=%q", held.Since.Format(time.RFC3339Nano), target)
+	return nil, nil
 }
 
 // ownedPasteShape checks the recorded rendering. Until the first observation,

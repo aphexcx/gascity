@@ -101,6 +101,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) s
 		NudgeLockTimeout:    sc.NudgeLockTimeoutDuration(),
 		NudgeOwnPasteAge:    sc.NudgeOwnPasteAgeDuration(),
 		NudgeReservationAge: sc.NudgeReservationAgeDuration(),
+		NudgeUnseenPasteAge: sc.NudgeUnseenPasteAgeDuration(),
 		NudgeReservationInvalidated: func(session, id string) (bool, error) {
 			if cityPath == "" {
 				return false, nil

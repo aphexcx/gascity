@@ -2945,6 +2945,11 @@
           "description": "NudgeHoldNoticeDelay sets how long a session may retain unowned input\nbefore the queue sends a hold notice to ParkAlertTo.",
           "default": "1m"
         },
+        "nudge_unseen_paste_age": {
+          "type": "string",
+          "description": "NudgeUnseenPasteAge bounds the hold on an empty composer after the\nterminal accepted a Claude paste that was never shown. Once the composer\nhas stayed empty that long with no client attached, the paste is treated\nas lost and delivery resumes. Defaults to \"5m\".",
+          "default": "5m"
+        },
         "nudge_reservation_age": {
           "type": "string",
           "description": "NudgeReservationAge bounds a retry caller's exclusive ownership of its\npaste, measured from the paste time. Defaults to \"10m\". A dead, expired,\ndropped or withdrawn queue item releases ownership immediately; this\nbound covers a lost caller or failed release. Recovery still requires\nmatching paste provenance, a detached pane and an idle composer.",

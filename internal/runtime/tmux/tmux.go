@@ -130,6 +130,9 @@ type Config struct {
 	NudgeOwnPasteAge time.Duration
 	// NudgeReservationAge bounds how long a retry owner can reserve its paste.
 	NudgeReservationAge time.Duration
+	// NudgeUnseenPasteAge is how long an empty composer, with no client
+	// attached, holds delivery for a full paste it never showed.
+	NudgeUnseenPasteAge time.Duration
 	// NudgeReservationInvalidated checks pending cancellation before retry
 	// staging, recovery, or cleanup. Errors preserve input and cleanup intent;
 	// nil means no external ledger.
@@ -172,6 +175,7 @@ func DefaultConfig() Config {
 		NudgeIdleTimeout:    30 * time.Second,
 		NudgeOwnPasteAge:    15 * time.Second,
 		NudgeReservationAge: 10 * time.Minute,
+		NudgeUnseenPasteAge: 5 * time.Minute,
 		DebounceMs:          500,
 		DisplayMs:           5000,
 	}
@@ -3068,8 +3072,8 @@ func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(s
 		}
 		if draft == "" {
 			if waitForRender {
-				if err := t.checkUnrenderedNudgePaste(target); err != nil {
-					return runtime.NudgeDelivery{}, err
+				if held, err := t.holdForUnseenNudgePaste(target, time.Now()); err != nil {
+					return runtime.NudgeDelivery{Held: held}, err
 				}
 			}
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeDraftPayloadOption, ""); err != nil {

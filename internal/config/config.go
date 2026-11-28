@@ -1624,6 +1624,11 @@ type SessionConfig struct {
 	// NudgeHoldNoticeDelay sets how long a session may retain unowned input
 	// before the queue sends a hold notice to ParkAlertTo.
 	NudgeHoldNoticeDelay string `toml:"nudge_hold_notice_delay,omitempty" jsonschema:"default=1m"`
+	// NudgeUnseenPasteAge bounds the hold on an empty composer after the
+	// terminal accepted a Claude paste that was never shown. Once the composer
+	// has stayed empty that long with no client attached, the paste is treated
+	// as lost and delivery resumes. Defaults to "5m".
+	NudgeUnseenPasteAge string `toml:"nudge_unseen_paste_age,omitempty" jsonschema:"default=5m"`
 	// NudgeReservationAge bounds a retry caller's exclusive ownership of its
 	// paste, measured from the paste time. Defaults to "10m". A dead, expired,
 	// dropped or withdrawn queue item releases ownership immediately; this
@@ -1755,6 +1760,12 @@ func (s *SessionConfig) NudgeOwnPasteAgeDuration() time.Duration {
 // NudgeHoldNoticeDelayDuration returns the interval before a draft hold is reported.
 func (s *SessionConfig) NudgeHoldNoticeDelayDuration() time.Duration {
 	return durationOr(s.NudgeHoldNoticeDelay, time.Minute)
+}
+
+// NudgeUnseenPasteAgeDuration returns the limit on an empty-composer hold for
+// an accepted, never-shown paste, defaulting to 5m.
+func (s *SessionConfig) NudgeUnseenPasteAgeDuration() time.Duration {
+	return durationOr(s.NudgeUnseenPasteAge, 5*time.Minute)
 }
 
 // NudgeReservationAgeDuration returns the retry reservation bound, defaulting to 10m.
