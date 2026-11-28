@@ -28,6 +28,10 @@ No city of ours runs:
 - A remote-city setting, `GC_CITY_URL` or `GC_CITY_CONTEXT`, in a
   provider's or the workspace's environment
   (`internal/api/session_runtime.go`).
+- The k8s session provider, which runs sessions in Kubernetes pods
+  (`internal/runtime/k8s/`).
+- The ssh session provider, which runs tmux sessions on a remote host
+  over SSH (`internal/runtime/ssh/`).
 
 The grades:
 
@@ -105,6 +109,31 @@ unless the diff changes what that line does or who it reaches.
 - No evidence on the pull request branch. A transcript, a log or a
   capture that no test reads stays outside this repository; a diff that
   adds one is MAJOR.
+- When a diff changes how the code addresses a tmux session, window or
+  pane, or changes a tmux command's arguments, check it on a real tmux.
+  Try a live target and an absent name that shares a prefix with another
+  session. Check what arrived in the pane and that the other session
+  was untouched, as `TestExactSessionTargetsRealTmux` does in
+  `internal/runtime/tmux/exact_target_integration_test.go` (build tag
+  `integration`). In what our cities run, a live operation that fails
+  or reaches the wrong session is MAJOR at least. If it exposes one
+  session's transcript to another caller, the disclosure is CRITICAL.
+  In this fork's pull request #91, an exact-match target passed the
+  absent-name check but broke sends to a live pane.
+- When a diff adds queueing, waiting or another check ahead of an
+  existing refusal, try the same invalid request on the base and the
+  head. The caller must get the same refusal at once. A lost refusal on
+  a route our cities run is MAJOR at least. If the same refusal arrives
+  late, use the delay rule above (a bounded delay is MINOR). This fork's
+  pull request #110 put an ownership check ahead of the
+  unsupported-interrupt refusal in `Manager.submit`
+  (`internal/session/submit.go`). The base still has that order, and
+  the reviews parked the case as a PRECONDITION because the only provider
+  family that reaches the refusal is neither Claude nor Codex.
+
+For each of these two checks that the diff triggers, the worker supplies
+the observation in the pull request's evidence, and a read-only reviewer
+records the check as UNVERIFIED if the observation is missing.
 
 ## Pruning
 
