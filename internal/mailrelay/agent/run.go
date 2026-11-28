@@ -256,7 +256,7 @@ func (r *receiver) publish(ctx context.Context) error {
 // loop asks, handles each delivery in order, and asks again. The place moves
 // only past a delivery that is filed, passed or dropped.
 func (r *receiver) loop(ctx context.Context) {
-	var relayWait, apiWait backoff
+	var relayWait, apiWait, pinsWait backoff
 	for ctx.Err() == nil {
 		batch, out := r.ask(ctx)
 		switch out.kind {
@@ -292,6 +292,13 @@ func (r *receiver) loop(ctx context.Context) {
 			continue
 		}
 		relayWait.reset()
+		if !r.readPins() {
+			if r.d.Sleep(ctx, pinsWait.step()) != nil {
+				return
+			}
+			continue
+		}
+		pinsWait.reset()
 		handled := true
 		for _, dl := range batch {
 			done, err := r.handle(ctx, dl)
@@ -426,35 +433,38 @@ func (r *receiver) tell(ctx context.Context, number int64, label envelope.Label,
 	r.log.printf("told number=%d mail=%s via=%s", number, res.id, via)
 }
 
+// readPins reads the peers folder before a batch, so a pin added, changed
+// or removed while the agent runs counts from the next batch on. When the
+// folder cannot be read the batch is left at the relay, to be asked again:
+// the agent can no longer vouch for the pins it holds, and passing the mail
+// over would lose it for a folder that may read again in a moment.
+func (r *receiver) readPins() bool {
+	peers, err := loadPeers(r.s.PeersDir)
+	if err != nil {
+		r.log.printf("peers-failed error=%q", err.Error())
+		r.status.degrade("peers: folder could not be read")
+		return false
+	}
+	if !maps.EqualFunc(peers, r.peers, func(a, b ed25519.PublicKey) bool { return a.Equal(b) }) {
+		r.peers = peers
+		r.log.printf("peers-changed peers=%d", len(peers))
+	}
+	return true
+}
+
 // open opens and checks a mail from a pinned peer and returns why it did not
-// open. When the sender is not pinned or its signature fails, the peers
-// folder is read again first, so a pin added or changed while the agent runs
-// takes effect, and one removed stops being trusted.
+// open. The pins are the ones read before this batch.
 func (r *receiver) open(env envelope.Envelope, now time.Time) (envelope.Mail, string) {
 	from := env.Label.From
-	for reloaded := false; ; reloaded = true {
-		reason := "not-a-peer"
-		if signer, ok := r.peers[from]; ok {
-			m, err := envelope.Open(env, r.s.City, r.ring.private, from, signer, now)
-			if err == nil {
-				return m, ""
-			}
-			reason = openReason(err)
-		}
-		if reloaded || (reason != "not-a-peer" && reason != "bad-signature") {
-			return envelope.Mail{}, reason
-		}
-		peers, err := loadPeers(r.s.PeersDir)
-		if err != nil {
-			r.log.printf("peers-reload-failed error=%q", err.Error())
-			return envelope.Mail{}, reason
-		}
-		if maps.EqualFunc(peers, r.peers, func(a, b ed25519.PublicKey) bool { return a.Equal(b) }) {
-			return envelope.Mail{}, reason
-		}
-		r.peers = peers
-		r.log.printf("peers-reloaded peers=%d", len(peers))
+	signer, ok := r.peers[from]
+	if !ok {
+		return envelope.Mail{}, "not-a-peer"
 	}
+	m, err := envelope.Open(env, r.s.City, r.ring.private, from, signer, now)
+	if err != nil {
+		return envelope.Mail{}, openReason(err)
+	}
+	return m, ""
 }
 
 // openReason names why a mail did not open.
