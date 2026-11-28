@@ -290,14 +290,6 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	if action == mailWakeNone {
 		return false, reason
 	}
-	// Reading the history, deciding and recording are one step for the
-	// requests of one controller. The lock is released before any delivery.
-	reserved := func() {}
-	if host.reserve != nil {
-		host.reserve.Lock()
-		reserved = sync.OnceFunc(host.reserve.Unlock)
-	}
-	defer reserved()
 	var incoming, outgoing []session.MailWakeEntry
 	if id != "" {
 		incoming, err = p.front.MailWakeHistory(id)
@@ -316,6 +308,24 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	action, reason = decideMailWake(a, sender, facts, incoming, outgoing, now)
 	if action == mailWakeNone {
 		return false, reason
+	}
+	// A request the history refuses was answered above without waiting. One
+	// that may proceed is counted one at a time by its controller: under the
+	// lock it reads the history again, decides again and records. The lock
+	// is released before any delivery.
+	reserved := func() {}
+	if host.reserve != nil {
+		host.reserve.Lock()
+		reserved = sync.OnceFunc(host.reserve.Unlock)
+	}
+	defer reserved()
+	if host.reserve != nil && id != "" {
+		if incoming, err = p.front.MailWakeHistory(id); err != nil {
+			return false, "history"
+		}
+		if action, reason = decideMailWake(a, sender, facts, incoming, outgoing, now); action == mailWakeNone {
+			return false, reason
+		}
 	}
 	created := action == mailWakeCreate
 	if created {

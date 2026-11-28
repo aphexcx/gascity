@@ -280,6 +280,55 @@ func TestPeerCityConcurrentListedSendsHoldBudget(t *testing.T) {
 	}
 }
 
+// A request the list or the budget refuses gets its answer at once. It does
+// not wait behind another request that is being counted.
+func TestPeerCityRefusalDoesNotWaitForReservation(t *testing.T) {
+	c := newPeerWakeCity(t, beads.NewMemStore(), []string{"alpha", "beta"},
+		config.Agent{Name: "reader", Provider: "claude", StartCommand: "echo", MailWakeFrom: []string{"city:alpha"}},
+	)
+	reader := c.start("reader", "")
+	for range 3 {
+		if answer := c.keyed("alpha", reader.ID, "alpha/mayor"); !answer.notified {
+			t.Fatalf("wake inside the budget: %+v", answer)
+		}
+	}
+	c.state.mailWakeReserve.Lock()
+	unlock := sync.OnceFunc(c.state.mailWakeReserve.Unlock)
+	defer unlock()
+	for what, r := range map[string]*http.Request{
+		"over the budget":   peerMailRequest(t, c.keys["alpha"], "alpha", reader.ID, "alpha/mayor"),
+		"an unlisted key":   peerMailRequest(t, c.keys["beta"], "beta", reader.ID, "beta/mayor"),
+		"no key":            peerMailRequest(t, nil, "", reader.ID, "human"),
+		"a human recipient": peerMailRequest(t, c.keys["alpha"], "alpha", "human", "alpha/mayor"),
+	} {
+		handler := http.Handler(c.hardened)
+		if what == "no key" {
+			handler = c.ungated
+		}
+		type result struct {
+			answer peerMailAnswer
+			err    error
+		}
+		done := make(chan result, 1)
+		go func() {
+			answer, err := servePeerMail(handler, r)
+			done <- result{answer, err}
+		}()
+		select {
+		case got := <-done:
+			if got.err != nil || got.answer.status != http.StatusCreated || got.answer.notified {
+				t.Errorf("%s: %+v, %v; want the mail stored and no turn", what, got.answer, got.err)
+			}
+		case <-time.After(5 * time.Second):
+			unlock()
+			t.Fatalf("%s: the refusal waited for another request's reservation", what)
+		}
+	}
+	if typed, history := c.typed(reader), c.history(reader.ID); len(typed) != 3 || len(history) != 3 {
+		t.Errorf("after the refusals: %d reminder(s) typed, history %q", len(typed), history)
+	}
+}
+
 // A key the recipient does not list is declined before it can hold the
 // recipient's live-delivery slot, so it cannot push a listed reminder into
 // the queue.
