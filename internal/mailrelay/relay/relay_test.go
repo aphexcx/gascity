@@ -435,6 +435,10 @@ func TestReload(t *testing.T) {
 	if err := os.Remove(pub); err != nil {
 		t.Fatal(err)
 	}
+	// A pin missing at one read stays in force; it leaves at the next read
+	// that still misses it.
+	f.server.refreshKeys()
+	f.call("beta", "GET", "keys/hub", nil, 404)
 	f.server.refreshKeys()
 	f.call("beta", "GET", "keys/hub", nil, 401)
 	f.addKey("beta")
@@ -456,6 +460,10 @@ func TestReload(t *testing.T) {
 	if err := os.Remove(bad); err != nil {
 		t.Fatal(err)
 	}
+	if err := f.server.reloadKeys(); err == nil {
+		t.Fatal("a read that misses a pin of the last good read must not be whole")
+	}
+	f.call("beta", "GET", "keys/hub", nil, 404)
 	if err := f.server.reloadKeys(); err != nil {
 		t.Fatal(err)
 	}

@@ -3,7 +3,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "relay",
     srcs = [
+        "keyset.go",
+        "registry.go",
         "server.go",
+        "signingkey.go",
         "store.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/mailrelay/relay",
@@ -19,7 +22,9 @@ go_library(
 go_test(
     name = "relay_test",
     srcs = [
+        "registry_test.go",
         "relay_test.go",
+        "signingkey_test.go",
         "testenv_import_test.go",
     ],
     embed = [":relay"],
