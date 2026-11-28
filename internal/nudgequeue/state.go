@@ -126,6 +126,14 @@ func (h DraftHold) MatchesSession(id, epoch string) bool {
 		(epoch == "" || h.ContinuationEpoch == "" || h.ContinuationEpoch == epoch)
 }
 
+// Covers reports whether a queued item keeps the hold filed under key open:
+// the item met the refusal, or it is addressed to the hold's own session and
+// waits behind the items that did.
+func (h DraftHold) Covers(key string, item Item) bool {
+	return slices.Contains(h.Items, item.ID) ||
+		(item.DraftHoldKey() == key && h.MatchesSession(item.SessionID, item.ContinuationEpoch))
+}
+
 // DraftHoldKey groups claimed items by the pane's session, including unfenced
 // items addressed by alias. Older items can lack a runtime session name.
 func (item Item) DraftHoldKey() string {
@@ -436,7 +444,7 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 	}
 	recordEndedReservations(&state, previous)
 	if len(state.DraftHolds) != 0 {
-		// A hold lasts while an item that met it is still queued.
+		// A hold lasts while a queued item still waits on it.
 		queued := make(map[string]bool)
 		for _, items := range [][]Item{state.Pending, state.InFlight} {
 			for _, item := range items {
@@ -444,11 +452,12 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 			}
 		}
 		for key, hold := range state.DraftHolds {
-			hold.Items = slices.DeleteFunc(slices.Clone(hold.Items), func(id string) bool { return !queued[id] })
-			if len(hold.Items) == 0 {
+			waiting := func(item Item) bool { return hold.Covers(key, item) }
+			if !slices.ContainsFunc(state.Pending, waiting) && !slices.ContainsFunc(state.InFlight, waiting) {
 				delete(state.DraftHolds, key)
 				continue
 			}
+			hold.Items = slices.DeleteFunc(slices.Clone(hold.Items), func(id string) bool { return !queued[id] })
 			state.DraftHolds[key] = hold
 		}
 	}

@@ -2887,16 +2887,10 @@ func readNudgeStatus(cityPath string, target nudgeTarget, now time.Time, clk clo
 	return status, err
 }
 
-// draftHoldForTarget finds the hold this target's session recorded for one of
-// the listed items. A hold belongs to the session that read the composer, so an
-// item's own routing fields do not have to name that session.
+// draftHoldForTarget finds the hold of this target's session that one of the
+// listed items waits on. A hold belongs to the session that read the composer,
+// so an item's own routing fields do not have to name that session.
 func draftHoldForTarget(state *nudgeQueueState, target nudgeTarget, queues ...[]queuedNudge) *nudgequeue.DraftHold {
-	listed := make(map[string]bool)
-	for _, queue := range queues {
-		for _, item := range queue {
-			listed[item.ID] = true
-		}
-	}
 	keys := make([]string, 0, len(state.DraftHolds))
 	for key := range state.DraftHolds {
 		keys = append(keys, key)
@@ -2907,8 +2901,10 @@ func draftHoldForTarget(state *nudgeQueueState, target nudgeTarget, queues ...[]
 		if (target.sessionName != "" && key != target.sessionName) || !hold.MatchesSession(target.sessionID, target.continuationEpoch) {
 			continue
 		}
-		if slices.ContainsFunc(hold.Items, func(id string) bool { return listed[id] }) {
-			return &hold
+		for _, queue := range queues {
+			if slices.ContainsFunc(queue, func(item queuedNudge) bool { return hold.Covers(key, item) }) {
+				return &hold
+			}
 		}
 	}
 	return nil
@@ -3131,7 +3127,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 			if outcome == "injected" || outcome == "injected_unobserved" {
 				// The claim labels an item with the session that delivers it.
 				key := item.DraftHoldKey()
-				if h, ok := state.DraftHolds[key]; ok && (slices.Contains(h.Items, item.ID) || h.MatchesSession(item.SessionID, item.ContinuationEpoch)) {
+				if h, ok := state.DraftHolds[key]; ok && h.Covers(key, item) {
 					delete(state.DraftHolds, key)
 				}
 			}

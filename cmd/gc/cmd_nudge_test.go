@@ -5207,6 +5207,81 @@ func TestDraftHoldOutlivesItemsWithAnotherFence(t *testing.T) {
 	}
 }
 
+// One draft holds one session. The held batch leaves the queue undelivered
+// while another item waits behind it: the hold and its one notice stand.
+func TestDraftHoldOutlivesItsHeldBatch(t *testing.T) {
+	dir, store, target := newDraftHoldNoticeCity(t, "")
+	mailbox := beadmail.New(store)
+	start := time.Now().UTC().Add(-time.Hour)
+	unowned := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	enqueue := func(message string) string {
+		t.Helper()
+		item := newQueuedNudgeWithOptions("worker", message, "session", start, queuedNudgeOptions{SessionID: target.sessionID, SessionName: "worker", ContinuationEpoch: "1"})
+		if err := enqueueQueuedNudge(dir, item); err != nil {
+			t.Fatal(err)
+		}
+		return item.ID
+	}
+	refuse := func(id string, after time.Duration) {
+		t.Helper()
+		if _, err := recordQueuedNudgeFailureForTarget(target, beads.NudgesStore{Store: store}, []string{id}, unowned, start.Add(after)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices := func() int {
+		t.Helper()
+		letters, err := mailbox.Inbox("operator")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(letters)
+	}
+	held, behind := enqueue("held reminder"), enqueue("waiting reminder")
+	refuse(held, 0)
+	refuse(held, time.Minute)
+	if got := notices(); got != 1 {
+		t.Fatalf("notices after the delay = %d, want 1", got)
+	}
+	// The held item is withdrawn. The other item was never attempted.
+	if err := ackQueuedNudgesWithOutcome(dir, []string{held}, "failed", "withdrawn", "delivery-withdrawn"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil || len(state.Pending) != 1 || state.Pending[0].ID != behind {
+		t.Fatalf("queue after the withdrawal: %+v err=%v", state.Pending, err)
+	}
+	if hold, ok := state.DraftHolds["worker"]; !ok || !hold.Since.Equal(start) || hold.NotifiedAt.IsZero() {
+		t.Fatalf("the hold ended with its held batch while an item still waits: %+v", state.DraftHolds)
+	}
+	for _, after := range []time.Duration{2 * time.Minute, 4 * time.Minute, time.Hour} {
+		refuse(behind, after)
+	}
+	state, err = nudgequeue.LoadState(dir)
+	if err != nil || !state.DraftHolds["worker"].Since.Equal(start) || len(state.DraftHolds["worker"].Items) != 1 {
+		t.Fatalf("one draft must stay one hold: %+v err=%v", state.DraftHolds, err)
+	}
+	if got := notices(); got != 1 {
+		t.Fatalf("one draft, one session, never emptied: notices = %d, want 1", got)
+	}
+
+	// A hold saved without its item list is kept while its session's item waits.
+	if err := nudgequeue.WithState(dir, func(state *nudgeQueueState) error {
+		hold := state.DraftHolds["worker"]
+		hold.Items = nil
+		state.DraftHolds["worker"] = hold
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err = nudgequeue.LoadState(dir); err != nil || !state.DraftHolds["worker"].Since.Equal(start) {
+		t.Fatalf("a hold without an item list was dropped: %+v err=%v", state.DraftHolds, err)
+	}
+	status, err := readNudgeStatus(dir, target, start, clock.Real{})
+	if err != nil || status.DraftHold == nil {
+		t.Fatalf("status lost the hold: %+v err=%v", status.DraftHold, err)
+	}
+}
+
 func newDraftHoldNoticeCity(t *testing.T, sessionConfig string) (string, beads.Store, nudgeTarget) {
 	t.Helper()
 	dir := t.TempDir()
