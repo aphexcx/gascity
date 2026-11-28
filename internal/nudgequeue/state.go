@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -103,13 +104,16 @@ type Tombstone struct {
 	RepairedAt     time.Time  `json:"repaired_at,omitempty"`
 }
 
-// DraftHold records the current preserved-input episode for a session.
+// DraftHold records the current preserved-input episode for a session. The
+// session fields name the session whose composer refused delivery. Items lists
+// the queued items that met the refusal; their own routing is left unchanged.
 type DraftHold struct {
 	SessionID         string    `json:"session_id,omitempty"`
 	ContinuationEpoch string    `json:"continuation_epoch,omitempty"`
 	Since             time.Time `json:"since"`
 	NotifiedAt        time.Time `json:"notified_at,omitzero"`
 	NotifyLease       time.Time `json:"notify_lease,omitzero"`
+	Items             []string  `json:"items,omitempty"`
 }
 
 // MatchesSession checks the available generation fence. Unfenced legacy
@@ -429,19 +433,20 @@ func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Cloc
 	}
 	recordEndedReservations(&state, previous)
 	if len(state.DraftHolds) != 0 {
-		live := make(map[string]bool)
+		// A hold lasts while an item that met it is still queued.
+		queued := make(map[string]bool)
 		for _, items := range [][]Item{state.Pending, state.InFlight} {
 			for _, item := range items {
-				key := item.DraftHoldKey()
-				if h, ok := state.DraftHolds[key]; ok && h.MatchesSession(item.SessionID, item.ContinuationEpoch) {
-					live[key] = true
-				}
+				queued[item.ID] = true
 			}
 		}
-		for key := range state.DraftHolds {
-			if !live[key] {
+		for key, hold := range state.DraftHolds {
+			hold.Items = slices.DeleteFunc(slices.Clone(hold.Items), func(id string) bool { return !queued[id] })
+			if len(hold.Items) == 0 {
 				delete(state.DraftHolds, key)
+				continue
 			}
+			state.DraftHolds[key] = hold
 		}
 	}
 	data, err := json.MarshalIndent(state, "", "  ")

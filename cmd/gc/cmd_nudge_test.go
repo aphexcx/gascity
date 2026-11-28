@@ -5072,6 +5072,140 @@ func checkQueuedDraftHold(t *testing.T, cause error, interval time.Duration) {
 	}
 }
 
+// Two live sessions match one selector. The first claims an unfenced item and
+// its composer refuses it. Recording that hold leaves the item's routing as it
+// was, so the other session can still take the item.
+func TestDraftHoldKeepsItemRouting(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-1": {}, "gc-2": {}}
+	}
+	item := newQueuedNudge("worker", "shared reminder", time.Now().Add(-time.Minute))
+	if item.SessionID != "" || item.ContinuationEpoch != "" {
+		t.Fatalf("fixture must be unfenced: %+v", item)
+	}
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatal(err)
+	}
+	first := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-1", continuationEpoch: "1", sessionName: "worker-1"}
+	second := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-2", continuationEpoch: "1", sessionName: "worker-2"}
+	routing := func() (string, *nudgeQueueState) {
+		t.Helper()
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, saved := range append(append([]queuedNudge(nil), state.Pending...), state.InFlight...) {
+			if saved.ID == item.ID {
+				fields, err := json.Marshal([]string{saved.Agent, saved.SessionID, saved.SessionName, saved.ContinuationEpoch})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(fields), &state
+			}
+		}
+		t.Fatalf("item %s left the queue: %+v", item.ID, state)
+		return "", nil
+	}
+
+	now := time.Now()
+	claimed, err := claimDueQueuedNudgesForTarget(dir, first, now)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("first session claim = %+v, err=%v", claimed, err)
+	}
+	before, _ := routing()
+	cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	if _, err := recordQueuedNudgeFailureForTarget(first, beads.NudgesStore{}, []string{item.ID}, cause, now); err != nil {
+		t.Fatal(err)
+	}
+	after, state := routing()
+	if after != before {
+		t.Fatalf("recording a hold rewrote the item's routing:\n before %s\n after  %s", before, after)
+	}
+	if want := `["worker","","worker-1",""]`; after != want {
+		t.Fatalf("saved routing = %s, want the unfenced item with only its claim label: %s", after, want)
+	}
+	hold, ok := state.DraftHolds["worker-1"]
+	if !ok || hold.SessionID != "gc-1" || hold.ContinuationEpoch != "1" || len(hold.Items) != 1 || hold.Items[0] != item.ID {
+		t.Fatalf("hold must name the session that read the composer and the held item: %+v", state.DraftHolds)
+	}
+	if got := draftHoldForTarget(state, first, state.Pending); got == nil {
+		t.Fatal("the refusing session's status lost its hold")
+	}
+	if got := draftHoldForTarget(state, second, state.Pending); got != nil {
+		t.Fatalf("the other session's status shows a hold it never met: %+v", got)
+	}
+
+	retry := now.Add(defaultQueuedNudgeRetryDelay + time.Second)
+	claimed, err = claimDueQueuedNudgesForTarget(dir, second, retry)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("the other session could not take the held item: claimed=%+v err=%v", claimed, err)
+	}
+	if deliverable, rejected := splitQueuedNudgesForTarget(second, claimed); len(deliverable) != 1 || len(rejected) != 0 {
+		t.Fatalf("the other session rejected the held item: deliverable=%+v rejected=%+v", deliverable, rejected)
+	}
+	if err := ackQueuedNudges(dir, []string{item.ID}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := nudgequeue.LoadState(dir)
+	if err != nil || len(final.Pending)+len(final.InFlight) != 0 || len(final.DraftHolds) != 0 {
+		t.Fatalf("after the other session delivered it: state=%+v err=%v", final, err)
+	}
+}
+
+// A superseded item keeps its own fence when the successor's composer refuses
+// it. The hold still lasts while the item waits and ends on its proven submit.
+func TestDraftHoldOutlivesItemsWithAnotherFence(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return map[string]struct{}{"gc-new": {}} }
+	item := newQueuedNudgeWithOptions("worker", "predecessor reminder", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "gc-old", ContinuationEpoch: "1"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatal(err)
+	}
+	successor := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: "gc-new", continuationEpoch: "2", sessionName: "worker"}
+	cause := errors.Join(tmux.ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnowned)
+	now := time.Now()
+	var since time.Time
+	for attempt := range 3 {
+		at := now.Add(time.Duration(attempt) * (defaultQueuedNudgeRetryDelay + time.Second))
+		claimed, err := claimDueQueuedNudgesForTarget(dir, successor, at)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("attempt %d: claimed=%+v err=%v", attempt, claimed, err)
+		}
+		if _, err := recordQueuedNudgeFailureForTarget(successor, beads.NudgesStore{}, []string{item.ID}, cause, at); err != nil {
+			t.Fatal(err)
+		}
+		state, err := nudgequeue.LoadState(dir)
+		if err != nil || len(state.Pending) != 1 || state.Pending[0].SessionID != "gc-old" || state.Pending[0].ContinuationEpoch != "1" {
+			t.Fatalf("attempt %d: the item's own fence changed: %+v err=%v", attempt, state.Pending, err)
+		}
+		hold, ok := state.DraftHolds["worker"]
+		if !ok || hold.SessionID != "gc-new" {
+			t.Fatalf("attempt %d: hold lost between refusals: %+v", attempt, state.DraftHolds)
+		}
+		if attempt == 0 {
+			since = hold.Since
+		} else if !hold.Since.Equal(since) {
+			t.Fatalf("attempt %d: hold restarted at %s, want one episode since %s", attempt, hold.Since, since)
+		}
+	}
+	if _, err := claimDueQueuedNudgesForTarget(dir, successor, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ackQueuedNudges(dir, []string{item.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := nudgequeue.LoadState(dir); err != nil || len(state.DraftHolds) != 0 {
+		t.Fatalf("a proven submit must end the hold: %+v err=%v", state.DraftHolds, err)
+	}
+}
+
 func TestFailedQueuedNudge_DeadLettersFenceMismatch(t *testing.T) {
 	item := newQueuedNudgeWithOptions("worker", "stale epoch", "wait", time.Now(), queuedNudgeOptions{
 		ID:                "n-stale",

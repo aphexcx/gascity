@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -386,23 +387,35 @@ type draftHoldNotice struct {
 }
 
 // Reserve the session notice under the queue lock. The lease lets another
-// poller retry if this one exits before the mail provider returns.
-func reserveDraftHoldNotice(state *nudgeQueueState, item queuedNudge, now time.Time, delay time.Duration) *draftHoldNotice {
-	key := item.DraftHoldKey()
+// poller retry if this one exits before the mail provider returns. The
+// observer is the refused item as the refusing session saw it.
+func reserveDraftHoldNotice(state *nudgeQueueState, observer queuedNudge, now time.Time, delay time.Duration) *draftHoldNotice {
+	key := observer.DraftHoldKey()
 	if state.DraftHolds == nil {
 		state.DraftHolds = make(map[string]nudgequeue.DraftHold)
 	}
 	hold, ok := state.DraftHolds[key]
-	if !ok || !hold.MatchesSession(item.SessionID, item.ContinuationEpoch) {
-		hold = nudgequeue.DraftHold{Since: now.UTC(), SessionID: item.SessionID, ContinuationEpoch: item.ContinuationEpoch}
-		state.DraftHolds[key] = hold
+	if !ok || !hold.MatchesSession(observer.SessionID, observer.ContinuationEpoch) {
+		hold = nudgequeue.DraftHold{Since: now.UTC(), SessionID: observer.SessionID, ContinuationEpoch: observer.ContinuationEpoch}
 	}
+	if !slices.Contains(hold.Items, observer.ID) {
+		hold.Items = append(slices.Clone(hold.Items), observer.ID)
+	}
+	state.DraftHolds[key] = hold
 	if !hold.NotifiedAt.IsZero() || now.Before(hold.Since.Add(delay)) || now.Before(hold.NotifyLease) {
 		return nil
 	}
 	hold.NotifyLease = now.UTC().Add(defaultQueuedNudgeClaimTTL)
 	state.DraftHolds[key] = hold
 	return &draftHoldNotice{key, hold}
+}
+
+// sameDraftHoldNotice reports whether stored is still the episode and notice
+// lease that reserved was taken under. Items joining the hold do not change it.
+func sameDraftHoldNotice(stored, reserved nudgequeue.DraftHold) bool {
+	return stored.SessionID == reserved.SessionID && stored.ContinuationEpoch == reserved.ContinuationEpoch &&
+		stored.Since.Equal(reserved.Since) &&
+		stored.NotifiedAt.Equal(reserved.NotifiedAt) && stored.NotifyLease.Equal(reserved.NotifyLease)
 }
 
 func (notice draftHoldNotice) deliver(cityPath string, now time.Time) error {
@@ -443,7 +456,7 @@ func (notice draftHoldNotice) send(cityPath string, now time.Time) error {
 	}
 	saveErr := nudgequeue.WithState(cityPath, func(state *nudgeQueueState) error {
 		hold, ok := state.DraftHolds[key]
-		if !ok || hold != notice.hold {
+		if !ok || !sameDraftHoldNotice(hold, notice.hold) {
 			return nil
 		}
 		hold.NotifyLease = time.Time{}

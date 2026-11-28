@@ -2876,14 +2876,7 @@ func readNudgeStatus(cityPath string, target nudgeTarget, now time.Time, clk clo
 				status.InFlight = append(status.InFlight, item)
 			}
 		}
-		for _, queue := range [][]queuedNudge{status.Pending, status.InFlight} {
-			for _, item := range queue {
-				if hold, ok := state.DraftHolds[item.DraftHoldKey()]; ok && hold.MatchesSession(item.SessionID, item.ContinuationEpoch) && hold.MatchesSession(target.sessionID, target.continuationEpoch) {
-					status.DraftHold = &hold
-					break
-				}
-			}
-		}
+		status.DraftHold = draftHoldForTarget(state, target, status.Pending, status.InFlight)
 		for _, item := range state.Dead {
 			if target.matchesQueueAgent(item.Agent) {
 				status.Dead = append(status.Dead, item)
@@ -2892,6 +2885,33 @@ func readNudgeStatus(cityPath string, target nudgeTarget, now time.Time, clk clo
 		return nil
 	})
 	return status, err
+}
+
+// draftHoldForTarget finds the hold this target's session recorded for one of
+// the listed items. A hold belongs to the session that read the composer, so an
+// item's own routing fields do not have to name that session.
+func draftHoldForTarget(state *nudgeQueueState, target nudgeTarget, queues ...[]queuedNudge) *nudgequeue.DraftHold {
+	listed := make(map[string]bool)
+	for _, queue := range queues {
+		for _, item := range queue {
+			listed[item.ID] = true
+		}
+	}
+	keys := make([]string, 0, len(state.DraftHolds))
+	for key := range state.DraftHolds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		hold := state.DraftHolds[key]
+		if (target.sessionName != "" && key != target.sessionName) || !hold.MatchesSession(target.sessionID, target.continuationEpoch) {
+			continue
+		}
+		if slices.ContainsFunc(hold.Items, func(id string) bool { return listed[id] }) {
+			return &hold
+		}
+	}
+	return nil
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
@@ -3109,8 +3129,9 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 		state.InFlight = inFlight
 		for _, item := range terminal {
 			if outcome == "injected" || outcome == "injected_unobserved" {
+				// The claim labels an item with the session that delivers it.
 				key := item.DraftHoldKey()
-				if h, ok := state.DraftHolds[key]; ok && h.MatchesSession(item.SessionID, item.ContinuationEpoch) {
+				if h, ok := state.DraftHolds[key]; ok && (slices.Contains(h.Items, item.ID) || h.MatchesSession(item.SessionID, item.ContinuationEpoch)) {
 					delete(state.DraftHolds, key)
 				}
 			}
@@ -3260,18 +3281,19 @@ func recordQueuedNudgeFailureForTarget(target nudgeTarget, store beads.NudgesSto
 			if target.cfg != nil {
 				noticeDelay = target.cfg.Session.NudgeHoldNoticeDelayDuration()
 			}
-			for i := range requeued {
-				item := &requeued[i]
+			for _, item := range requeued {
 				// Claim can admit an unfenced item or rebind a superseded generation.
-				// Keep the hold with the session that actually observed the draft.
+				// The hold names the session that read the composer. The queued
+				// item keeps its own routing, so any session it matches can claim it.
+				observer := item
 				if target.sessionID != "" {
-					item.SessionID = target.sessionID
-					item.ContinuationEpoch = target.continuationEpoch
+					observer.SessionID = target.sessionID
+					observer.ContinuationEpoch = target.continuationEpoch
 				}
 				if target.sessionName != "" {
-					item.SessionName = target.sessionName
+					observer.SessionName = target.sessionName
 				}
-				if notice := reserveDraftHoldNotice(state, *item, now, noticeDelay); notice != nil {
+				if notice := reserveDraftHoldNotice(state, observer, now, noticeDelay); notice != nil {
 					notices = append(notices, *notice)
 				}
 			}
