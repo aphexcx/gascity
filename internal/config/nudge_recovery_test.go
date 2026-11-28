@@ -52,5 +52,8 @@ func TestSessionNudgeUnseenPasteAgeConfiguration(t *testing.T) {
 		if len(ValidateDurations(&cfg, "city.toml")) == 0 {
 			t.Fatalf("invalid unseen paste age %q accepted", invalid)
 		}
+		if got := cfg.Session.NudgeUnseenPasteAgeDuration(); got != 5*time.Minute {
+			t.Fatalf("invalid unseen paste age %q read as %s, want the 5m the runtime applies", invalid, got)
+		}
 	}
 }

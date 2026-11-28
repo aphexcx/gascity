@@ -1763,9 +1763,14 @@ func (s *SessionConfig) NudgeHoldNoticeDelayDuration() time.Duration {
 }
 
 // NudgeUnseenPasteAgeDuration returns the limit on an empty-composer hold for
-// an accepted, never-shown paste, defaulting to 5m.
+// an accepted, never-shown paste. Unset, unparseable and non-positive values
+// yield the 5m default, the limit the runtime applies in those cases.
 func (s *SessionConfig) NudgeUnseenPasteAgeDuration() time.Duration {
-	return durationOr(s.NudgeUnseenPasteAge, 5*time.Minute)
+	const limit = 5 * time.Minute
+	if d := durationOr(s.NudgeUnseenPasteAge, limit); d > 0 {
+		return d
+	}
+	return limit
 }
 
 // NudgeReservationAgeDuration returns the retry reservation bound, defaulting to 10m.
