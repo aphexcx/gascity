@@ -846,6 +846,7 @@ go_test(
         "cmd_dolt_config_test.go",
         "cmd_dolt_state_test.go",
         "cmd_event_emit_test.go",
+        "cmd_events_bounded_test.go",
         "cmd_events_reemit_execution_test.go",
         "cmd_events_remote_test.go",
         "cmd_events_scope_test.go",
