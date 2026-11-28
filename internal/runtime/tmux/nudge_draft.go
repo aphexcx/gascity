@@ -128,22 +128,19 @@ func normalizedNudgeDigest(message string) string {
 }
 
 // waitForNudgeDraftRendering leaves a third of the remaining lock budget for
-// confirmation and I/O. Codex also needs time for its slower staged retries.
-func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix, footer string, lockDeadline time.Time, stagedRetries bool) (string, error) {
+// confirmation and I/O after observing a Claude paste.
+func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix string, lockDeadline time.Time) (string, error) {
 	ctx, cancel := context.WithDeadline(context.Background(), lockDeadline)
 	defer cancel()
 	remaining := time.Until(lockDeadline)
-	if stagedRetries {
-		remaining -= submitDraftRecoverySends * (submitDraftRecoveryBackoff + nudgeSubmitKeySettle)
-	}
 	budget := min(20*time.Second, remaining/3*2)
 	if budget <= 0 {
-		return t.recordNudgeDraftRendering(ctx, target, message, prefix, footer)
+		return t.recordNudgeDraftRendering(ctx, target, message, prefix, true)
 	}
 	ctx, stop := context.WithTimeout(ctx, budget)
 	defer stop()
 	for {
-		recorded, err := t.recordNudgeDraftRendering(ctx, target, message, prefix, footer)
+		recorded, err := t.recordNudgeDraftRendering(ctx, target, message, prefix, true)
 		if recorded != "" || errors.Is(err, ErrNudgeDraftDeferred) {
 			return recorded, err
 		}
@@ -157,7 +154,7 @@ func (t *Tmux) waitForNudgeDraftRendering(target, message, prefix, footer string
 
 // recordNudgeDraftRendering binds recovery to what the completed paste actually
 // displayed. An opaque placeholder needs its counter as well as its line count.
-func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, prefix, footer string) (string, error) {
+func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, prefix string, claude bool) (string, error) {
 	shape, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftShapeOption)
 	if err != nil {
 		return "", err
@@ -167,12 +164,15 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 	if len(parts) != 5 || parts[0] != digest {
 		return "", fmt.Errorf("%w: paste shape changed before rendering observation", ErrNudgeDraftDeferred)
 	}
+	if !claude && parts[4] != "" {
+		return parts[4], nil
+	}
 	payload, err := t.runCtx(ctx, "show-options", "-p", "-qv", "-t", exactPaneTarget(target), nudgeDraftPayloadOption)
 	if err != nil {
 		return "", err
 	}
 	payload = strings.TrimSpace(payload)
-	attachedStage := payload == "attached:"+digest
+	attachedStage := claude && payload == "attached:"+digest
 	if !attachedStage && payload != digest && payload != "pending:"+digest {
 		return "", fmt.Errorf("%w: paste ownership changed before rendering observation", ErrNudgeDraftDeferred)
 	}
@@ -180,15 +180,13 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 	if err != nil {
 		return "", err
 	}
-	draft, literal, observed := nudgeComposerViews(content, prefix, footer)
+	reading := readNudgeComposer(content, prefix, claude)
+	draft, observed := reading.draft, reading.observed
 	if !observed || draft == "" {
 		return "", nil
 	}
 	collapsed := collapsedNudgeDraftMatches(draft, message)
-	if strings.TrimSpace(prefix) == "›" {
-		collapsed = draft == fmt.Sprintf("[Pasted Content %d chars]", utf8.RuneCountInString(message))
-	}
-	if !collapsed && !nudgeCapturedDraftMatches(draft, literal, message, prefix, 0) {
+	if !collapsed && !reading.matches(message, 0) {
 		widthText, err := t.runCtx(ctx, "display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 		if err != nil {
 			return "", fmt.Errorf("reading pasted composer width: %w", err)
@@ -197,7 +195,7 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 		if err != nil || width <= 2 {
 			return "", fmt.Errorf("invalid pasted composer width %q", widthText)
 		}
-		if !nudgeCapturedDraftMatches(draft, literal, message, prefix, width-2) {
+		if !reading.matches(message, width-2) {
 			return "", fmt.Errorf("pasted composer does not match the payload")
 		}
 	}
@@ -295,16 +293,18 @@ func (t *Tmux) captureOwnedNudgeDraftInput(target, digest string, requireDetache
 	return strings.Split(out, "\n"), nil
 }
 
-// nudgeComposer reads the last live input, including continuation rows inside
-// its frame. Unknown layouts stay unreadable: a missing prompt is not an empty
-// composer. ComposerInputText removes attributed suggestions, not typed input.
-// composerRemainder folds the TUI's nonbreaking prompt separator while
-// preserving the original bytes of the input after it.
-func composerRemainder(line, prefix string) (string, bool) {
+// capturedPromptRemainder preserves Claude's literal input and its screen
+// column, including the space or nonbreaking space after the prompt glyph.
+func capturedPromptRemainder(line, prefix string, claude bool) (string, int, bool) {
+	if !claude {
+		remainder, ok := lastComposerRemainder([]string{line}, prefix)
+		return remainder, -1, ok
+	}
+	fullWidth := runewidth.StringWidth(line)
 	line = stripLeadingBoxBorder(strings.TrimLeft(line, " \t\u00a0"))
 	prefix = strings.ReplaceAll(prefix, "\u00a0", " ")
 	if strings.TrimSpace(line) == strings.TrimSpace(prefix) {
-		return "", true
+		return "", fullWidth, true
 	}
 	for _, want := range prefix {
 		got, size := utf8.DecodeRuneInString(line)
@@ -312,48 +312,53 @@ func composerRemainder(line, prefix string) (string, bool) {
 			got = ' '
 		}
 		if size == 0 || got != want {
-			return "", false
+			return "", 0, false
 		}
 		line = line[size:]
 	}
-	return line, true
+	// show-environment trims the configured prefix. Account for the
+	// separator that the terminal still paints after the prompt glyph.
+	if strings.TrimRight(prefix, " \u00a0") == prefix {
+		if rest, found := strings.CutPrefix(line, " "); found {
+			line = rest
+		} else {
+			line = strings.TrimPrefix(line, "\u00a0")
+		}
+	}
+	return line, fullWidth - runewidth.StringWidth(line), true
 }
 
 func nudgeComposer(content, prefix string) (string, bool) {
-	draft, _, observed := nudgeComposerViews(content, prefix, "")
-	return draft, observed
+	reading := readNudgeComposer(content, prefix, false)
+	return reading.draft, reading.observed
 }
 
-// Keep both views of captured rows. Terminal padding is absent from the
-// canonical form used for ownership records, but a paste can itself contain
-// those spaces immediately before an explicit newline.
-func nudgeComposerViews(content, prefix, observedFooter string) (draft, literal string, observed bool) {
-	literal, observed = literalNudgeComposer(content, prefix, observedFooter)
-	if !strings.Contains(literal, " \n") {
-		return literal, literal, observed
-	}
-	rows := strings.Split(literal, "\n")
-	for i := range rows {
-		rows[i] = strings.TrimRight(rows[i], " ")
-	}
-	return strings.Join(rows, "\n"), literal, observed
+type composerReading struct {
+	draft, literal string
+	inputColumn    int
+	observed       bool
 }
 
-func nudgeCapturedDraftMatches(draft, literal, message, prefix string, width int) bool {
-	return nudgeDraftMatches(draft, message, width) || matchNudgeRows(literal, message, width, runewidth.StringWidth(prefix))
+func (r composerReading) matches(message string, width int) bool {
+	return nudgeDraftMatches(r.draft, message, width) ||
+		(r.inputColumn >= 0 && matchNudgeRows(r.literal, message, width, r.inputColumn))
 }
 
-func literalNudgeComposer(content, prefix, observedFooter string) (string, bool) {
+// readNudgeComposer keeps the observed input column and literal row padding
+// when matching Claude pastes. Other providers retain their existing reader.
+func readNudgeComposer(content, prefix string, claude bool) composerReading {
 	lines := strings.Split(runtime.ComposerInputText(content), "\n")
 	start := -1
 	frame, promptIndent := -1, 0
+	inputColumn := -1
 	var draft string
 	for i, line := range lines {
 		if composerFrameBoundary(line) {
 			frame = i
 			continue
 		}
-		if remainder, ok := composerRemainder(line, prefix); ok {
+		remainder, column, ok := capturedPromptRemainder(line, prefix, claude)
+		if ok {
 			candidate := line
 			if trimmed := strings.TrimLeft(line, " \t"); strings.HasPrefix(trimmed, "│") || strings.HasPrefix(trimmed, "┃") {
 				// Only a vertical border in the frame column is structural.
@@ -365,20 +370,26 @@ func literalNudgeComposer(content, prefix, observedFooter string) (string, bool)
 			}
 			indent := len(candidate) - len(strings.TrimLeft(candidate, " \t"))
 			if start < 0 || start < frame || indent <= promptIndent {
+				inputColumn = column
 				start, draft, promptIndent = i, remainder, indent
 			}
 		}
 	}
 	if start < 0 {
-		return "", false
+		return composerReading{}
 	}
 	border := "│"
 	if strings.HasPrefix(lines[start], "┃") {
 		border = "┃"
 	}
 	boxed := strings.HasPrefix(lines[start], border)
-	if boxed {
+	if boxed && !claude {
+		draft = strings.TrimSuffix(strings.TrimSpace(draft), border)
+	} else if boxed {
 		draft = strings.TrimSuffix(strings.TrimSuffix(strings.TrimRight(draft, " "), border), " ")
+	}
+	if !claude {
+		draft = strings.TrimSpace(draft)
 	}
 	parts := []string{draft}
 	framed := false
@@ -389,28 +400,18 @@ func literalNudgeComposer(content, prefix, observedFooter string) (string, bool)
 		}
 	}
 	if boxed && !framed {
-		return "", false
+		return composerReading{}
 	}
-	// A separated footer establishes a lower boundary just like a frame.
-	// Only the last nonblank row can be the footer. An indented blank row
-	// and footer-shaped text inside the pasted message are both input.
+	// Codex's original reader recognizes a single footer after a blank row.
 	footer := false
-	if !framed && !boxed {
+	if !claude && !framed && !boxed && strings.TrimSpace(prefix) == "›" {
 		end := len(lines)
 		for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
 			end--
 		}
-		if end > start+2 && lines[end-2] == "" {
-			last := strings.TrimRight(lines[end-1], " \t\r")
-			footer = (observedFooter != "" && last == observedFooter) ||
-				(strings.TrimSpace(prefix) == "›" && codexComposerFooter(last))
-			if footer {
-				lines = lines[:end-2]
-				framed = true
-			}
-		}
-		if observedFooter != "" && !footer {
-			return "", false
+		if end > start+2 && strings.TrimSpace(lines[end-2]) == "" && codexComposerFooter(lines[end-1]) {
+			lines = lines[:end-2]
+			footer, framed = true, true
 		}
 	}
 	// An attributed placeholder is evidence of empty input. Without a frame
@@ -418,7 +419,7 @@ func literalNudgeComposer(content, prefix, observedFooter string) (string, bool)
 	emptySuggestion := false
 	if !framed && strings.TrimSpace(draft) == "" {
 		rawLines := strings.Split(runtime.RenderPeek(content).Output, "\n")
-		rawDraft, ok := composerRemainder(rawLines[start], prefix)
+		rawDraft, ok := lastComposerRemainder([]string{rawLines[start]}, prefix)
 		emptySuggestion = ok && strings.TrimSpace(rawDraft) != ""
 	}
 	for i, line := range lines[start+1:] {
@@ -428,33 +429,41 @@ func literalNudgeComposer(content, prefix, observedFooter string) (string, bool)
 		}
 		if boxed {
 			if !strings.HasPrefix(trimmed, border) {
-				return "", false
+				return composerReading{}
+			}
+			if !claude {
+				parts = append(parts, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, border), border)))
+				continue
 			}
 			row := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(trimmed, border), border), " ")
 			// The TUI aligns continuation text with the first input column.
 			// Any additional indentation belongs to the paste.
-			gutter := promptIndent + runewidth.StringWidth(prefix)
+			gutter := inputColumn - runewidth.StringWidth(border)
 			padding := min(gutter, len(row)-len(strings.TrimLeft(row, " ")))
 			parts = append(parts, row[padding:])
 			continue
 		}
 		if footer && trimmed != "" && !strings.HasPrefix(line, "  ") {
-			return "", false
+			return composerReading{}
 		}
 		if !framed {
 			if trimmed == "" {
 				if strings.TrimSpace(strings.Join(lines[start+1+i:], "\n")) == "" {
 					break
 				}
-				return "", emptySuggestion && strings.TrimSpace(strings.Join(parts, "\n")) == ""
+				return composerReading{observed: emptySuggestion && strings.TrimSpace(strings.Join(parts, "\n")) == ""}
 			}
 			if !strings.HasPrefix(line, "  ") {
-				return "", false
+				return composerReading{}
 			}
 		}
 		parts = append(parts, strings.TrimPrefix(line, "  "))
 	}
-	return strings.TrimSpace(strings.Join(parts, "\n")), true
+	literal := strings.TrimSpace(strings.Join(parts, "\n"))
+	for i := range parts {
+		parts[i] = strings.TrimRight(parts[i], " ")
+	}
+	return composerReading{draft: strings.TrimSpace(strings.Join(parts, "\n")), literal: literal, inputColumn: inputColumn, observed: true}
 }
 
 // nudgeDraftMatches checks rendering compatibility, not payload identity.

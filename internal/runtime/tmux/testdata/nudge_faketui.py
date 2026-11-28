@@ -88,7 +88,7 @@ try:
                     log("EMPTY-ENTER")
             elif b == 0x1b:                    # ESC / CSI prefix: ignore
                 pass
-            elif 0x20 <= b < 0x7f or b >= 0x80:
+            elif b == 0x09 or 0x20 <= b < 0x7f or b >= 0x80:
                 state["draft"].append(chr(b) if b < 0x80 else ch.decode("utf-8", "ignore"))
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old)

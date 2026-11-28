@@ -29,7 +29,8 @@ type renderTrace struct {
 func (e *renderTrace) executeCtx(ctx context.Context, args []string) (string, error) {
 	out, err := e.realExecutor.executeCtx(ctx, args)
 	if slices.Contains(args, "capture-pane") && slices.Contains(args, "-J") {
-		draft, observed := nudgeComposer(out, DefaultReadyPromptPrefix)
+		reading := readNudgeComposer(out, DefaultReadyPromptPrefix, true)
+		draft, observed := reading.draft, reading.observed
 		if observed && !e.seen && (draft == e.message || collapsedNudgeDraftMatches(draft, e.message)) {
 			e.seen = true
 			e.t.Logf("composer at %s: %q", time.Since(e.start).Round(time.Millisecond), draft)
@@ -61,7 +62,7 @@ func TestNudgeDuringClaudeSessionStart(t *testing.T) {
 			dir := t.TempDir()
 			const settings = `{"hooks":{
 				"SessionStart":[{"hooks":[{"type":"command","command":"cd \"$GC_TEST_HOOK_DIR\" && touch hook-started && sleep 18 && touch hook-finished && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"Synthetic startup complete.\"}}'"}]}],
-				"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cd \"$GC_TEST_HOOK_DIR\" && cat > turn.tmp && mv turn.tmp turn.json"}]}]
+				"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cd \"$GC_TEST_HOOK_DIR\" && record=$(mktemp turn.XXXXXXXX) && cat > \"$record\" && mv \"$record\" \"$record.json\""}]}]
 			}}`
 			if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0o600); err != nil {
 				t.Fatal(err)
@@ -75,7 +76,7 @@ func TestNudgeDuringClaudeSessionStart(t *testing.T) {
 			trace := &renderTrace{t: t, start: start, message: message}
 			tm.exec = trace
 			if _, err := tm.run("new-session", "-d", "-s", session, "-c", project, "-x", "139", "-y", "57",
-				"-e", "GC_PROVIDER=claude", "-e", "GC_TEST_HOOK_DIR="+dir, command); err != nil {
+				"-e", "GC_PROVIDER=claude", "-e", sessionReadyPromptEnvKey+"="+DefaultReadyPromptPrefix, "-e", "GC_TEST_HOOK_DIR="+dir, command); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
@@ -141,15 +142,20 @@ func TestNudgeDuringClaudeSessionStart(t *testing.T) {
 				held++
 				return
 			}
-			if d.Submit != runtime.NudgeSubmitConfirmed || trace.enters == 0 || (err != nil && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)) {
+			if d.Submit != runtime.NudgeSubmitConfirmed || trace.enters != 1 || (err != nil && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)) {
 				t.Fatalf("rendered paste: delivery=%+v err=%v Enters=%d", d, err, trace.enters)
 			}
-			turnFile := filepath.Join(dir, "turn.json")
+			records := func() []string {
+				files, err := filepath.Glob(filepath.Join(dir, "turn.*.json"))
+				require.NoError(t, err)
+				return files
+			}
 			require.Eventually(t, func() bool {
-				_, err := os.Stat(turnFile)
-				return !errors.Is(err, os.ErrNotExist)
+				return len(records()) > 0
 			}, 30*time.Second, 200*time.Millisecond, "UserPromptSubmit hook")
-			raw, err := os.ReadFile(turnFile)
+			files := records()
+			require.Len(t, files, 1, "one UserPromptSubmit per nudge")
+			raw, err := os.ReadFile(files[0])
 			require.NoError(t, err)
 			var turn struct{ Prompt string }
 			require.NoError(t, json.Unmarshal(raw, &turn))
@@ -157,6 +163,7 @@ func TestNudgeDuringClaudeSessionStart(t *testing.T) {
 			if strings.Count(turn.Prompt, message) != 1 {
 				t.Fatal("UserPromptSubmit did not contain the complete paste exactly once")
 			}
+			require.Never(t, func() bool { return len(records()) > 1 }, time.Second, 100*time.Millisecond, "duplicate UserPromptSubmit")
 			t.Logf("UserPromptSubmit witnessed the complete paste at %s", time.Since(start).Round(time.Millisecond))
 		})
 	}

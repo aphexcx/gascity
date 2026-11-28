@@ -92,6 +92,23 @@ func TestNudgeConfirmBusyRenderLag(t *testing.T) {
 
 	const msg = "gc-nudge-lag-probe"
 
+	t.Run("tab after configured prompt", func(t *testing.T) {
+		const session = "tab"
+		tm, logPath := startFakeTUI(t, privateSocketName("tab"), session, 100*time.Millisecond)
+		if err := tm.SetEnvironment(session, sessionReadyPromptEnvKey, "❯ "); err != nil {
+			t.Fatal(err)
+		}
+		if got := tm.resolveIdlePromptPrefix(session); got != "❯" {
+			t.Fatalf("configured prefix read from tmux = %q", got)
+		}
+		if err := tm.NudgeSession(session, "one\tcopy"); err != nil {
+			t.Fatal(err)
+		}
+		if got := submits(t, logPath); len(got) != 1 || got[0] != "one copy" {
+			t.Fatalf("TUI submissions = %q", got)
+		}
+	})
+
 	// The composer drains — the fake TUI clears its draft the instant Enter
 	// lands — but the busy indicator renders after the confirm budget. This is
 	// the production shape: 1201 of these in ~/.gc/supervisor.log over 5 days,

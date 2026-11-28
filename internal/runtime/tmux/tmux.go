@@ -2658,18 +2658,17 @@ func (t *Tmux) paneBusy(target string) (bool, error) {
 	return paneContainsBusyIndicator(lines), nil
 }
 
-// submitVerifyEligible reports whether the target runs a provider whose busy
-// indicator is reliable enough to confirm a submit.
-func (t *Tmux) submitVerifyEligible(target string) bool {
+// submitVerifyFamily identifies providers with an observable busy transition.
+func (t *Tmux) submitVerifyFamily(target string) string {
 	if provider := t.providerEnv(target); provider != "" {
-		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
+		return sessionlog.ProviderFamily(provider)
 	}
 	for _, family := range submitVerifyEligibleFamilies {
 		if t.targetLooksLikeProvider(target, family) {
-			return true
+			return family
 		}
 	}
-	return false
+	return ""
 }
 
 // submitVerifyEligibleFamilies are the provider families whose busy indicator
@@ -2812,7 +2811,7 @@ func (t *Tmux) nudgeSessionDelivery(session, message string) (runtime.NudgeDeliv
 // prompts use provider-safe paste chunks so its TUI keeps the text inline.
 // Like NudgeSession it owes its caller the retry signal, not evidence.
 func (t *Tmux) nudgeStartupSession(session, message, deliveryID string) error {
-	delivery, err := t.nudgeSessionDeliveryWithIdentity(session, message, deliveryID, func(target, text string, timeout time.Duration) (int, error) {
+	delivery, err := t.deliverNudge(session, message, deliveryID, func(target, text string, timeout time.Duration) (int, error) {
 		return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
 	})
 	if err != nil {
@@ -2827,7 +2826,19 @@ func (t *Tmux) nudgeSessionDeliveryWith(session, message string, sendText func(s
 	return t.nudgeSessionDeliveryWithIdentity(session, message, "", sendText)
 }
 
-func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
+func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID string, sendText func(string, string, time.Duration) (int, error)) (runtime.NudgeDelivery, error) {
+	delivery, err := t.deliverNudge(session, message, deliveryID, sendText)
+	if errors.Is(err, errNudgeAwaitingRender) {
+		return delivery, nil // The paste landed. Its receipt carries the unconfirmed submit.
+	}
+	return delivery, err
+}
+
+// Startup can retry a deferred paste, but cannot use an unrelated busy
+// transition as evidence until it has actually attempted a submit.
+var errNudgeAwaitingRender = fmt.Errorf("%w: paste not rendered, submit not attempted", ErrNudgeDraftDeferred)
+
+func (t *Tmux) deliverNudge(session, message, deliveryID string, sendText func(string, string, time.Duration) (int, error)) (delivery runtime.NudgeDelivery, deliveryErr error) {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2877,7 +2888,8 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	payloadBytes := 0
 	submitted := false
 	renderingRecorded := false
-	var renderedDraft, baselineFooter string
+	var renderedDraft string
+	waitForRender := false
 	verifySubmit := false
 	guardOwnedDraft := false
 	ownershipLost := false
@@ -2909,12 +2921,13 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				log.Printf("tmux nudge: retiring nudge retry ownership for %q: %v; any remaining owned draft requires attention", target, err)
 			}
 		}
-		clearProvenance := renderingRecorded && submitted
-		if renderingRecorded && !submitted {
+		canClear := !waitForRender || renderingRecorded
+		clearProvenance := canClear && submitted
+		if canClear && verifySubmit && !submitted {
 			content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 			if err == nil {
-				draft, observed := nudgeComposer(content, prefix)
-				clearProvenance = observed && draft == ""
+				reading := readNudgeComposer(content, t.resolveIdlePromptPrefix(session), waitForRender)
+				clearProvenance = reading.observed && reading.draft == ""
 			} else {
 				log.Printf("tmux nudge: checking completed paste for %q: %v", target, err)
 			}
@@ -2938,29 +2951,30 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 
 	// Capture the baseline before the paste: a running turn may briefly lose
 	// its busy indicator at a tool boundary while the new input is staged.
-	verifySubmit = t.submitVerifyEligible(target)
+	family := t.submitVerifyFamily(target)
+	verifySubmit = submitVerifyEligibleFamily(family)
+	waitForRender = family == "claude"
 	idleBeforePaste := false
 	resumeDraft := false
-	var stagedMarker stagedDraftMarker
-	var hasStagedMarker bool
 	if verifySubmit {
 		content, err := t.run("capture-pane", "-p", "-e", "-J", "-t", exactPaneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 		if err != nil {
 			return runtime.NudgeDelivery{}, fmt.Errorf("reading composer before nudge to %q: %w", target, err)
 		}
 		prefix = t.resolveIdlePromptPrefix(session)
-		stagedMarker, hasStagedMarker = t.stagedDraftMarkerFor(target)
-		if hasStagedMarker {
-			prefix = stagedMarker.promptPrefix
+		if marker, ok := t.stagedDraftMarkerFor(target); ok {
+			prefix = marker.promptPrefix
 		}
-		draft, literal, observed := nudgeComposerViews(content, prefix, "")
+		read := func(content string) composerReading { return readNudgeComposer(content, prefix, waitForRender) }
+		reading := read(content)
+		draft, observed := reading.draft, reading.observed
 		heldDraft = draft
 		if !observed {
 			heldState = "unreadable_composer"
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q composer is unreadable", ErrNudgeDraftDeferred, target)
 		}
 		if draft != "" && !t.cfg.DisableOpaquePasteRecovery {
-			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, prefix, message, deliveryID)
+			recovered, since, err := t.recoverEarlierNudgePaste(session, target, draft, message, deliveryID, read)
 			if !since.IsZero() {
 				heldState, heldSince = "own_paste", since
 			}
@@ -2978,7 +2992,8 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("reading composer after recovery: %w", err)
 				}
-				draft, literal, observed = nudgeComposerViews(content, prefix, "")
+				reading = read(content)
+				draft, observed = reading.draft, reading.observed
 				heldDraft = draft
 				if !observed {
 					heldState = "unreadable_composer"
@@ -3026,7 +3041,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			if strings.TrimSpace(attached) != "0" {
 				return runtime.NudgeDelivery{}, fmt.Errorf("%w: target %q is not confirmed detached for draft retry", deferred, target)
 			}
-			if !collapsed && !nudgeCapturedDraftMatches(draft, literal, message, prefix, 0) {
+			if !collapsed && !reading.matches(message, 0) {
 				widthText, err := t.run("display-message", "-p", "-t", exactPaneTarget(target), "#{pane_width}")
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: reading pane width for %q: %w", ErrNudgeDraftDeferred, target, err)
@@ -3035,7 +3050,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if err != nil || width <= 2 {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: invalid pane width %q for %q", ErrNudgeDraftDeferred, widthText, target)
 				}
-				if !nudgeCapturedDraftMatches(draft, literal, message, prefix, width-2) {
+				if !reading.matches(message, width-2) {
 					return runtime.NudgeDelivery{}, fmt.Errorf("%w: %w: target %q holds a different or opaque draft", ErrNudgeDraftDeferred, runtime.ErrNudgeDraftUnmatched, target)
 				}
 			}
@@ -3053,10 +3068,6 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		if draft == "" {
-			text := strings.TrimRight(runtime.ComposerInputText(content), " \t\r\n")
-			if i := strings.LastIndex(text, "\n\n  "); i >= 0 && !strings.Contains(text[i+2:], "\n") {
-				baselineFooter = text[i+2:]
-			}
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
 				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
 			}
@@ -3135,6 +3146,18 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
 	time.Sleep(t.nudgeSubmitDebounce(target))
+	// Providers without a proven fresh-render check retain best-effort
+	// recording, both here and during the existing confirmation probes.
+	recordIfVisible := func() {
+		if verifySubmit && !waitForRender && !resumeDraft && !renderingRecorded {
+			draft, err := t.recordNudgeDraftRendering(context.Background(), target, message, t.resolveIdlePromptPrefix(session), false)
+			renderingRecorded = draft != ""
+			if err != nil {
+				log.Printf("tmux nudge: recording pasted rendering for %q: %v", target, err)
+			}
+		}
+	}
+	recordIfVisible()
 
 	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -3200,21 +3223,22 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 	delivered = true
 	if verifySubmit {
 		// An idle prompt can appear before the TUI starts consuming input.
-		// Wake it first, then require its own rendering of the entire paste.
-		if !resumeDraft {
+		// Claude must show its own rendering of the entire fresh paste.
+		if waitForRender && !resumeDraft {
 			if guardOwnedDraft && payloadBytes == len(message) {
 				var err error
-				renderedDraft, err = t.waitForNudgeDraftRendering(target, message, prefix, baselineFooter, lockDeadline, hasStagedMarker)
+				renderedDraft, err = t.waitForNudgeDraftRendering(target, message, prefix, lockDeadline)
 				renderingRecorded = renderedDraft != ""
 				if err != nil {
 					log.Printf("tmux nudge: recording pasted rendering for %q: %v", target, err)
 				}
 			}
 			if !renderingRecorded {
-				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, nil
+				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitUnconfirmed}, errNudgeAwaitingRender
 			}
 		}
 		capture := func() ([]string, error) {
+			recordIfVisible()
 			if guardOwnedDraft {
 				if ownershipLost {
 					return nil, ErrNudgeDraftDeferred
@@ -3253,10 +3277,10 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			// it when a client is attached, for the same reason the C-u
 			// clear above is skipped: a human may be composing, and a
 			// re-sent submit would send their draft.
-			if hasStagedMarker && !t.IsSessionAttached(session) {
+			if marker, ok := t.stagedDraftMarkerFor(target); ok && !t.IsSessionAttached(session) {
 				observe := func() (paneSubmitObservation, error) {
 					lines, err := capture()
-					return paneSubmitObservation{busy: paneContainsBusyIndicator(lines), drafted: paneShowsStagedDraft(lines, stagedMarker)}, err
+					return paneSubmitObservation{busy: paneContainsBusyIndicator(lines), drafted: paneShowsStagedDraft(lines, marker)}, err
 				}
 				switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
 				case stagedDraftUnverified:
@@ -3282,7 +3306,16 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case is
 			// reported as proven delivery, not as unconfirmed.
-			if lines, capErr := capture(); renderingRecorded && capErr == nil && paneShowsDrainedComposer(lines, message, prefix, renderedDraft) {
+			lines, capErr := capture()
+			drained := false
+			if capErr == nil {
+				if waitForRender {
+					drained = renderingRecorded && claudeComposerDrained(lines, message, prefix, renderedDraft)
+				} else {
+					drained = paneShowsDrainedComposer(lines, message)
+				}
+			}
+			if drained {
 				submitted = true
 				return runtime.NudgeDelivery{Delivered: true, Bytes: payloadBytes, Submit: runtime.NudgeSubmitConfirmed},
 					fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
@@ -4991,19 +5024,78 @@ func paneContainsBusyIndicator(lines []string) bool {
 	return false
 }
 
-// paneShowsDrainedComposer checks whether a previously seen paste has left
+// paneShowsDrainedComposer reports whether the pane's live composer -- the
+// LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
+// -- has drained, meaning the submit Enter actually reached the pane and the
+// agent consumed it. Earlier lines that also start with the prompt prefix are
+// scrollback transcript entries, not the live composer, and are ignored.
+//
+// It returns false when the composer still holds sent: the first non-empty
+// line of sent (compared on its first 40 runes, trimmed) is still present in
+// what remains after stripping the prompt prefix. That is the ga-bwm case --
+// the message is sitting drafted-but-unsubmitted -- and callers must keep
+// treating it as unconfirmed and retry. It returns true otherwise: the
+// composer is bare (or holds different, newer text), so the prior submit
+// drained it and only the busy-state OBSERVATION failed. When no line
+// matches the prompt prefix at all, the composer cannot be observed, so this
+// conservatively returns false rather than claiming delivery is proven.
+func paneShowsDrainedComposer(lines []string, sent string) bool {
+	if paneShowsStagedDraft(lines, stagedDraftMarker{promptPrefix: DefaultReadyPromptPrefix, marker: "[Pasted text #"}) {
+		return false
+	}
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	if !observed {
+		return false
+	}
+	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
+	if draft != "" && strings.Contains(remainder, draft) {
+		return false
+	}
+	return true
+}
+
+// lastComposerRemainder returns the text after the ready-prompt prefix on the
+// LAST captured line that matches it -- the live composer, since any earlier
+// match is a scrollback transcript entry -- and whether any line matched at
+// all. Mirrors matchesPromptPrefix's normalization (NBSP folding, box-border
+// stripping) so a line it would call a match also yields a remainder here.
+func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
+
+	var remainder string
+	var observed bool
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+			switch {
+			case strings.HasPrefix(cand, normalizedPrefix):
+				remainder, observed = cand[len(normalizedPrefix):], true
+			case prefixTrimmed != "" && cand == prefixTrimmed:
+				remainder, observed = "", true
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return remainder, observed
+}
+
+// claudeComposerDrained checks whether a previously seen paste has left
 // the provider's live composer. A narrow pane can wrap the first row before
 // the 40-rune sample ends, leaving only a prefix of the message on that row.
-func paneShowsDrainedComposer(lines []string, sent, prefix string, rendering ...string) bool {
-	content, observed := nudgeComposer(strings.Join(lines, "\n"), prefix)
-	if !observed || strings.Contains(content, "[Pasted text #") || strings.Contains(content, "[Pasted Content ") {
+func claudeComposerDrained(lines []string, sent, prefix, rendering string) bool {
+	reading := readNudgeComposer(strings.Join(lines, "\n"), prefix, true)
+	content := reading.draft
+	if !reading.observed || strings.Contains(content, "[Pasted text #") {
 		return false
 	}
 	row := firstNonEmptyLine(content)
 	if row == "" {
 		return true
 	}
-	for _, candidate := range append(rendering, sent) {
+	for _, candidate := range []string{rendering, sent} {
 		draft := firstNRunes(firstNonEmptyLine(candidate), 40)
 		if draft != "" && (strings.Contains(row, draft) || strings.HasPrefix(draft, row)) {
 			return false
