@@ -26,11 +26,6 @@ const (
 	// an earlier read for this city, as it does for a while after a
 	// connection died without closing.
 	busyWait = time.Second
-	// refusalGrace is how long the city must keep refusing one mail before
-	// it is dropped. The city's API also answers 400 when its own store is
-	// briefly unreachable, so a refusal is asked again until it has lasted
-	// this long.
-	refusalGrace = 2 * time.Minute
 )
 
 // Deps are the agent's ways out of its process. Nil fields take defaults:
@@ -114,11 +109,6 @@ type receiver struct {
 	in     *inbound
 	status *board
 	log    eventLog
-	// refused is the delivery the city has been refusing and since when.
-	refused struct {
-		number int64
-		since  time.Time
-	}
 }
 
 // Run publishes the city's newest key statement and then keeps one read
@@ -390,15 +380,7 @@ func (r *receiver) handle(ctx context.Context, dl relay.Delivery) (bool, error) 
 		}
 		return r.advance(dl.Number)
 	case filingRefused:
-		if r.refused.number != dl.Number {
-			r.refused.number, r.refused.since = dl.Number, now
-		}
-		if now.Sub(r.refused.since) >= refusalGrace {
-			return r.drop(dl, label, "refused", res.detail)
-		}
-		r.log.printf("file-refused number=%d id=%q from=%s %s", dl.Number, label.ID, label.From, res.detail)
-		r.status.degrade("city API: mail refused (" + res.detail + ")")
-		return false, nil
+		return r.drop(dl, label, "refused", res.detail)
 	}
 	r.log.printf("file-failed number=%d id=%q from=%s %s", dl.Number, label.ID, label.From, res.detail)
 	r.status.degrade("city API: mail not filed (" + res.detail + ")")

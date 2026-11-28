@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
@@ -18,6 +19,14 @@ const apiTimeout = 30 * time.Second
 // another request body.
 const problemIdempotencyMismatch = "idempotency-mismatch"
 
+// The city API's 400 detail starts with one of these when the address names
+// no recipient, or more than one. They are the words of the session lookup
+// the route answers with.
+const (
+	detailRecipientNotFound  = "session not found"
+	detailRecipientAmbiguous = "ambiguous session identifier"
+)
+
 // What one filing came to.
 type filingKind int
 
@@ -29,7 +38,8 @@ const (
 	// filingMismatch: the sender city reused an id with other content; the
 	// first mail stands and this one is passed.
 	filingMismatch
-	// filingRefused: the city refused the request itself; the mail is dropped.
+	// filingRefused: the city says the fault is in the mail itself, so no
+	// later try can file it; the mail is passed over.
 	filingRefused
 )
 
@@ -82,25 +92,25 @@ func (c *cityMail) file(ctx context.Context, key, senderCity string, m envelope.
 		return r
 	case code == http.StatusUnprocessableEntity && problemCode(resp.ApplicationproblemJSON422) == problemIdempotencyMismatch:
 		return filingResult{kind: filingMismatch, detail: status}
-	case retryable(code):
-		return filingResult{kind: filingRetry, detail: status}
-	case code >= 400 && code < 500:
-		// The city refused the request. It gives 400 too when its own store
-		// is briefly unreachable, so the run asks again for a while first.
+	case mailFault(code, resp):
 		return filingResult{kind: filingRefused, detail: status + problemSuffix(resp)}
 	}
-	return filingResult{kind: filingRetry, detail: status}
+	return filingResult{kind: filingRetry, detail: status + problemSuffix(resp)}
 }
 
-// retryable answers say nothing about the mail itself: the city could not
-// take it now, or the agent is not let in. The mail stays at the relay.
-func retryable(code int) bool {
+// mailFault reports whether the city's answer puts the fault in the mail
+// itself: too large, malformed, or addressed to no recipient or to more than
+// one. Every other answer, a refusal included, can pass: the city's store
+// was down, or the agent is not let in yet. That mail stays at the relay.
+func mailFault(code int, resp *genclient.SendMailResponse) bool {
 	switch code {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusRequestTimeout,
-		http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests:
+	case http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 		return true
+	case http.StatusBadRequest:
+		detail := problemDetail(resp.ApplicationproblemJSON400)
+		return strings.HasPrefix(detail, detailRecipientNotFound) || strings.HasPrefix(detail, detailRecipientAmbiguous)
 	}
-	return code >= 500
+	return false
 }
 
 func problemCode(p *genclient.ErrorModel) string {
@@ -108,6 +118,13 @@ func problemCode(p *genclient.ErrorModel) string {
 		return ""
 	}
 	return *p.Code
+}
+
+func problemDetail(p *genclient.ErrorModel) string {
+	if p == nil || p.Detail == nil {
+		return ""
+	}
+	return *p.Detail
 }
 
 // problemSuffix names the city's problem code, never its detail, which can

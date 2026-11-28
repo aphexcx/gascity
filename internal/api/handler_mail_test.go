@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1744,5 +1746,71 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	}
 	if payload.Message.Rig != "test-city" {
 		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "test-city")
+	}
+}
+
+// unreachableSessionStore is a session store whose reads fail, the way a
+// store the city cannot reach fails.
+type unreachableSessionStore struct{ beads.Store }
+
+var errSessionStoreUnreachable = errors.New("session store unreachable")
+
+func (unreachableSessionStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errSessionStoreUnreachable
+}
+
+func (unreachableSessionStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errSessionStoreUnreachable
+}
+
+// A store that fails while the route resolves the recipient is not a fault
+// in the mail: the route answers 503, so the sender files the same mail
+// again later. A recipient the store truly does not hold stays a 400.
+func TestMailSendStoreErrorWhileResolvingRecipientAnswers503(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+		to    string
+		want  int
+	}{
+		{"store down, session lookup", unreachableSessionStore{beads.NewMemStore()}, "nobody", http.StatusServiceUnavailable},
+		{"store down, configured named session lookup", unreachableSessionStore{beads.NewMemStore()}, "worker", http.StatusServiceUnavailable},
+		{"store up, no such recipient", beads.NewMemStore(), "nobody", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.sessionsBeadStore = tc.store
+			h := newTestCityHandler(t, state)
+			for _, key := range []string{"", "store-error-key"} {
+				body := fmt.Sprintf(`{"from":"human","to":%q,"subject":"hello","body":"test"}`, tc.to)
+				req := newPostRequest(cityURL(state, "/mail"), strings.NewReader(body))
+				if key != "" {
+					req.Header.Set("Idempotency-Key", key)
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != tc.want {
+					t.Fatalf("key %q: status = %d, want %d; body = %s", key, rec.Code, tc.want, rec.Body.String())
+				}
+			}
+			msgs, err := state.cityMailProv.Inbox(tc.to)
+			if err != nil || len(msgs) != 0 {
+				t.Fatalf("inbox of %s = %d messages, %v", tc.to, len(msgs), err)
+			}
+		})
+	}
+}
+
+// The recipient is resolved again inside a keyed filing; a store that fails
+// there answers 503 too.
+func TestMailFilingStoreErrorWhileResolvingRecipientAnswers503(t *testing.T) {
+	state := newFakeState(t)
+	state.sessionsBeadStore = unreachableSessionStore{beads.NewMemStore()}
+	input := &MailSendInput{}
+	input.Body.From, input.Body.To, input.Body.Subject = "human", "nobody", "hello"
+	_, err := New(state).fileMail(context.Background(), state.cityMailProv, input)
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) || problem.Status != http.StatusServiceUnavailable {
+		t.Fatalf("filing with the store down: %v", err)
 	}
 }

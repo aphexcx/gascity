@@ -407,17 +407,17 @@ func TestTellTheRecipient(t *testing.T) {
 	}
 }
 
-// A11: a recipient the city does not have is dropped, logged, and passed.
+// A11: a recipient the city does not have is dropped at its first refusal,
+// logged, and passed.
 func TestRefusedRecipientIsDropped(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		hub, alpha := pair(t)
-		city := newCityAPI(t, "alpha", "reader")
+		city := newSessionCity(t, "reader")
 		rel := newScriptedRelay()
 		rel.add(1, seal(t, hub, alpha, "nobody-1", time.Now(), letter("nobody")))
 		rel.add(2, seal(t, hub, alpha, "reader-1", time.Now(), letter("reader")))
 		deps := alpha.deps(rel.transport(), city.transport())
 		deps.Sleep = nil
-		began := time.Now()
 		run := start(t, alpha.settings, deps)
 		rel.recorder.await(t, "both places", func() bool { return slices.Contains(rel.recorder.reads(), 2) })
 		run.stop(t)
@@ -428,11 +428,8 @@ func TestRefusedRecipientIsDropped(t *testing.T) {
 		if len(drops) != 1 || !strings.Contains(drops[0], `"nobody-1"`) || !strings.Contains(drops[0], "reason=refused") {
 			t.Fatalf("drop lines %q", drops)
 		}
-		if n := len(city.posts()); n < 3 {
+		if n := len(city.posts()); n != 2 {
 			t.Fatalf("the refusal was asked %d times before the drop", n-1)
-		}
-		if waited := time.Since(began); waited < refusalGrace {
-			t.Fatalf("dropped after %s, before the grace of %s", waited, refusalGrace)
 		}
 	})
 }

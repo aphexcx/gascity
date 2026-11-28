@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -384,10 +385,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[MailSendResult], error) {
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
-		if errors.Is(resolveErr, errMailNoBeadStore) {
-			return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
-		}
-		return nil, apierr.InvalidRequest.Msg(resolveErr.Error())
+		return nil, mailRecipientError(resolveErr)
 	}
 
 	mp := s.findMailProvider(input.Body.Rig)
@@ -433,11 +431,27 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}, nil
 }
 
+// mailRecipientError answers a failure to resolve a mail's recipient. An
+// address the city has no recipient for, or one that names more than one, is
+// the request's fault and answers 400. Any other failure came from the store
+// the recipient is looked up in and answers 503, so the sender can file the
+// same mail again once the store is back.
+func mailRecipientError(err error) error {
+	switch {
+	case errors.Is(err, errMailNoBeadStore),
+		errors.Is(err, session.ErrSessionNotFound),
+		errors.Is(err, session.ErrAmbiguous),
+		errors.Is(err, errConfiguredNamedSessionConflict):
+		return apierr.InvalidRequest.Msg(err.Error())
+	}
+	return apierr.StoreUnavailable.Msg(err.Error())
+}
+
 func (s *Server) fileMail(ctx context.Context, mp mail.Provider, input *MailSendInput) (mail.Message, error) {
 	send := func(create func(from, to, subject, body string) (mail.Message, error)) (mail.Message, error) {
 		to, err := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 		if err != nil {
-			return mail.Message{}, apierr.InvalidRequest.Msg(err.Error())
+			return mail.Message{}, mailRecipientError(err)
 		}
 		msg, err := create(input.Body.From, to, input.Body.Subject, input.Body.Body)
 		telemetry.RecordMailOp(ctx, "send", err)
