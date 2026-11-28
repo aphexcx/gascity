@@ -19,7 +19,6 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/api/genclient",
-        "//internal/fsys",
         "//internal/mailrelay/envelope",
         "//internal/mailrelay/relay",
         "//internal/supervisor",

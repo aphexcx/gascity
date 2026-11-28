@@ -61,11 +61,17 @@ func newCityMail(s Settings, transport http.RoundTripper) (*cityMail, error) {
 func (c *cityMail) file(ctx context.Context, key, senderCity string, m envelope.Mail) filingResult {
 	from := senderCity + "/" + m.From
 	body := genclient.SendMailJSONRequestBody{From: &from, To: m.To, Subject: m.Subject, Body: &m.Body}
-	resp, err := c.client.SendMailWithResponse(ctx, c.city, &genclient.SendMailParams{XGCRequest: "true", IdempotencyKey: &key}, body)
+	raw, err := c.client.SendMail(ctx, c.city, &genclient.SendMailParams{XGCRequest: "true", IdempotencyKey: &key}, body)
 	if err != nil {
 		return filingResult{kind: filingRetry, detail: "reason=" + transportReason(ctx, err)}
 	}
-	code := resp.StatusCode()
+	code := raw.StatusCode
+	// The status decides; an answer body that does not parse only loses the
+	// detail, so a filing answered 201 is a filing.
+	resp, err := genclient.ParseSendMailResponse(raw)
+	if err != nil {
+		resp = &genclient.SendMailResponse{HTTPResponse: raw}
+	}
 	status := "status=" + strconv.Itoa(code)
 	switch {
 	case code == http.StatusCreated:
@@ -79,6 +85,8 @@ func (c *cityMail) file(ctx context.Context, key, senderCity string, m envelope.
 	case retryable(code):
 		return filingResult{kind: filingRetry, detail: status}
 	case code >= 400 && code < 500:
+		// The city refused the request. It gives 400 too when its own store
+		// is briefly unreachable, so the run asks again for a while first.
 		return filingResult{kind: filingRefused, detail: status + problemSuffix(resp)}
 	}
 	return filingResult{kind: filingRetry, detail: status}

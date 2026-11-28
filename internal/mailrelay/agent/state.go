@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // The files the agent keeps in its state folder.
@@ -105,6 +103,15 @@ func (in *inbound) advance(number int64) error {
 	return nil
 }
 
+// reset starts the place over from zero.
+func (in *inbound) reset() error {
+	if err := writeJSON(filepath.Join(in.dir, placeFile), placeRecord{}); err != nil {
+		return err
+	}
+	in.place = 0
+	return nil
+}
+
 // readJSON fills v from path; a missing file leaves v empty.
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
@@ -125,8 +132,8 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, data, privateFileMode); err != nil {
-		return fmt.Errorf("saving state %s: %w", filepath.Base(path), err)
+	if err := writeFile(filepath.Dir(path), filepath.Base(path), data, privateFileMode, true); err != nil {
+		return fmt.Errorf("saving state: %w", err)
 	}
 	return nil
 }
@@ -157,16 +164,22 @@ func peerStatement(stateDir, peer string) ([]byte, bool, error) {
 }
 
 func savePeerStatement(stateDir, peer string, wire []byte) error {
-	path := filepath.Join(stateDir, peersDir, peer+statementSuffix)
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, encodeLine(wire), privateFileMode); err != nil {
+	if err := writeFile(filepath.Join(stateDir, peersDir), peer+statementSuffix, encodeLine(wire), privateFileMode, true); err != nil {
 		return fmt.Errorf("saving peer key statement: %w", err)
 	}
 	return nil
 }
 
-// writeNewFile creates dir/name durably and never replaces an existing file:
-// the content goes to a temporary file first, then a hard link names it.
-func writeNewFile(dir, name string, data []byte, perm os.FileMode) (err error) {
+// writeNewFile creates dir/name durably and never replaces an existing file.
+func writeNewFile(dir, name string, data []byte, perm os.FileMode) error {
+	return writeFile(dir, name, data, perm, false)
+}
+
+// writeFile writes dir/name through a synced temporary file, so a crash
+// leaves the old content or the new, never a torn file. With replace it
+// renames over an existing file; without, a hard link names the new file and
+// an existing one is never replaced.
+func writeFile(dir, name string, data []byte, perm os.FileMode, replace bool) (err error) {
 	final := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
@@ -192,7 +205,11 @@ func writeNewFile(dir, name string, data []byte, perm os.FileMode) (err error) {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", name, err)
 	}
-	if err := os.Link(tmp.Name(), final); err != nil {
+	if replace {
+		if err := os.Rename(tmp.Name(), final); err != nil {
+			return fmt.Errorf("writing %s: %w", name, err)
+		}
+	} else if err := os.Link(tmp.Name(), final); err != nil {
 		return fmt.Errorf("refusing to replace %s: %w", final, err)
 	}
 	return syncDir(dir)

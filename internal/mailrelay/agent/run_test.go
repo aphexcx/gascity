@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -392,7 +393,7 @@ func TestTellTheRecipient(t *testing.T) {
 					return len(c) > 2 && c[0] == "mail" && c[1] == "send" && slices.Contains(c, "--notify") &&
 						slices.Contains(c, "--to=reader") && slices.Contains(c, "--from=human") &&
 						slices.ContainsFunc(c, func(a string) bool {
-							return strings.HasPrefix(a, "--subject=") && strings.Contains(a, "hub/writer") && strings.Contains(a, subjectSentinel) && strings.Contains(a, filed.ID)
+							return strings.HasPrefix(a, "--subject=Relay mail from hub/writer") && strings.Contains(a, "hub/writer") && strings.Contains(a, subjectSentinel) && strings.Contains(a, filed.ID)
 						})
 				})
 				if nudged != tc.nudge || noticed != tc.notice {
@@ -414,7 +415,10 @@ func TestRefusedRecipientIsDropped(t *testing.T) {
 		rel := newScriptedRelay()
 		rel.add(1, seal(t, hub, alpha, "nobody-1", time.Now(), letter("nobody")))
 		rel.add(2, seal(t, hub, alpha, "reader-1", time.Now(), letter("reader")))
-		run := start(t, alpha.settings, alpha.deps(rel.transport(), city.transport()))
+		deps := alpha.deps(rel.transport(), city.transport())
+		deps.Sleep = nil
+		began := time.Now()
+		run := start(t, alpha.settings, deps)
 		rel.recorder.await(t, "both places", func() bool { return slices.Contains(rel.recorder.reads(), 2) })
 		run.stop(t)
 		if n := len(city.messages()); n != 1 {
@@ -423,6 +427,114 @@ func TestRefusedRecipientIsDropped(t *testing.T) {
 		drops := alpha.log.lines("drop ")
 		if len(drops) != 1 || !strings.Contains(drops[0], `"nobody-1"`) || !strings.Contains(drops[0], "reason=refused") {
 			t.Fatalf("drop lines %q", drops)
+		}
+		if n := len(city.posts()); n < 3 {
+			t.Fatalf("the refusal was asked %d times before the drop", n-1)
+		}
+		if waited := time.Since(began); waited < refusalGrace {
+			t.Fatalf("dropped after %s, before the grace of %s", waited, refusalGrace)
+		}
+	})
+}
+
+// A 400 the city gives while its own store is briefly unreachable is not a
+// refusal of the mail: it is asked again, and the mail is filed.
+func TestShortLivedRefusalIsRetried(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hub, alpha := pair(t)
+		city := newCityAPI(t, "alpha", "reader")
+		rel := newScriptedRelay()
+		rel.add(1, seal(t, hub, alpha, "m-1", time.Now(), letter("reader")))
+		var refusals atomic.Int32
+		apiTransport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if refusals.Add(1) <= 3 {
+				return problem(r, http.StatusBadRequest, "invalid-request"), nil
+			}
+			return city.transport().RoundTrip(r)
+		})
+		deps := alpha.deps(rel.transport(), apiTransport)
+		deps.Sleep = nil
+		run := start(t, alpha.settings, deps)
+		rel.recorder.await(t, "the place to move", func() bool { return slices.Contains(rel.recorder.reads(), 1) })
+		run.stop(t)
+		if n := len(city.inbox("reader")); n != 1 {
+			t.Fatalf("filed %d mails after a short refusal", n)
+		}
+		if drops := alpha.log.lines("drop "); len(drops) != 0 {
+			t.Fatalf("dropped: %q", drops)
+		}
+	})
+}
+
+// A peer pinned while the agent runs is trusted without a restart.
+func TestPeerPinnedWhileRunningIsAccepted(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hub, alpha := newCityFixture(t, "hub"), newCityFixture(t, "alpha")
+		hub.keygen()
+		alpha.keygen()
+		city := newCityAPI(t, "alpha", "reader")
+		rel := newScriptedRelay()
+		run := start(t, alpha.settings, alpha.deps(rel.transport(), city.transport()))
+		rel.recorder.await(t, "the first ask", func() bool { return len(rel.recorder.reads()) > 0 })
+		alpha.pin(hub)
+		rel.add(1, seal(t, hub, alpha, "m-1", time.Now(), letter("reader")))
+		rel.recorder.await(t, "the place to move", func() bool { return slices.Contains(rel.recorder.reads(), 1) })
+		run.stop(t)
+		if n := len(city.inbox("reader")); n != 1 {
+			t.Fatalf("filed %d mails from the new peer: %q", n, alpha.log.lines("drop "))
+		}
+	})
+}
+
+// A place above the relay's highest number, as after the relay lost its
+// store, starts over from zero instead of waiting for the relay's counter to
+// pass it and delete mail unread.
+func TestPlaceAboveRelayCounterStartsOver(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hub, alpha := pair(t)
+		city := newCityAPI(t, "alpha", "reader")
+		if err := os.MkdirAll(alpha.settings.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(alpha.settings.StateDir, placeFile), []byte(`{"place":10}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rel := newScriptedRelay()
+		rel.add(1, seal(t, hub, alpha, "m-1", time.Now(), letter("reader")))
+		rel.add(2, seal(t, hub, alpha, "m-2", time.Now(), letter("reader")))
+		run := start(t, alpha.settings, alpha.deps(rel.transport(), city.transport()))
+		rel.recorder.await(t, "the place to reach 2", func() bool { return slices.Contains(rel.recorder.reads(), 2) })
+		run.stop(t)
+		if reads := rel.recorder.reads(); reads[0] != 10 || reads[1] != 0 {
+			t.Fatalf("reads %v", reads)
+		}
+		if n := len(city.inbox("reader")); n != 2 {
+			t.Fatalf("filed %d of two mails", n)
+		}
+		if n := len(alpha.log.lines("place-reset ")); n != 1 {
+			t.Fatalf("%d place-reset lines", n)
+		}
+	})
+}
+
+// A 201 whose body cannot be read is still a filing: the place moves.
+func TestFilingAnsweredWithUnreadableBodyIsFiled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hub, alpha := pair(t)
+		rel := newScriptedRelay()
+		rel.add(1, seal(t, hub, alpha, "m-1", time.Now(), letter("reader")))
+		posts := newRecorder()
+		apiTransport := posts.wrap(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusCreated, Request: r, Body: io.NopCloser(strings.NewReader("{not json")),
+				Header: http.Header{"Content-Type": {"application/json"}},
+			}, nil
+		}))
+		run := start(t, alpha.settings, alpha.deps(rel.transport(), apiTransport))
+		rel.recorder.await(t, "the place to move", func() bool { return slices.Contains(rel.recorder.reads(), 1) })
+		run.stop(t)
+		if n := len(posts.all()); n != 1 {
+			t.Fatalf("filed %d times", n)
 		}
 	})
 }

@@ -1,10 +1,8 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -27,41 +25,15 @@ type Runner interface {
 
 // execRunner runs gc as a bounded child process, in the agent's working
 // folder and environment, so gc finds the city as it does for any command
-// run there.
+// run there. gc's output is not kept: it can quote the mail's subject.
 type execRunner struct{ path string }
 
 func (r execRunner) Run(ctx context.Context, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, gcTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, r.path, args...)
-	stderr := &boundedBuffer{max: 1024}
-	cmd.Stdout, cmd.Stderr = io.Discard, stderr
 	cmd.WaitDelay = 5 * time.Second
-	if err := cmd.Run(); err != nil {
-		if line := stderr.firstLine(); line != "" {
-			return fmt.Errorf("%w: %s", err, line)
-		}
-		return err
-	}
-	return nil
-}
-
-// boundedBuffer keeps the start of a child's error output.
-type boundedBuffer struct {
-	max int
-	buf bytes.Buffer
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.buf.Len(); room > 0 {
-		b.buf.Write(p[:min(len(p), room)])
-	}
-	return len(p), nil
-}
-
-func (b *boundedBuffer) firstLine() string {
-	line, _, _ := strings.Cut(strings.TrimSpace(b.buf.String()), "\n")
-	return line
+	return cmd.Run()
 }
 
 // notice is what the recipient is told about one filed mail.
@@ -78,12 +50,16 @@ func tell(ctx context.Context, gc Runner, n notice) (string, error) {
 		return "none", nil
 	}
 	sender, subject := plainText(n.sender), plainText(n.subject)
-	nudge := fmt.Sprintf("New mail from %s: %s (gc mail read %s)", sender, subject, n.mailID)
+	nudge := fmt.Sprintf("New relay mail from %s: %s", sender, subject)
+	line := fmt.Sprintf("Relay mail from %s: %s", sender, subject)
+	if n.mailID != "" {
+		nudge += " (gc mail read " + n.mailID + ")"
+		line = fmt.Sprintf("Relay mail from %s filed as %s: %s", sender, n.mailID, subject)
+	}
 	nudgeErr := gc.Run(ctx, "session", "nudge", "--", n.recipient, nudge)
 	if nudgeErr == nil {
 		return "nudge", nil
 	}
-	line := fmt.Sprintf("Mail from %s filed as %s: %s", sender, n.mailID, subject)
 	noticeErr := gc.Run(ctx, "mail", "send", "--notify", "--from="+humanRecipient, "--to="+n.recipient, "--subject="+line)
 	if noticeErr == nil {
 		return "notice", nil

@@ -71,6 +71,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// problem answers the way the city API reports a problem.
+func problem(r *http.Request, status int, code string) *http.Response {
+	body := fmt.Sprintf(`{"code":%q,"status":%d,"title":"problem"}`, code, status)
+	return &http.Response{
+		StatusCode: status, Request: r, Body: io.NopCloser(strings.NewReader(body)),
+		Header: http.Header{"Content-Type": {"application/problem+json"}},
+	}
+}
+
 // refused is the error a dial to a closed port reports.
 func refused() error {
 	return &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
@@ -539,6 +548,7 @@ func fileDigest(t testing.TB, path string) [32]byte {
 type scriptedRelay struct {
 	mu       sync.Mutex
 	queue    []relay.Delivery
+	last     int64 // the highest number handed out, as the relay keeps it
 	recorder *recorder
 	wake     chan struct{}
 }
@@ -550,6 +560,7 @@ func newScriptedRelay() *scriptedRelay {
 func (s *scriptedRelay) add(number int64, wire []byte) {
 	s.mu.Lock()
 	s.queue = append(s.queue, relay.Delivery{Number: number, Envelope: wire})
+	s.last = max(s.last, number)
 	s.mu.Unlock()
 	select {
 	case s.wake <- struct{}{}:
@@ -566,6 +577,14 @@ func (s *scriptedRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/queue"):
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		wait, _ := time.ParseDuration(r.URL.Query().Get("wait"))
+		s.mu.Lock()
+		ahead := after > s.last
+		s.mu.Unlock()
+		if ahead {
+			// The relay refuses a place above the highest number it handed out.
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		for {

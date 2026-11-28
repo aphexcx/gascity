@@ -156,6 +156,36 @@ func TestSigningKeyOpenToOthersStopsEveryVerb(t *testing.T) {
 	}
 }
 
+// A pinned peer key that the group or others can change is not a pin: run
+// and send refuse it before contacting anyone.
+func TestPinsOthersCanWriteAreRefused(t *testing.T) {
+	for name, chmod := range map[string]func(c *cityFixture) error{
+		"pin file":     func(c *cityFixture) error { return os.Chmod(filepath.Join(c.settings.PeersDir, "hub.pub"), 0o620) },
+		"peers folder": func(c *cityFixture) error { return os.Chmod(c.settings.PeersDir, 0o770) },
+		"others, file": func(c *cityFixture) error { return os.Chmod(filepath.Join(c.settings.PeersDir, "hub.pub"), 0o602) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub, alpha := pair(t)
+			_ = hub
+			if err := chmod(alpha); err != nil {
+				t.Fatal(err)
+			}
+			rel := newRecorder()
+			deps := alpha.deps(rel.wrap(roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, refused() })), nil)
+			_, sendErr := Send(context.Background(), alpha.settings, deps, Outgoing{To: "hub/writer", From: "reader", Subject: "s"})
+			runErr := Run(context.Background(), alpha.settings, deps)
+			for verb, err := range map[string]error{"send": sendErr, "run": runErr} {
+				if err == nil || !strings.Contains(err.Error(), "group or others") {
+					t.Fatalf("%s with a writable pin: %v", verb, err)
+				}
+			}
+			if n := len(rel.all()); n != 0 {
+				t.Fatalf("contacted the relay %d times", n)
+			}
+		})
+	}
+}
+
 func assertSigningKeyRefusal(t *testing.T, verb string, err error) {
 	t.Helper()
 	if err == nil {

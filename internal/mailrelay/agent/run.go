@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -24,6 +26,11 @@ const (
 	// an earlier read for this city, as it does for a while after a
 	// connection died without closing.
 	busyWait = time.Second
+	// refusalGrace is how long the city must keep refusing one mail before
+	// it is dropped. The city's API also answers 400 when its own store is
+	// briefly unreachable, so a refusal is asked again until it has lasted
+	// this long.
+	refusalGrace = 2 * time.Minute
 )
 
 // Deps are the agent's ways out of its process. Nil fields take defaults:
@@ -107,6 +114,11 @@ type receiver struct {
 	in     *inbound
 	status *board
 	log    eventLog
+	// refused is the delivery the city has been refusing and since when.
+	refused struct {
+		number int64
+		since  time.Time
+	}
 }
 
 // Run publishes the city's newest key statement and then keeps one read
@@ -175,6 +187,9 @@ func Run(ctx context.Context, s Settings, d Deps) (err error) {
 
 // loadPeers reads the pinned signing keys of the cities this city may mail.
 func loadPeers(dir string) (map[string]ed25519.PublicKey, error) {
+	if err := checkPins(dir); err != nil {
+		return nil, err
+	}
 	keys, refused, err := supervisor.LoadTrustedKeys(dir)
 	if err != nil {
 		return nil, fmt.Errorf("peers folder: %w", err)
@@ -188,6 +203,33 @@ func loadPeers(dir string) (map[string]ed25519.PublicKey, error) {
 		}
 	}
 	return keys, nil
+}
+
+// checkPins refuses a peers folder or pin file that the group or others can
+// change: whoever can change a pin can forge that peer's mail and read mail
+// sent to it.
+func checkPins(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("peers folder: %w", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("peers folder %s can be changed by group or others (mode %#o)", dir, perm)
+	}
+	pins, err := filepath.Glob(filepath.Join(dir, "*.pub"))
+	if err != nil {
+		return fmt.Errorf("peers folder: %w", err)
+	}
+	for _, pin := range pins {
+		info, err := os.Lstat(pin)
+		if err != nil {
+			return fmt.Errorf("peer key: %w", err)
+		}
+		if perm := info.Mode().Perm(); perm&0o022 != 0 {
+			return fmt.Errorf("peer key %s can be changed by group or others (mode %#o)", pin, perm)
+		}
+	}
+	return nil
 }
 
 // publish puts the newest key statement on the relay, which accepts the same
@@ -232,7 +274,24 @@ func (r *receiver) loop(ctx context.Context) {
 				return
 			}
 			continue
-		case outcomeCut, outcomeError:
+		case outcomeError:
+			if out.status == http.StatusBadRequest && r.in.place > 0 {
+				// The relay refuses a place above the highest number it
+				// handed out, as after it lost its store. Waiting would let
+				// its new counter pass the place and delete mail unread, so
+				// start over: what is filed again is passed as seen or
+				// filed under the same key.
+				from := r.in.place
+				if err := r.in.reset(); err != nil {
+					r.log.printf("state-failed error=%q", err.Error())
+				} else {
+					r.log.printf("place-reset from=%d status=%d", from, out.status)
+					r.status.update(func(s *Status) { s.Place = 0 })
+					continue
+				}
+			}
+			fallthrough
+		case outcomeCut:
 			r.status.degrade("relay: last read " + out.kind)
 			if r.d.Sleep(ctx, relayWait.step()) != nil {
 				return
@@ -300,13 +359,9 @@ func (r *receiver) handle(ctx context.Context, dl relay.Delivery) (bool, error) 
 		return r.drop(dl, envelope.Label{}, "malformed", "")
 	}
 	label := env.Label
-	signer, ok := r.peers[label.From]
-	if !ok {
-		return r.drop(dl, label, "not-a-peer", "")
-	}
-	m, err := envelope.Open(env, r.s.City, r.ring.private, label.From, signer, now)
-	if err != nil {
-		return r.drop(dl, label, openReason(err), "")
+	m, reason := r.open(env, now)
+	if reason != "" {
+		return r.drop(dl, label, reason, "")
 	}
 	key := filingKey(label.From, label.ID)
 	if r.in.hasSeen(key, now) {
@@ -335,7 +390,15 @@ func (r *receiver) handle(ctx context.Context, dl relay.Delivery) (bool, error) 
 		}
 		return r.advance(dl.Number)
 	case filingRefused:
-		return r.drop(dl, label, "refused", res.detail)
+		if r.refused.number != dl.Number {
+			r.refused.number, r.refused.since = dl.Number, now
+		}
+		if now.Sub(r.refused.since) >= refusalGrace {
+			return r.drop(dl, label, "refused", res.detail)
+		}
+		r.log.printf("file-refused number=%d id=%q from=%s %s", dl.Number, label.ID, label.From, res.detail)
+		r.status.degrade("city API: mail refused (" + res.detail + ")")
+		return false, nil
 	}
 	r.log.printf("file-failed number=%d id=%q from=%s %s", dl.Number, label.ID, label.From, res.detail)
 	r.status.degrade("city API: mail not filed (" + res.detail + ")")
@@ -373,6 +436,37 @@ func (r *receiver) tell(ctx context.Context, number int64, label envelope.Label,
 		return
 	}
 	r.log.printf("told number=%d mail=%s via=%s", number, res.id, via)
+}
+
+// open opens and checks a mail from a pinned peer and returns why it did not
+// open. When the sender is not pinned or its signature fails, the peers
+// folder is read again first, so a pin added or changed while the agent runs
+// takes effect, and one removed stops being trusted.
+func (r *receiver) open(env envelope.Envelope, now time.Time) (envelope.Mail, string) {
+	from := env.Label.From
+	for reloaded := false; ; reloaded = true {
+		reason := "not-a-peer"
+		if signer, ok := r.peers[from]; ok {
+			m, err := envelope.Open(env, r.s.City, r.ring.private, from, signer, now)
+			if err == nil {
+				return m, ""
+			}
+			reason = openReason(err)
+		}
+		if reloaded || (reason != "not-a-peer" && reason != "bad-signature") {
+			return envelope.Mail{}, reason
+		}
+		peers, err := loadPeers(r.s.PeersDir)
+		if err != nil {
+			r.log.printf("peers-reload-failed error=%q", err.Error())
+			return envelope.Mail{}, reason
+		}
+		if maps.EqualFunc(peers, r.peers, func(a, b ed25519.PublicKey) bool { return a.Equal(b) }) {
+			return envelope.Mail{}, reason
+		}
+		r.peers = peers
+		r.log.printf("peers-reloaded peers=%d", len(peers))
+	}
 }
 
 // openReason names why a mail did not open.
