@@ -49,6 +49,39 @@ func gateRepoHead(t *testing.T, dir string) string {
 	return commit
 }
 
+func TestAPIWorkRecordCloseUsesRecordedRepository(t *testing.T) {
+	st, store, _, _ := relocatedGraphRouteState(t)
+	lane, repo := st.cityPath, st.cfg.Rigs[0].Path
+	initGateRepo(t, lane, "lane work")
+	initGateRepo(t, repo, "shipped work")
+	t.Setenv(workrecord.EnforceEnvVar, "1")
+	s := New(st)
+	prefix, _ := config.ReservedClassPrefix(config.BeadClassGraph)
+	for _, tc := range []struct {
+		name, commit string
+		wantConflict bool
+	}{
+		{"landed", gateRepoHead(t, repo), false},
+		{"absent", strings.Repeat("0", 40), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := seedGateBead(t, store, prefix+"-"+tc.name, map[string]string{
+				beadmeta.WorkDirMetadataKey:     lane,
+				beadmeta.WorkRepoDirMetadataKey: repo,
+				beadmeta.WorkBranchMetadataKey:  "main",
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  tc.commit,
+			})
+			_, err := s.humaHandleBeadClose(t.Context(), &BeadCloseInput{ID: id})
+			if tc.wantConflict {
+				assertConflict(t, err, repo)
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestAPIBeadCloseAsksTheOwningRigsCheckoutForABindingResidentBead is the
 // residency half of the gate. The store a row is served FROM says where it
 // lives; gc.root_store_ref says who OWNS it. A rig-owned work step that a

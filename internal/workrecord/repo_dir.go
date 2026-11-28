@@ -67,6 +67,8 @@ type ScopeDirs interface {
 type ScopeKind string
 
 const (
+	// ScopeWorkRepoDir means the work record names the commit's checkout.
+	ScopeWorkRepoDir ScopeKind = "work_repo_dir"
 	// ScopeWorkDir means the bead recorded its own gc.work_dir.
 	ScopeWorkDir ScopeKind = "work_dir"
 	// ScopeRig means the bead's owner is a rig, and the plane named its
@@ -92,8 +94,8 @@ const (
 // RepoDirFor names the repository a shipped bead's commit must be reachable in,
 // and reports which arm of the rule answered.
 //
-// In order: the bead's own gc.work_dir, because the commit was made where the
-// work happened; then its OWNER, read from gc.root_store_ref — a rig-owned bead
+// In order: the commit's recorded checkout, the claiming lane's gc.work_dir,
+// then the bead's owner, read from gc.root_store_ref — a rig-owned bead
 // answers to that rig's checkout, a city-owned or binding-owned one to the city
 // checkout. An owner the plane can point at no checkout for is ScopeUnknown and
 // never the city: falling back there would ask about a repository that is not
@@ -104,6 +106,9 @@ const (
 // scopes may be nil; a caller that knows no checkouts learns nothing about the
 // bead's owner, which is ScopeUnknown rather than a panic on a close path.
 func RepoDirFor(bead beads.Bead, scopes ScopeDirs) (string, ScopeKind) {
+	if dir := strings.TrimSpace(bead.Metadata[beadmeta.WorkRepoDirMetadataKey]); dir != "" {
+		return dir, ScopeWorkRepoDir
+	}
 	if dir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey]); dir != "" {
 		return dir, ScopeWorkDir
 	}

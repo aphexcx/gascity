@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +21,7 @@ import (
 //
 // That sentence covers the reachability clause too, which is the one part of the
 // contract a bead cannot answer alone: workrecord.RepoDirFor names the repository
-// from the bead's OWNER — its gc.work_dir, else the scope gc.root_store_ref
+// from its gc.work_repo_dir, its gc.work_dir, or the scope gc.root_store_ref
 // records — and both doors run it, so one bead is judged against one repository
 // however it is closed. Each door supplies only its own checkout table
 // (workRecordRepoDirs here, workRecordScopeDirs in internal/api) and its own
@@ -82,14 +83,6 @@ func isWorkRecordGatedBead(bead beads.Bead) bool { return workrecord.Gated(bead)
 // a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
 func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
 	return workrecord.ValidateOnClose(bead, commitReachable)
-}
-
-// gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
-// the git repository at repoDir. The rule — including which refs can prove
-// reachability — lives in internal/workrecord so both close doors ask git the
-// same question.
-func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
-	return workrecord.CommitReachableOnBranch(repoDir, commit, branch)
 }
 
 // workRecordRepoDirs is the CLI plane's checkout table, plus the answer this
@@ -320,14 +313,8 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			// close may stamp the work directory or the owner in the same
 			// invocation that closes.
 			repoDir := dirs.repoDirFor(bead)
-			unverified := false
-			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
-				if repoDir == "" {
-					unverified = true
-					return true
-				}
-				return gitCommitReachableOnBranch(repoDir, commit, branch)
-			})
+			var unverified bool
+			violations, unverified = workrecord.ValidateInRepo(context.Background(), bead, repoDir, workrecord.CommitReachableOnBranchContext)
 			if unverified {
 				fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, workrecord.ReachabilityUnverifiedNote) //nolint:errcheck // best-effort stderr
 			}

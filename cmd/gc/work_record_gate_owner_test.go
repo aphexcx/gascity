@@ -33,6 +33,65 @@ func initWorkRecordGateRepo(t *testing.T, dir, content string) {
 	runGit(t, dir, "commit", "-m", "test: "+content)
 }
 
+func TestWorkRecordCloseUsesRecordedRepository(t *testing.T) {
+	lane, repo := t.TempDir(), t.TempDir()
+	initWorkRecordGateRepo(t, lane, "lane work")
+	initWorkRecordGateRepo(t, repo, "shipped work")
+	commit := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	laneCommit := strings.TrimSpace(runGit(t, lane, "rev-parse", "HEAD"))
+	runGit(t, repo, "switch", "--detach")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "staged")
+	tip := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	runGit(t, repo, "remote", "add", "staging", lane)
+	runGit(t, repo, "remote", "add", "team/staging", lane)
+	runGit(t, repo, "remote", "add", "other/team\u00a0one", lane)
+	runGit(t, repo, "update-ref", "refs/remotes/staging/topic/fix", tip)
+	runGit(t, repo, "update-ref", "refs/remotes/team/staging/ready", tip)
+	runGit(t, repo, "update-ref", "refs/remotes/other/team\u00a0one/release\u00a0candidate", tip)
+	runGit(t, repo, "commit", "--allow-empty", "-m", "later")
+	runGit(t, repo, "update-ref", "refs/remotes/staging/later", "HEAD")
+
+	for _, tc := range []struct {
+		name, dir, sha, branch, wantWarning string
+	}{
+		{"recorded checkout", repo, commit, "main", ""},
+		{"absent commit", repo, strings.Repeat("0", 40), "main", repo},
+		{"commit only in lane", repo, laneCommit, "main", repo},
+		{"remote tip", repo, tip, "topic/fix", ""},
+		{"slash remote", repo, tip, "ready", ""},
+		{"unicode remote and branch", repo, tip, "release\u00a0candidate", ""},
+		{"remote name is not part of the branch", repo, tip, "staging/ready", repo},
+		{"different branch with same suffix", repo, tip, "fix", repo},
+		{"ancestor of other remote tip", repo, tip, "later", repo},
+		{"remote shorthand is not a local branch", repo, tip, "staging/later", repo},
+		{"legacy remote rules", "", tip, "topic/fix", "not reachable"},
+		{"relative checkout", "relative", commit, "main", "absolute"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := beads.StringMap{
+				beadmeta.WorkDirMetadataKey:     lane,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  tc.sha,
+				beadmeta.WorkBranchMetadataKey:  tc.branch,
+			}
+			if tc.dir != "" {
+				meta[beadmeta.WorkRepoDirMetadataKey] = tc.dir
+			} else {
+				meta[beadmeta.WorkDirMetadataKey] = repo
+			}
+			if tc.branch == "main" {
+				t.Setenv("GIT_DIR", filepath.Join(lane, ".git"))
+			}
+			b := beads.Bead{ID: "wr-repo", Type: "task", Metadata: meta}
+			var stderr strings.Builder
+			blocked := evaluateWorkRecordCloseGate([]string{"close", b.ID}, nil, map[string]beads.Bead{b.ID: b}, workRecordRepoDirs{}, true, &stderr)
+			if blocked != (tc.wantWarning != "") || (tc.wantWarning == "" && stderr.Len() != 0) || !strings.Contains(stderr.String(), tc.wantWarning) {
+				t.Fatalf("blocked=%t, warning=%q, wanted warning %q", blocked, stderr.String(), tc.wantWarning)
+			}
+		})
+	}
+}
+
 // appendRigCheckout registers a rig with a checkout in an already-written
 // city.toml. The class binding the fixture resolved is city-scope and keyed off
 // [storage] alone, so a rig is orthogonal to it — but the close gate reads the

@@ -307,6 +307,7 @@ const (
 	WorkCommitMetadataKey          = "gc.work_commit"
 	WorkDirMetadataKey             = "gc.work_dir"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
+	WorkRepoDirMetadataKey         = "gc.work_repo_dir"
 	WorkVerificationMetadataKey    = "gc.work_verification"
 	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
 	WorktreeBaseSHAMetadataKey     = "gc.worktree_base_sha"
@@ -344,6 +345,8 @@ const (
 //     must be reachable on WorkBranchMetadataKey; an absolute path needs no
 //     branch. Named in the gc.work_* family
 //     (not a bare "gc.commit") to avoid collision with future commit concepts.
+//   - WorkRepoDirMetadataKey ("gc.work_repo_dir") — the absolute checkout in
+//     which to verify the commit, when it differs from the claiming lane.
 //   - WorkVerificationMetadataKey ("gc.work_verification") — the verification
 //     record (gate result, "manual", or a link) backing a shipped outcome.
 //
