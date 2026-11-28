@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -126,6 +128,70 @@ func TestEventListHistoryReadHonorsCanceledRequest(t *testing.T) {
 	if rec.Code == http.StatusOK {
 		t.Fatalf("status 200 (%d bytes): a canceled request was served an archive read", rec.Body.Len())
 	}
+}
+
+// cancelOnHistoryCheck delivers a client cancellation at a synchronous reader
+// checkpoint, so the test can distinguish an interrupted read from a request
+// that was canceled before the handler started.
+type cancelOnHistoryCheck struct {
+	context.Context
+	remaining int
+	cancel    context.CancelFunc
+}
+
+func (c *cancelOnHistoryCheck) Err() error {
+	c.remaining--
+	if c.remaining == 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestEventListShortActiveJournal(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLogFile(t, dir, archiveName("20260927T070000Z", 1, 8), []byte("unexpected archive read"))
+	newest := archiveName("20260927T080000Z", 9, 16)
+	// Leading JSON whitespace makes the first archived row span several read
+	// buffers without changing the eight events in this archive.
+	body := append(bytes.Repeat([]byte(" "), 192<<10), eventLogLines(9, 16)...)
+	archive := gzipped(t, body)
+	writeEventLogFile(t, dir, newest, archive)
+	writeEventLogFile(t, dir, "events.jsonl", eventLogLines(17, 17))
+	srv := &Server{state: fileBackedEventState(t, dir)}
+
+	t.Run("page skips older archive", func(t *testing.T) {
+		in := &EventListInput{PaginationParam: PaginationParam{Limit: 4}}
+		page, err := srv.humaHandleEventList(t.Context(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Body.Items) != in.Limit || page.Body.Total != 17 || page.Body.NextCursor == "" {
+			t.Fatalf("got %d items, total %d, cursor %q", len(page.Body.Items), page.Body.Total, page.Body.NextCursor)
+		}
+		for i, item := range page.Body.Items {
+			if want := uint64(17 - i); item.Seq != want {
+				t.Fatalf("item %d: seq %d, want %d", i, item.Seq, want)
+			}
+		}
+	})
+
+	t.Run("client leaves during newest archive", func(t *testing.T) {
+		// Reading to the end of this archive would now fail its gzip CRC.
+		// A full page would also require the unreadable older archive.
+		archive[len(archive)-8] ^= 1
+		writeEventLogFile(t, dir, newest, archive)
+		parent, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		// The reader checks at entry, in the active file, before the archive,
+		// and then inside its first row. Deliver cancellation at that last check.
+		ctx := &cancelOnHistoryCheck{Context: parent, remaining: 4, cancel: cancel}
+		in := &EventListInput{PaginationParam: PaginationParam{Limit: 10}}
+		page, err := srv.humaHandleEventList(ctx, in)
+		var problem *apierr.ErrorModel
+		if page != nil || !errors.As(err, &problem) || problem.Detail != context.Canceled.Error() {
+			t.Fatalf("page = %v, error = %v, want only the cancellation error", page, err)
+		}
+	})
 }
 
 // TestEventListFileRecorderWalkAcrossRotations walks the whole history of a
