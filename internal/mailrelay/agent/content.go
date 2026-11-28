@@ -24,6 +24,10 @@ var (
 	ruleSubjectLong  = contentRule{"subject-over-500-bytes", "the subject is over 500 bytes"}
 )
 
+// The sender's name is printed wherever the mail is listed, so it must be
+// text and not a command to a terminal.
+var ruleSenderControl = contentRule{"sender-control-character", "the sender name holds a control character"}
+
 // unfitText returns the first rule a mail's text breaks. send refuses such a
 // mail and the receiver passes it over unfiled.
 func unfitText(m envelope.Mail) (contentRule, bool) {
@@ -34,6 +38,14 @@ func unfitText(m envelope.Mail) (contentRule, bool) {
 		return ruleSubjectDash, true
 	case len(m.Subject) > maxSubjectBytes:
 		return ruleSubjectLong, true
+	case strings.ContainsFunc(m.From, controlCharacter):
+		return ruleSenderControl, true
 	}
 	return contentRule{}, false
+}
+
+// controlCharacter reports a C0 or C1 control, DEL, or a line or paragraph
+// separator.
+func controlCharacter(r rune) bool {
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\u2028' || r == '\u2029'
 }

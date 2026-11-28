@@ -11,12 +11,14 @@ import (
 )
 
 // unfitMail lists mail no city should file: a subject the city's store can
-// never take (blank, starting with a dash, over 500 bytes).
+// never take (blank, starting with a dash, over 500 bytes), and a sender name
+// that holds a control character.
 func unfitMail() []struct {
 	name string
 	edit func(m *envelope.Mail)
 	rule string
 } {
+	sender := func(from string) func(m *envelope.Mail) { return func(m *envelope.Mail) { m.From = from } }
 	subject := func(s string) func(m *envelope.Mail) { return func(m *envelope.Mail) { m.Subject = s } }
 	return []struct {
 		name string
@@ -29,6 +31,12 @@ func unfitMail() []struct {
 		{"subject is an option", subject("--help"), "dash"},
 		{"subject over 500 bytes", subject(strings.Repeat("s", 501)), "500 bytes"},
 		{"subject over 500 bytes in fewer characters", subject(strings.Repeat("é", 251)), "500 bytes"},
+		{"sender name with an escape", sender("writer\x1b[2J"), "control character"},
+		{"sender name with a newline", sender("writer\nfiled"), "control character"},
+		{"sender name with DEL", sender("writer\x7f"), "control character"},
+		{"sender name with a C1 control", sender("writer\u009b2J"), "control character"},
+		{"sender name with a line separator", sender("writer\u2028x"), "control character"},
+		{"sender name with a paragraph separator", sender("writer\u2029x"), "control character"},
 	}
 }
 
