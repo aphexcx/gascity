@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -291,7 +292,8 @@ func TestRegistryBadCopyChangesNothing(t *testing.T) {
 		t.Fatal("beta's registry key is not in force")
 	}
 	beta := f.entry("beta", "beta")
-	other := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	// The curve's base point: a real key that no city of the fixture holds.
+	other := base64.StdEncoding.EncodeToString(append([]byte{0x58}, bytes.Repeat([]byte{0x66}, 31)...))
 	urlSafe := base64.URLEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32))
 	if !strings.ContainsAny(urlSafe, "-_") {
 		t.Fatal("fixture key must differ between the two alphabets")
@@ -658,6 +660,47 @@ func TestSingleUseSurvivesRegistrySwap(t *testing.T) {
 	}
 }
 
+// notSigningKeys are 32-byte values that are not real Ed25519 public keys,
+// with the words the registry copy's line gives for each: every point of the
+// curve's subgroup of order 8 in its canonical encoding, two other encodings
+// of the identity point, and a value that is not a point on the curve.
+var notSigningKeys = []struct{ name, hex, reason string }{
+	{"identity point", "0100000000000000000000000000000000000000000000000000000000000000", "a point of small order"},
+	{"order 2", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "a point of small order"},
+	{"order 4, even x", "0000000000000000000000000000000000000000000000000000000000000000", "a point of small order"},
+	{"order 4, odd x", "0000000000000000000000000000000000000000000000000000000000000080", "a point of small order"},
+	{"order 8, first y, even x", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "a point of small order"},
+	{"order 8, first y, odd x", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", "a point of small order"},
+	{"order 8, second y, even x", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "a point of small order"},
+	{"order 8, second y, odd x", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "a point of small order"},
+	{"identity point with y written as p+1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "not the canonical encoding of a point"},
+	{"identity point with x written as odd", "0100000000000000000000000000000000000000000000000000000000000080", "not the canonical encoding of a point"},
+	{"not on the curve", "0200000000000000000000000000000000000000000000000000000000000000", "not a point on the curve"},
+}
+
+func notSigningKey(t *testing.T, hexKey string) string {
+	t.Helper()
+	key, err := hex.DecodeString(hexKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		t.Fatalf("test key %q is not 32 bytes of hex", hexKey)
+	}
+	return base64.StdEncoding.EncodeToString(key)
+}
+
+// readForged reads city's queue with a grant no private key signed. Its
+// signature is the identity point's encoding and a zero scalar, which
+// verifies for any message when the city's key is the identity point.
+func (f *fixture) readForged(city string, want int) {
+	f.t.Helper()
+	path := "/v1/city/" + city + "/queue?wait=0s"
+	claims, _, _ := strings.Cut(f.token(city, "GET", path, nil), ".")
+	sig := make([]byte, ed25519.SignatureSize)
+	sig[0] = 1
+	if w := f.request("GET", path, nil, claims+"."+base64.RawURLEncoding.EncodeToString(sig)); w.Code != want {
+		f.t.Fatalf("read of %s signed by no private key: got %d, want %d", city, w.Code, want)
+	}
+}
+
 func (f *fixture) writePin(city, key string) {
 	f.t.Helper()
 	if err := os.WriteFile(filepath.Join(f.cfg.KeysDir, city+".pub"), []byte(key), 0o600); err != nil {
@@ -678,6 +721,67 @@ func (f *fixture) tickLog() string {
 // whole.
 func notWhole(reason string) string {
 	return `trusted key reload failed; keeping the whole key set, no trust decision this interval reason="` + reason + `"`
+}
+
+// A registry row whose key is not a real signing key makes the whole copy
+// bad: the key set stays as it was, the city's old key still signs in, and a
+// grant signed with no private key gets 401.
+func TestRegistryRowWithoutARealKeyIsABadCopy(t *testing.T) {
+	for _, tc := range notSigningKeys {
+		t.Run(tc.name, func(t *testing.T) {
+			f, reg := registryFixture(t, nil)
+			before := f.keysInForce()
+			key := notSigningKey(t, tc.hex)
+			reg.reply(200, list(f.entry("gamma", "alpha"), row("beta", key)))
+			line := f.tickLog()
+			f.readForged("beta", 401)
+			f.readSigned("beta", "beta", 200)
+			if after := f.keysInForce(); !maps.Equal(before, after) {
+				t.Fatalf("a row without a real key changed the key set: before %v, after %v", before, after)
+			}
+			oneLine(t, line, `registry copy bad entries=2 kept=1 reason="entry 2: public key is `+tc.reason+`"`, key)
+		})
+	}
+}
+
+// A pin file whose key is not a real signing key is refused as an invalid key
+// file is: the relay does not start on it as the hub's pin, and at run time
+// the read is refused and the city's pinned key stays in force.
+func TestPinWithoutARealKeyIsRefused(t *testing.T) {
+	const refused = "trust directory contains 1 invalid key files"
+	for _, tc := range notSigningKeys {
+		t.Run(tc.name, func(t *testing.T) {
+			key := notSigningKey(t, tc.hex)
+			f := relayFixture(t, "hub", "alpha")
+			if _, err := keysDirectory(f.cfg.KeysDir).read(t.Context()); err != nil {
+				t.Fatalf("the fixture's own pins are refused: %v", err)
+			}
+			hub, err := os.ReadFile(filepath.Join(f.cfg.KeysDir, "hub.pub"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.writePin("hub", key)
+			if _, err := keysDirectory(f.cfg.KeysDir).read(t.Context()); err == nil || err.Error() != refused {
+				t.Fatalf("pin read with such a key: got %v, want %q", err, refused)
+			}
+			s, err := Open(f.cfg, &f.log)
+			if err == nil {
+				f.server = s
+				t.Fatal("relay started with such a key as the hub's pin")
+			}
+			if err.Error() != refused {
+				t.Fatalf("start refused with %q, want %q", err, refused)
+			}
+
+			f.writePin("hub", string(hub))
+			f.open()
+			f.writePin("alpha", key)
+			line := f.tickLog()
+			f.readForged("alpha", 401)
+			f.readSigned("alpha", "alpha", 200)
+			oneLine(t, line, notWhole(refused), key)
+		})
+	}
 }
 
 // In a pass whose read of the pinned keys is not whole, the relay makes no

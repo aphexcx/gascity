@@ -22,7 +22,8 @@ type keySource interface {
 }
 
 // keysDirectory is the pinned key source: one <city>.pub file per city. One
-// invalid file fails the whole read.
+// invalid file, including one whose key checkSigningKey refuses, fails the
+// whole read.
 type keysDirectory string
 
 func (dir keysDirectory) read(context.Context) (cityKeys, error) {
@@ -30,8 +31,14 @@ func (dir keysDirectory) read(context.Context) (cityKeys, error) {
 	if err != nil {
 		return nil, &pinReadError{reason: "keys directory could not be read", err: fmt.Errorf("read trusted keys: %w", err)}
 	}
-	if len(refused) > 0 {
-		return nil, &pinReadError{reason: fmt.Sprintf("trust directory contains %d invalid key files", len(refused))}
+	invalid := len(refused)
+	for _, key := range keys {
+		if checkSigningKey(key) != nil {
+			invalid++
+		}
+	}
+	if invalid > 0 {
+		return nil, &pinReadError{reason: fmt.Sprintf("trust directory contains %d invalid key files", invalid)}
 	}
 	return keys, nil
 }

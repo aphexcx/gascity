@@ -183,6 +183,9 @@ func parseRegistryList(body []byte) (cityKeys, error) {
 		case strings.TrimSpace(entry.RegisteredAt) == "":
 			return nil, bad("no registered_at")
 		}
+		if err := checkSigningKey(key); err != nil {
+			return nil, bad("public key is " + err.Error())
+		}
 		keys[entry.City] = key
 	}
 	return keys, nil
