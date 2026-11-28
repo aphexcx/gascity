@@ -433,9 +433,9 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 
 // mailRecipientError answers a failure to resolve a mail's recipient. An
 // address the city has no recipient for, or one that names more than one, is
-// the request's fault and answers 400. Any other failure came from the store
-// the recipient is looked up in and answers 503, so the sender can file the
-// same mail again once the store is back.
+// the request's fault and answers 400. Any other failure is not, chiefly a
+// store the recipient is looked up in that cannot be read: it answers 503,
+// so the sender can file the same mail again later.
 func mailRecipientError(err error) error {
 	switch {
 	case errors.Is(err, errMailNoBeadStore),

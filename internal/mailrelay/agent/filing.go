@@ -19,13 +19,9 @@ const apiTimeout = 30 * time.Second
 // another request body.
 const problemIdempotencyMismatch = "idempotency-mismatch"
 
-// The city API's 400 detail starts with one of these when the address names
-// no recipient, or more than one. They are the words of the session lookup
-// the route answers with.
-const (
-	detailRecipientNotFound  = "session not found"
-	detailRecipientAmbiguous = "ambiguous session identifier"
-)
+// detailRecipientNotFound starts the city API's 400 detail when the address
+// names no recipient: the words of the session lookup the route answers with.
+const detailRecipientNotFound = "session not found"
 
 // What one filing came to.
 type filingKind int
@@ -99,16 +95,16 @@ func (c *cityMail) file(ctx context.Context, key, senderCity string, m envelope.
 }
 
 // mailFault reports whether the city's answer puts the fault in the mail
-// itself: too large, malformed, or addressed to no recipient or to more than
-// one. Every other answer, a refusal included, can pass: the city's store
-// was down, or the agent is not let in yet. That mail stays at the relay.
+// itself: too large, malformed, or addressed to no recipient. Every other
+// answer, a refusal included, can pass: the city's store was down, the
+// address named two sessions for a moment, or the agent is not let in yet.
+// That mail stays at the relay.
 func mailFault(code int, resp *genclient.SendMailResponse) bool {
 	switch code {
 	case http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 		return true
 	case http.StatusBadRequest:
-		detail := problemDetail(resp.ApplicationproblemJSON400)
-		return strings.HasPrefix(detail, detailRecipientNotFound) || strings.HasPrefix(detail, detailRecipientAmbiguous)
+		return strings.HasPrefix(problemDetail(resp.ApplicationproblemJSON400), detailRecipientNotFound)
 	}
 	return false
 }

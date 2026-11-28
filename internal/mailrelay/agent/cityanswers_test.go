@@ -82,9 +82,9 @@ func TestMailToMissingRecipientIsPassedAtOnce(t *testing.T) {
 	}
 }
 
-// Mail to an address that names more than one recipient is passed at once:
-// waiting does not change it, the sender has to address it again.
-func TestMailToAmbiguousRecipientIsPassedAtOnce(t *testing.T) {
+// Mail to an address that names more than one recipient stays at the relay
+// and is asked again: two sessions can share an address for a moment.
+func TestMailToAmbiguousRecipientIsTriedAgain(t *testing.T) {
 	hub, alpha := pair(t)
 	rel := newScriptedRelay()
 	clock := newTestClock()
@@ -92,23 +92,22 @@ func TestMailToAmbiguousRecipientIsPassedAtOnce(t *testing.T) {
 	city.addSession("twin")
 	city.addSession("twin")
 	rel.add(1, seal(t, hub, alpha, "twin-1", clock.Now(), mailTo("twin")))
-	rel.add(2, seal(t, hub, alpha, "good-2", clock.Now(), mailTo("reader")))
 	run := start(t, alpha.settings, clock.use(alpha.deps(rel.transport(), city.transport())))
-	rel.recorder.await(t, "the place to pass both", func() bool { return slices.Contains(rel.recorder.reads(), 2) })
+	rel.recorder.await(t, "ten minutes of answers, or a drop", func() bool {
+		return clock.elapsed() >= 10*time.Minute || len(alpha.log.lines("drop ")) > 0
+	})
 	run.stop(t)
-	if n := len(city.posts()); n != 2 {
-		t.Fatalf("the city API was asked %d times for two mails", n)
-	}
-	if countDrops(alpha.log, "twin-1", "refused") != 1 || len(city.inbox("reader")) != 1 {
-		t.Fatalf("drops %q, inbox %d", alpha.log.lines("drop "), len(city.inbox("reader")))
+	assertKeptAtRelay(t, alpha, rel, city.posts())
+	if lines := alpha.log.lines("file-failed "); len(lines) == 0 || !strings.Contains(lines[0], "status=400") {
+		t.Fatalf("file-failed lines %q", lines)
 	}
 }
 
-// The words the agent reads as no recipient, or more than one, are the
-// session lookup's own, which the route answers with.
-func TestRecipientFaultDetailsAreTheSessionLookupsWords(t *testing.T) {
-	if detailRecipientNotFound != session.ErrSessionNotFound.Error() || detailRecipientAmbiguous != session.ErrAmbiguous.Error() {
-		t.Fatalf("details %q and %q, session lookup %q and %q", detailRecipientNotFound, detailRecipientAmbiguous, session.ErrSessionNotFound, session.ErrAmbiguous)
+// The words the agent reads as no recipient are the session lookup's own,
+// which the route answers with.
+func TestRecipientFaultDetailIsTheSessionLookupsWords(t *testing.T) {
+	if detailRecipientNotFound != session.ErrSessionNotFound.Error() {
+		t.Fatalf("detail %q, session lookup %q", detailRecipientNotFound, session.ErrSessionNotFound)
 	}
 }
 

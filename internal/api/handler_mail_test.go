@@ -1801,16 +1801,18 @@ func TestMailSendStoreErrorWhileResolvingRecipientAnswers503(t *testing.T) {
 	}
 }
 
-// The recipient is resolved again inside a keyed filing; a store that fails
-// there answers 503 too.
+// The recipient is resolved again where the mail is filed, keyed or not; a
+// store that fails there answers 503 too.
 func TestMailFilingStoreErrorWhileResolvingRecipientAnswers503(t *testing.T) {
-	state := newFakeState(t)
-	state.sessionsBeadStore = unreachableSessionStore{beads.NewMemStore()}
-	input := &MailSendInput{}
-	input.Body.From, input.Body.To, input.Body.Subject = "human", "nobody", "hello"
-	_, err := New(state).fileMail(context.Background(), state.cityMailProv, input)
-	var problem *apierr.ErrorModel
-	if !errors.As(err, &problem) || problem.Status != http.StatusServiceUnavailable {
-		t.Fatalf("filing with the store down: %v", err)
+	for _, key := range []string{"", "store-error-key"} {
+		state := newFakeState(t)
+		state.sessionsBeadStore = unreachableSessionStore{beads.NewMemStore()}
+		input := &MailSendInput{IdempotencyKey: key}
+		input.Body.From, input.Body.To, input.Body.Subject = "human", "nobody", "hello"
+		_, err := New(state).fileMail(context.Background(), state.cityMailProv, input)
+		var problem *apierr.ErrorModel
+		if !errors.As(err, &problem) || problem.Status != http.StatusServiceUnavailable {
+			t.Fatalf("key %q: filing with the store down: %v", key, err)
+		}
 	}
 }
