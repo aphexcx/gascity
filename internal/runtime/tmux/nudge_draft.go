@@ -180,15 +180,7 @@ func (t *Tmux) recordNudgeDraftRendering(ctx context.Context, target, message, p
 	if err != nil {
 		return "", err
 	}
-	draft, literal, observed := nudgeComposerViews(content, prefix)
-	if !observed && footer != "" {
-		// The empty composer established this footer before we pasted. It
-		// must still be a separate, identical row below the input.
-		text := strings.TrimRight(runtime.ComposerInputText(content), " \t\r\n")
-		if input, ok := strings.CutSuffix(text, footer); ok {
-			draft, literal, observed = nudgeComposerViews(input, prefix)
-		}
-	}
+	draft, literal, observed := nudgeComposerViews(content, prefix, footer)
 	if !observed || draft == "" {
 		return "", nil
 	}
@@ -328,15 +320,15 @@ func composerRemainder(line, prefix string) (string, bool) {
 }
 
 func nudgeComposer(content, prefix string) (string, bool) {
-	draft, _, observed := nudgeComposerViews(content, prefix)
+	draft, _, observed := nudgeComposerViews(content, prefix, "")
 	return draft, observed
 }
 
 // Keep both views of captured rows. Terminal padding is absent from the
 // canonical form used for ownership records, but a paste can itself contain
 // those spaces immediately before an explicit newline.
-func nudgeComposerViews(content, prefix string) (draft, literal string, observed bool) {
-	literal, observed = literalNudgeComposer(content, prefix)
+func nudgeComposerViews(content, prefix, observedFooter string) (draft, literal string, observed bool) {
+	literal, observed = literalNudgeComposer(content, prefix, observedFooter)
 	if !strings.Contains(literal, " \n") {
 		return literal, literal, observed
 	}
@@ -351,7 +343,7 @@ func nudgeCapturedDraftMatches(draft, literal, message, prefix string, width int
 	return nudgeDraftMatches(draft, message, width) || matchNudgeRows(literal, message, width, runewidth.StringWidth(prefix))
 }
 
-func literalNudgeComposer(content, prefix string) (string, bool) {
+func literalNudgeComposer(content, prefix, observedFooter string) (string, bool) {
 	lines := strings.Split(runtime.ComposerInputText(content), "\n")
 	start := -1
 	frame, promptIndent := -1, 0
@@ -399,18 +391,26 @@ func literalNudgeComposer(content, prefix string) (string, bool) {
 	if boxed && !framed {
 		return "", false
 	}
-	// Codex separates its composer from the model/effort/cwd footer with
-	// a blank row instead of a box border. Only the final nonblank row can
-	// be that footer: footer-shaped lines inside a draft remain input.
+	// A separated footer establishes a lower boundary just like a frame.
+	// Only the last nonblank row can be the footer. An indented blank row
+	// and footer-shaped text inside the pasted message are both input.
 	footer := false
-	if !framed && !boxed && strings.TrimSpace(prefix) == "›" {
+	if !framed && !boxed {
 		end := len(lines)
 		for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
 			end--
 		}
-		if end > start+2 && strings.TrimSpace(lines[end-2]) == "" && codexComposerFooter(lines[end-1]) {
-			lines = lines[:end-2]
-			footer, framed = true, true
+		if end > start+2 && lines[end-2] == "" {
+			last := strings.TrimRight(lines[end-1], " \t\r")
+			footer = (observedFooter != "" && last == observedFooter) ||
+				(strings.TrimSpace(prefix) == "›" && codexComposerFooter(last))
+			if footer {
+				lines = lines[:end-2]
+				framed = true
+			}
+		}
+		if observedFooter != "" && !footer {
+			return "", false
 		}
 	}
 	// An attributed placeholder is evidence of empty input. Without a frame

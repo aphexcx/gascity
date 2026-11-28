@@ -1250,33 +1250,60 @@ func TestNudgeWaitsForPasteRendering(t *testing.T) {
 			})
 		}
 	})
-	for _, footer := range []string{"  ? for shortcuts", "  gpt-5.5 low"} {
-		t.Run(footer, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				tm, pane := newRecoveryPane(t)
-				tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
-					if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
-						return "GC_PROVIDER=codex", nil
-					}
-					result, err := pane.exec(args)
-					if strings.Contains(result, "❯ ") {
-						input := pane.draft
-						if input == "" {
-							input = "\x1b[2mExplain this codebase\x1b[22m"
+	for _, layout := range []struct{ provider, prefix, footer string }{
+		{"codex", "› ", "  ? for shortcuts"},
+		{"codex", "› ", "  gpt-5.5 low"},
+		{"claude", "❯ ", "────"},
+	} {
+		for _, sample := range []struct {
+			name, message string
+			missingFooter bool
+		}{
+			{"single line", "hello", false},
+			{"interior blank row", "one\n\ntwo", false},
+			{"last input row resembles footer", "one\n\n" + strings.TrimSpace(layout.footer), false},
+			{"missing boundary", "one\n\n" + strings.TrimSpace(layout.footer), true},
+		} {
+			t.Run(layout.provider+"/"+strings.TrimSpace(layout.footer)+"/"+sample.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					tm, pane := newRecoveryPane(t)
+					tm.exec = &fakeExecutor{fn: func(args []string) (string, error) {
+						if slices.Contains(args, "show-environment") && args[len(args)-1] == "GC_PROVIDER" {
+							return "GC_PROVIDER=" + layout.provider, nil
 						}
-						result = strings.Replace(result, pane.render(), "› "+input+"\n\n"+footer, 1)
-						if pane.busy {
-							result = "esc to interrupt\n" + result
+						result, err := pane.exec(args)
+						if result == pane.render() {
+							input := strings.ReplaceAll(pane.draft, "\n", "\n  ")
+							if input == "" {
+								input = "\x1b[2mExplain this codebase\x1b[22m"
+							}
+							result = layout.prefix + input
+							if pane.draft == "" || !sample.missingFooter {
+								if layout.provider == "codex" {
+									result += "\n"
+								}
+								result += "\n" + layout.footer
+							}
+							if pane.busy {
+								result = "esc to interrupt\n" + result
+							}
 						}
+						return result, err
+					}}
+					d, err := tm.nudgeSessionDeliveryWith(t.Name(), sample.message, pane.paste(""))
+					if sample.missingFooter {
+						if err != nil || d.Submit != runtime.NudgeSubmitUnconfirmed || pane.enters != 0 ||
+							pane.options[nudgeDraftPayloadOption] != runtime.NudgePayloadDigest(sample.message) {
+							t.Fatalf("missing boundary: delivery=%+v err=%v enters=%d", d, err, pane.enters)
+						}
+						return
 					}
-					return result, err
-				}}
-				d, err := tm.nudgeSessionDeliveryWith(t.Name(), "hello", pane.paste(""))
-				if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{"hello"}) {
-					t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
-				}
+					if err != nil || d.Submit != runtime.NudgeSubmitConfirmed || !slices.Equal(pane.submitted, []string{sample.message}) {
+						t.Fatalf("delivery=%+v err=%v submitted=%q", d, err, pane.submitted)
+					}
+				})
 			})
-		})
+		}
 	}
 	const message = "one\ntwo\nthree"
 	const placeholder = "[Pasted text #1 +2 lines]"

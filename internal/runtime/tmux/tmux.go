@@ -2953,7 +2953,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 		if hasStagedMarker {
 			prefix = stagedMarker.promptPrefix
 		}
-		draft, literal, observed := nudgeComposerViews(content, prefix)
+		draft, literal, observed := nudgeComposerViews(content, prefix, "")
 		heldDraft = draft
 		if !observed {
 			heldState = "unreadable_composer"
@@ -2978,7 +2978,7 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 				if err != nil {
 					return runtime.NudgeDelivery{}, fmt.Errorf("reading composer after recovery: %w", err)
 				}
-				draft, literal, observed = nudgeComposerViews(content, prefix)
+				draft, literal, observed = nudgeComposerViews(content, prefix, "")
 				heldDraft = draft
 				if !observed {
 					heldState = "unreadable_composer"
@@ -3053,11 +3053,9 @@ func (t *Tmux) nudgeSessionDeliveryWithIdentity(session, message, deliveryID str
 			return runtime.NudgeDelivery{}, fmt.Errorf("%w: clearing empty draft provenance for %q: %w", ErrNudgeDraftDeferred, target, err)
 		}
 		if draft == "" {
-			if hasStagedMarker && strings.TrimSpace(prefix) == "›" {
-				text := strings.TrimRight(runtime.ComposerInputText(content), " \t\r\n")
-				if i := strings.LastIndex(text, "\n\n  "); i >= 0 && !strings.Contains(text[i+2:], "\n") {
-					baselineFooter = text[i:]
-				}
+			text := strings.TrimRight(runtime.ComposerInputText(content), " \t\r\n")
+			if i := strings.LastIndex(text, "\n\n  "); i >= 0 && !strings.Contains(text[i+2:], "\n") {
+				baselineFooter = text[i+2:]
 			}
 			if _, err := t.run("set-option", "-p", "-t", exactPaneTarget(target), nudgeHeldOption, ""); err != nil {
 				return runtime.NudgeDelivery{}, fmt.Errorf("clearing resolved composer hold: %w", err)
