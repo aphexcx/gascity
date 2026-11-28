@@ -2601,6 +2601,9 @@ func qualifyImportedMailWakeFrom(groups ...[]Agent) {
 				if name == "human" || name == "controller" || strings.ContainsAny(name, "/.") {
 					continue
 				}
+				if _, peer := MailWakePeerKid(name); peer {
+					continue
+				}
 				local := a.BindingPrefix() + name
 				if scoped := a.Dir + "/" + local; a.Dir != "" && (names[scoped] || !names[local]) {
 					local = scoped

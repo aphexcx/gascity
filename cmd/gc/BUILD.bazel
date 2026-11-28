@@ -1191,6 +1191,8 @@ go_test(
         "lifecycle_coordination_test.go",
         "lifecycle_live_query_test.go",
         "load_city_config_snapshot_test.go",
+        "mail_peer_wake_delivery_test.go",
+        "mail_peer_wake_test.go",
         "mail_remote_test.go",
         "mail_wake_list_test.go",
         "main_scope_symlink_test.go",

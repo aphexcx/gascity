@@ -690,7 +690,14 @@ func (s *Store) MailWakeHistory(id string) ([]MailWakeEntry, error) {
 	return decodeMailWakeHistory(b.Metadata[mailWakeLogKey])
 }
 
-// RecordMailWake reserves one reminder against the observed history.
+// ErrMailWakeHistoryChanged reports that the session's record moved between a
+// caller's read of its wake history and the write that reserves a reminder
+// against it. Nothing was written: the caller may read the history again,
+// decide again and retry.
+var ErrMailWakeHistoryChanged = errors.New("mail wake history changed")
+
+// RecordMailWake reserves one reminder against the observed history. It
+// returns ErrMailWakeHistoryChanged when a concurrent writer got there first.
 func (s *Store) RecordMailWake(id string, seen []MailWakeEntry, entry MailWakeEntry) error {
 	b, err := s.validatedBead(id)
 	if err != nil {
@@ -701,7 +708,7 @@ func (s *Store) RecordMailWake(id string, seen []MailWakeEntry, entry MailWakeEn
 		return err
 	}
 	if !slices.Equal(entries, seen) {
-		return errors.New("mail wake history changed")
+		return ErrMailWakeHistoryChanged
 	}
 	if MailWakeBlock(infoFromPersistedBead(b), false, false) != "" {
 		return errors.New("session became ineligible for mail reminders")
@@ -716,6 +723,10 @@ func (s *Store) RecordMailWake(id string, seen []MailWakeEntry, entry MailWakeEn
 		patch := map[string]string{mailWakeLogKey: string(raw)}
 		err := writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: patch})
 		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			var moved *beads.PreconditionFailedError
+			if errors.As(err, &moved) {
+				return fmt.Errorf("%w: %w", ErrMailWakeHistoryChanged, err)
+			}
 			return err
 		}
 	}
@@ -723,7 +734,7 @@ func (s *Store) RecordMailWake(id string, seen []MailWakeEntry, entry MailWakeEn
 		swapped, err := writer.CompareAndSetMetadataKey(id, mailWakeLogKey, b.Metadata[mailWakeLogKey], string(raw))
 		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
 			if err == nil && !swapped {
-				return errors.New("mail wake history changed")
+				return ErrMailWakeHistoryChanged
 			}
 			return err
 		}

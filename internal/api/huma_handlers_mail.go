@@ -403,10 +403,8 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 			}
 			result := MailSendResult{Message: sent}
 			if input.Body.Notify {
-				if policy, ok := s.state.(interface {
-					NotifyListedMail(mail.Message) (listed, notified bool)
-				}); ok {
-					if listed, notified := policy.NotifyListedMail(sent); listed {
+				if policy, ok := s.state.(ListedMailNotifier); ok {
+					if listed, notified := policy.NotifyListedMail(sent, verifiedWriteKid(ctx)); listed {
 						result.Notified = &notified
 						return result, nil
 					}

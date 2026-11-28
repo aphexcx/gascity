@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -83,6 +84,23 @@ func decideMailWake(agent config.Agent, sender mailWakeSender, facts mailWakeFac
 	return action, ""
 }
 
+// mailWakeRecordAttempts bounds how often one request reads the wake history
+// again after a concurrent request for the same recipient recorded first.
+const mailWakeRecordAttempts = 5
+
+// mailWakeHost is what a receiving controller already holds for a turn
+// request that arrived through its API: its open session provider, the nudge
+// store its storage routes resolve to, the lock under which it reads the wake
+// history, decides and records, and whether another live delivery to the
+// same recipient is in flight. A local command passes the zero value, opens
+// its own provider, queues through its own store and takes no lock.
+type mailWakeHost struct {
+	provider  runtime.Provider
+	nudges    beads.NudgesStore
+	reserve   sync.Locker
+	queueOnly bool
+}
+
 // localMailWake runs after a successful send or reply.
 type localMailWake func(mail.Message) bool
 
@@ -121,7 +139,7 @@ func newLocalMailWake(cityPath string, cfg *config.City, store, sessions beads.S
 		if identity.key == "" || message.To == "human" {
 			return false
 		}
-		asked, reason := p.request(message, sender, identity, now().UTC(), nil)
+		asked, reason := p.request(message, sender, identity, now().UTC(), mailWakeHost{})
 		if reason != "" {
 			fmt.Fprintf(stderr, "%s: %s: %s\n", command, message.To, reason) //nolint:errcheck // best-effort stderr
 		}
@@ -173,10 +191,16 @@ func (p localMailWakePolicy) sender(address, resolved, stamped string) mailWakeS
 	if !ok {
 		return mailWakeSender{}
 	}
+	// A rig name is free text, so a qualified name can start like a peer
+	// entry. Only a verified key is a peer city: such an agent sends no wake.
+	if _, peer := config.MailWakePeerKid(a.QualifiedName()); peer {
+		return mailWakeSender{}
+	}
 	return mailWakeSender{a.QualifiedName(), id}
 }
 
-func (p localMailWakePolicy) request(message mail.Message, address string, sender mailWakeSender, now time.Time, sp runtime.Provider) (bool, string) {
+func (p localMailWakePolicy) request(message mail.Message, address string, sender mailWakeSender, now time.Time, host mailWakeHost) (bool, string) {
+	sp := host.provider
 	city := loadedCityName(p.cfg, p.cityPath)
 	id := message.ToSessionID
 	var err error
@@ -273,7 +297,9 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 			return false, "history"
 		}
 	}
-	if sender.key != "human" {
+	// Only a local session has a history of its own to check for a return
+	// hop. A peer city's lives in the other city.
+	if _, peer := config.MailWakePeerKid(sender.agent); !peer && sender.key != "human" {
 		outgoing, err = p.front.MailWakeHistory(sender.key)
 		if err != nil {
 			return false, "history"
@@ -283,9 +309,27 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 	if action == mailWakeNone {
 		return false, reason
 	}
+	// A request the history refuses was answered above without waiting. One
+	// that may proceed is counted one at a time by its controller: under the
+	// lock it reads the history again, decides again and records. The lock
+	// is released before any delivery.
+	reserved := func() {}
+	if host.reserve != nil {
+		host.reserve.Lock()
+		reserved = sync.OnceFunc(host.reserve.Unlock)
+	}
+	defer reserved()
+	if host.reserve != nil && id != "" {
+		if incoming, err = p.front.MailWakeHistory(id); err != nil {
+			return false, "history"
+		}
+		if action, reason = decideMailWake(a, sender, facts, incoming, outgoing, now); action == mailWakeNone {
+			return false, reason
+		}
+	}
 	created := action == mailWakeCreate
 	if created {
-		id, err = resolveSessionIDMaterializingNamed(p.cityPath, p.cfg, p.sessions, message.To)
+		id, err = resolveSessionIDWithOptions(p.cityPath, p.cfg, p.sessions, message.To, namedSessionResolveOptions{materialize: true, provider: sp})
 		if err != nil {
 			return false, "create"
 		}
@@ -302,11 +346,26 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 		}
 		target = resolveNudgeTargetFromSessionInfo(p.cityPath, p.cfg, info)
 	}
-	if err := p.front.RecordMailWake(id, incoming, session.MailWakeEntry{Sender: sender.key, At: now}); err != nil {
-		return created, "history-write"
+	for attempt := 1; ; attempt++ {
+		err = p.front.RecordMailWake(id, incoming, session.MailWakeEntry{Sender: sender.key, At: now})
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, session.ErrMailWakeHistoryChanged) || attempt == mailWakeRecordAttempts {
+			return created, "history-write"
+		}
+		// A concurrent request for this recipient recorded first. Count the
+		// budget against what it wrote, then reserve again.
+		if incoming, err = p.front.MailWakeHistory(id); err != nil {
+			return created, "history"
+		}
+		if again, reason := decideMailWake(a, sender, facts, incoming, outgoing, now); again == mailWakeNone {
+			return created, reason
+		}
 	}
+	reserved()
 	item := mailReminderItem(target, address, message.ID, now)
-	if action == mailWakeRemind {
+	if action == mailWakeRemind && !host.queueOnly {
 		var landed bool
 		ctx := runtime.WithNudgeDeliveryCheck(context.Background(), func() error {
 			_, blocked, err := blockedQueuedMailNudgeReason(p.mail, item)
@@ -329,7 +388,10 @@ func (p localMailWakePolicy) request(message mail.Message, address string, sende
 			return true, ""
 		}
 	}
-	nudges := cliNudgesStore(p.work, p.cfg, p.cityPath)
+	nudges := host.nudges
+	if nudges.Store == nil {
+		nudges = cliNudgesStore(p.work, p.cfg, p.cityPath)
+	}
 	if err := enqueueQueuedNudgeWithStore(p.cityPath, nudges, item); err != nil {
 		if action == mailWakeRemind {
 			_ = releaseLiveNudgeReservation(target, sp, item.ID)

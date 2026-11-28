@@ -78,6 +78,15 @@ type MailNotifier interface {
 	NotifyMail(recipient, messageID string) error
 }
 
+// ListedMailNotifier applies the recipient's wake list to a turn request that
+// arrived through the API. originKid is the key id of the write grant the
+// receiving gate verified, and is empty when the request passed no gate; it is
+// the only sender identity the list sees. listed reports whether the
+// recipient has a list, in which case notified is the list's answer.
+type ListedMailNotifier interface {
+	NotifyListedMail(message mail.Message, originKid string) (listed, notified bool)
+}
+
 // MailReadInput is the Huma input for POST /v0/city/{cityName}/mail/{id}/read.
 type MailReadInput struct {
 	CityScope
