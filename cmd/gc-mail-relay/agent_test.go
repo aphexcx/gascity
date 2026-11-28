@@ -87,6 +87,34 @@ func TestAgentVerbsRefuseOpenSigningKey(t *testing.T) {
 	}
 }
 
+// The send verb exits non-zero for a subject the city's store could never
+// take, naming the rule it broke, and makes nothing. The relay address is a
+// closed loopback port, so nothing could leave the machine.
+func TestSendVerbRefusesUnfileableSubject(t *testing.T) {
+	for _, tc := range []struct{ name, subject, rule string }{
+		{"blank", " ", "blank"},
+		{"starts with a dash", "-1 from me", "dash"},
+		{"over 500 bytes", strings.Repeat("s", 501), "500 bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, key := cityFiles(t, 0o600)
+			root, out := agentRoot(nil)
+			args := append([]string{"send", "hub/writer", "--subject=" + tc.subject}, settingArgs(dir, key)...)
+			root.SetArgs(append(args, "--relay-url=http://127.0.0.1:1"))
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tc.rule) || strings.Contains(err.Error(), "\n") {
+				t.Fatalf("send: %v, want one line naming %q", err, tc.rule)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("send printed %q", out.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, "state")); !os.IsNotExist(err) {
+				t.Fatalf("send made its state folder: %v", err)
+			}
+		})
+	}
+}
+
 // Settings reach keygen from a settings file named in the environment.
 func TestKeygenCommandReadsSettingsFile(t *testing.T) {
 	dir, key := cityFiles(t, 0o600)

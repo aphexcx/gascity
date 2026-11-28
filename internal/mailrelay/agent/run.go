@@ -353,6 +353,9 @@ func (r *receiver) handle(ctx context.Context, dl relay.Delivery) (bool, error) 
 	if reason != "" {
 		return r.drop(dl, label, reason, "")
 	}
+	if rule, bad := unfitText(m); bad {
+		return r.drop(dl, label, "malformed", "rule="+rule.name)
+	}
 	key := filingKey(label.From, label.ID)
 	if r.in.hasSeen(key, now) {
 		r.log.printf("skip number=%d id=%q from=%s reason=seen", dl.Number, label.ID, label.From)

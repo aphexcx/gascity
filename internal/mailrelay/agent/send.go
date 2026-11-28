@@ -42,8 +42,9 @@ func Send(ctx context.Context, s Settings, d Deps, m Outgoing) (string, error) {
 		return "", fmt.Errorf("recipient %q must be a relay city id, a slash and an address", m.To)
 	case m.From == "":
 		return "", errors.New("a sender address is required")
-	case m.Subject == "":
-		return "", errors.New("a subject is required")
+	}
+	if rule, bad := unfitText(envelope.Mail{From: m.From, Subject: m.Subject, Body: m.Body}); bad {
+		return "", fmt.Errorf("refusing the mail: %s", rule.text)
 	}
 	peers, err := loadPeers(s.PeersDir)
 	if err != nil {
