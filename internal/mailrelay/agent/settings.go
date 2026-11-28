@@ -192,7 +192,8 @@ func (s *Settings) set(name, value string) error {
 		return fmt.Errorf("unknown setting %q", name)
 	}
 	if err != nil {
-		return fmt.Errorf("setting %s: %w", name, err)
+		// The value is not quoted: it may be a credential typed in by mistake.
+		return fmt.Errorf("setting %s is not a duration", name)
 	}
 	return nil
 }
@@ -213,14 +214,14 @@ func (s Settings) checkRun() error {
 
 func (s Settings) checkCity() error {
 	if !envelope.ValidCityID(s.City) {
-		return fmt.Errorf("setting %s %q is not a relay city id (1 to 40 of a-z, 0-9 and -, not starting with -)", SettingCity, s.City)
+		return fmt.Errorf("setting %s is not a relay city id (1 to 40 of a-z, 0-9 and -, not starting with -)", SettingCity)
 	}
 	return nil
 }
 
 func (s Settings) checkTimes() error {
 	if s.Wait <= 0 || s.RequestLimit <= s.Wait {
-		return fmt.Errorf("setting %s must be positive and shorter than %s (%s, %s)", SettingWait, SettingRequestLimit, s.Wait, s.RequestLimit)
+		return fmt.Errorf("setting %s must be positive and shorter than %s", SettingWait, SettingRequestLimit)
 	}
 	return nil
 }
@@ -234,25 +235,27 @@ func required(name, value string) error {
 
 // checkAddress accepts https, or http to a loopback host, since mail crosses
 // this hop. A relay address carries no path: grants bind the path from /v1.
+// A refusal names the setting and never quotes its value, which may hold a
+// credential typed in by mistake.
 func checkAddress(name, raw string, pathAllowed bool) error {
 	if raw == "" {
 		return fmt.Errorf("setting %s is required", name)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("setting %s: %w", name, err)
+		return fmt.Errorf("setting %s is not a valid address", name)
 	}
 	switch {
 	case u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "":
-		return fmt.Errorf("setting %s %q must be a plain scheme://host[:port] address", name, raw)
+		return fmt.Errorf("setting %s must be a plain scheme://host[:port] address", name)
 	case !pathAllowed && u.Path != "" && u.Path != "/":
-		return fmt.Errorf("setting %s %q must not carry a path", name, raw)
+		return fmt.Errorf("setting %s must not carry a path", name)
 	case u.Scheme == "https":
 		return nil
 	case u.Scheme == "http" && loopback(u.Hostname()):
 		return nil
 	}
-	return fmt.Errorf("setting %s %q must use https, or http to a loopback host", name, raw)
+	return fmt.Errorf("setting %s must use https, or http to a loopback host", name)
 }
 
 func loopback(host string) bool {

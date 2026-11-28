@@ -60,7 +60,7 @@ type relayClient struct {
 func newRelayClient(s Settings, signer ed25519.PrivateKey, transport http.RoundTripper) (*relayClient, error) {
 	u, err := url.Parse(s.RelayURL)
 	if err != nil {
-		return nil, fmt.Errorf("setting %s: %w", SettingRelayURL, err)
+		return nil, fmt.Errorf("setting %s is not a valid address", SettingRelayURL)
 	}
 	return &relayClient{
 		base:   url.URL{Scheme: u.Scheme, Host: u.Host},

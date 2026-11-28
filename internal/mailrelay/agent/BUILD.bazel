@@ -42,6 +42,7 @@ go_test(
         "run_test.go",
         "send_test.go",
         "settings_test.go",
+        "settings_value_test.go",
         "testenv_import_test.go",
     ],
     embed = [":agent"],
