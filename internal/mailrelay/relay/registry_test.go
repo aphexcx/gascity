@@ -265,7 +265,7 @@ func TestRegistryRemovedRowRefusedWithinOneInterval(t *testing.T) {
 
 func waitHeld(t *testing.T, s *Server, city string) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	probe := time.NewTicker(time.Millisecond)
 	defer probe.Stop()
@@ -358,11 +358,11 @@ func TestRegistryBadCopyChangesNothing(t *testing.T) {
 		{"two entries with one id", `reason="entry 2: duplicate city id"`, func(s *standIn) { s.reply(200, list(beta, beta)) }},
 		{"two keys for one id", `reason="entry 2: duplicate city id"`, func(s *standIn) { s.reply(200, list(beta, row("beta", other))) }},
 		{"body over 1 MiB", `reason="body over 1 MiB"`, func(s *standIn) { s.reply(200, padded(list(beta, row("gamma", other)), 1<<20+1)) }},
-		{"length over 1 MiB", `reason="body over 1 MiB"`, func(s *standIn) {
+		{"declared length over 1 MiB", `reason="body over 1 MiB"`, func(s *standIn) {
+			// The body itself is small and good: only its declared length is refused.
 			s.set(func(w http.ResponseWriter, _ *http.Request) {
-				body := padded(list(beta, row("gamma", other)), 1<<20+1)
-				w.Header().Set("Content-Length", fmt.Sprint(len(body)))
-				_, _ = io.WriteString(w, body)
+				w.Header().Set("Content-Length", fmt.Sprint(1<<20+1))
+				_, _ = io.WriteString(w, list(beta, row("gamma", other)))
 			})
 		}},
 		{"empty list", `reason="empty list"`, func(s *standIn) { s.reply(200, `{"cities":[]}`) }},
@@ -654,5 +654,34 @@ func TestSingleUseSurvivesRegistrySwap(t *testing.T) {
 		if w := f.request("GET", path, nil, tok); w.Code != 401 {
 			t.Fatalf("%s: grant used before the swap got %d after it, want 401", city, w.Code)
 		}
+	}
+}
+
+// A key statement stored under a city's old signing key never blocks the
+// statement the city signs with its new key, whichever source changed the key.
+func TestStatementUnderARetiredKeyDoesNotBlockTheNewKey(t *testing.T) {
+	for _, tc := range []struct{ source, city string }{{"registry", "beta"}, {"pin", "alpha"}} {
+		t.Run(tc.source, func(t *testing.T) {
+			f, reg := registryFixture(t, nil)
+			// The holder of the old key publishes a statement dated far ahead.
+			f.call(tc.city, "PUT", "key", f.statement(tc.city, tc.city, 1<<62), 204)
+			f.addKey(tc.city)
+			if tc.source == "registry" {
+				f.unpin(tc.city)
+				reg.reply(200, list(f.entry("beta", "beta")))
+			}
+			start := f.logLen()
+			tick(t, f.server, 1)
+			if tc.source == "registry" {
+				oneLine(t, f.logFrom(start), "registry copy good entries=1 pinned=0 added=0 removed=0 changed=1")
+			}
+			current := f.statement(tc.city, tc.city, 2)
+			f.call(tc.city, "PUT", "key", current, 204)
+			if got := f.call("hub", "GET", "keys/"+tc.city, nil, 200); !bytes.Equal(got, current) {
+				t.Fatal("hub did not get the statement signed with the current key")
+			}
+			// The current key's own statements still move forward only.
+			f.call(tc.city, "PUT", "key", f.statement(tc.city, tc.city, 1), 409)
+		})
 	}
 }

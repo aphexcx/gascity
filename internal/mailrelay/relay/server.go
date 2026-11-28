@@ -129,7 +129,7 @@ func (s *Server) reloadKeys() error {
 		return err
 	}
 	registry, _ := s.unpinned(s.fromRegistry, pinned)
-	return s.publish(pinned, registry)
+	return s.swapKeys(pinned, registry)
 }
 
 func (s *Server) refreshKeys() {
@@ -259,7 +259,7 @@ func (s *Server) authorize(r *http.Request, body []byte) (string, string, reply)
 		if stmt.Verify(city, set.keys[city]) != nil {
 			return city, "publish", status(403)
 		}
-		return city, "publish", dbReply(s.store.publish(ctx, stmt, body))
+		return city, "publish", dbReply(s.store.publish(ctx, stmt, body, set.keys[city]))
 	case r.Method == "GET" && route == "queue" && len(body) == 0:
 		return city, "read", s.heldRead(ctx, r.URL, city, set.keys[city])
 	case r.Method == "GET" && strings.HasPrefix(route, "keys/") && len(body) == 0 && r.URL.RawQuery == "":

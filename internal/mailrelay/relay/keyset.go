@@ -36,11 +36,11 @@ func (dir keysDirectory) read(context.Context) (cityKeys, error) {
 	return keys, nil
 }
 
-// publish swaps in the key set built from the pinned and registry keys, as one
+// swapKeys swaps in the key set built from the pinned and registry keys, as one
 // whole, for every request that follows. A pinned key wins over a registry key
 // for the same city. Every verifier shares the store's record of spent grants,
 // so a grant used before a swap stays spent after it. The caller holds keyMu.
-func (s *Server) publish(pinned, registry cityKeys) error {
+func (s *Server) swapKeys(pinned, registry cityKeys) error {
 	keys := make(cityKeys, len(pinned)+len(registry))
 	maps.Copy(keys, registry)
 	maps.Copy(keys, pinned)
@@ -73,7 +73,8 @@ func (s *Server) unpinned(listed, pinned cityKeys) (cityKeys, int) {
 // registry keys as one whole; a bad copy, or an empty list unless empty lists
 // are allowed, changes nothing. Either way it logs one line, never a key.
 // Registry keys are kept without the cities they lost to a pin, so removing a
-// pin later uncovers nothing until a newer good copy lists that city.
+// pin uncovers nothing from an old copy: the city comes from the registry only
+// through a newer good copy, normally the one in the same interval.
 func (s *Server) copyRegistry(ctx context.Context) {
 	if s.registry == nil {
 		return
@@ -93,7 +94,7 @@ func (s *Server) copyRegistry(ctx context.Context) {
 	}
 	next, leftOut := s.unpinned(listed, s.pinned)
 	added, removed, changed := countChanges(s.fromRegistry, next)
-	if err := s.publish(s.pinned, next); err != nil {
+	if err := s.swapKeys(s.pinned, next); err != nil {
 		s.logBadCopy(&copyError{reason: "verifier refused the key set", entries: len(listed)})
 		return
 	}

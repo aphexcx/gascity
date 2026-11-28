@@ -51,7 +51,9 @@ func serve(t *testing.T, args ...string) error {
 }
 
 func TestServeRequiresPinnedHub(t *testing.T) {
-	for _, address := range []string{"", "https://registry.test/v1/cities"} {
+	// The hub check comes before any registry request; the loopback address
+	// keeps even a broken order off the network.
+	for _, address := range []string{"", "https://127.0.0.1:1/v1/cities"} {
 		err := serve(t, "--keys-dir", keysDir(t, "alpha"), "--registry-url", address)
 		if err == nil || !strings.Contains(err.Error(), "pinned") || strings.Contains(err.Error(), "\n") {
 			t.Fatalf("serve without a pinned hub, registry %q: want one plain line, got %v", address, err)

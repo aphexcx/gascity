@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -208,7 +209,11 @@ func (s *store) read(ctx context.Context, city string, after int64) ([]Delivery,
 	return batch, rows.Err()
 }
 
-func (s *store) publish(ctx context.Context, next envelope.KeyStatement, wire []byte) error {
+// publish stores a city's key statement, already verified under signer, the
+// city's current signing key. A stored statement that signer did not sign was
+// made under a key the city no longer holds, so it is replaced, not compared:
+// a retired key cannot hold back the city's next statement.
+func (s *store) publish(ctx context.Context, next envelope.KeyStatement, wire []byte, signer ed25519.PublicKey) error {
 	return s.transaction(ctx, func(tx *sql.Tx) error {
 		var prev []byte
 		err := tx.QueryRowContext(ctx, "SELECT wire FROM statements WHERE city=?", next.City).Scan(&prev)
@@ -217,8 +222,10 @@ func (s *store) publish(ctx context.Context, next envelope.KeyStatement, wire []
 			if err != nil {
 				return err
 			}
-			if err := old.CheckSuccessor(next); err != nil {
-				return err
+			if old.Verify(next.City, signer) == nil {
+				if err := old.CheckSuccessor(next); err != nil {
+					return err
+				}
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
