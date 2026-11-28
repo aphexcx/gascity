@@ -43,36 +43,81 @@ func filingKey(senderCity, id string) string {
 // inbound is the receiving side's durable state.
 type inbound struct {
 	dir   string
+	owner placeOwner
 	place int64
 	seen  map[string]int64 // filing key -> Unix second first filed
 }
 
+// placeOwner is whose a saved place is. A place counts only for the city it
+// was handed to, on the relay that handed out its numbers: anywhere else the
+// relay would take it as an acknowledgement and delete that much unread.
+type placeOwner struct {
+	City  string
+	Relay string
+}
+
 type placeRecord struct {
-	Place int64 `json:"place"`
+	Place int64  `json:"place"`
+	City  string `json:"city,omitempty"`
+	Relay string `json:"relay,omitempty"`
+}
+
+// ownerChange names why a saved place does not belong to owner, or is "".
+func (p placeRecord) ownerChange(owner placeOwner) string {
+	switch {
+	case p.City == "" && p.Relay == "":
+		return "owner-unrecorded"
+	case p.City != owner.City:
+		return "city-changed"
+	case p.Relay != owner.Relay:
+		return "relay-changed"
+	}
+	return ""
+}
+
+// placeReset is a saved place that was not taken: where it stood and why.
+type placeReset struct {
+	from   int64
+	reason string
 }
 
 type seenRecord struct {
 	Pairs map[string]int64 `json:"pairs"`
 }
 
-func loadInbound(dir string) (*inbound, error) {
-	in := &inbound{dir: dir, seen: make(map[string]int64)}
+// loadInbound reads the agent's state for owner. A saved place that another
+// city or relay owns, or that was saved without its owner, is not taken: the
+// place starts from 0 and is saved for owner at once, and the reset is
+// returned so the run can say so.
+func loadInbound(dir string, owner placeOwner) (*inbound, *placeReset, error) {
+	in := &inbound{dir: dir, owner: owner, seen: make(map[string]int64)}
 	var p placeRecord
-	if err := readJSON(filepath.Join(dir, placeFile), &p); err != nil {
-		return nil, err
+	saved, err := readJSON(filepath.Join(dir, placeFile), &p)
+	if err != nil {
+		return nil, nil, err
 	}
 	var s seenRecord
-	if err := readJSON(filepath.Join(dir, seenFile), &s); err != nil {
-		return nil, err
+	if _, err := readJSON(filepath.Join(dir, seenFile), &s); err != nil {
+		return nil, nil, err
 	}
 	if p.Place < 0 {
-		return nil, fmt.Errorf("state file %s holds a negative place", placeFile)
+		return nil, nil, fmt.Errorf("state file %s holds a negative place", placeFile)
 	}
 	in.place = p.Place
 	for k, v := range s.Pairs {
 		in.seen[k] = v
 	}
-	return in, nil
+	if !saved {
+		return in, nil, nil
+	}
+	reason := p.ownerChange(owner)
+	if reason == "" {
+		return in, nil, nil
+	}
+	if err := in.reset(); err != nil {
+		return nil, nil, err
+	}
+	return in, &placeReset{from: p.Place, reason: reason}, nil
 }
 
 func (in *inbound) hasSeen(key string, now time.Time) bool {
@@ -96,7 +141,7 @@ func (in *inbound) advance(number int64) error {
 	if number <= in.place {
 		return nil
 	}
-	if err := writeJSON(filepath.Join(in.dir, placeFile), placeRecord{Place: number}); err != nil {
+	if err := writeJSON(filepath.Join(in.dir, placeFile), in.record(number)); err != nil {
 		return err
 	}
 	in.place = number
@@ -105,26 +150,32 @@ func (in *inbound) advance(number int64) error {
 
 // reset starts the place over from zero.
 func (in *inbound) reset() error {
-	if err := writeJSON(filepath.Join(in.dir, placeFile), placeRecord{}); err != nil {
+	if err := writeJSON(filepath.Join(in.dir, placeFile), in.record(0)); err != nil {
 		return err
 	}
 	in.place = 0
 	return nil
 }
 
-// readJSON fills v from path; a missing file leaves v empty.
-func readJSON(path string, v any) error {
+// record is the place as saved, with its owner.
+func (in *inbound) record(place int64) placeRecord {
+	return placeRecord{Place: place, City: in.owner.City, Relay: in.owner.Relay}
+}
+
+// readJSON fills v from path and reports whether the file was there; a
+// missing file leaves v empty.
+func readJSON(path string, v any) (bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("reading state: %w", err)
+		return false, fmt.Errorf("reading state: %w", err)
 	}
 	if err := json.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("state file %s: %w", path, err)
+		return false, fmt.Errorf("state file %s: %w", path, err)
 	}
-	return nil
+	return true, nil
 }
 
 func writeJSON(path string, v any) error {

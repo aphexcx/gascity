@@ -142,12 +142,12 @@ func Run(ctx context.Context, s Settings, d Deps) (err error) {
 		return err
 	}
 	defer unlock()
-	in, err := loadInbound(s.StateDir)
+	d = d.withDefaults(s)
+	rc, err := newRelayClient(s, signer, d.RelayTransport)
 	if err != nil {
 		return err
 	}
-	d = d.withDefaults(s)
-	rc, err := newRelayClient(s, signer, d.RelayTransport)
+	in, reset, err := loadInbound(s.StateDir, placeOwner{City: s.City, Relay: rc.base.String()})
 	if err != nil {
 		return err
 	}
@@ -165,6 +165,9 @@ func Run(ctx context.Context, s Settings, d Deps) (err error) {
 			return err
 		}
 		defer func() { err = errors.Join(err, stop()) }()
+	}
+	if reset != nil {
+		r.log.printf("place-reset from=%d reason=%s", reset.from, reset.reason)
 	}
 	r.log.printf("start city=%s place=%d keys=%d peers=%d key-id=%s", s.City, in.place, len(ring.private), len(peers), ring.newest.KeyID)
 	if err := r.publish(ctx); err != nil {

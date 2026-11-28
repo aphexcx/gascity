@@ -493,7 +493,7 @@ func TestPlaceAboveRelayCounterStartsOver(t *testing.T) {
 		if err := os.MkdirAll(alpha.settings.StateDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(alpha.settings.StateDir, placeFile), []byte(`{"place":10}`), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(alpha.settings.StateDir, placeFile), []byte(`{"place":10,"city":"alpha","relay":"`+relayBase+`"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		rel := newScriptedRelay()

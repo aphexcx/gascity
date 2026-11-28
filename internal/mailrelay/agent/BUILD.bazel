@@ -36,6 +36,7 @@ go_test(
         "fixture_test.go",
         "keys_test.go",
         "outage_fixture_test.go",
+        "place_test.go",
         "run_test.go",
         "send_test.go",
         "settings_test.go",
