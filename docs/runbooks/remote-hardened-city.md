@@ -334,7 +334,7 @@ over the list.
 | Recipient in the receiving city | The remote request |
 |---|---|
 | has no `mail_wake_from` list | is handled as an explicit request, for any registered key |
-| lists `city:<kid>`, where `<kid>` is the key that signed the request | is accepted, up to three wakes per peer city in 15 minutes |
+| lists `city:<kid>`, where `<kid>` is the key that signed the request | is accepted when the recipient's state allows a reminder, up to three wakes per recipient and peer city in 15 minutes |
 | has a list without that entry | is declined |
 
 The receiving city takes the sender from the key its write gate verified, never
@@ -347,11 +347,14 @@ wake `worker` on B, name A's key id on B:
 [[agent]]
 name = "worker"
 mail_wake_from = ["human", "city:a"]
+mail_wake_start = true # without it, listed mail reminds a running worker and never starts a stopped one
 ```
 
 The `<kid>` follows the rule for a key file's name in `trusted_keys_dir`: not
-empty, no surrounding spaces, no colon and no comma. Removing a peer's key
-refuses its mail at the gate, so no list needs editing. Take the `city:` entries
+empty, no surrounding spaces, no colon and no comma. Once a peer's key is
+revoked its mail is refused at the gate, so no list needs editing: a key file
+removed from `trusted_keys_dir` stops verifying at the next reload, an inline
+key at the next supervisor restart. Take the `city:` entries
 out before rolling gc back to a build that predates them, because an older build
 refuses a configuration that holds one.
 
