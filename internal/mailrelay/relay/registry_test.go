@@ -78,12 +78,6 @@ func (s *standIn) reply(code int, body string) {
 	})
 }
 
-func (s *standIn) count(origin string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls[origin]
-}
-
 func (s *standIn) total() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -570,54 +564,42 @@ func TestRegistryClient(t *testing.T) {
 	}
 }
 
-func TestRegistryRedirects(t *testing.T) {
-	for _, tc := range []struct {
-		name, location string
-		good           bool
-	}{
-		{"to another host", "https://elsewhere.test/v1/cities", false},
-		{"to another port", "https://registry.test:8443/v1/cities", false},
-		{"to plain http", "http://registry.test/v1/cities", false},
-		{"with a user name", "https://reader@registry.test/v2/cities", false},
-		{"on the same host", "https://registry.test/v2/cities", true},
-		{"on the same host in another case", "https://REGISTRY.test/v2/cities", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f, reg := registryFixture(t, nil)
-			reg.set(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/v1/cities" && strings.EqualFold(r.URL.Host, "registry.test") && r.URL.Scheme == "https" {
-					http.Redirect(w, r, tc.location, http.StatusFound)
-					return
+// A redirect is a bad copy whatever its target. The registry has one
+// address, so no second request is made.
+func TestRegistryRedirectIsABadCopy(t *testing.T) {
+	for _, code := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, tc := range []struct{ name, location string }{
+			{"the same host", "https://registry.test/v2/cities"},
+			{"the same host in another case", "https://REGISTRY.test/v2/cities"},
+			{"the default port spelled out", "https://registry.test:443/v1/cities"},
+			{"the address itself", registryAddress},
+			{"another host", "https://elsewhere.test/v1/cities"},
+			{"another port", "https://registry.test:8443/v1/cities"},
+			{"plain http", "http://registry.test/v1/cities"},
+			{"a user name", "https://reader@registry.test/v2/cities"},
+		} {
+			t.Run(fmt.Sprintf("%d to %s", code, tc.name), func(t *testing.T) {
+				f, reg := registryFixture(t, nil)
+				before := f.keysInForce()
+				reg.set(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.String() == registryAddress {
+						http.Redirect(w, r, tc.location, code)
+						return
+					}
+					_, _ = io.WriteString(w, list(f.entry("alpha", "alpha")))
+				})
+				line := f.tickLog()
+				if got := reg.total(); got != 2 {
+					t.Fatalf("redirect was followed: %d requests, want 2 (startup and this copy)", got)
 				}
-				_, _ = io.WriteString(w, list(f.entry("alpha", "alpha")))
+				if after := f.keysInForce(); !maps.Equal(before, after) {
+					t.Fatalf("a redirect changed the key set: before %v, after %v", before, after)
+				}
+				f.call("beta", "GET", "queue?wait=0s", nil, 200)
+				oneLine(t, line, fmt.Sprintf(`registry copy bad entries=0 kept=1 reason="status %d"`, code))
 			})
-			start := f.logLen()
-			tick(t, f.server, 1)
-			line := f.logFrom(start)
-			if tc.good {
-				oneLine(t, line, "registry copy good entries=1 pinned=1 added=0 removed=1 changed=0")
-				f.call("beta", "GET", "queue?wait=0s", nil, 401)
-				return
-			}
-			oneLine(t, line, `registry copy bad entries=0 kept=1 reason="redirect away from the registry address"`)
-			if reg.total() != 2 {
-				t.Fatalf("redirect was followed: %d requests, want 2 (startup and this copy)", reg.total())
-			}
-			f.call("beta", "GET", "queue?wait=0s", nil, 200)
-		})
-	}
-	t.Run("without end", func(t *testing.T) {
-		f, reg := registryFixture(t, nil)
-		reg.set(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "https://registry.test/v1/cities", http.StatusFound)
-		})
-		start := f.logLen()
-		tick(t, f.server, 1)
-		oneLine(t, f.logFrom(start), `reason="too many redirects"`)
-		if got := reg.count("https://registry.test"); got != 1+10 {
-			t.Fatalf("redirect loop made %d requests, want the startup copy and 10", got)
 		}
-	})
+	}
 }
 
 func TestNoRegistryAddressNoRequest(t *testing.T) {

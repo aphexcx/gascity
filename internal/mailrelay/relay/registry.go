@@ -18,15 +18,9 @@ import (
 )
 
 const (
-	registryTimeout      = 10 * time.Second
-	registryBodyLimit    = 1 << 20
-	registryUserAgent    = "gc-mail-relay"
-	registryMaxRedirects = 10
-)
-
-var (
-	errRedirectAway     = errors.New("redirect away from the registry address")
-	errTooManyRedirects = errors.New("too many redirects")
+	registryTimeout   = 10 * time.Second
+	registryBodyLimit = 1 << 20
+	registryUserAgent = "gc-mail-relay"
 )
 
 // copyError says why a copy of the registry's list is bad. Its words never
@@ -39,8 +33,8 @@ type copyError struct {
 func (e *copyError) Error() string { return e.reason }
 
 // registryCopy reads the key registry's list of city signing keys from one
-// address. A read sends no cookies and no credentials, follows a redirect only
-// on the address's own scheme and host, and reads at most 1 MiB in 10 seconds.
+// address. A read sends no cookies and no credentials, follows no redirect,
+// and reads at most 1 MiB in 10 seconds.
 type registryCopy struct {
 	address string
 	client  *http.Client
@@ -69,15 +63,9 @@ func newRegistryCopy(address string, transport http.RoundTripper) (*registryCopy
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   registryTimeout,
-		CheckRedirect: func(next *http.Request, via []*http.Request) error {
-			if next.URL.Scheme != u.Scheme || !strings.EqualFold(next.URL.Host, u.Host) || next.URL.User != nil {
-				return errRedirectAway
-			}
-			if len(via) >= registryMaxRedirects {
-				return errTooManyRedirects
-			}
-			return nil
-		},
+		// The registry has one address: a redirect answer is returned as it
+		// is, and its status makes the copy bad.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return &registryCopy{address: address, client: client}, nil
 }
@@ -124,16 +112,10 @@ func (r *registryCopy) read(ctx context.Context) (cityKeys, error) {
 // the address.
 func requestFailure(err error) string {
 	var timeout interface{ Timeout() bool }
-	switch {
-	case errors.Is(err, errRedirectAway):
-		return errRedirectAway.Error()
-	case errors.Is(err, errTooManyRedirects):
-		return errTooManyRedirects.Error()
-	case errors.As(err, &timeout) && timeout.Timeout():
+	if errors.As(err, &timeout) && timeout.Timeout() {
 		return "timeout"
-	default:
-		return "request failed"
 	}
+	return "request failed"
 }
 
 // registryList is the registry's answer: a JSON object with one list named
