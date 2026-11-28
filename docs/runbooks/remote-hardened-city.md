@@ -327,10 +327,38 @@ From alone picks the city, so the answer goes to the city the From names,
 which may not be the city the mail came from.
 
 To request a recipient turn, run `gc mail send --context b worker "Update" --notify --json`.
-The receiving city stores the mail, then handles the request as it would for a local
-send. The response reports `notified: true` when the peer accepts the request.
-A declined request leaves the mail in the inbox. If an older peer rejects the
-`notify` field, the sender retries once without it and reports `notified: false`.
+The receiving city stores the mail, then decides the request by the recipient's
+`mail_wake_from` list. A local send differs: there an explicit `--notify` wins
+over the list.
+
+| Recipient in the receiving city | The remote request |
+|---|---|
+| has no `mail_wake_from` list | is handled as an explicit request, for any registered key |
+| lists `city:<kid>`, where `<kid>` is the key that signed the request | is accepted, up to three wakes per peer city in 15 minutes |
+| has a list without that entry | is declined |
+
+The receiving city takes the sender from the key its write gate verified, never
+from the From the mail writes. `human` and a local agent's name on a list are
+therefore matched only by a command run inside that city, and a request with no
+signed grant is declined for a recipient that has a list. To let city A's mail
+wake `worker` on B, name A's key id on B:
+
+```toml
+[[agent]]
+name = "worker"
+mail_wake_from = ["human", "city:a"]
+```
+
+The `<kid>` follows the rule for a key file's name in `trusted_keys_dir`: not
+empty, no surrounding spaces, no colon and no comma. Removing a peer's key
+refuses its mail at the gate, so no list needs editing. Take the `city:` entries
+out before rolling gc back to a build that predates them, because an older build
+refuses a configuration that holds one.
+
+The response reports `notified: true` when the peer accepts the request and
+`notified: false` when it declines. A declined request leaves the mail in the
+inbox. If an older peer rejects the `notify` field, the sender retries once
+without it and reports `notified: false`.
 
 A send without `--notify` makes exactly one request:
 `POST /v0/city/{peer}/mail`. It performs no city lookup, version request, session
