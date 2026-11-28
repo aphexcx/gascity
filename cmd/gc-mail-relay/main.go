@@ -1,4 +1,5 @@
-// Command gc-mail-relay serves sealed mail for authenticated cities.
+// Command gc-mail-relay serves sealed mail for authenticated cities, and is
+// each city's agent for it: keygen, send and run.
 package main
 
 import (
@@ -55,6 +56,7 @@ func newCommand() *cobra.Command {
 	flags.IntVar(&cfg.PostsPerMinute, "posts-per-minute", cfg.PostsPerMinute, "new posts allowed per city per minute")
 	flags.DurationVar(&cfg.ReloadInterval, "reload-interval", cfg.ReloadInterval, "trusted key reload interval")
 	root.AddCommand(serve)
+	root.AddCommand(newAgentCommands(os.Getenv)...)
 	return root
 }
 
