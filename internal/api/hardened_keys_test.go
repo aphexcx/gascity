@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +42,25 @@ func hardenedRead(t *testing.T, h http.Handler, priv ed25519.PrivateKey, kid, jt
 	return w.Code
 }
 
+// hardenedWrite sends one mail POST to acme, signed by kid when priv is set,
+// and returns the status: the write gate's 401 or 403, or the handler's own
+// answer once the grant is admitted (201 for a served city).
+func hardenedWrite(t *testing.T, h http.Handler, priv ed25519.PrivateKey, kid, jti string) int {
+	t.Helper()
+	const path = "/v0/city/acme/mail"
+	body := []byte(`{"from":"beta/mayor","to":"worker","subject":"probe"}`)
+	r := httptest.NewRequest("POST", path, bytes.NewReader(body))
+	r.Header.Set(csrfHeaderName, "true")
+	if priv != nil {
+		g := grantFor(time.Now(), "acme", "POST", path, body, jti)
+		g.Kid = kid
+		r.Header.Set(writeAuthHeader, mintToken(t, priv, g))
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Code
+}
+
 func TestHardenedKeysReload(t *testing.T) {
 	dir := t.TempDir()
 	pub, priv := mustKeypair(t)
@@ -56,31 +77,38 @@ func TestHardenedKeysReload(t *testing.T) {
 	if got := hardenedRead(t, sm.Handler(), nil, "", ""); got != 200 {
 		t.Fatalf("primary changed: %d", got)
 	}
-	if got := hardenedRead(t, h, priv, "one", "consumed"); got != 200 {
-		t.Fatalf("signed read: %d", got)
+	if got := hardenedWrite(t, h, priv, "one", "consumed"); got != 201 {
+		t.Fatalf("signed write: %d", got)
+	}
+	if got := hardenedRead(t, h, priv, "one", "read-one"); got != 403 {
+		t.Fatalf("directory key read: %d", got)
 	}
 	writeTrustedKey(t, dir, "two", pub)
-	if got := hardenedRead(t, h, priv, "two", "new"); got != 403 {
+	if got := hardenedWrite(t, h, priv, "two", "new"); got != 403 {
 		t.Fatalf("unloaded key accepted: %d", got)
 	}
 	if err := h.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardenedRead(t, h, priv, "two", "new"); got != 200 {
+	if got := hardenedWrite(t, h, priv, "two", "new"); got != 201 {
 		t.Fatalf("added key refused: %d", got)
 	}
-	if got := hardenedRead(t, h, priv, "one", "consumed"); got != 403 {
+	if got := hardenedRead(t, h, priv, "two", "read-two"); got != 403 {
+		t.Fatalf("added key read: %d", got)
+	}
+	if got := hardenedWrite(t, h, priv, "one", "consumed"); got != 403 {
 		t.Fatalf("replay after reload: %d", got)
 	}
-	// Both audiences use the directory, with independent replay domains.
+	// Only the write audience uses the directory; the read verifier has no
+	// directory key.
 	pair := h.current.Load()
 	read := readGrant(time.Now(), "acme", "GET", "/v0/city/acme/beads", "", "same-jti")
 	read.Kid = "one"
 	write := read
 	write.Aud = writeAuthAudience
 	expect := citywriteauth.Expect{City: read.City, ReqDigest: read.Req}
-	if _, err := pair.read.Verify(mintToken(t, priv, read), expect); err != nil {
-		t.Fatal(err)
+	if _, err := pair.read.Verify(mintToken(t, priv, read), expect); !errors.Is(err, citywriteauth.ErrUnknownKey) {
+		t.Fatalf("directory key verified a read grant: %v", err)
 	}
 	if _, err := pair.write.Verify(mintToken(t, priv, write), expect); err != nil {
 		t.Fatal(err)
@@ -108,18 +136,27 @@ func TestHardenedKeysReload(t *testing.T) {
 	if err := h.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardenedRead(t, h, priv, "one", "revoked"); got != 403 {
+	if got := hardenedWrite(t, h, priv, "one", "revoked"); got != 403 {
 		t.Fatalf("removed last key still accepted: %d", got)
+	}
+	if got := hardenedRead(t, h, priv, "one", "revoked-read"); got != 403 {
+		t.Fatalf("removed key read: %d", got)
 	}
 	if got := hardenedRead(t, h, nil, "", ""); got != 401 {
 		t.Fatalf("empty directory disabled gate: %d", got)
+	}
+	if got := hardenedWrite(t, h, nil, "", ""); got != 401 {
+		t.Fatalf("empty directory disabled write gate: %d", got)
 	}
 	writeTrustedKey(t, dir, "one", pub)
 	if err := h.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	if got := hardenedRead(t, h, priv, "one", "consumed"); got != 403 {
+	if got := hardenedWrite(t, h, priv, "one", "consumed"); got != 403 {
 		t.Fatalf("replay after revoke and restore: %d", got)
+	}
+	if got := hardenedRead(t, h, priv, "one", "restored-read"); got != 403 {
+		t.Fatalf("restored key read: %d", got)
 	}
 	// A failed directory read also preserves the active snapshot.
 	pair = h.current.Load()
@@ -152,8 +189,11 @@ func TestHardenedKeysBootSkipsMalformedFile(t *testing.T) {
 	if len(messages) != 1 || !strings.Contains(messages[0], "bad.pub") {
 		t.Fatalf("boot diagnostics = %v", messages)
 	}
-	if got := hardenedRead(t, h, priv, "one", "boot"); got != 200 {
+	if got := hardenedWrite(t, h, priv, "one", "boot"); got != 201 {
 		t.Fatalf("valid file refused: %d", got)
+	}
+	if got := hardenedRead(t, h, priv, "one", "boot-read"); got != 403 {
+		t.Fatalf("valid file read: %d", got)
 	}
 }
 
@@ -201,8 +241,11 @@ func TestHardenedKeysTimer(t *testing.T) {
 		writeTrustedKey(t, dir, "two", pub)
 		<-time.After(time.Second) // Advance virtual time to the first refresh deadline.
 		synctest.Wait()
-		if got := hardenedRead(t, h, priv, "two", "timer"); got != 200 {
+		if got := hardenedWrite(t, h, priv, "two", "timer"); got != 201 {
 			t.Fatalf("timer did not register new key: %d", got)
+		}
+		if got := hardenedRead(t, h, priv, "two", "timer-read"); got != 403 {
+			t.Fatalf("timer key read: %d", got)
 		}
 	})
 }
@@ -222,16 +265,35 @@ func TestHardenedKeysTimerDisabledAndInlineMerge(t *testing.T) {
 	}
 	writeTrustedKey(t, dir, "two", pub)
 	h.Run(context.Background()) // Disabled timer returns immediately.
-	if got := hardenedRead(t, h, priv, "two", "manual"); got != 403 {
+	if got := hardenedWrite(t, h, priv, "two", "manual"); got != 403 {
 		t.Fatalf("timer ran: %d", got)
 	}
 	if err := h.Reload(); err != nil {
 		t.Fatal(err)
 	}
 	for _, kid := range []string{"two", "inline"} {
-		if got := hardenedRead(t, h, priv, kid, kid); got != 200 {
+		if got := hardenedWrite(t, h, priv, kid, kid); got != 201 {
 			t.Fatalf("merged %s refused: %d", kid, got)
 		}
+	}
+	if got := hardenedRead(t, h, priv, "two", "two-read"); got != 403 {
+		t.Fatalf("directory key two read: %d", got)
+	}
+	if got := hardenedRead(t, h, priv, "inline", "inline-read"); got != 200 {
+		t.Fatalf("inline read key refused: %d", got)
+	}
+	// The inline read key keeps its single use across a reload, and its verifier
+	// still refuses the write audience.
+	if err := h.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := hardenedRead(t, h, priv, "inline", "inline-read"); got != 403 {
+		t.Fatalf("inline read grant replayed after reload: %d", got)
+	}
+	write := readGrant(time.Now(), "acme", "GET", "/v0/city/acme/beads", "", "inline-write-aud")
+	write.Kid, write.Aud = "inline", writeAuthAudience
+	if _, err := h.current.Load().read.Verify(mintToken(t, priv, write), citywriteauth.Expect{City: write.City, ReqDigest: write.Req}); !errors.Is(err, citywriteauth.ErrAudience) {
+		t.Fatalf("read verifier on a write-audience grant: %v", err)
 	}
 	before := h.current.Load()
 	writeTrustedKey(t, dir, "local", pub)
@@ -256,8 +318,11 @@ func TestHardenedKeysConcurrentReload(t *testing.T) {
 	for n := range 4 {
 		wg.Go(func() {
 			for i := range 20 {
-				if got := hardenedRead(t, h, priv, "one", fmt.Sprintf("%d-%d", n, i)); got != http.StatusNotFound {
-					t.Errorf("signed unknown-city read = %d", got)
+				if got := hardenedWrite(t, h, priv, "one", fmt.Sprintf("%d-%d", n, i)); got != http.StatusNotFound {
+					t.Errorf("signed unknown-city write = %d", got)
+				}
+				if got := hardenedRead(t, h, priv, "one", fmt.Sprintf("read-%d-%d", n, i)); got != http.StatusForbidden {
+					t.Errorf("directory key unknown-city read = %d", got)
 				}
 			}
 		})
