@@ -113,7 +113,10 @@ type DraftHold struct {
 	Since             time.Time `json:"since"`
 	NotifiedAt        time.Time `json:"notified_at,omitzero"`
 	NotifyLease       time.Time `json:"notify_lease,omitzero"`
-	Items             []string  `json:"items,omitempty"`
+	// PasteUnseen marks a hold on an empty composer: an earlier paste was
+	// accepted and never shown. The runtime ends that hold by itself.
+	PasteUnseen bool     `json:"paste_unseen,omitempty"`
+	Items       []string `json:"items,omitempty"`
 }
 
 // MatchesSession checks the available generation fence. Unfenced legacy

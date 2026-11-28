@@ -3281,6 +3281,7 @@ func recordQueuedNudgeFailureForTarget(target nudgeTarget, store beads.NudgesSto
 			if target.cfg != nil {
 				noticeDelay = target.cfg.Session.NudgeHoldNoticeDelayDuration()
 			}
+			unseen := errors.Is(cause, runtime.ErrNudgePasteUnseen)
 			for _, item := range requeued {
 				// Claim can admit an unfenced item or rebind a superseded generation.
 				// The hold names the session that read the composer. The queued
@@ -3293,7 +3294,7 @@ func recordQueuedNudgeFailureForTarget(target nudgeTarget, store beads.NudgesSto
 				if target.sessionName != "" {
 					observer.SessionName = target.sessionName
 				}
-				if notice := reserveDraftHoldNotice(state, observer, now, noticeDelay); notice != nil {
+				if notice := reserveDraftHoldNotice(state, observer, unseen, now, noticeDelay); notice != nil {
 					notices = append(notices, *notice)
 				}
 			}

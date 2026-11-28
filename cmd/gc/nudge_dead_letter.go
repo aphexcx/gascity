@@ -388,15 +388,17 @@ type draftHoldNotice struct {
 
 // Reserve the session notice under the queue lock. The lease lets another
 // poller retry if this one exits before the mail provider returns. The
-// observer is the refused item as the refusing session saw it.
-func reserveDraftHoldNotice(state *nudgeQueueState, observer queuedNudge, now time.Time, delay time.Duration) *draftHoldNotice {
+// observer is the refused item as the refusing session saw it. A hold on an
+// empty composer and a hold on a draft are separate episodes, each with its
+// own notice.
+func reserveDraftHoldNotice(state *nudgeQueueState, observer queuedNudge, unseen bool, now time.Time, delay time.Duration) *draftHoldNotice {
 	key := observer.DraftHoldKey()
 	if state.DraftHolds == nil {
 		state.DraftHolds = make(map[string]nudgequeue.DraftHold)
 	}
 	hold, ok := state.DraftHolds[key]
-	if !ok || !hold.MatchesSession(observer.SessionID, observer.ContinuationEpoch) {
-		hold = nudgequeue.DraftHold{Since: now.UTC(), SessionID: observer.SessionID, ContinuationEpoch: observer.ContinuationEpoch}
+	if !ok || !hold.MatchesSession(observer.SessionID, observer.ContinuationEpoch) || hold.PasteUnseen != unseen {
+		hold = nudgequeue.DraftHold{Since: now.UTC(), SessionID: observer.SessionID, ContinuationEpoch: observer.ContinuationEpoch, PasteUnseen: unseen}
 	}
 	if !slices.Contains(hold.Items, observer.ID) {
 		hold.Items = append(slices.Clone(hold.Items), observer.ID)
@@ -414,8 +416,16 @@ func reserveDraftHoldNotice(state *nudgeQueueState, observer queuedNudge, now ti
 // lease that reserved was taken under. Items joining the hold do not change it.
 func sameDraftHoldNotice(stored, reserved nudgequeue.DraftHold) bool {
 	return stored.SessionID == reserved.SessionID && stored.ContinuationEpoch == reserved.ContinuationEpoch &&
-		stored.Since.Equal(reserved.Since) &&
+		stored.PasteUnseen == reserved.PasteUnseen && stored.Since.Equal(reserved.Since) &&
 		stored.NotifiedAt.Equal(reserved.NotifiedAt) && stored.NotifyLease.Equal(reserved.NotifyLease)
+}
+
+// draftHoldNoticeBody says what holds the session's queue and how the hold ends.
+func draftHoldNoticeBody(key string, unseen bool, unseenPasteAge time.Duration) string {
+	if unseen {
+		return fmt.Sprintf("Queued nudges for %s are waiting on an empty composer: the box is empty, and gc's last paste was accepted by the terminal but never shown. There is no draft to resolve. The hold ends by itself once the box has stayed empty with no client attached for %s (session.nudge_unseen_paste_age); gc then treats that paste as lost and delivers the queue again. Run gc nudge status %s --json to see the queue.", key, unseenPasteAge, key)
+	}
+	return fmt.Sprintf("Queued nudges for %s are waiting on preserved composer input. Inspect the draft and resolve it to resume delivery. Do not press Enter by hand on gc's own stuck paste: gc cannot see that submit and delivers a second copy once the box empties, so clear the box instead and gc delivers the held nudges itself. Run gc nudge status %s --json to see the queue.", key, key)
 }
 
 func (notice draftHoldNotice) deliver(cityPath string, now time.Time) error {
@@ -449,7 +459,7 @@ func (notice draftHoldNotice) send(cityPath string, now time.Time) error {
 		} else {
 			resolveRigPaths(cityPath, cfg.Rigs)
 			subject := "NUDGE HOLD: " + key
-			body := fmt.Sprintf("Queued nudges for %s are waiting on preserved composer input. Inspect the draft and resolve it to resume delivery. Run gc nudge status %s --json to see the queue.", key, key)
+			body := draftHoldNoticeBody(key, notice.hold.PasteUnseen, cfg.Session.NudgeUnseenPasteAgeDuration())
 			dedupKey := fmt.Sprintf("nudge-hold/%s/%s/%s/%d", key, notice.hold.SessionID, notice.hold.ContinuationEpoch, notice.hold.Since.UnixNano())
 			sendErr = sendNudgeQueueMail(cityPath, cfg, to, subject, body, dedupKey)
 		}
