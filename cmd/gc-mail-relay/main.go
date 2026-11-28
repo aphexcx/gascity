@@ -35,7 +35,7 @@ func newCommand() *cobra.Command {
 	serve := &cobra.Command{
 		Use: "serve", Short: "Listen for signed relay requests", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			for _, name := range []string{"listen", "store", "keys-dir", "hub", "max-wait", "posts-per-minute", "reload-interval"} {
+			for _, name := range []string{"listen", "store", "keys-dir", "hub", "max-wait", "posts-per-minute", "reload-interval", "registry-url", "registry-allow-empty"} {
 				env := "GC_MAIL_RELAY_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 				if value, ok := os.LookupEnv(env); ok && !cmd.Flags().Changed(name) {
 					if err := cmd.Flags().Set(name, value); err != nil {
@@ -53,7 +53,9 @@ func newCommand() *cobra.Command {
 	flags.StringVar(&cfg.Hub, "hub", "", "required hub city ID")
 	flags.DurationVar(&cfg.MaxWait, "max-wait", cfg.MaxWait, "longest queue wait (at most 300s)")
 	flags.IntVar(&cfg.PostsPerMinute, "posts-per-minute", cfg.PostsPerMinute, "new posts allowed per city per minute")
-	flags.DurationVar(&cfg.ReloadInterval, "reload-interval", cfg.ReloadInterval, "trusted key reload interval")
+	flags.DurationVar(&cfg.ReloadInterval, "reload-interval", cfg.ReloadInterval, "interval for re-reading pinned keys and copying the registry")
+	flags.StringVar(&cfg.RegistryURL, "registry-url", "", "https address of the key registry's list of city signing keys (empty: pinned keys only)")
+	flags.BoolVar(&cfg.RegistryAllowEmpty, "registry-allow-empty", false, "let an empty registry list remove every registry key")
 	root.AddCommand(serve)
 	return root
 }

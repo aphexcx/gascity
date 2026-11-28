@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "relay",
     srcs = [
+        "keyset.go",
+        "registry.go",
         "server.go",
         "store.go",
     ],
@@ -19,6 +21,7 @@ go_library(
 go_test(
     name = "relay_test",
     srcs = [
+        "registry_test.go",
         "relay_test.go",
         "testenv_import_test.go",
     ],

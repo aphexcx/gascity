@@ -21,7 +21,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/mailrelay/envelope"
-	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 const (
@@ -37,15 +36,27 @@ type Config struct {
 	Hub, KeysDir, StorePath string
 	MaxWait, ReloadInterval time.Duration
 	PostsPerMinute          int
+	// RegistryURL is the key registry's list of city signing keys: https, or
+	// http to a loopback host. Empty means the relay signs in pinned cities
+	// only. The list is copied once at Open and after each ReloadInterval.
+	RegistryURL string
+	// RegistryAllowEmpty lets an empty list remove every registry key. Without
+	// it an empty list is a bad copy and changes nothing.
+	RegistryAllowEmpty bool
+	// RegistryTransport carries registry reads; nil means http.DefaultTransport.
+	RegistryTransport http.RoundTripper
 }
 
-// DefaultConfig supplies operational limits. The hub, store and trust directory are required.
+// DefaultConfig supplies operational limits. The hub, store and trust directory
+// are required; the registry is off.
 func DefaultConfig() Config {
 	return Config{MaxWait: 25 * time.Second, ReloadInterval: time.Minute, PostsPerMinute: 60}
 }
 
+// trust is the key set sign-in checks against: pinned keys and registry keys
+// together. It is immutable once published.
 type trust struct {
-	keys     map[string]ed25519.PublicKey
+	keys     cityKeys
 	verifier *envelope.GrantVerifier
 }
 
@@ -58,9 +69,19 @@ type Server struct {
 	now     func() time.Time
 	mu      sync.Mutex
 	waiting map[string]chan struct{}
+
+	// keyMu serializes rebuilds of the key set. pinned and fromRegistry are
+	// the keys from each source that the published set was built from.
+	keyMu        sync.Mutex
+	pins         keySource
+	registry     keySource // nil when no registry address is set
+	pinned       cityKeys
+	fromRegistry cityKeys
 }
 
-// Open validates settings, opens the durable store and loads the initial trusted keys.
+// Open validates settings, opens the durable store and loads the initial
+// trusted keys. The hub must have a pinned key. With a registry address set it
+// copies the registry once; a bad copy leaves the relay on pinned keys.
 func Open(cfg Config, out io.Writer) (*Server, error) {
 	switch {
 	case !envelope.ValidCityID(cfg.Hub):
@@ -70,14 +91,25 @@ func Open(cfg Config, out io.Writer) (*Server, error) {
 	case cfg.PostsPerMinute <= 0 || cfg.ReloadInterval <= 0 || cfg.MaxWait <= 0 || cfg.MaxWait > maxWaitCeiling:
 		return nil, errors.New("post rate and reload interval must be positive and maximum wait must be in (0, 300s]")
 	}
+	registry, err := newRegistryCopy(cfg.RegistryURL, cfg.RegistryTransport)
+	if err != nil {
+		return nil, err
+	}
 	st, err := openStore(cfg.StorePath)
 	if err != nil {
 		return nil, fmt.Errorf("open relay store: %w", err)
 	}
-	s := &Server{config: cfg, store: st, now: time.Now, logger: log.New(out, "", log.LstdFlags|log.LUTC), waiting: make(map[string]chan struct{})}
+	s := &Server{config: cfg, store: st, now: time.Now, logger: log.New(out, "", log.LstdFlags|log.LUTC), waiting: make(map[string]chan struct{}), pins: keysDirectory(cfg.KeysDir)}
+	if registry != nil {
+		s.registry = registry
+	}
 	if err := s.reloadKeys(); err != nil {
 		return nil, errors.Join(err, st.db.Close())
 	}
+	if s.pinned[cfg.Hub] == nil {
+		return nil, errors.Join(fmt.Errorf("hub city %q has no pinned signing key in the keys directory", cfg.Hub), st.db.Close())
+	}
+	s.copyRegistry(context.Background())
 	if err := st.sweep(context.Background(), s.now()); err != nil {
 		return nil, errors.Join(err, st.db.Close())
 	}
@@ -87,23 +119,17 @@ func Open(cfg Config, out io.Writer) (*Server, error) {
 // Close releases the store.
 func (s *Server) Close() error { return s.store.db.Close() }
 
+// reloadKeys re-reads the pinned keys and publishes them with the registry
+// keys in force, less any city that is now pinned.
 func (s *Server) reloadKeys() error {
-	keys, refused, err := supervisor.LoadTrustedKeys(s.config.KeysDir)
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	pinned, err := s.pins.read(context.Background())
 	if err != nil {
-		return fmt.Errorf("read trusted keys: %w", err)
+		return err
 	}
-	if len(refused) > 0 {
-		return fmt.Errorf("trust directory contains %d invalid key files", len(refused))
-	}
-	set := &trust{keys: keys}
-	if len(keys) > 0 {
-		set.verifier, err = envelope.NewGrantVerifier(keys, s.store)
-		if err != nil {
-			return fmt.Errorf("build grant verifier: %w", err)
-		}
-	}
-	s.trusted.Store(set)
-	return nil
+	registry, _ := s.unpinned(s.fromRegistry, pinned)
+	return s.publish(pinned, registry)
 }
 
 func (s *Server) refreshKeys() {
@@ -112,19 +138,27 @@ func (s *Server) refreshKeys() {
 	}
 }
 
-// Maintain reloads trust and removes expired records until ctx ends.
+// Maintain re-reads the pinned keys, copies the registry when an address is
+// set, and removes expired records, until ctx ends.
 func (s *Server) Maintain(ctx context.Context) {
 	reload := time.NewTicker(s.config.ReloadInterval)
 	sweep := time.NewTicker(time.Minute)
 	defer reload.Stop()
 	defer sweep.Stop()
+	s.maintain(ctx, reload.C, sweep.C)
+}
+
+// maintain does Maintain's work on the given clock. Each reload tick re-reads
+// the pinned keys and then copies the registry.
+func (s *Server) maintain(ctx context.Context, reload, sweep <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-reload.C:
+		case <-reload:
 			s.refreshKeys()
-		case <-sweep.C:
+			s.copyRegistry(ctx)
+		case <-sweep:
 			if err := s.store.sweep(ctx, s.now()); err != nil && ctx.Err() == nil {
 				s.logger.Print("store sweep failed")
 			}
