@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -190,6 +191,44 @@ func TestEventListShortActiveJournal(t *testing.T) {
 		var problem *apierr.ErrorModel
 		if page != nil || !errors.As(err, &problem) || problem.Detail != context.Canceled.Error() {
 			t.Fatalf("page = %v, error = %v, want only the cancellation error", page, err)
+		}
+	})
+
+	t.Run("retained heap", func(t *testing.T) {
+		dir := t.TempDir()
+		writeEventLogFile(t, dir, archiveName("20260927T070000Z", 1, 8192), gzipped(t, eventLogLines(1, 8192)))
+		writeEventLogFile(t, dir, archiveName("20260927T080000Z", 8193, 16384), gzipped(t, eventLogLines(8193, 16384)))
+		writeEventLogFile(t, dir, "events.jsonl", eventLogLines(16385, 16385))
+		srv := &Server{state: fileBackedEventState(t, dir)}
+		liveHeap := func(page any) uint64 {
+			runtime.GC()
+			runtime.GC()
+			var mem runtime.MemStats
+			runtime.ReadMemStats(&mem)
+			runtime.KeepAlive(page)
+			return mem.HeapAlloc
+		}
+		before := liveHeap(nil)
+		in := &EventListInput{PaginationParam: PaginationParam{Limit: 8}}
+		// The handler copies events into wire items. Sample the fetched page
+		// too, while a tail subslice can still pin a whole archive.
+		fetched, _, err := fetchEventPageAscending(t.Context(), srv.state.EventProvider(), events.Filter{}, in.Limit, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withFetched := liveHeap(fetched)
+
+		page, err := srv.humaHandleEventList(t.Context(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Body.Items) != in.Limit {
+			t.Fatalf("got %d events, want %d", len(page.Body.Items), in.Limit)
+		}
+		withWire := liveHeap(page)
+		t.Logf("live heap in bytes: baseline %d, fetched page %d, wire page %d", before, withFetched, withWire)
+		if peak := max(withFetched, withWire); peak > before+1<<20 {
+			t.Fatalf("page retained %d bytes, want at most 1 MiB", peak-before)
 		}
 	})
 }
