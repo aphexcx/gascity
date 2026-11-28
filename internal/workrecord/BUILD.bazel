@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/git",
         "//internal/storeref",
     ],
 )

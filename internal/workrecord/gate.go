@@ -32,10 +32,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // EnforceEnvVar gates whether work-record violations block the close (enforce)
@@ -112,10 +114,94 @@ func ValidateOnClose(bead beads.Bead, commitReachable func(commit, branch string
 	if branch == "" {
 		violations = append(violations, fmt.Sprintf("%s=shipped requires %s for a git commit (not for an absolute artifact path in %s)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey, beadmeta.WorkCommitMetadataKey))
 	}
-	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
+	if commit != "" && branch != "" {
+		dir := strings.TrimSpace(bead.Metadata[beadmeta.WorkRepoDirMetadataKey])
+		if dir != "" && !filepath.IsAbs(dir) {
+			return []string{fmt.Sprintf("%s must be an absolute directory, got %q", beadmeta.WorkRepoDirMetadataKey, dir)}
+		}
+		if !commitReachable(commit, branch) {
+			message := fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch)
+			if dir != "" {
+				message += fmt.Sprintf(" in %q", dir)
+			}
+			violations = append(violations, message)
+		}
 	}
 	return violations
+}
+
+// ValidateInRepo checks a record in the checkout selected by RepoDirFor and
+// the caller's legacy fallback. unverified reports that no checkout was known
+// when validation required a Git probe.
+func ValidateInRepo(ctx context.Context, bead beads.Bead, repoDir string, reachable func(context.Context, string, string, string) bool) (violations []string, unverified bool) {
+	violations = ValidateOnClose(bead, func(commit, branch string) bool {
+		if repoDir == "" {
+			unverified = true
+			return true
+		}
+		if strings.TrimSpace(bead.Metadata[beadmeta.WorkRepoDirMetadataKey]) != "" {
+			return reachableInRecordedRepo(ctx, repoDir, commit, branch)
+		}
+		return reachable(ctx, repoDir, commit, branch)
+	})
+	return violations, unverified
+}
+
+// reachableInRecordedRepo accepts ancestors of the local or origin branch and
+// the exact tip of the named branch on any other remote. Query full ref names:
+// Git's short-name resolution could mistake a tag or a remote for a local branch.
+func reachableInRecordedRepo(ctx context.Context, dir, commit, branch string) bool {
+	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
+		return false
+	}
+	local := "refs/heads/" + branch
+	refs, err := localGit(ctx, dir, "for-each-ref", "--format=%(objecttype)%09%(objectname)%09%(refname)%09%(symref)", local, "refs/remotes/**/"+branch).Output()
+	if err != nil || len(refs) == 0 {
+		return false
+	}
+	out, err := localGit(ctx, dir, "remote").Output()
+	if err != nil {
+		return false
+	}
+	remotes := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	for line := range strings.SplitSeq(string(refs), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[0] != "commit" || fields[3] != "" {
+			continue
+		}
+		oid, ref := fields[1], fields[2]
+		ancestorOK := ref == local
+		if !ancestorOK {
+			tracking, ok := strings.CutPrefix(ref, "refs/remotes/")
+			remote := trackingRemote(tracking, remotes)
+			if !ok || tracking != remote+"/"+branch {
+				continue
+			}
+			ancestorOK = remote == "origin"
+		}
+		if strings.EqualFold(oid, commit) || (ancestorOK && localGit(ctx, dir, "merge-base", "--is-ancestor", commit, oid).Run() == nil) {
+			return true
+		}
+	}
+	return false
+}
+
+// A remote name can contain slashes. Take the longest configured prefix, or
+// the conventional first component for a tracking ref with no configured remote.
+func trackingRemote(tracking string, remotes []string) string {
+	name, _, _ := strings.Cut(tracking, "/")
+	for _, remote := range remotes {
+		if len(remote) > len(name) && strings.HasPrefix(tracking, remote+"/") {
+			name = remote
+		}
+	}
+	return name
+}
+
+func localGit(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(git.SanitizedEnv(), "GIT_NO_LAZY_FETCH=1")
+	return cmd
 }
 
 // PreferredReachabilityRef decides which ref CommitReachableOnBranch should
@@ -199,9 +285,9 @@ func CommitReachableOnBranchContext(ctx context.Context, repoDir, commit, branch
 	}
 	return CommitReachableOnEitherRef(branch,
 		func(candidate string) bool {
-			return exec.CommandContext(ctx, "git", "-C", repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
+			return localGit(ctx, repoDir, "rev-parse", "--verify", "--quiet", candidate).Run() == nil
 		},
 		func(ref string) bool {
-			return exec.CommandContext(ctx, "git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
+			return localGit(ctx, repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
 		})
 }

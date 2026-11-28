@@ -91,19 +91,7 @@ func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads
 	}
 	prospective := projectSubmittedWorkRecord(stored, submitted)
 	repoDir := s.workRecordRepoDir(store, prospective)
-	unverified := false
-	violations := workrecord.ValidateOnClose(prospective, func(commit, branch string) bool {
-		if repoDir == "" {
-			// The scope that owns this bead names no checkout (see
-			// workRecordRepoDir for which shapes produce that, and why the
-			// current State implementations do not), so there is no repository to
-			// ask. The clause degrades to a warning and says so; see
-			// workrecord.ReachabilityUnverifiedNote for why only this one does.
-			unverified = true
-			return true
-		}
-		return workRecordCommitReachable(ctx, repoDir, commit, branch)
-	})
+	violations, unverified := workrecord.ValidateInRepo(ctx, prospective, repoDir, workRecordCommitReachable)
 
 	enforce := workrecord.EnforceEnabled()
 	mode := "warn-only"
@@ -193,7 +181,7 @@ func (s *Server) workRecordScopeDirs() workRecordScopeDirs {
 }
 
 // workRecordRepoDir names the repository a shipped bead's commit must be
-// reachable in. The rule is workrecord.RepoDirFor's — gc.work_dir, else the
+// reachable in. RepoDirFor prefers gc.work_repo_dir, then gc.work_dir, then the
 // bead's OWNER — so this door and the CLI's judge one bead against one
 // repository; all this plane supplies is the checkout table and, for a bead that
 // names no owner, the answer it gave before owners were recorded.
