@@ -1,0 +1,73 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agent",
+    srcs = [
+        "content.go",
+        "filing.go",
+        "keys.go",
+        "lock_other.go",
+        "lock_unix.go",
+        "relay_client.go",
+        "run.go",
+        "send.go",
+        "settings.go",
+        "state.go",
+        "status.go",
+        "tell.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/mailrelay/agent",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/api/genclient",
+        "//internal/mailrelay/envelope",
+        "//internal/mailrelay/relay",
+        "//internal/supervisor",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "agent_test",
+    srcs = [
+        "asks_test.go",
+        "cityanswers_test.go",
+        "content_test.go",
+        "e2e_test.go",
+        "fixture_test.go",
+        "keys_test.go",
+        "outage_fixture_test.go",
+        "pins_test.go",
+        "place_test.go",
+        "run_test.go",
+        "send_test.go",
+        "settings_test.go",
+        "settings_value_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":agent"],
+    deps = [
+        "//internal/api",
+        "//internal/beads",
+        "//internal/config",
+        "//internal/events",
+        "//internal/mail",
+        "//internal/mail/beadmail",
+        "//internal/mailrelay/envelope",
+        "//internal/mailrelay/relay",
+        "//internal/session",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

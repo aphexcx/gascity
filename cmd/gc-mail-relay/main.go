@@ -1,4 +1,5 @@
-// Command gc-mail-relay serves sealed mail for authenticated cities.
+// Command gc-mail-relay serves sealed mail for authenticated cities, and is
+// each city's agent for it: keygen, send and run.
 package main
 
 import (
@@ -57,6 +58,7 @@ func newCommand() *cobra.Command {
 	flags.StringVar(&cfg.RegistryURL, "registry-url", "", "https address of the key registry's list of city signing keys (empty: pinned keys only)")
 	flags.BoolVar(&cfg.RegistryAllowEmpty, "registry-allow-empty", false, "let an empty registry list remove every registry key")
 	root.AddCommand(serve)
+	root.AddCommand(newAgentCommands(os.Getenv)...)
 	return root
 }
 
