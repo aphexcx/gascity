@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
@@ -251,14 +252,27 @@ func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Han
 			City:      city,
 			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, body),
 		}
-		if _, err := v.Verify(token, expect); err != nil {
+		grant, err := v.Verify(token, expect)
+		if err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
 			problemWriteAuthRejected.writeTo(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), verifiedWriteKidKey{}, grant.Kid)))
 	})
+}
+
+// verifiedWriteKidKey is the context key for the key id of the write grant
+// the gate verified. The type is unexported so only the gate can set it.
+type verifiedWriteKidKey struct{}
+
+// verifiedWriteKid returns the key id of the write grant this request's gate
+// verified. It is empty for a request that passed no write gate, whatever the
+// request says about itself.
+func verifiedWriteKid(ctx context.Context) string {
+	kid, _ := ctx.Value(verifiedWriteKidKey{}).(string)
+	return kid
 }
 
 // Pre-serialized RFC 9457 problem responses for the write-auth gate. Like the

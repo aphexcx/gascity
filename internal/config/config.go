@@ -4394,6 +4394,12 @@ func validateDependsOn(agents []Agent) error {
 	// Check all references exist.
 	for _, a := range agents {
 		for _, sender := range a.MailWakeFrom {
+			if kid, peer := MailWakePeerKid(sender); peer {
+				if !ValidVerifyKeyID(kid) {
+					return fmt.Errorf("agent %q: invalid mail_wake_from sender %q: invalid key id", a.QualifiedName(), sender)
+				}
+				continue
+			}
 			switch {
 			case sender == "human":
 				continue

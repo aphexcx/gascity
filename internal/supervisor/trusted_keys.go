@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // LoadTrustedKeys reads a directory of <kid>.pub files. Directory failures are
@@ -50,7 +52,7 @@ func LoadTrustedKeys(dir string) (map[string]ed25519.PublicKey, []error, error) 
 }
 
 func readTrustedKey(root *os.Root, name, kid string) (ed25519.PublicKey, error) {
-	if kid == "" || strings.TrimSpace(kid) != kid || strings.ContainsAny(kid, ":,\r\n\x00") {
+	if !config.ValidVerifyKeyID(kid) {
 		return nil, errors.New("invalid key id")
 	}
 	info, err := root.Lstat(name)

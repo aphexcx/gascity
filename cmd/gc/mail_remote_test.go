@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 const remoteMailMessageJSON = `{"id":"mc-wisp-1","from":"alpha/mayor","to":"mayor","subject":"hello","body":"round trip","created_at":"2026-08-18T17:00:00Z","read":false}`
@@ -787,14 +788,15 @@ func TestRemoteMailNotifyRespectsRecipientList(t *testing.T) {
 	cfg := mailWakeTestCity()
 	cfg.Workspace.Name = "beta"
 	cfg.Daemon.NudgeDispatcher = "supervisor"
+	cfg.Agents[0].MailWakeFrom = []string{"human", "city:alpha"}
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	state := &controllerState{
 		cityName: "beta", cityPath: t.TempDir(), cfg: cfg, sp: sp,
 		cityBeadStore: store, cityMailProv: mail.NewFake(), eventProv: events.NewFake(),
 	}
-	mux := api.NewSupervisorMux(&singleCityStateResolver{state}, nil, false, "test", "", time.Now())
-	client := inProcessMailClient(t, mux.WithAllowedHosts([]string{"beta.test"}).Handler())
+	mux := api.NewSupervisorMux(&singleCityStateResolver{state}, nil, false, "test", "", time.Now()).WithAllowedHosts([]string{"beta.test"})
+	client := inProcessMailClient(t, mux.Handler())
 	result, err := client.SendMail(api.MailSendRequest{To: "reader", From: "alpha/worker", Subject: "update", Notify: true})
 	if err != nil {
 		t.Fatal(err)
@@ -824,6 +826,9 @@ func TestRemoteMailNotifyRespectsRecipientList(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp.WaitForIdleErrors[reader.SessionName] = nil
+
+	// A request that passed no write gate is nobody, even when it writes a
+	// listed local name.
 	result, err = client.SendMail(api.MailSendRequest{To: reader.ID, From: "human", Subject: "follow-up", Notify: true})
 	if err != nil {
 		t.Fatal(err)
@@ -832,8 +837,34 @@ func TestRemoteMailNotifyRespectsRecipientList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Notified == nil || !*result.Notified || len(history) != 1 || history[0].Sender != "human" {
-		t.Fatalf("listed sender: notified=%v, recipient wake history=%+v", result.Notified != nil && *result.Notified, history)
+	if result.Notified == nil || *result.Notified || len(history) != 0 {
+		t.Fatalf("no key writing human: notified=%v, recipient wake history=%+v", result.Notified != nil && *result.Notified, history)
+	}
+
+	// The accepted sender is a peer city on the list, named by the key the
+	// receiving write gate verified.
+	keys := t.TempDir()
+	if err := os.Chmod(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keys, "alpha.pub"), []byte(base64.StdEncoding.EncodeToString(pub)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hardened, err := api.NewHardenedAuth(mux, supervisor.Section{Hardened: supervisor.HardenedListener{Port: 8447, TrustedKeysDir: keys}}, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := peerMailPost(t, hardened, priv, "alpha", reader.ID, "alpha/worker")
+	history, err = sessionFrontDoor(store).MailWakeHistory(reader.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !answer.notified || len(history) != 1 || history[0].Sender != "city:alpha" {
+		t.Fatalf("listed peer city: %+v, recipient wake history=%+v", answer, history)
 	}
 }
 

@@ -1671,9 +1671,19 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 // NotifyListedMail applies the receiving agent's wake policy before an
 // explicit request can materialize a named session. A recipient without a
 // sender list uses the ordinary explicit notification path.
-func (cs *controllerState) NotifyListedMail(message mail.Message) (listed, notified bool) {
+//
+// A request that arrives through the API is whoever's key signed it:
+// originKid is the key id of the write grant the receiving gate verified, and
+// the sender is the peer city of that key. The mail's written sender is only
+// the return address, so "human" and a local agent on a list are satisfied by
+// a local command alone. A request that passed no gate is declined.
+func (cs *controllerState) NotifyListedMail(message mail.Message, originKid string) (listed, notified bool) {
 	cs.mu.RLock()
 	cfg, cityPath, work, mp, sp := cs.cfg, cs.cityPath, cs.cityBeadStore, cs.cityMailProv, cs.sp
+	host := mailWakeHost{
+		provider: sp,
+		nudges:   beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, cs.eventProv)},
+	}
 	cs.mu.RUnlock()
 	if message.To == "human" || cfg == nil || !slices.ContainsFunc(cfg.Agents, func(a config.Agent) bool { return len(a.MailWakeFrom) > 0 }) {
 		return false, false
@@ -1710,13 +1720,24 @@ func (cs *controllerState) NotifyListedMail(message mail.Message) (listed, notif
 	if len(recipient.MailWakeFrom) == 0 {
 		return false, false
 	}
-	sender := policy.sender(message.From, "", message.FromSessionID)
-	if sender.key == "" {
+	if originKid == "" {
 		return true, false
 	}
-	asked, _ := policy.request(message, message.From, sender, time.Now().UTC(), sp)
+	if err == nil {
+		// One live delivery per recipient at a time, shared with NotifyMail:
+		// a reminder that overlaps another goes to the queue.
+		_, busy := cs.liveMailNotifies.LoadOrStore(id, struct{}{})
+		if !busy {
+			defer cs.liveMailNotifies.Delete(id)
+		}
+		host.queueOnly = busy
+	}
+	peer := config.MailWakePeer(originKid)
+	asked, _ := policy.request(message, peer, mailWakeSender{peer, peer}, time.Now().UTC(), host)
 	return true, asked
 }
+
+var _ api.ListedMailNotifier = (*controllerState)(nil)
 
 type mailNotifyDelivery struct {
 	nudges    beads.NudgesStore
